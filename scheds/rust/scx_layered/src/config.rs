@@ -105,6 +105,10 @@ pub struct LayerCommon {
     pub disallow_preempt_after_us: Option<u64>,
     #[serde(default)]
     pub xllc_mig_min_us: f64,
+    #[serde(default)]
+    pub dsp_local_scan_pct: Option<f64>,
+    #[serde(default)]
+    pub dsp_local_scan_max: Option<u32>,
     #[serde(default, skip_serializing)]
     pub idle_smt: Option<bool>,
     #[serde(default)]

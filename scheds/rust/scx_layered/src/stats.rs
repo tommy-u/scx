@@ -68,6 +68,7 @@ const LSTAT_XLAYER_WAKE: usize = bpf_intf::layer_stat_id_LSTAT_XLAYER_WAKE as us
 const LSTAT_XLAYER_REWAKE: usize = bpf_intf::layer_stat_id_LSTAT_XLAYER_REWAKE as usize;
 const LSTAT_LLC_DRAIN_TRY: usize = bpf_intf::layer_stat_id_LSTAT_LLC_DRAIN_TRY as usize;
 const LSTAT_LLC_DRAIN: usize = bpf_intf::layer_stat_id_LSTAT_LLC_DRAIN as usize;
+const LSTAT_DSP_LOCAL_SCAN: usize = bpf_intf::layer_stat_id_LSTAT_DSP_LOCAL_SCAN as usize;
 
 const LLC_LSTAT_LAT: usize = bpf_intf::llc_layer_stat_id_LLC_LSTAT_LAT as usize;
 const LLC_LSTAT_CNT: usize = bpf_intf::llc_layer_stat_id_LLC_LSTAT_CNT as usize;
@@ -182,6 +183,8 @@ pub struct LayerStats {
     pub llc_drain_try: f64,
     #[stat(desc = "% LLC draining succeeded")]
     pub llc_drain: f64,
+    #[stat(desc = "% dispatched through local scan")]
+    pub dsp_local_scan: f64,
     #[stat(desc = "mask of allocated CPUs", _om_skip)]
     pub cpus: Vec<u32>,
     #[stat(desc = "count of CPUs assigned")]
@@ -288,6 +291,7 @@ impl LayerStats {
             xllc_migration_skip: lstat_pct(LSTAT_XLLC_MIGRATION_SKIP),
             llc_drain_try: lstat_pct(LSTAT_LLC_DRAIN_TRY),
             llc_drain: lstat_pct(LSTAT_LLC_DRAIN),
+            dsp_local_scan: lstat_pct(LSTAT_DSP_LOCAL_SCAN),
             cpus: Self::bitvec_to_u32s(layer.cpus.as_raw_bitvec()),
             cur_nr_cpus: layer.cpus.weight() as u32,
             min_nr_cpus: nr_cpus_range.0 as u32,
@@ -379,12 +383,13 @@ impl LayerStats {
 
         writeln!(
             w,
-            "  {:<width$}  xlayer_wake/re={}/{} llc_drain/try={}/{}",
+            "  {:<width$}  xlayer_wake/re={}/{} llc_drain/try={}/{} dsp_local_scan={}",
             "",
             fmt_pct(self.xlayer_wake),
             fmt_pct(self.xlayer_rewake),
             fmt_pct(self.llc_drain),
             fmt_pct(self.llc_drain_try),
+            fmt_pct(self.dsp_local_scan),
             width = header_width,
         )?;
 

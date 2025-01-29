@@ -135,6 +135,7 @@ enum layer_stat_id {
 	LSTAT_XLAYER_REWAKE,
 	LSTAT_LLC_DRAIN_TRY,
 	LSTAT_LLC_DRAIN,
+	LSTAT_DSP_LOCAL_SCAN,
 	NR_LSTATS,
 };
 
@@ -302,6 +303,7 @@ struct layer {
 	bool			preempt_first;
 	bool			exclusive;
 	bool			allow_node_aligned;
+	u32			nr_to_local_scan;
 	int			growth_algo;
 
 	u64			nr_tasks;

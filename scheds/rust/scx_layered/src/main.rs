@@ -121,6 +121,8 @@ lazy_static! {
                         disallow_open_after_us: None,
                         disallow_preempt_after_us: None,
                         xllc_mig_min_us: 1000.0,
+                        dsp_local_scan_pct: None,
+                        dsp_local_scan_max: None,
                         growth_algo: LayerGrowthAlgo::Sticky,
                         perf: 1024,
                         nodes: vec![],
@@ -150,6 +152,8 @@ lazy_static! {
                         disallow_open_after_us: None,
                         disallow_preempt_after_us: None,
                         xllc_mig_min_us: 0.0,
+                        dsp_local_scan_pct: None,
+                        dsp_local_scan_max: None,
                         growth_algo: LayerGrowthAlgo::Sticky,
                         perf: 1024,
                         nodes: vec![],
@@ -181,6 +185,8 @@ lazy_static! {
                         disallow_open_after_us: None,
                         disallow_preempt_after_us: None,
                         xllc_mig_min_us: 0.0,
+                        dsp_local_scan_pct: None,
+                        dsp_local_scan_max: None,
                         growth_algo: LayerGrowthAlgo::Topo,
                         perf: 1024,
                         nodes: vec![],
@@ -209,6 +215,8 @@ lazy_static! {
                         disallow_open_after_us: None,
                         disallow_preempt_after_us: None,
                         xllc_mig_min_us: 100.0,
+                        dsp_local_scan_pct: None,
+                        dsp_local_scan_max: None,
                         growth_algo: LayerGrowthAlgo::Linear,
                         perf: 1024,
                         nodes: vec![],
@@ -374,6 +382,14 @@ static NVML_CELL: once_cell::sync::OnceCell<Nvml> = once_cell::sync::OnceCell::n
 ///   starvation across layers. Weights are used in combination with
 ///   utilization to determine the infeasible adjusted weight with higher
 ///   weights having a larger adjustment in adjusted utilization.
+///
+/// - dsp_local_scan_pct: Scan for tasks close to local CPU during dispatch.
+///   Determines the number of tasks to scan for tasks on the same L1/2
+///   cache as the dispatching CPU in each DSQ. The percentage is calculated
+///   based on the number of CPUs per L3 cache.
+///
+/// - dsp_local_scan_max: If set, limit the number of CPUs calculated from
+///   dsp_local_scan_pct.
 ///
 /// - idle_smt: *** DEPRECATED ****
 ///
@@ -1243,6 +1259,8 @@ impl<'a> Scheduler<'a> {
                     disallow_open_after_us,
                     disallow_preempt_after_us,
                     xllc_mig_min_us,
+                    dsp_local_scan_pct,
+                    dsp_local_scan_max,
                     ..
                 } = spec.kind.common();
 
@@ -1263,6 +1281,12 @@ impl<'a> Scheduler<'a> {
                 layer.preempt_first.write(*preempt_first);
                 layer.exclusive.write(*exclusive);
                 layer.allow_node_aligned.write(*allow_node_aligned);
+
+                let nr_cpus_per_llc = topo.all_llcs[&0].all_cpus.iter().count();
+                layer.nr_to_local_scan =
+                    ((nr_cpus_per_llc as f64 * dsp_local_scan_pct.unwrap() / 100.0).round() as u32)
+                        .min(dsp_local_scan_max.unwrap());
+
                 layer.growth_algo = growth_algo.as_bpf_enum();
                 layer.weight = *weight;
                 layer.disallow_open_after_ns = match disallow_open_after_us.unwrap() {
@@ -2588,6 +2612,13 @@ fn main() -> Result<()> {
             if common.disallow_preempt_after_us.is_none() {
                 common.disallow_preempt_after_us = Some(*DFL_DISALLOW_PREEMPT_AFTER_US);
             }
+        }
+
+        if common.dsp_local_scan_pct.is_none() {
+            common.dsp_local_scan_pct = Some(0.0);
+        }
+        if common.dsp_local_scan_max.is_none() {
+            common.dsp_local_scan_max = Some(u32::MAX);
         }
 
         if common.idle_smt.is_some() {
