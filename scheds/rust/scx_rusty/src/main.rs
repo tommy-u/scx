@@ -4,7 +4,6 @@
 // GNU General Public License version 2.
 mod bpf_skel;
 pub use bpf_skel::*;
-pub mod bpf_intf;
 
 mod domain;
 use domain::DomainGroup;
@@ -61,8 +60,8 @@ use scx_utils::Topology;
 use scx_utils::UserExitInfo;
 use scx_utils::NR_CPU_IDS;
 
-const MAX_DOMS: usize = bpf_intf::consts_MAX_DOMS as usize;
-const MAX_CPUS: usize = bpf_intf::consts_MAX_CPUS as usize;
+const MAX_DOMS: usize = types::consts::MAX_DOMS.0 as usize;
+const MAX_CPUS: usize = types::consts::MAX_CPUS.0 as usize;
 
 /// scx_rusty: A multi-domain BPF / userspace hybrid scheduler
 ///
@@ -278,7 +277,7 @@ impl StatsCtx {
         let stats_map = &skel.maps.stats;
         let mut stats: Vec<u64> = Vec::new();
 
-        for stat in 0..bpf_intf::stat_idx_RUSTY_NR_STATS {
+        for stat in 0..types::stat_idx::RUSTY_NR_STATS.0 {
             let cpu_stat_vec = stats_map
                 .lookup_percpu(&stat.to_ne_bytes(), libbpf_rs::MapFlags::ANY)
                 .with_context(|| format!("Failed to lookup stat {}", stat))?
@@ -302,7 +301,7 @@ impl StatsCtx {
         Self {
             cpu_busy: 0,
             cpu_total: 0,
-            bpf_stats: vec![0u64; bpf_intf::stat_idx_RUSTY_NR_STATS as usize],
+            bpf_stats: vec![0u64; types::stat_idx::RUSTY_NR_STATS.0 as usize],
             time_used: Duration::default(),
         }
     }
@@ -498,18 +497,18 @@ impl<'a> Scheduler<'a> {
     }
 
     fn cluster_stats(&self, sc: &StatsCtx, node_stats: BTreeMap<usize, NodeStats>) -> ClusterStats {
-        let stat = |idx| sc.bpf_stats[idx as usize];
-        let total = stat(bpf_intf::stat_idx_RUSTY_STAT_WAKE_SYNC)
-            + stat(bpf_intf::stat_idx_RUSTY_STAT_SYNC_PREV_IDLE)
-            + stat(bpf_intf::stat_idx_RUSTY_STAT_PREV_IDLE)
-            + stat(bpf_intf::stat_idx_RUSTY_STAT_GREEDY_IDLE)
-            + stat(bpf_intf::stat_idx_RUSTY_STAT_PINNED)
-            + stat(bpf_intf::stat_idx_RUSTY_STAT_DIRECT_DISPATCH)
-            + stat(bpf_intf::stat_idx_RUSTY_STAT_DIRECT_GREEDY)
-            + stat(bpf_intf::stat_idx_RUSTY_STAT_DIRECT_GREEDY_FAR)
-            + stat(bpf_intf::stat_idx_RUSTY_STAT_DSQ_DISPATCH)
-            + stat(bpf_intf::stat_idx_RUSTY_STAT_GREEDY_LOCAL)
-            + stat(bpf_intf::stat_idx_RUSTY_STAT_GREEDY_XNUMA);
+        let stat = |idx: types::stat_idx| sc.bpf_stats[idx.0 as usize];
+        let total = stat(types::stat_idx::RUSTY_STAT_WAKE_SYNC)
+            + stat(types::stat_idx::RUSTY_STAT_SYNC_PREV_IDLE)
+            + stat(types::stat_idx::RUSTY_STAT_PREV_IDLE)
+            + stat(types::stat_idx::RUSTY_STAT_GREEDY_IDLE)
+            + stat(types::stat_idx::RUSTY_STAT_PINNED)
+            + stat(types::stat_idx::RUSTY_STAT_DIRECT_DISPATCH)
+            + stat(types::stat_idx::RUSTY_STAT_DIRECT_GREEDY)
+            + stat(types::stat_idx::RUSTY_STAT_DIRECT_GREEDY_FAR)
+            + stat(types::stat_idx::RUSTY_STAT_DSQ_DISPATCH)
+            + stat(types::stat_idx::RUSTY_STAT_GREEDY_LOCAL)
+            + stat(types::stat_idx::RUSTY_STAT_GREEDY_XNUMA);
         let stat_pct = |idx| stat(idx) as f64 / total as f64 * 100.0;
 
         let cpu_busy = if sc.cpu_total != 0 {
@@ -537,26 +536,26 @@ impl<'a> Scheduler<'a> {
 
             cpu_busy,
             load: node_stats.iter().map(|(_k, v)| v.load).sum::<f64>(),
-            nr_migrations: sc.bpf_stats[bpf_intf::stat_idx_RUSTY_STAT_LOAD_BALANCE as usize],
+            nr_migrations: sc.bpf_stats[types::stat_idx::RUSTY_STAT_LOAD_BALANCE.0 as usize],
 
-            task_get_err: sc.bpf_stats[bpf_intf::stat_idx_RUSTY_STAT_TASK_GET_ERR as usize],
+            task_get_err: sc.bpf_stats[types::stat_idx::RUSTY_STAT_TASK_GET_ERR.0 as usize],
             time_used: sc.time_used.as_secs_f64(),
 
-            sync_prev_idle: stat_pct(bpf_intf::stat_idx_RUSTY_STAT_SYNC_PREV_IDLE),
-            wake_sync: stat_pct(bpf_intf::stat_idx_RUSTY_STAT_WAKE_SYNC),
-            prev_idle: stat_pct(bpf_intf::stat_idx_RUSTY_STAT_PREV_IDLE),
-            greedy_idle: stat_pct(bpf_intf::stat_idx_RUSTY_STAT_GREEDY_IDLE),
-            pinned: stat_pct(bpf_intf::stat_idx_RUSTY_STAT_PINNED),
-            direct: stat_pct(bpf_intf::stat_idx_RUSTY_STAT_DIRECT_DISPATCH),
-            greedy: stat_pct(bpf_intf::stat_idx_RUSTY_STAT_DIRECT_GREEDY),
-            greedy_far: stat_pct(bpf_intf::stat_idx_RUSTY_STAT_DIRECT_GREEDY_FAR),
-            dsq_dispatch: stat_pct(bpf_intf::stat_idx_RUSTY_STAT_DSQ_DISPATCH),
-            greedy_local: stat_pct(bpf_intf::stat_idx_RUSTY_STAT_GREEDY_LOCAL),
-            greedy_xnuma: stat_pct(bpf_intf::stat_idx_RUSTY_STAT_GREEDY_XNUMA),
-            kick_greedy: stat_pct(bpf_intf::stat_idx_RUSTY_STAT_KICK_GREEDY),
-            repatriate: stat_pct(bpf_intf::stat_idx_RUSTY_STAT_REPATRIATE),
-            dl_clamp: stat_pct(bpf_intf::stat_idx_RUSTY_STAT_DL_CLAMP),
-            dl_preset: stat_pct(bpf_intf::stat_idx_RUSTY_STAT_DL_PRESET),
+            sync_prev_idle: stat_pct(types::stat_idx::RUSTY_STAT_SYNC_PREV_IDLE),
+            wake_sync: stat_pct(types::stat_idx::RUSTY_STAT_WAKE_SYNC),
+            prev_idle: stat_pct(types::stat_idx::RUSTY_STAT_PREV_IDLE),
+            greedy_idle: stat_pct(types::stat_idx::RUSTY_STAT_GREEDY_IDLE),
+            pinned: stat_pct(types::stat_idx::RUSTY_STAT_PINNED),
+            direct: stat_pct(types::stat_idx::RUSTY_STAT_DIRECT_DISPATCH),
+            greedy: stat_pct(types::stat_idx::RUSTY_STAT_DIRECT_GREEDY),
+            greedy_far: stat_pct(types::stat_idx::RUSTY_STAT_DIRECT_GREEDY_FAR),
+            dsq_dispatch: stat_pct(types::stat_idx::RUSTY_STAT_DSQ_DISPATCH),
+            greedy_local: stat_pct(types::stat_idx::RUSTY_STAT_GREEDY_LOCAL),
+            greedy_xnuma: stat_pct(types::stat_idx::RUSTY_STAT_GREEDY_XNUMA),
+            kick_greedy: stat_pct(types::stat_idx::RUSTY_STAT_KICK_GREEDY),
+            repatriate: stat_pct(types::stat_idx::RUSTY_STAT_REPATRIATE),
+            dl_clamp: stat_pct(types::stat_idx::RUSTY_STAT_DL_CLAMP),
+            dl_preset: stat_pct(types::stat_idx::RUSTY_STAT_DL_PRESET),
 
             direct_greedy_cpus: self.tuner.direct_greedy_mask.as_raw_slice().to_owned(),
             kick_greedy_cpus: self.tuner.kick_greedy_mask.as_raw_slice().to_owned(),

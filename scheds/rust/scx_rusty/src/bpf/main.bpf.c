@@ -46,7 +46,6 @@
 #include <lib/sdt_task.h>
 #endif
 
-#include "intf.h"
 #include "types.h"
 #include "lb_domain.h"
 
@@ -60,6 +59,10 @@
 char _license[] SEC("license") = "GPL";
 
 UEI_DEFINE(uei);
+
+const enum ravg_consts __btf_anchor_ravg_consts = RAVG_VAL_BITS;
+const enum consts __btf_anchor_consts = LB_DEFAULT_WEIGHT;
+const enum stat_idx __btf_anchor_stat_idx = RUSTY_NR_STATS;
 
 /*
  * const volatiles are set during initialization and treated as consts by the

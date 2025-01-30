@@ -147,14 +147,13 @@ use scx_utils::LoadAggregator;
 use scx_utils::LoadLedger;
 use sorted_vec::SortedVec;
 
-use crate::bpf_intf;
 use crate::bpf_skel::*;
 use crate::stats::DomainStats;
 use crate::stats::NodeStats;
 use crate::DomainGroup;
 
-const DEFAULT_WEIGHT: f64 = bpf_intf::consts_LB_DEFAULT_WEIGHT as f64;
-const RAVG_FRAC_BITS: u32 = bpf_intf::ravg_consts_RAVG_FRAC_BITS;
+const DEFAULT_WEIGHT: f64 = types::consts::LB_DEFAULT_WEIGHT.0 as f64;
+const RAVG_FRAC_BITS: u32 = types::ravg_consts::RAVG_FRAC_BITS.0;
 
 fn now_monotonic() -> u64 {
     let mut time = libc::timespec {
@@ -465,7 +464,7 @@ pub struct LoadBalancer<'a, 'b> {
 // Verify that the number of buckets is a factor of the maximum weight to
 // ensure that the range of weight can be split evenly amongst every bucket.
 const_assert_eq!(
-    bpf_intf::consts_LB_MAX_WEIGHT % bpf_intf::consts_LB_LOAD_BUCKETS,
+    types::consts::LB_MAX_WEIGHT.0 % types::consts::LB_LOAD_BUCKETS.0,
     0
 );
 
@@ -481,7 +480,7 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
             skel,
             skip_kworkers,
 
-            infeas_threshold: bpf_intf::consts_LB_MAX_WEIGHT as f64,
+            infeas_threshold: types::consts::LB_MAX_WEIGHT.0 as f64,
 
             nodes: SortedVec::new(),
 
@@ -559,7 +558,7 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
     }
 
     fn calculate_load_avgs(&mut self) -> Result<LoadLedger> {
-        const NUM_BUCKETS: u64 = bpf_intf::consts_LB_LOAD_BUCKETS as u64;
+        const NUM_BUCKETS: u64 = types::consts::LB_LOAD_BUCKETS.0 as u64;
         let now_mono = now_monotonic();
         let load_half_life = self.skel.maps.rodata_data.load_half_life;
 
@@ -597,8 +596,8 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
     }
 
     fn bucket_range(&self, bucket: u64) -> (f64, f64) {
-        const MAX_WEIGHT: u64 = bpf_intf::consts_LB_MAX_WEIGHT as u64;
-        const NUM_BUCKETS: u64 = bpf_intf::consts_LB_LOAD_BUCKETS as u64;
+        const MAX_WEIGHT: u64 = types::consts::LB_MAX_WEIGHT.0 as u64;
+        const NUM_BUCKETS: u64 = types::consts::LB_LOAD_BUCKETS.0 as u64;
         const WEIGHT_PER_BUCKET: u64 = MAX_WEIGHT / NUM_BUCKETS;
 
         if bucket >= NUM_BUCKETS {
@@ -613,7 +612,7 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
     }
 
     fn bucket_weight(&self, bucket: u64) -> usize {
-        const WEIGHT_PER_BUCKET: f64 = bpf_intf::consts_LB_WEIGHT_PER_BUCKET as f64;
+        const WEIGHT_PER_BUCKET: f64 = types::consts::LB_WEIGHT_PER_BUCKET.0 as f64;
         let (min_weight, _) = self.bucket_range(bucket);
 
         // Use the mid-point of the bucket when determining weight
@@ -629,7 +628,7 @@ impl<'a, 'b> LoadBalancer<'a, 'b> {
         dom.queried_tasks = true;
 
         // Read active_tasks and update read_idx and gen.
-        const MAX_TPTRS: u64 = bpf_intf::consts_MAX_DOM_ACTIVE_TPTRS as u64;
+        const MAX_TPTRS: u64 = types::consts::MAX_DOM_ACTIVE_TPTRS.0 as u64;
         let dom_ctx = unsafe { &mut *self.skel.maps.bss_data.dom_ctxs[dom.id] };
         let active_tasks = &mut dom_ctx.active_tasks;
 
