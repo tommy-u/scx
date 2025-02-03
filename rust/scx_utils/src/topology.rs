@@ -243,10 +243,9 @@ impl Topology {
         })
     }
 
-    /// Build a complete host Topology
-    pub fn new() -> Result<Topology> {
+    pub fn with_max_cores_per_llc(max_cores_per_llc: usize) -> Result<Topology> {
         let span = cpus_online()?;
-        let mut topo_ctx = TopoCtx::new();
+        let mut topo_ctx = TopoCtx::new(max_cores_per_llc);
         // If the kernel is compiled with CONFIG_NUMA, then build a topology
         // from the NUMA hierarchy in sysfs. Otherwise, just make a single
         // default node of ID 0 which contains all cores.
@@ -259,9 +258,14 @@ impl Topology {
         Self::instantiate(span, nodes)
     }
 
+    /// Build a complete host Topology
+    pub fn new() -> Result<Topology> {
+        Self::with_max_cores_per_llc(usize::MAX)
+    }
+
     pub fn with_flattened_llc_node() -> Result<Topology> {
         let span = cpus_online()?;
-        let mut topo_ctx = TopoCtx::new();
+        let mut topo_ctx = TopoCtx::new(usize::MAX);
         let nodes = create_default_node(&span, &mut topo_ctx, true)?;
         Self::instantiate(span, nodes)
     }
@@ -314,10 +318,16 @@ impl Topology {
  ******************************************************/
 /// TopoCtx is a helper struct used to build a topology.
 struct TopoCtx {
+    /// Split LLCs if above this number of cores
+    max_cores_per_llc: usize,
     /// Mapping of NUMA node core ids
     node_core_kernel_ids: BTreeMap<(usize, usize), usize>,
+    /// llc ID allocation cursor
+    llc_id_cursor: usize,
     /// Mapping of NUMA node LLC ids
     node_llc_kernel_ids: BTreeMap<(usize, usize), usize>,
+    /// Mapping from core to LLC
+    core_to_llc: BTreeMap<usize, usize>,
     /// Mapping of L2 ids
     l2_ids: BTreeMap<String, usize>,
     /// Mapping of L3 ids
@@ -325,16 +335,15 @@ struct TopoCtx {
 }
 
 impl TopoCtx {
-    fn new() -> TopoCtx {
-        let core_kernel_ids = BTreeMap::new();
-        let llc_kernel_ids = BTreeMap::new();
-        let l2_ids = BTreeMap::new();
-        let l3_ids = BTreeMap::new();
+    fn new(max_cores_per_llc: usize) -> TopoCtx {
         TopoCtx {
-            node_core_kernel_ids: core_kernel_ids,
-            node_llc_kernel_ids: llc_kernel_ids,
-            l2_ids,
-            l3_ids,
+            max_cores_per_llc,
+            node_core_kernel_ids: BTreeMap::new(),
+            llc_id_cursor: 0,
+            node_llc_kernel_ids: BTreeMap::new(),
+            core_to_llc: BTreeMap::new(),
+            l2_ids: BTreeMap::new(),
+            l3_ids: BTreeMap::new(),
         }
     }
 }
@@ -443,14 +452,45 @@ fn create_insert_cpu(
     let base_freq = read_file_usize(&freq_path.join("base_frequency")).unwrap_or(max_freq);
     let trans_lat_ns = read_file_usize(&freq_path.join("cpuinfo_transition_latency")).unwrap_or(0);
 
-    let num_llcs = topo_ctx.node_llc_kernel_ids.len();
-    let llc_id = topo_ctx
-        .node_llc_kernel_ids
-        .entry((node.id, llc_kernel_id))
-        .or_insert(num_llcs);
+    let num_cores = topo_ctx.node_core_kernel_ids.len();
+    let core_id = *topo_ctx
+        .node_core_kernel_ids
+        .entry((node.id, core_kernel_id))
+        .or_insert(num_cores);
 
-    let llc = node.llcs.entry(*llc_id).or_insert(Arc::new(Llc {
-        id: *llc_id,
+    let llc_id = match topo_ctx.core_to_llc.get(&core_id) {
+        Some(llc_id) => *llc_id,
+        None => {
+            let mut use_llc_id = None;
+            if let Some(llc_id) = topo_ctx.node_llc_kernel_ids.get(&(node.id, llc_kernel_id)) {
+                if let Some(llc) = node.llcs.get(llc_id) {
+                    if llc.cores.len() < topo_ctx.max_cores_per_llc {
+                        use_llc_id = Some(*llc_id);
+                    }
+                }
+            }
+
+            let llc_id = match use_llc_id {
+                Some(llc_id) => llc_id,
+                None => {
+                    let llc_id = topo_ctx.llc_id_cursor;
+                    topo_ctx.llc_id_cursor += 1;
+                    topo_ctx
+                        .node_llc_kernel_ids
+                        .insert((node.id, llc_kernel_id), llc_id);
+                    llc_id
+                }
+            };
+
+            topo_ctx.core_to_llc.insert(core_id, llc_id);
+            llc_id
+        }
+    };
+
+    println!("CPU{}: CORE={} LLC={}", id, core_id, llc_id);
+
+    let llc = node.llcs.entry(llc_id).or_insert(Arc::new(Llc {
+        id: llc_id,
         cores: BTreeMap::new(),
         span: Cpumask::new(),
         all_cpus: BTreeMap::new(),
@@ -473,19 +513,13 @@ fn create_insert_cpu(
         None => CoreType::Big { turbo: false },
     };
 
-    let num_cores = topo_ctx.node_core_kernel_ids.len();
-    let core_id = topo_ctx
-        .node_core_kernel_ids
-        .entry((node.id, core_kernel_id))
-        .or_insert(num_cores);
-
-    let core = llc_mut.cores.entry(*core_id).or_insert(Arc::new(Core {
-        id: *core_id,
+    let core = llc_mut.cores.entry(core_id).or_insert(Arc::new(Core {
+        id: core_id,
         cpus: BTreeMap::new(),
         span: Cpumask::new(),
         core_type: core_type.clone(),
 
-        llc_id: *llc_id,
+        llc_id,
         node_id: node.id,
         kernel_id: core_kernel_id,
     }));
@@ -503,8 +537,8 @@ fn create_insert_cpu(
             l3_id,
             core_type: core_type.clone(),
 
-            core_id: *core_id,
-            llc_id: *llc_id,
+            core_id,
+            llc_id,
             node_id: node.id,
             package_id,
         }),
@@ -654,15 +688,19 @@ fn create_numa_nodes(
         let cpu_pattern = numa_path.join("cpu[0-9]*");
         let cpu_paths = glob(cpu_pattern.to_string_lossy().as_ref())?;
         let avg_cpu_freq = avg_cpu_freq();
+        let mut cpu_ids = vec![];
         for cpu_path in cpu_paths.filter_map(Result::ok) {
             let cpu_str = cpu_path.to_str().unwrap().trim();
-            let cpu_id = match sscanf!(cpu_str, "/sys/devices/system/node/node{usize}/cpu{usize}") {
-                Ok((_, val)) => val,
+            match sscanf!(cpu_str, "/sys/devices/system/node/node{usize}/cpu{usize}") {
+                Ok((_, val)) => cpu_ids.push(val),
                 Err(_) => {
                     bail!("Failed to parse cpu ID {}", cpu_str);
                 }
-            };
+            }
+        }
 
+        cpu_ids.sort();
+        for &cpu_id in cpu_ids.iter() {
             create_insert_cpu(
                 cpu_id,
                 &mut node,

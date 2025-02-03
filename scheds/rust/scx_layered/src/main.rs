@@ -504,6 +504,10 @@ struct Opts {
     #[arg(short = 't', long, num_args = 0..=1, default_missing_value = "true", require_equals = true)]
     disable_topology: Option<bool>,
 
+    /// Limit the number of cores per LLC.
+    #[clap(long)]
+    max_cores_per_llc: Option<usize>,
+
     /// Enable cross NUMA preemption.
     #[clap(long)]
     xnuma_preemption: bool,
@@ -1647,9 +1651,13 @@ impl<'a> Scheduler<'a> {
 
         let topo = Arc::new(if disable_topology {
             Topology::with_flattened_llc_node()?
+        } else if opts.max_cores_per_llc.is_some() {
+            Topology::with_max_cores_per_llc(opts.max_cores_per_llc.unwrap())?
         } else {
             Topology::new()?
         });
+
+        debug!("topology: {:#?}", &topo);
 
         /*
          * FIXME: scx_layered incorrectly assumes that node, LLC and CPU IDs
