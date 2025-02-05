@@ -1567,22 +1567,20 @@ static __always_inline bool try_consume_layer(u32 layer_id, struct cpu_ctx *cpuc
 			bpf_for_each(scx_dsq, p, layer_dsq_id(layer_id, *llc_idp), 0) {
 				s32 task_cpu = scx_bpf_task_cpu(p);
 
-				if (/*(task_cpu == this_cpu ||
-				      task_cpu == sibling_cpu(this_cpu)) &&*/
+				/*if ((task_cpu == this_cpu ||
+				     task_cpu == sibling_cpu(this_cpu)) &&
 				    __COMPAT_scx_bpf_dsq_move(BPF_FOR_EACH_ITER, p,
 							      SCX_DSQ_LOCAL, 0)) {
 					lstat_inc(LSTAT_DSP_LOCAL_SCAN, layer, cpuc);
 					return true;
-				}
+					}*/
 
+				break;
 				if (++nr_scanned >= layer->nr_to_local_scan)
 					break;
 			}
 		}
 
-		static int cnt = 0;
-		if (!(cnt++ % 10000))
-			bpf_printk("XXX CPU%d(%d) scan failed %s[%d], cnt=%d", cpuc->cpu, bpf_smp_processor_id(), p->comm, p->pid, cnt);
 		if (scx_bpf_dsq_move_to_local(layer_dsq_id(layer_id, *llc_idp)))
 			return true;
 	}
