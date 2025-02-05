@@ -1534,7 +1534,7 @@ static __always_inline bool try_consume_layer(u32 layer_id, struct cpu_ctx *cpuc
 	struct llc_prox_map *llc_pmap = &llcc->prox_map;
 	struct layer *layer;
 	bool xllc_mig_skipped = false;
-	s32 this_cpu = cpuc->cpu;
+	//s32 this_cpu = cpuc->cpu;
 	u32 u;
 
 	if (!(layer = lookup_layer(layer_id)))
@@ -1561,28 +1561,20 @@ static __always_inline bool try_consume_layer(u32 layer_id, struct cpu_ctx *cpuc
 			}
 		}
 
-		if (layer->nr_to_local_scan) {
-			u32 nr_scanned = 0;
-
+		if (true) {
 			bpf_for_each(scx_dsq, p, layer_dsq_id(layer_id, *llc_idp), 0) {
-				s32 task_cpu = scx_bpf_task_cpu(p);
+				//s32 task_cpu = scx_bpf_task_cpu(p);
 
-				/*if ((task_cpu == this_cpu ||
-				     task_cpu == sibling_cpu(this_cpu)) &&
-				    __COMPAT_scx_bpf_dsq_move(BPF_FOR_EACH_ITER, p,
+				if (__COMPAT_scx_bpf_dsq_move(BPF_FOR_EACH_ITER, p,
 							      SCX_DSQ_LOCAL, 0)) {
 					lstat_inc(LSTAT_DSP_LOCAL_SCAN, layer, cpuc);
 					return true;
-					}*/
-
-				break;
-				if (++nr_scanned >= layer->nr_to_local_scan)
-					break;
+				}
 			}
 		}
 
-		if (scx_bpf_dsq_move_to_local(layer_dsq_id(layer_id, *llc_idp)))
-			return true;
+		//if (scx_bpf_dsq_move_to_local(layer_dsq_id(layer_id, *llc_idp)))
+		//return true;
 	}
 
 	if (xllc_mig_skipped)
