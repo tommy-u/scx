@@ -1,6 +1,8 @@
 name: stable-test
 
 on:
+  # TODO: remove me
+  push:
   # only runs on main, every 6 hours. specify hours explicitly so scheduled runs can be offset and use a random minute.
   schedule:
     - cron: "40 2,8,14,20 * * *"
