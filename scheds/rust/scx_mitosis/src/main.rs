@@ -114,8 +114,7 @@ impl<'a> Scheduler<'a> {
         uei_report!(&self.skel, uei)
     }
 
-    /// Output various debugging data like per cell stats, per-cpu stats, etc.
-    fn debug(&mut self) -> Result<()> {
+    fn debug_cpu_ctrs(&mut self) -> Result<()> {
         let zero = 0 as libc::__u32;
         let zero_slice = unsafe { any_as_u8_slice(&zero) };
         if let Some(v) = self
@@ -139,6 +138,44 @@ impl<'a> Scheduler<'a> {
                 trace!("CPU {}: {:?}", cpu, diff_cycles);
             }
         }
+        Ok(())
+    }
+
+    // Print all affinity violations
+    fn debug_affinity_violations(&mut self) -> Result<()> {
+        let zero = 0 as libc::__u32;
+        let zero_slice = unsafe { any_as_u8_slice(&zero) };
+
+        if let Some(v) = self
+            .skel
+            .maps
+            .cpu_ctxs
+            .lookup_percpu(zero_slice, libbpf_rs::MapFlags::ANY)
+            .context("Failed to lookup cpu_ctxs map")?
+        {
+            for (cpu, ctx) in v.iter().enumerate() {
+                let cpu_ctx = unsafe {
+                    let ptr = ctx.as_slice().as_ptr() as *const bpf_intf::cpu_ctx;
+                    &*ptr
+                };
+
+                let affn_viol: Vec<u64> = cpu_ctx
+                    .cstats
+                    .iter()
+                    .map(|stats| stats[bpf_intf::cell_stat_idx_CSTAT_AFFN_VIOL as usize])
+                    .collect();
+                trace!("CPU {}: affin-viols {:?}", cpu, affn_viol);
+
+            }
+
+        }
+        Ok(())
+    }
+
+    /// Output various debugging data like per cell stats, per-cpu stats, etc.
+    fn debug(&mut self) -> Result<()> {
+        // self.debug_cpu_ctrs()?;
+        self.debug_affinity_violations()?;
         Ok(())
     }
 }

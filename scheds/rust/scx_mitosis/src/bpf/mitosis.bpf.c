@@ -640,6 +640,19 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 */
 void BPF_STRUCT_OPS(mitosis_tick, struct task_struct *p_run)
 {
+
+	// Bump the affinity violation counter for all CPUs and all cells
+	for (u32 cpu = 0; cpu < nr_possible_cpus; ++cpu) {
+		struct cpu_ctx *cctx = lookup_cpu_ctx(cpu);
+		if (!cctx)
+			continue;
+
+		for (u32 cell = 0; cell < MAX_CELLS; ++cell) {
+			// Increment by cell number
+			cstat_add(CSTAT_AFFN_VIOL, cell, cctx, cell);
+		}
+	}
+
 	if (bpf_get_smp_processor_id())
 		return;
 
