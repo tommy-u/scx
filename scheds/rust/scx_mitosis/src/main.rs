@@ -119,6 +119,7 @@ impl<'a> Scheduler<'a> {
     }
 
     fn debug_cpu_ctrs(&mut self) -> Result<()> {
+        trace!("CPU Cycles:");
         let zero = 0 as libc::__u32;
         let zero_slice = unsafe { any_as_u8_slice(&zero) };
         if let Some(v) = self
@@ -155,6 +156,8 @@ impl<'a> Scheduler<'a> {
     // Print all affinity violations
     // We could do this with less memory if anyone cares.
     fn debug_affinity_violations(&mut self) -> Result<()> {
+        trace!("Affinity Violations:");
+
         let zero = 0 as libc::__u32;
         let zero_slice = unsafe { any_as_u8_slice(&zero) };
 
@@ -186,13 +189,13 @@ impl<'a> Scheduler<'a> {
         }
 
         // Print the current affin-viols
-        for cpu in 0..*NR_CPU_IDS {
-            let affn_viol: Vec<u64> = current_affn_viol[cpu]
-                .iter()
-                .map(|val| *val)
-                .collect();
-            trace!("CPU {}: {:?}", cpu, affn_viol);
-        }
+        // for cpu in 0..*NR_CPU_IDS {
+        //     let affn_viol: Vec<u64> = current_affn_viol[cpu]
+        //         .iter()
+        //         .map(|val| *val)
+        //         .collect();
+        //     trace!("CPU {}: {:?}", cpu, affn_viol);
+        // }
 
         // 2) Subtract the previous affin-viols from the current ones to get the diff
         // The difference between the current and previous affin-viols
@@ -216,7 +219,7 @@ impl<'a> Scheduler<'a> {
         // update the previous affin-viols
         self.prev_affin_viol = current_affn_viol;
 
-        // 3) Per-Cell violations. Sum the CPUS for each cell.
+        // 4) Per-Cell violations. Sum the CPUS for each cell.
         let mut per_cell_violations: [u64; MAX_CELLS] = [0; MAX_CELLS];
         for cell in 0..MAX_CELLS {
             for cpu in 0..*NR_CPU_IDS {
@@ -226,7 +229,7 @@ impl<'a> Scheduler<'a> {
         }
         trace!("Per-Cell violations: {:?}", per_cell_violations);
 
-        // 4) Per-CPU violations. Sum the Cells for each CPU.
+        // 5) Per-CPU violations. Sum the Cells for each CPU.
         let mut per_cpu_violations: Vec<u64> = vec![0; *NR_CPU_IDS];
         for cpu in 0..*NR_CPU_IDS {
             for cell in 0..MAX_CELLS {
@@ -239,7 +242,7 @@ impl<'a> Scheduler<'a> {
         // Sanity check, the sum of the per-cell violations should equal the sum of the per-cpu violations
         assert_eq!(per_cpu_violations.iter().sum::<u64>(), per_cell_violations.iter().sum::<u64>());
 
-        // 5) Total violations. Sum the CPUS and Cells.
+        // 6) Total violations. Sum the CPUS and Cells.
         trace!("Total violations: {}", per_cpu_violations.iter().sum::<u64>());
 
         Ok(())
@@ -247,7 +250,7 @@ impl<'a> Scheduler<'a> {
 
     /// Output various debugging data like per cell stats, per-cpu stats, etc.
     fn debug(&mut self) -> Result<()> {
-        // self.debug_cpu_ctrs()?;
+        self.debug_cpu_ctrs()?;
         self.debug_affinity_violations()?;
         Ok(())
     }
