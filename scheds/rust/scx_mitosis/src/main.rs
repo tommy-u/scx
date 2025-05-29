@@ -204,33 +204,43 @@ impl<'a> Scheduler<'a> {
                 affn_viol_diff[cpu][i] = val - self.prev_affin_viol[cpu][i];
             }
         }
-        // print the diff affin-viols
+        // 3) print the diff affin-viols
         for cpu in 0..*NR_CPU_IDS {
             let affn_viol: Vec<u64> = affn_viol_diff[cpu]
                 .iter()
                 .map(|val| *val)
                 .collect();
-            trace!("CPU {}: diff-affin-viols {:?}", cpu, affn_viol);
+            trace!("CPU {}: affin-viols {:?}", cpu, affn_viol);
         }
-
 
         // update the previous affin-viols
         self.prev_affin_viol = current_affn_viol;
 
-        // 3) Sum the CPUS for each cell and print the sum vector (per cell violations)
-        // let mut sum_per_cell:
+        // 3) Per-Cell violations. Sum the CPUS for each cell.
+        let mut per_cell_violations: [u64; MAX_CELLS] = [0; MAX_CELLS];
+        for cell in 0..MAX_CELLS {
+            for cpu in 0..*NR_CPU_IDS {
+                let val = affn_viol_diff[cpu][cell];
+                per_cell_violations[cell] += val;
+            }
+        }
+        trace!("Per-Cell violations: {:?}", per_cell_violations);
 
+        // 4) Per-CPU violations. Sum the Cells for each CPU.
+        let mut per_cpu_violations: Vec<u64> = vec![0; *NR_CPU_IDS];
+        for cpu in 0..*NR_CPU_IDS {
+            for cell in 0..MAX_CELLS {
+                let val = affn_viol_diff[cpu][cell];
+                per_cpu_violations[cpu] += val;
+            }
+        }
+        trace!("Per-CPU violations: {:?}", per_cpu_violations);
 
-                // Find the difference between current and previous affin-viols
-                // subtract prev_affin_viol from affn_viol
-                // let diff_affn_viol: Vec<i64> = self.prev_affin_viol[cpu]
-                //     .iter()
-                //     .zip(affn_viol.iter())
-                //     .map(|(a, b)| (b - a) as i64)
-                //     .collect();
-                // trace!("CPU {}: diff-affin-viols {:?}", cpu, diff_affn_viol);
+        // Sanity check, the sum of the per-cell violations should equal the sum of the per-cpu violations
+        assert_eq!(per_cpu_violations.iter().sum::<u64>(), per_cell_violations.iter().sum::<u64>());
 
-
+        // 5) Total violations. Sum the CPUS and Cells.
+        trace!("Total violations: {}", per_cpu_violations.iter().sum::<u64>());
 
         Ok(())
     }
