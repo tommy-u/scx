@@ -73,6 +73,9 @@ unsafe fn any_as_u8_slice<T: Sized>(p: &T) -> &[u8] {
 struct Scheduler<'a> {
     skel: BpfSkel<'a>,
     prev_percpu_cell_cycles: Vec<[u64; MAX_CELLS]>,
+    // Cell as the primary index makes more sense to me [cell][cpu]
+    // I can change this to match the cycles vector if needed.
+    prev_affin_viol: Vec<[u64; MAX_CELLS]>,
     monitor_interval: std::time::Duration,
 }
 
@@ -99,6 +102,7 @@ impl<'a> Scheduler<'a> {
         Ok(Self {
             skel,
             prev_percpu_cell_cycles: vec![[0; MAX_CELLS]; *NR_CPU_IDS],
+            prev_affin_viol: vec![[0; MAX_CELLS]; *NR_CPU_IDS],
             monitor_interval: std::time::Duration::from_secs(opts.monitor_interval_s),
         })
     }
@@ -141,11 +145,23 @@ impl<'a> Scheduler<'a> {
         Ok(())
     }
 
+    // 1) Get the affin-viols from BPF
+    // 2) Subtract the previous affin-viols from the current ones to get the diff
+    // 3) Print the diff (this is all cpus and all cells)
+    // 4) Sum the CPUS for each cell and print the sum vector (per cell violations)
+    // 5) Sum the Cells for each CPU and print the sum vector (per CPU violations)
+    // 6) Sum the CPUS and Cells and print the sum (total violations)
+
     // Print all affinity violations
+    // We could do this with less memory if anyone cares.
     fn debug_affinity_violations(&mut self) -> Result<()> {
         let zero = 0 as libc::__u32;
         let zero_slice = unsafe { any_as_u8_slice(&zero) };
 
+        // The raw affin-viols counters from BPF
+        let mut current_affn_viol: Vec<[u64; MAX_CELLS]> = vec![[0; MAX_CELLS]; *NR_CPU_IDS];
+
+        // Load the current affin-viols from BPF
         if let Some(v) = self
             .skel
             .maps
@@ -159,16 +175,63 @@ impl<'a> Scheduler<'a> {
                     &*ptr
                 };
 
-                let affn_viol: Vec<u64> = cpu_ctx
-                    .cstats
-                    .iter()
-                    .map(|stats| stats[bpf_intf::cell_stat_idx_CSTAT_AFFN_VIOL as usize])
-                    .collect();
-                trace!("CPU {}: affin-viols {:?}", cpu, affn_viol);
+                // assert that there are as many entries in cstats as there are cells
+                assert_eq!(cpu_ctx.cstats.len(), MAX_CELLS);
 
+                // 1) Raw affin-viols from BPF
+                for (i, val) in cpu_ctx.cstats.iter().enumerate() {
+                    current_affn_viol[cpu][i] = val[bpf_intf::cell_stat_idx_CSTAT_AFFN_VIOL as usize];
+                }
             }
-
         }
+
+        // Print the current affin-viols
+        for cpu in 0..*NR_CPU_IDS {
+            let affn_viol: Vec<u64> = current_affn_viol[cpu]
+                .iter()
+                .map(|val| *val)
+                .collect();
+            trace!("CPU {}: {:?}", cpu, affn_viol);
+        }
+
+        // 2) Subtract the previous affin-viols from the current ones to get the diff
+        // The difference between the current and previous affin-viols
+        let mut affn_viol_diff: Vec<[u64; MAX_CELLS]> = vec![[0; MAX_CELLS]; *NR_CPU_IDS];
+
+        // Loop over the current affin-viols and subtract the previous ones
+        for cpu in 0..*NR_CPU_IDS {
+            for (i, val) in current_affn_viol[cpu].iter().enumerate() {
+                affn_viol_diff[cpu][i] = val - self.prev_affin_viol[cpu][i];
+            }
+        }
+        // print the diff affin-viols
+        for cpu in 0..*NR_CPU_IDS {
+            let affn_viol: Vec<u64> = affn_viol_diff[cpu]
+                .iter()
+                .map(|val| *val)
+                .collect();
+            trace!("CPU {}: diff-affin-viols {:?}", cpu, affn_viol);
+        }
+
+
+        // update the previous affin-viols
+        self.prev_affin_viol = current_affn_viol;
+
+        // 3) Sum the CPUS for each cell and print the sum vector (per cell violations)
+        // let mut sum_per_cell:
+
+
+                // Find the difference between current and previous affin-viols
+                // subtract prev_affin_viol from affn_viol
+                // let diff_affn_viol: Vec<i64> = self.prev_affin_viol[cpu]
+                //     .iter()
+                //     .zip(affn_viol.iter())
+                //     .map(|(a, b)| (b - a) as i64)
+                //     .collect();
+                // trace!("CPU {}: diff-affin-viols {:?}", cpu, diff_affn_viol);
+
+
+
         Ok(())
     }
 
