@@ -346,6 +346,35 @@ static void cstat_inc(enum cell_stat_idx idx, u32 cell, struct cpu_ctx *cctx)
 	cstat_add(idx, cell, cctx, 1);
 }
 
+static void qcounter_add(enum cell_queue_idx idx, u32 cell, struct cpu_ctx *cctx, u64 delta) {
+    u64 *vptr;
+
+    switch (idx) {
+        case DEFAULT_DSQ_IDX:
+            vptr = MEMBER_VPTR(*cctx, .queue_counters[cell].default_count);
+            break;
+        case HI_FALLBACK_DSQ_IDX:
+            vptr = MEMBER_VPTR(*cctx, .queue_counters[cell].hi_fallback_count);
+            break;
+        case LO_FALLBACK_DSQ_IDX:
+            vptr = MEMBER_VPTR(*cctx, .queue_counters[cell].lo_fallback_count);
+            break;
+        default:
+            scx_bpf_error("invalid queue counter idx: %d", idx);
+            return;
+    }
+
+    if (vptr) {
+        (*vptr) += delta;
+    } else {
+        scx_bpf_error("invalid cell or queue counter idxs: %d, %d", idx, cell);
+    }
+}
+
+static void qcounter_inc(enum cell_queue_idx idx, u32 cell, struct cpu_ctx *cctx) {
+    qcounter_add(idx, cell, cctx, 1);
+}
+
 static inline int update_task_cpumask(struct task_struct *p,
 				      struct task_ctx *tctx)
 {
@@ -587,14 +616,23 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 
 	if (p->flags & PF_KTHREAD && p->nr_cpus_allowed == 1) {
 		scx_bpf_dsq_insert(p, HI_FALLBACK_DSQ, slice_ns, 0);
+		// FIXME: I don't think this is safe with concurrency
+		// cctx->queue_counters[tctx->cell].hi_fallback_count++;
+		qcounter_inc(HI_FALLBACK_DSQ_IDX, tctx->cell, cctx);
+
 	} else if (!tctx->all_cpus_allowed) {
 		// FIXME: With cpusets, most schedules will fall into this section and
 		// not actually get distributed to the correct cell. We need to loosen
 		// the check on tctx->all_cpus_allowed
 		scx_bpf_dsq_insert(p, LO_FALLBACK_DSQ, slice_ns, 0);
+		qcounter_inc(LO_FALLBACK_DSQ_IDX, tctx->cell, cctx);
+		// cctx->queue_counters[tctx->cell].lo_fallback_count++;
 	} else {
 		scx_bpf_dsq_insert_vtime(p, tctx->cell, slice_ns, vtime,
 					 enq_flags);
+		// cctx->queue_counters[tctx->cell].default_count++;
+		qcounter_inc(DEFAULT_DSQ_IDX, tctx->cell, cctx);
+
 	}
 
 	/*

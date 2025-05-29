@@ -38,9 +38,22 @@ enum cell_stat_idx {
 	NR_CSTATS,
 };
 
+enum cell_queue_idx {
+	LO_FALLBACK_DSQ_IDX,
+	HI_FALLBACK_DSQ_IDX,
+	DEFAULT_DSQ_IDX,
+};
+
+struct cell_queue_counters {
+	u64 lo_fallback_count;
+	u64 hi_fallback_count;
+	u64 default_count;
+};
+
 struct cpu_ctx {
 	u64 cstats[MAX_CELLS][NR_CSTATS];
 	u64 cell_cycles[MAX_CELLS];
+	struct cell_queue_counters queue_counters[MAX_CELLS];
 	u32 prev_cell;
 	u32 cell;
 };
