@@ -33,6 +33,13 @@ use scx_utils::NR_CPU_IDS;
 
 const MAX_CELLS: usize = bpf_intf::consts_MAX_CELLS as usize;
 
+fn default_cell_queue_counters() -> bpf_intf::cell_queue_counters {
+    bpf_intf::cell_queue_counters {
+        lo_fallback_count: 0,
+        hi_fallback_count: 0,
+        default_count: 0,
+    }
+}
 /// scx_mitosis: A dynamic affinity scheduler
 ///
 /// Cgroups are assigned to a dynamic number of Cells which are assigned to a
@@ -78,7 +85,7 @@ struct Scheduler<'a> {
     prev_affin_viol: Vec<[u64; MAX_CELLS]>,
     // Structure to hold previous queue counters: [cpu][cell][queue]
     // queue_type: 0 = lo_fallback, 1 = hi_fallback, 2 = default
-    prev_queue_counters: Vec<Vec<[u64; 3]>>,
+    prev_queue_counters: Vec<[bpf_intf::cell_queue_counters; MAX_CELLS]>,
     monitor_interval: std::time::Duration,
 }
 
@@ -106,7 +113,7 @@ impl<'a> Scheduler<'a> {
             skel,
             prev_percpu_cell_cycles: vec![[0; MAX_CELLS]; *NR_CPU_IDS],
             prev_affin_viol: vec![[0; MAX_CELLS]; *NR_CPU_IDS],
-            prev_queue_counters: vec![vec![[0; 3]; MAX_CELLS]; *NR_CPU_IDS],
+            prev_queue_counters: vec![[ default_cell_queue_counters(); MAX_CELLS]; *NR_CPU_IDS],
             monitor_interval: std::time::Duration::from_secs(opts.monitor_interval_s),
         })
     }
@@ -276,12 +283,8 @@ impl<'a> Scheduler<'a> {
 
         // Structure to hold queue counters: [cpu][cell][queue_type]
         // queue_type: 0 = lo_fallback, 1 = hi_fallback, 2 = default
-        let mut current_queue_counters: Vec<Vec<[u64; 3]>> = vec![vec![[0; 3]; MAX_CELLS]; *NR_CPU_IDS];
-
-        // Store previous queue counters if not already initialized
-        // if self.prev_queue_counters.is_empty() {
-        //     self.prev_queue_counters = vec![vec![[0; 3]; MAX_CELLS]; *NR_CPU_IDS];
-        // }
+        // let mut current_queue_counters: Vec<Vec<[u64; 3]>> = vec![vec![[0; 3]; MAX_CELLS]; *NR_CPU_IDS];
+        let mut current_queue_counters: Vec<[bpf_intf::cell_queue_counters; MAX_CELLS]> = vec![[default_cell_queue_counters(); MAX_CELLS]; *NR_CPU_IDS];
 
         if let Some(v) = self
             .skel
@@ -298,9 +301,10 @@ impl<'a> Scheduler<'a> {
                 };
 
                 for cell in 0..MAX_CELLS {
-                    current_queue_counters[cpu][cell][0] = cpu_ctx.queue_counters[cell].lo_fallback_count;
-                    current_queue_counters[cpu][cell][1] = cpu_ctx.queue_counters[cell].hi_fallback_count;
-                    current_queue_counters[cpu][cell][2] = cpu_ctx.queue_counters[cell].default_count;
+                    // current_queue_counters[cpu][cell][0] = cpu_ctx.queue_counters[cell].lo_fallback_count;
+                    // current_queue_counters[cpu][cell][1] = cpu_ctx.queue_counters[cell].hi_fallback_count;
+                    // current_queue_counters[cpu][cell][2] = cpu_ctx.queue_counters[cell].default_count;
+                    current_queue_counters[cpu][cell] = cpu_ctx.queue_counters[cell];
                 }
             }
 
@@ -309,7 +313,7 @@ impl<'a> Scheduler<'a> {
             let cpu_width = (*NR_CPU_IDS as f64).log10().ceil() as usize;
             for cpu in 0..*NR_CPU_IDS {
                 // a 2d array of size MAX_CELLS X 3 to hold the diffs for each cell
-                let mut diff_counters = vec![[0u64; 3]; MAX_CELLS];
+                let mut diff_counters = [default_cell_queue_counters(); MAX_CELLS]
 
                 for cell in 0..MAX_CELLS {
                     let lo_diff = current_queue_counters[cpu][cell][0] - self.prev_queue_counters[cpu][cell][0];
@@ -341,19 +345,6 @@ impl<'a> Scheduler<'a> {
 
             // trace!("{}", cell_counters.join(" | "));
             trace!("{}", cell_counters.join(" "));
-
-                // trace!(
-                //     "Cell {}: LO: {}, HI: {}, DEFAULT: {}",
-                //     cell,
-                //     per_cell_counters[cell][0],
-                //     per_cell_counters[cell][1],
-                //     per_cell_counters[cell][2]
-                // );
-
-                // if per_cell_counters[cell][0] > 0 || per_cell_counters[cell][1] > 0 || per_cell_counters[cell][2] > 0 {
-                // trace!("Cell {}: LO, HI, DEFAULT: {}, {}, {}",
-                //     cell, per_cell_counters[cell][0], per_cell_counters[cell][1], per_cell_counters[cell][2]);
-                // }
 
             // 3. Calculate and print per CPU queue values (summed across all cells)
             trace!("Per CPU Queue Counters (summed across cells):");
