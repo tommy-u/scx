@@ -77,6 +77,8 @@ unsafe fn any_as_u8_slice<T: Sized>(p: &T) -> &[u8] {
     }
 }
 
+
+
 struct Scheduler<'a> {
     skel: BpfSkel<'a>,
     prev_percpu_cell_cycles: Vec<[u64; MAX_CELLS]>,
@@ -272,6 +274,7 @@ impl<'a> Scheduler<'a> {
     }
 
     // Follow the pattern of debug_affinity_violations, where it prints out:
+    // 0. Get the difference between the prior and current queue values
     // 1. The per CPU per cell DIFF between the prior and current queue values
     // 2. The per cell queue values
     // 3. The per-CPU queue values
@@ -301,100 +304,94 @@ impl<'a> Scheduler<'a> {
                 };
 
                 for cell in 0..MAX_CELLS {
-                    // current_queue_counters[cpu][cell][0] = cpu_ctx.queue_counters[cell].lo_fallback_count;
-                    // current_queue_counters[cpu][cell][1] = cpu_ctx.queue_counters[cell].hi_fallback_count;
-                    // current_queue_counters[cpu][cell][2] = cpu_ctx.queue_counters[cell].default_count;
                     current_queue_counters[cpu][cell] = cpu_ctx.queue_counters[cell];
+                }
+            }
+
+            // 0. Get the difference between the prior and current queue values
+            let mut diff_counters: Vec<[bpf_intf::cell_queue_counters; MAX_CELLS]> = vec![[default_cell_queue_counters(); MAX_CELLS]; *NR_CPU_IDS];
+
+            for cpu in 0..*NR_CPU_IDS {
+                for cell in 0..MAX_CELLS {
+                    diff_counters[cpu][cell] = bpf_intf::cell_queue_counters {
+                        lo_fallback_count: current_queue_counters[cpu][cell].lo_fallback_count - self.prev_queue_counters[cpu][cell].lo_fallback_count,
+                        hi_fallback_count: current_queue_counters[cpu][cell].hi_fallback_count - self.prev_queue_counters[cpu][cell].hi_fallback_count,
+                        default_count:     current_queue_counters[cpu][cell].default_count     - self.prev_queue_counters[cpu][cell].default_count,
+                    };
                 }
             }
 
             // 1. Calculate and print the DIFF between prior and current queue values per CPU per cell
             trace!("Per CPU per Cell Queue Counter Diffs:");
             let cpu_width = (*NR_CPU_IDS as f64).log10().ceil() as usize;
-            for cpu in 0..*NR_CPU_IDS {
-                // a 2d array of size MAX_CELLS X 3 to hold the diffs for each cell
-                let mut diff_counters = [default_cell_queue_counters(); MAX_CELLS]
+            let cpu_counters: Vec<String> = diff_counters.iter().enumerate().map(|(cpu, counters)| {
+                let cell_counters: Vec<String> = counters.iter().enumerate().map(|(cell, counter)| {
+                    format!(
+                        "C{} {},{},{}",
+                        cell,
+                        counter.lo_fallback_count,
+                        counter.hi_fallback_count,
+                        counter.default_count
+                    )
+                }).collect();
+                format!("CPU {:width$}: {}", cpu, cell_counters.join(" "), width = cpu_width)
+            }).collect();
 
-                for cell in 0..MAX_CELLS {
-                    let lo_diff = current_queue_counters[cpu][cell][0] - self.prev_queue_counters[cpu][cell][0];
-                    let hi_diff = current_queue_counters[cpu][cell][1] - self.prev_queue_counters[cpu][cell][1];
-                    let default_diff = current_queue_counters[cpu][cell][2] - self.prev_queue_counters[cpu][cell][2];
+            trace!("\n{}", cpu_counters.join("\n"));
 
-                    diff_counters[cell][0] = lo_diff;
-                    diff_counters[cell][1] = hi_diff;
-                    diff_counters[cell][2] = default_diff;
-                }
-                // Print the diffs for this cpu for all cells
-                trace!("CPU {:width$}: {:?}", cpu, diff_counters, width = cpu_width);
-            }
-
-            // 2. Calculate and print per cell queue values (summed across all CPUs)
-            trace!("Per Cell Queue Counters (summed across CPUs): LO, HI, DEFAULT");
-            let mut per_cell_counters = vec![[0u64; 3]; MAX_CELLS];
+            // 2. Calculate and print per cell queue values
+            let mut per_cell_counters = vec![default_cell_queue_counters(); MAX_CELLS];
+            // zero out the per_cell_counters
+            // Each element of per_cell_counters is the sum of all cpu's counters for that cell
             for cell in 0..MAX_CELLS {
+                let mut tmp_counter = default_cell_queue_counters();
                 for cpu in 0..*NR_CPU_IDS {
-                    per_cell_counters[cell][0] += current_queue_counters[cpu][cell][0] - self.prev_queue_counters[cpu][cell][0];
-                    per_cell_counters[cell][1] += current_queue_counters[cpu][cell][1] - self.prev_queue_counters[cpu][cell][1];
-                    per_cell_counters[cell][2] += current_queue_counters[cpu][cell][2] - self.prev_queue_counters[cpu][cell][2];
+                    tmp_counter.lo_fallback_count += diff_counters[cpu][cell].lo_fallback_count;
+                    tmp_counter.hi_fallback_count += diff_counters[cpu][cell].hi_fallback_count;
+                    tmp_counter.default_count     += diff_counters[cpu][cell].default_count;
                 }
+                per_cell_counters[cell] = tmp_counter;
             }
 
             let cell_counters: Vec<String> = per_cell_counters.iter().enumerate().map(|(cell, counters)| {
-                format!("\x1b[1mCell {}:\x1b[0m [ {}, {}, {} ]", cell, counters[0], counters[1], counters[2])
+                format!(
+                    "Cell {}: [{}, {}, {}]",
+                    cell,
+                    counters.lo_fallback_count,
+                    counters.hi_fallback_count,
+                    counters.default_count
+                )
             }).collect();
 
-            // trace!("{}", cell_counters.join(" | "));
-            trace!("{}", cell_counters.join(" "));
+            trace!("\nPer Cell Queue counters:\n{}", cell_counters.join(" "));
 
-            // 3. Calculate and print per CPU queue values (summed across all cells)
-            trace!("Per CPU Queue Counters (summed across cells):");
-            let mut per_cpu_counters = vec![[0u64; 3]; *NR_CPU_IDS];
+        //     // 3. Calculate and print per CPU queue values (summed across all cells)
+        //     trace!("Per CPU Queue Counters (summed across cells):");
+            let mut per_cpu_counters = vec![default_cell_queue_counters(); *NR_CPU_IDS];
             for cpu in 0..*NR_CPU_IDS {
+                let mut tmp_counter = default_cell_queue_counters();
                 for cell in 0..MAX_CELLS {
-                    per_cpu_counters[cpu][0] += current_queue_counters[cpu][cell][0] - self.prev_queue_counters[cpu][cell][0];
-                    per_cpu_counters[cpu][1] += current_queue_counters[cpu][cell][1] - self.prev_queue_counters[cpu][cell][1];
-                    per_cpu_counters[cpu][2] += current_queue_counters[cpu][cell][2] - self.prev_queue_counters[cpu][cell][2];
+                    tmp_counter.lo_fallback_count += diff_counters[cpu][cell].lo_fallback_count;
+                    tmp_counter.hi_fallback_count += diff_counters[cpu][cell].hi_fallback_count;
+                    tmp_counter.default_count     += diff_counters[cpu][cell].default_count;
                 }
-
-                // if per_cpu_counters[cpu][0] > 0 || per_cpu_counters[cpu][1] > 0 || per_cpu_counters[cpu][2] > 0 {
-                // trace!("CPU {}: LO_FALLBACK: {}, HI_FALLBACK: {}, DEFAULT: {}",
-                //     cpu, per_cpu_counters[cpu][0], per_cpu_counters[cpu][1], per_cpu_counters[cpu][2]);
-                // }
+                per_cpu_counters[cpu] = tmp_counter;
             }
+
             let cpu_counters: Vec<String> = per_cpu_counters.iter().enumerate().map(|(cpu, counters)| {
-                format!("\x1b[1mCPU {}:\x1b[0m [ {}, {}, {} ]", cpu, counters[0], counters[1], counters[2])
+                format!(
+                    "CPU {}: [{}, {}, {}]",
+                    cpu,
+                    counters.lo_fallback_count,
+                    counters.hi_fallback_count,
+                    counters.default_count
+                )
             }).collect();
+            trace!("\nPer CPU Queue Counters:\n{}", cpu_counters.join(" "));
 
-            trace!("{}", cpu_counters.join(" "));
 
-            // sum the per_cpu_counters and per_cell_counters to get the total queue counters
-            // check they are equal and print the total queue counters
-            let total_lo_fallback_count: u64 = per_cpu_counters.iter().map(|counters| counters[0]).sum();
-            let total_hi_fallback_count: u64 = per_cpu_counters.iter().map(|counters| counters[1]).sum();
-            let total_default_count: u64 = per_cpu_counters.iter().map(|counters| counters[2]).sum();
 
-            let total_lo_fallback_count_cell: u64 = per_cell_counters.iter().map(|counters| counters[0]).sum();
-            let total_hi_fallback_count_cell: u64 = per_cell_counters.iter().map(|counters| counters[1]).sum();
-            let total_default_count_cell: u64 = per_cell_counters.iter().map(|counters| counters[2]).sum();
-
-            if total_lo_fallback_count != total_lo_fallback_count_cell {
-                log::error!("Mismatch in total LO fallback count: per CPU = {}, per Cell = {}", total_lo_fallback_count, total_lo_fallback_count_cell);
-                return Err(anyhow::anyhow!("Mismatch in total LO fallback count"));
-            }
-            if total_hi_fallback_count != total_hi_fallback_count_cell {
-                log::error!("Mismatch in total HI fallback count: per CPU = {}, per Cell = {}", total_hi_fallback_count, total_hi_fallback_count_cell);
-                return Err(anyhow::anyhow!("Mismatch in total HI fallback count"));
-            }
-            if total_default_count != total_default_count_cell {
-                log::error!("Mismatch in total default count: per CPU = {}, per Cell = {}", total_default_count, total_default_count_cell);
-                return Err(anyhow::anyhow!("Mismatch in total default count"));
-            }
-
-            // Print the total queue counters
-            trace!("Total Queue Counters: LO_FALLBACK: {}, HI_FALLBACK: {}, DEFAULT: {}",
-                total_lo_fallback_count, total_hi_fallback_count, total_default_count);
-
-            // Update previous queue counters for next time
+        //     // Update previous queue counters for next time
             self.prev_queue_counters = current_queue_counters;
         }
 
