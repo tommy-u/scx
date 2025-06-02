@@ -77,21 +77,21 @@ unsafe fn any_as_u8_slice<T: Sized>(p: &T) -> &[u8] {
     }
 }
 
-
-
 struct Scheduler<'a> {
     skel: BpfSkel<'a>,
+    // Cycle counters for each cell on each CPU
     prev_percpu_cell_cycles: Vec<[u64; MAX_CELLS]>,
-    // Cell as the primary index makes more sense to me [cell][cpu]
-    // I can change this to match the cycles vector if needed.
+    // Affinity violation counters
     prev_affin_viol: Vec<[u64; MAX_CELLS]>,
-    // Structure to hold previous queue counters: [cpu][cell][queue]
-    // queue_type: 0 = lo_fallback, 1 = hi_fallback, 2 = default
+    // Queue placement counters. Three for each cell and CPU: lo_fallback, hi_fallback, default
     prev_queue_counters: Vec<[bpf_intf::cell_queue_counters; MAX_CELLS]>,
     monitor_interval: std::time::Duration,
+    // Useful for formatting printing. Basically log10(Largest CPU ID) + 1
+    largest_cpu_width: usize,
 }
 
 impl<'a> Scheduler<'a> {
+
     fn init(opts: &Opts, open_object: &'a mut MaybeUninit<OpenObject>) -> Result<Self> {
         let topology = Topology::new()?;
 
@@ -109,6 +109,13 @@ impl<'a> Scheduler<'a> {
             skel.maps.rodata_data.all_cpus[cpu / 8] |= 1 << (cpu % 8);
         }
 
+        let largest_cpu_width = {
+            let largest_cpu = topology.all_cores.keys().max().ok_or_else(|| {
+                anyhow::anyhow!("Failed to determine the largest CPU number")
+            })?;
+            (*largest_cpu as f64).log10().ceil() as usize
+        };
+
         let skel = scx_ops_load!(skel, mitosis, uei)?;
 
         Ok(Self {
@@ -117,6 +124,7 @@ impl<'a> Scheduler<'a> {
             prev_affin_viol: vec![[0; MAX_CELLS]; *NR_CPU_IDS],
             prev_queue_counters: vec![[ default_cell_queue_counters(); MAX_CELLS]; *NR_CPU_IDS],
             monitor_interval: std::time::Duration::from_secs(opts.monitor_interval_s),
+            largest_cpu_width,
         })
     }
 
@@ -131,33 +139,39 @@ impl<'a> Scheduler<'a> {
         uei_report!(&self.skel, uei)
     }
 
-    fn debug_cpu_ctrs(&mut self) -> Result<()> {
-        trace!("CPU Cycles:");
-        let cpu_width = (*NR_CPU_IDS as f64).log10().ceil() as usize;
-
+    fn load_cpu_ctxs(&self) -> Result<Vec<Vec<u8>>> {
         let zero = 0 as libc::__u32;
         let zero_slice = unsafe { any_as_u8_slice(&zero) };
 
-        if let Some(v) = self
-            .skel
-            .maps
-            .cpu_ctxs
-            .lookup_percpu(zero_slice, libbpf_rs::MapFlags::ANY)
-            .context("Failed to lookup cpu_ctxs map")?
+        let v = match self
+        .skel
+        .maps
+        .cpu_ctxs
+        .lookup_percpu(zero_slice, libbpf_rs::MapFlags::ANY)
         {
-            for (cpu, ctx) in v.iter().enumerate() {
-                let cpu_ctx = unsafe {
-                    let ptr = ctx.as_slice().as_ptr() as *const bpf_intf::cpu_ctx;
-                    &*ptr
-                };
-                let diff_cycles: Vec<i64> = self.prev_percpu_cell_cycles[cpu]
-                    .iter()
-                    .zip(cpu_ctx.cell_cycles.iter())
-                    .map(|(a, b)| (b - a) as i64)
-                    .collect();
-                self.prev_percpu_cell_cycles[cpu] = cpu_ctx.cell_cycles;
-                trace!("CPU {:width$}: {:?}", cpu, diff_cycles, width = cpu_width);
-            }
+            Ok(Some(v)) => v,
+            Ok(None) => return Err(anyhow::anyhow!("Failed to lookup cpu_ctxs map")),
+            Err(e) => return Err(anyhow::anyhow!("Error looking up cpu_ctxs map: {:?}", e)),
+        };
+        Ok(v)
+    }
+
+    fn debug_cpu_ctrs(&mut self) -> Result<()> {
+        trace!("CPU Cycles:");
+        let v = self.load_cpu_ctxs()?;
+
+        for (cpu, ctx) in v.iter().enumerate() {
+            let cpu_ctx = unsafe {
+                let ptr = ctx.as_slice().as_ptr() as *const bpf_intf::cpu_ctx;
+                &*ptr
+            };
+            let diff_cycles: Vec<i64> = self.prev_percpu_cell_cycles[cpu]
+                .iter()
+                .zip(cpu_ctx.cell_cycles.iter())
+                .map(|(a, b)| (b - a) as i64)
+                .collect();
+            self.prev_percpu_cell_cycles[cpu] = cpu_ctx.cell_cycles;
+            trace!("CPU {:width$}: {:?}", cpu, diff_cycles, width = self.largest_cpu_width);
         }
         Ok(())
     }
@@ -168,40 +182,26 @@ impl<'a> Scheduler<'a> {
     // 4) Sum the CPUS for each cell and print the sum vector (per cell violations)
     // 5) Sum the Cells for each CPU and print the sum vector (per CPU violations)
     // 6) Sum the CPUS and Cells and print the sum (total violations)
-
-    // Print all affinity violations
-    // We could do this with less memory if anyone cares.
     fn debug_affinity_violations(&mut self) -> Result<()> {
         trace!("Affinity Violations:");
-
-        let zero = 0 as libc::__u32;
-        let zero_slice = unsafe { any_as_u8_slice(&zero) };
 
         // The raw affin-viols counters from BPF
         let mut current_affn_viol: Vec<[u64; MAX_CELLS]> = vec![[0; MAX_CELLS]; *NR_CPU_IDS];
 
-        // Load the current affin-viols from BPF
-        if let Some(v) = self
-            .skel
-            .maps
-            .cpu_ctxs
-            .lookup_percpu(zero_slice, libbpf_rs::MapFlags::ANY)
-            .context("Failed to lookup cpu_ctxs map")?
-        {
-            for (cpu, ctx) in v.iter().enumerate() {
-                let cpu_ctx = unsafe {
-                    let ptr = ctx.as_slice().as_ptr() as *const bpf_intf::cpu_ctx;
-                    &*ptr
-                };
+        let v = self.load_cpu_ctxs()?;
 
-                if cpu_ctx.cstats.len() != MAX_CELLS {
-                    log::error!("Unexpected number of cells: expected {}, found {}", MAX_CELLS, cpu_ctx.cstats.len());
-                    return Err(anyhow::anyhow!("Unexpected number of cells"));
-                }
+        for ctx in v.iter() {
+            let cpu_ctx = unsafe {
+                let ptr = ctx.as_slice().as_ptr() as *const bpf_intf::cpu_ctx;
+                &*ptr
+            };
 
-                // 1) Raw affin-viols from BPF
-                for (i, val) in cpu_ctx.cstats.iter().enumerate() {
-                    current_affn_viol[cpu][i] = val[bpf_intf::cell_stat_idx_CSTAT_AFFN_VIOL as usize];
+            // 1) Raw affin-viols from BPF
+
+            // FIXME: Use loop over valid cpus instead of NR_CPU_IDS
+            for cpu in 0..*NR_CPU_IDS {
+                for (cell, val) in cpu_ctx.cstats.iter().enumerate() {
+                    current_affn_viol[cpu][cell] = val[bpf_intf::cell_stat_idx_CSTAT_AFFN_VIOL as usize];
                 }
             }
         }
@@ -209,8 +209,7 @@ impl<'a> Scheduler<'a> {
         // 2) Subtract the previous affin-viols from the current ones to get the diff
         // The difference between the current and previous affin-viols
         let mut affn_viol_diff: Vec<[u64; MAX_CELLS]> = vec![[0; MAX_CELLS]; *NR_CPU_IDS];
-        let cpu_width = (*NR_CPU_IDS as f64).log10().ceil() as usize;
-
+        // FIXME: Use loop over valid cpus instead of NR_CPU_IDS
 
         // Loop over the current affin-viols and subtract the previous ones
         for cpu in 0..*NR_CPU_IDS {
@@ -218,17 +217,15 @@ impl<'a> Scheduler<'a> {
                 affn_viol_diff[cpu][i] = val - self.prev_affin_viol[cpu][i];
             }
         }
+
         // 3) print the diff affin-viols
         for cpu in 0..*NR_CPU_IDS {
             let affn_viol: Vec<u64> = affn_viol_diff[cpu]
                 .iter()
                 .map(|val| *val)
                 .collect();
-            trace!("CPU {:width$}: {:?}", cpu, affn_viol, width = cpu_width);
+            trace!("CPU {:width$}: {:?}", cpu, affn_viol, width = self.largest_cpu_width);
         }
-
-        // update the previous affin-viols
-        self.prev_affin_viol = current_affn_viol;
 
         // 4) Per-Cell violations. Sum the CPUS for each cell.
         let mut per_cell_violations: [u64; MAX_CELLS] = [0; MAX_CELLS];
@@ -255,11 +252,6 @@ impl<'a> Scheduler<'a> {
         let total_cell_violations: u64 = per_cell_violations.iter().sum();
 
         if total_cpu_violations != total_cell_violations {
-            log::error!(
-                "Mismatch in total violations: per CPU = {}, per Cell = {}",
-                total_cpu_violations,
-                total_cell_violations
-            );
             return Err(anyhow::anyhow!(
                 "Mismatch in total violations: per CPU = {}, per Cell = {}",
                 total_cpu_violations,
@@ -270,6 +262,9 @@ impl<'a> Scheduler<'a> {
         // 6) Total violations. Sum the CPUS and Cells.
         trace!("Total violations: {}", per_cpu_violations.iter().sum::<u64>());
 
+        // update the previous affin-viols
+        self.prev_affin_viol = current_affn_viol;
+
         Ok(())
     }
 
@@ -279,121 +274,115 @@ impl<'a> Scheduler<'a> {
     // 2. The per cell queue values
     // 3. The per-CPU queue values
     fn debug_priority(&mut self) -> Result<()> {
-        trace!("Priority Stats:");
 
-        let zero = 0 as libc::__u32;
-        let zero_slice = unsafe { any_as_u8_slice(&zero) };
+        let v = self.load_cpu_ctxs()?;
 
-        // Structure to hold queue counters: [cpu][cell][queue_type]
-        // queue_type: 0 = lo_fallback, 1 = hi_fallback, 2 = default
-        // let mut current_queue_counters: Vec<Vec<[u64; 3]>> = vec![vec![[0; 3]; MAX_CELLS]; *NR_CPU_IDS];
         let mut current_queue_counters: Vec<[bpf_intf::cell_queue_counters; MAX_CELLS]> = vec![[default_cell_queue_counters(); MAX_CELLS]; *NR_CPU_IDS];
+        // Get current queue counters
+        for (cpu, ctx) in v.iter().enumerate() {
+            let cpu_ctx = unsafe {
+                let ptr = ctx.as_slice().as_ptr() as *const bpf_intf::cpu_ctx;
+                &*ptr
+            };
 
-        if let Some(v) = self
-            .skel
-            .maps
-            .cpu_ctxs
-            .lookup_percpu(zero_slice, libbpf_rs::MapFlags::ANY)
-            .context("Failed to lookup cpu_ctxs map")?
-        {
-            // Get current queue counters
-            for (cpu, ctx) in v.iter().enumerate() {
-                let cpu_ctx = unsafe {
-                    let ptr = ctx.as_slice().as_ptr() as *const bpf_intf::cpu_ctx;
-                    &*ptr
-                };
-
-                for cell in 0..MAX_CELLS {
-                    current_queue_counters[cpu][cell] = cpu_ctx.queue_counters[cell];
-                }
-            }
-
-            // 0. Get the difference between the prior and current queue values
-            let mut diff_counters: Vec<[bpf_intf::cell_queue_counters; MAX_CELLS]> = vec![[default_cell_queue_counters(); MAX_CELLS]; *NR_CPU_IDS];
-
-            for cpu in 0..*NR_CPU_IDS {
-                for cell in 0..MAX_CELLS {
-                    diff_counters[cpu][cell] = bpf_intf::cell_queue_counters {
-                        lo_fallback_count: current_queue_counters[cpu][cell].lo_fallback_count - self.prev_queue_counters[cpu][cell].lo_fallback_count,
-                        hi_fallback_count: current_queue_counters[cpu][cell].hi_fallback_count - self.prev_queue_counters[cpu][cell].hi_fallback_count,
-                        default_count:     current_queue_counters[cpu][cell].default_count     - self.prev_queue_counters[cpu][cell].default_count,
-                    };
-                }
-            }
-
-            // 1. Calculate and print the DIFF between prior and current queue values per CPU per cell
-            trace!("Per CPU per Cell Queue Counter Diffs:");
-            let cpu_width = (*NR_CPU_IDS as f64).log10().ceil() as usize;
-            let cpu_counters: Vec<String> = diff_counters.iter().enumerate().map(|(cpu, counters)| {
-                let cell_counters: Vec<String> = counters.iter().enumerate().map(|(cell, counter)| {
-                    format!(
-                        "C{} {},{},{}",
-                        cell,
-                        counter.lo_fallback_count,
-                        counter.hi_fallback_count,
-                        counter.default_count
-                    )
-                }).collect();
-                format!("CPU {:width$}: {}", cpu, cell_counters.join(" "), width = cpu_width)
-            }).collect();
-
-            trace!("\n{}", cpu_counters.join("\n"));
-
-            // 2. Calculate and print per cell queue values
-            let mut per_cell_counters = vec![default_cell_queue_counters(); MAX_CELLS];
-            // zero out the per_cell_counters
-            // Each element of per_cell_counters is the sum of all cpu's counters for that cell
             for cell in 0..MAX_CELLS {
-                let mut tmp_counter = default_cell_queue_counters();
-                for cpu in 0..*NR_CPU_IDS {
-                    tmp_counter.lo_fallback_count += diff_counters[cpu][cell].lo_fallback_count;
-                    tmp_counter.hi_fallback_count += diff_counters[cpu][cell].hi_fallback_count;
-                    tmp_counter.default_count     += diff_counters[cpu][cell].default_count;
-                }
-                per_cell_counters[cell] = tmp_counter;
+                current_queue_counters[cpu][cell] = cpu_ctx.queue_counters[cell];
             }
-
-            let cell_counters: Vec<String> = per_cell_counters.iter().enumerate().map(|(cell, counters)| {
-                format!(
-                    "Cell {}: [{}, {}, {}]",
-                    cell,
-                    counters.lo_fallback_count,
-                    counters.hi_fallback_count,
-                    counters.default_count
-                )
-            }).collect();
-
-            trace!("\nPer Cell Queue counters:\n{}", cell_counters.join(" "));
-
-        //     // 3. Calculate and print per CPU queue values (summed across all cells)
-        //     trace!("Per CPU Queue Counters (summed across cells):");
-            let mut per_cpu_counters = vec![default_cell_queue_counters(); *NR_CPU_IDS];
-            for cpu in 0..*NR_CPU_IDS {
-                let mut tmp_counter = default_cell_queue_counters();
-                for cell in 0..MAX_CELLS {
-                    tmp_counter.lo_fallback_count += diff_counters[cpu][cell].lo_fallback_count;
-                    tmp_counter.hi_fallback_count += diff_counters[cpu][cell].hi_fallback_count;
-                    tmp_counter.default_count     += diff_counters[cpu][cell].default_count;
-                }
-                per_cpu_counters[cpu] = tmp_counter;
-            }
-
-            let cpu_counters: Vec<String> = per_cpu_counters.iter().enumerate().map(|(cpu, counters)| {
-                format!(
-                    "CPU {}: [{}, {}, {}]",
-                    cpu,
-                    counters.lo_fallback_count,
-                    counters.hi_fallback_count,
-                    counters.default_count
-                )
-            }).collect();
-            trace!("\nPer CPU Queue Counters:\n{}", cpu_counters.join(" "));
-
-
-
-        //     // Update previous queue counters for next time
-            self.prev_queue_counters = current_queue_counters;
         }
+
+        // 0. Get the difference between the prior and current queue values
+        let mut diff_counters: Vec<[bpf_intf::cell_queue_counters; MAX_CELLS]> = vec![[default_cell_queue_counters(); MAX_CELLS]; *NR_CPU_IDS];
+
+        for cpu in 0..*NR_CPU_IDS {
+            for cell in 0..MAX_CELLS {
+                diff_counters[cpu][cell] = bpf_intf::cell_queue_counters {
+                    lo_fallback_count: current_queue_counters[cpu][cell].lo_fallback_count - self.prev_queue_counters[cpu][cell].lo_fallback_count,
+                    hi_fallback_count: current_queue_counters[cpu][cell].hi_fallback_count - self.prev_queue_counters[cpu][cell].hi_fallback_count,
+                    default_count:     current_queue_counters[cpu][cell].default_count     - self.prev_queue_counters[cpu][cell].default_count,
+                };
+            }
+        }
+
+        // 1. Calculate and print the DIFF between prior and current queue values per CPU per cell
+        trace!("Per CPU per Cell Queue Counter Diffs:");
+        let cpu_counters: Vec<String> = diff_counters.iter().enumerate().map(|(cpu, counters)| {
+            let cell_counters: Vec<String> = counters.iter().enumerate().map(|(cell, counter)| {
+                format!(
+                    "C{} {},{},{}",
+                    cell,
+                    counter.lo_fallback_count,
+                    counter.hi_fallback_count,
+                    counter.default_count
+                )
+            }).collect();
+            format!("CPU {:width$}: {}", cpu, cell_counters.join(" "), width = self.largest_cpu_width)
+        }).collect();
+
+        trace!("\n{}", cpu_counters.join("\n"));
+
+        // 2. Calculate and print per cell queue values
+        let mut per_cell_counters = vec![default_cell_queue_counters(); MAX_CELLS];
+        // zero out the per_cell_counters
+        // Each element of per_cell_counters is the sum of all cpu's counters for that cell
+        for cell in 0..MAX_CELLS {
+            let mut tmp_counter = default_cell_queue_counters();
+            for cpu in 0..*NR_CPU_IDS {
+                tmp_counter.lo_fallback_count += diff_counters[cpu][cell].lo_fallback_count;
+                tmp_counter.hi_fallback_count += diff_counters[cpu][cell].hi_fallback_count;
+                tmp_counter.default_count     += diff_counters[cpu][cell].default_count;
+            }
+            per_cell_counters[cell] = tmp_counter;
+        }
+
+        let cell_counters: Vec<String> = per_cell_counters.iter().enumerate().map(|(cell, counters)| {
+            format!(
+                "Cell {}: [{}, {}, {}]",
+                cell,
+                counters.lo_fallback_count,
+                counters.hi_fallback_count,
+                counters.default_count
+            )
+        }).collect();
+
+        trace!("\nPer Cell Queue counters:\n{}", cell_counters.join(" "));
+
+    //     // 3. Calculate and print per CPU queue values (summed across all cells)
+    //     trace!("Per CPU Queue Counters (summed across cells):");
+        let mut per_cpu_counters = vec![default_cell_queue_counters(); *NR_CPU_IDS];
+        for cpu in 0..*NR_CPU_IDS {
+            let mut tmp_counter = default_cell_queue_counters();
+            for cell in 0..MAX_CELLS {
+                tmp_counter.lo_fallback_count += diff_counters[cpu][cell].lo_fallback_count;
+                tmp_counter.hi_fallback_count += diff_counters[cpu][cell].hi_fallback_count;
+                tmp_counter.default_count     += diff_counters[cpu][cell].default_count;
+            }
+            per_cpu_counters[cpu] = tmp_counter;
+        }
+
+        let cpu_counters: Vec<String> = per_cpu_counters.iter().enumerate().map(|(cpu, counters)| {
+            format!(
+                "CPU {}: [{}, {}, {}]",
+                cpu,
+                counters.lo_fallback_count,
+                counters.hi_fallback_count,
+                counters.default_count
+            )
+        }).collect();
+        trace!("\nPer CPU Queue Counters:\n{}", cpu_counters.join(" "));
+
+        // 4. Calculate and print the total queue values (summed across all cells and all CPUs)
+        let mut total_counters: bpf_intf::cell_queue_counters = default_cell_queue_counters();
+        for cpu in 0..*NR_CPU_IDS {
+            for cell in 0..MAX_CELLS {
+                total_counters.lo_fallback_count += diff_counters[cpu][cell].lo_fallback_count;
+                total_counters.hi_fallback_count += diff_counters[cpu][cell].hi_fallback_count;
+                total_counters.default_count     += diff_counters[cpu][cell].default_count;
+            }
+        }
+        trace!("\nTotal Queue Counters: [{}, {}, {}]", total_counters.lo_fallback_count, total_counters.hi_fallback_count, total_counters.default_count);
+
+        // Update previous queue counters for next time
+        self.prev_queue_counters = current_queue_counters;
 
         Ok(())
     }
@@ -445,4 +434,68 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::mem::MaybeUninit;
+    use anyhow::Result;
+    use clap::Parser;
+    use libbpf_rs::OpenObject;
+
+    use crate::{Opts, Scheduler};
+    use crate::bpf_intf;
+    use scx_utils::NR_CPU_IDS;
+
+    #[test]
+    fn test_debug_cpu_ctrs() -> Result<()> {
+        // Generate some synthetic cycle counters
+
+        // Print per cpu per cell
+
+        // Print per cell
+
+        // Print per cpu
+
+        // Check sums of these two are the same
+
+        // Print total
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_debug_affinity_violations() -> Result<()> {
+        // Generate some synthetic affinity violations
+
+        // Print per cpu per cell
+
+        // Print per cell
+
+        // Print per cpu
+
+        // Check sums of these two are the same
+
+        // Print total
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_debug_priority() -> Result<()> {
+        // Generate some synthetic priority stats
+
+        // Print per cpu per cell
+
+        // Print per cell
+
+        // Print per cpu
+
+        // Check sums of these two are the same
+
+        // Print total
+
+        Ok(())
+    }
+
 }
