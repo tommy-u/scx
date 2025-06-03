@@ -88,6 +88,7 @@ struct Scheduler<'a> {
     monitor_interval: std::time::Duration,
     // Useful for formatting printing. Basically log10(Largest CPU ID) + 1
     largest_cpu_width: usize,
+    topology: Topology,
 }
 
 impl<'a> Scheduler<'a> {
@@ -125,6 +126,7 @@ impl<'a> Scheduler<'a> {
             prev_queue_counters: vec![[ default_cell_queue_counters(); MAX_CELLS]; *NR_CPU_IDS],
             monitor_interval: std::time::Duration::from_secs(opts.monitor_interval_s),
             largest_cpu_width,
+            topology,
         })
     }
 
@@ -150,7 +152,7 @@ impl<'a> Scheduler<'a> {
         .lookup_percpu(zero_slice, libbpf_rs::MapFlags::ANY)
         {
             Ok(Some(v)) => v,
-            Ok(None) => return Err(anyhow::anyhow!("Failed to lookup cpu_ctxs map")),
+            Ok(None) => return Err(anyhow::anyhow!("Found no values for cpu_ctxs map")),
             Err(e) => return Err(anyhow::anyhow!("Error looking up cpu_ctxs map: {:?}", e)),
         };
         Ok(v)
@@ -197,9 +199,7 @@ impl<'a> Scheduler<'a> {
             };
 
             // 1) Raw affin-viols from BPF
-
-            // FIXME: Use loop over valid cpus instead of NR_CPU_IDS
-            for cpu in 0..*NR_CPU_IDS {
+            for &cpu in self.topology.all_cores.keys() {
                 for (cell, val) in cpu_ctx.cstats.iter().enumerate() {
                     current_affn_viol[cpu][cell] = val[bpf_intf::cell_stat_idx_CSTAT_AFFN_VIOL as usize];
                 }
@@ -212,14 +212,14 @@ impl<'a> Scheduler<'a> {
         // FIXME: Use loop over valid cpus instead of NR_CPU_IDS
 
         // Loop over the current affin-viols and subtract the previous ones
-        for cpu in 0..*NR_CPU_IDS {
+        for &cpu in self.topology.all_cores.keys() {
             for (i, val) in current_affn_viol[cpu].iter().enumerate() {
                 affn_viol_diff[cpu][i] = val - self.prev_affin_viol[cpu][i];
             }
         }
 
         // 3) print the diff affin-viols
-        for cpu in 0..*NR_CPU_IDS {
+        for &cpu in self.topology.all_cores.keys() {
             let affn_viol: Vec<u64> = affn_viol_diff[cpu]
                 .iter()
                 .map(|val| *val)
@@ -230,7 +230,7 @@ impl<'a> Scheduler<'a> {
         // 4) Per-Cell violations. Sum the CPUS for each cell.
         let mut per_cell_violations: [u64; MAX_CELLS] = [0; MAX_CELLS];
         for cell in 0..MAX_CELLS {
-            for cpu in 0..*NR_CPU_IDS {
+            for &cpu in self.topology.all_cores.keys() {
                 let val = affn_viol_diff[cpu][cell];
                 per_cell_violations[cell] += val;
             }
@@ -239,7 +239,7 @@ impl<'a> Scheduler<'a> {
 
         // 5) Per-CPU violations. Sum the Cells for each CPU.
         let mut per_cpu_violations: Vec<u64> = vec![0; *NR_CPU_IDS];
-        for cpu in 0..*NR_CPU_IDS {
+        for &cpu in self.topology.all_cores.keys() {
             for cell in 0..MAX_CELLS {
                 let val = affn_viol_diff[cpu][cell];
                 per_cpu_violations[cpu] += val;
@@ -293,7 +293,7 @@ impl<'a> Scheduler<'a> {
         // 0. Get the difference between the prior and current queue values
         let mut diff_counters: Vec<[bpf_intf::cell_queue_counters; MAX_CELLS]> = vec![[default_cell_queue_counters(); MAX_CELLS]; *NR_CPU_IDS];
 
-        for cpu in 0..*NR_CPU_IDS {
+        for &cpu in self.topology.all_cores.keys() {
             for cell in 0..MAX_CELLS {
                 diff_counters[cpu][cell] = bpf_intf::cell_queue_counters {
                     lo_fallback_count: current_queue_counters[cpu][cell].lo_fallback_count - self.prev_queue_counters[cpu][cell].lo_fallback_count,
@@ -326,7 +326,7 @@ impl<'a> Scheduler<'a> {
         // Each element of per_cell_counters is the sum of all cpu's counters for that cell
         for cell in 0..MAX_CELLS {
             let mut tmp_counter = default_cell_queue_counters();
-            for cpu in 0..*NR_CPU_IDS {
+            for &cpu in self.topology.all_cores.keys() {
                 tmp_counter.lo_fallback_count += diff_counters[cpu][cell].lo_fallback_count;
                 tmp_counter.hi_fallback_count += diff_counters[cpu][cell].hi_fallback_count;
                 tmp_counter.default_count     += diff_counters[cpu][cell].default_count;
@@ -349,7 +349,7 @@ impl<'a> Scheduler<'a> {
     //     // 3. Calculate and print per CPU queue values (summed across all cells)
     //     trace!("Per CPU Queue Counters (summed across cells):");
         let mut per_cpu_counters = vec![default_cell_queue_counters(); *NR_CPU_IDS];
-        for cpu in 0..*NR_CPU_IDS {
+        for &cpu in self.topology.all_cores.keys() {
             let mut tmp_counter = default_cell_queue_counters();
             for cell in 0..MAX_CELLS {
                 tmp_counter.lo_fallback_count += diff_counters[cpu][cell].lo_fallback_count;
@@ -372,7 +372,7 @@ impl<'a> Scheduler<'a> {
 
         // 4. Calculate and print the total queue values (summed across all cells and all CPUs)
         let mut total_counters: bpf_intf::cell_queue_counters = default_cell_queue_counters();
-        for cpu in 0..*NR_CPU_IDS {
+        for &cpu in self.topology.all_cores.keys() {
             for cell in 0..MAX_CELLS {
                 total_counters.lo_fallback_count += diff_counters[cpu][cell].lo_fallback_count;
                 total_counters.hi_fallback_count += diff_counters[cpu][cell].hi_fallback_count;
