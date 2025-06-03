@@ -88,6 +88,7 @@ struct Scheduler<'a> {
     monitor_interval: std::time::Duration,
     // Useful for formatting printing. Basically log10(Largest CPU ID) + 1
     largest_cpu_width: usize,
+    // The all_cores map is a BTreeMap, so it is sorted.
     topology: Topology,
 }
 
@@ -114,7 +115,12 @@ impl<'a> Scheduler<'a> {
             let largest_cpu = topology.all_cores.keys().max().ok_or_else(|| {
                 anyhow::anyhow!("Failed to determine the largest CPU number")
             })?;
-            (*largest_cpu as f64).log10().ceil() as usize
+
+            if *largest_cpu == 0 {
+                1 // log10(0) is undefined
+            } else {
+                (*largest_cpu as f64).log10().ceil() as usize
+            }
         };
 
         let skel = scx_ops_load!(skel, mitosis, uei)?;
@@ -178,47 +184,30 @@ impl<'a> Scheduler<'a> {
         Ok(())
     }
 
-    // 1) Get the affin-viols from BPF
-    // 2) Subtract the previous affin-viols from the current ones to get the diff
-    // 3) Print the diff (this is all cpus and all cells)
-    // 4) Sum the CPUS for each cell and print the sum vector (per cell violations)
-    // 5) Sum the Cells for each CPU and print the sum vector (per CPU violations)
-    // 6) Sum the CPUS and Cells and print the sum (total violations)
     fn debug_affinity_violations(&mut self) -> Result<()> {
         trace!("Affinity Violations:");
 
         // The raw affin-viols counters from BPF
-        let mut current_affn_viol: Vec<[u64; MAX_CELLS]> = vec![[0; MAX_CELLS]; *NR_CPU_IDS];
+        // let mut current_affn_viol: Vec<[u64; MAX_CELLS]> = vec![[0; MAX_CELLS]; *NR_CPU_IDS];
+        let mut affn_viol_diff: Vec<[u64; MAX_CELLS]> = vec![[0; MAX_CELLS]; *NR_CPU_IDS];
 
         let v = self.load_cpu_ctxs()?;
 
-        for ctx in v.iter() {
+        for (ctx, &cpu) in v.iter().zip(self.topology.all_cores.keys()) {
             let cpu_ctx = unsafe {
                 let ptr = ctx.as_slice().as_ptr() as *const bpf_intf::cpu_ctx;
                 &*ptr
             };
 
-            // 1) Raw affin-viols from BPF
-            for &cpu in self.topology.all_cores.keys() {
-                for (cell, val) in cpu_ctx.cstats.iter().enumerate() {
-                    current_affn_viol[cpu][cell] = val[bpf_intf::cell_stat_idx_CSTAT_AFFN_VIOL as usize];
-                }
+            // 1) Get the difference between the prior and current affin-viols
+            for (cell, val) in cpu_ctx.cstats.iter().enumerate() {
+                let current_val = val[bpf_intf::cell_stat_idx_CSTAT_AFFN_VIOL as usize];
+                affn_viol_diff[cpu][cell] = current_val - self.prev_affin_viol[cpu][cell];
+                self.prev_affin_viol[cpu][cell] = current_val;
             }
         }
 
-        // 2) Subtract the previous affin-viols from the current ones to get the diff
-        // The difference between the current and previous affin-viols
-        let mut affn_viol_diff: Vec<[u64; MAX_CELLS]> = vec![[0; MAX_CELLS]; *NR_CPU_IDS];
-        // FIXME: Use loop over valid cpus instead of NR_CPU_IDS
-
-        // Loop over the current affin-viols and subtract the previous ones
-        for &cpu in self.topology.all_cores.keys() {
-            for (i, val) in current_affn_viol[cpu].iter().enumerate() {
-                affn_viol_diff[cpu][i] = val - self.prev_affin_viol[cpu][i];
-            }
-        }
-
-        // 3) print the diff affin-viols
+        // Print all violations
         for &cpu in self.topology.all_cores.keys() {
             let affn_viol: Vec<u64> = affn_viol_diff[cpu]
                 .iter()
@@ -263,7 +252,7 @@ impl<'a> Scheduler<'a> {
         trace!("Total violations: {}", per_cpu_violations.iter().sum::<u64>());
 
         // update the previous affin-viols
-        self.prev_affin_viol = current_affn_viol;
+        // self.prev_affin_viol = current_affn_viol;
 
         Ok(())
     }
@@ -389,9 +378,9 @@ impl<'a> Scheduler<'a> {
 
     /// Output various debugging data like per cell stats, per-cpu stats, etc.
     fn debug(&mut self) -> Result<()> {
-        self.debug_cpu_ctrs()?;
+        // self.debug_cpu_ctrs()?;
         self.debug_affinity_violations()?;
-        self.debug_priority()?;
+        // self.debug_priority()?;
         Ok(())
     }
 }
