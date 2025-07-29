@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand};
 
 #[derive(Parser, Debug)]
-#[command(author, version, about, long_about = None)]
+#[command(author, version, about, long_about = crate::LONG_HELP)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,
@@ -27,4 +27,5 @@ pub enum Commands {
         /// Value to set
         value: u32,
     },
+    Topology,
 }

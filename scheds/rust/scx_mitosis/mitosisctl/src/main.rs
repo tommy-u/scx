@@ -10,6 +10,34 @@ use libbpf_rs::skel::OpenSkel;
 use libbpf_rs::{MapCore, MapFlags};
 use scx_utils::scx_ops_open;
 use std::mem::MaybeUninit;
+use scx_utils::Topology;
+
+pub const LONG_HELP: &str = "mitosisctl is a small helper for the scx_mitosis\
+scheduler.\n\n\
+Commands:\n\
+  list                       list available BPF map names\n\
+  get <MAP> <KEY>            fetch the value stored at KEY in MAP\n\
+  set <MAP> <KEY> <VALUE>    set MAP[KEY] to VALUE\n\
+  topology                   display CPU to L3 mappings and vice versa\n";
+
+fn print_topology() -> Result<()> {
+    let topo = Topology::new()?;
+    println!("CPU -> L3 id:");
+    for cpu in topo.all_cpus.values() {
+        println!("cpu {} -> {}", cpu.id, cpu.l3_id);
+    }
+    println!("\nL3 id -> [cpus]:");
+    let mut by_l3: std::collections::BTreeMap<usize, Vec<usize>> =
+        std::collections::BTreeMap::new();
+    for cpu in topo.all_cpus.values() {
+        by_l3.entry(cpu.l3_id).or_default().push(cpu.id);
+    }
+    for (l3, mut cpus) in by_l3 {
+        cpus.sort_unstable();
+        println!("{l3} -> {:?}", cpus);
+    }
+    Ok(())
+}
 
 fn open_skel() -> Result<BpfSkel<'static>> {
     let open_obj = Box::leak(Box::new(MaybeUninit::uninit()));
@@ -115,15 +143,15 @@ fn set_entry(skel: &mut BpfSkel, map: &str, key: u32, value: u32) -> Result<()> 
     Ok(())
 }
 
-
-
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let mut skel = open_skel()?;
+
     match cli.command {
         Commands::List => list_maps(),
         Commands::Get { map, key } => get_entry(&skel, &map, key)?,
         Commands::Set { map, key, value } => set_entry(&mut skel, &map, key, value)?,
+        Commands::Topology => print_topology()?,
     }
     Ok(())
 }
