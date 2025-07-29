@@ -89,13 +89,6 @@ static inline struct cgroup *lookup_cgrp_ancestor(struct cgroup *cgrp,
 	return cg;
 }
 
-// A CPU -> L3 cache ID map
-struct {
-	__uint(type, BPF_MAP_TYPE_ARRAY);
-	__type(key, u32);
-	__type(value, u32);
-	__uint(max_entries, MAX_CPUS);
-} cpu_to_l3 SEC(".maps");
 
 struct {
 	__uint(type, BPF_MAP_TYPE_CGRP_STORAGE);
@@ -887,6 +880,43 @@ struct cpumask_entry {
 	unsigned long cpumask[CPUMASK_LONG_ENTRIES];
 	u64 used;
 };
+
+
+// ************************* L3 *************************** //
+// This might be the eventual way to do it, but let's stick with the array for now.
+
+// #define MAX_L3S  64
+
+// struct l3_cpumask_wrapper {
+//     struct bpf_cpumask __kptr *mask;
+// };
+
+// struct {
+//     __uint(type, BPF_MAP_TYPE_ARRAY);   /* or HASH if sparse */
+//     __type(key, u32);                   /* L3 id             */
+//     __type(value, struct l3_cpumask_wrapper);
+//     __uint(max_entries, MAX_L3S);
+// } l3_cpumasks SEC(".maps");
+
+// A CPU -> L3 cache ID map
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__type(key, u32);
+	__type(value, u32);
+	__uint(max_entries, MAX_CPUS);
+} cpu_to_l3 SEC(".maps");
+
+struct l3_cpu_mask {
+        unsigned long cpumask[CPUMASK_LONG_ENTRIES];
+};
+
+struct {
+        __uint(type, BPF_MAP_TYPE_ARRAY);
+        __type(key, u32);
+        __type(value, struct l3_cpu_mask);
+        __uint(max_entries, MAX_CPUS);
+} l3_to_cpus SEC(".maps");
+// ************************* L3 *************************** //
 
 struct {
 	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);

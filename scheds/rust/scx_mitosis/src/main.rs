@@ -401,6 +401,11 @@ impl<'a> Scheduler<'a> {
             trace!("cpu_to_l3[{cpu}] = {l3}");
         }
 
+        let l3_to_cpus = read_l3_to_cpus(&self.skel)?;
+        for (l3, mask) in l3_to_cpus.iter().enumerate() {
+            trace!("l3_to_cpus[{l3}] = {mask}");
+        }
+
         for (cell_id, cell) in self.cells.iter() {
             // Assume we have a CellMetrics entry if we have a known cell
             self.metrics
@@ -482,6 +487,33 @@ fn read_cpu_to_l3(skel: &BpfSkel) -> Result<Vec<u32>> {
         cpu_to_l3.push(val);
     }
     Ok(cpu_to_l3)
+}
+
+const CPUMASK_LONG_ENTRIES: usize = 128;
+
+fn read_l3_to_cpus(skel: &BpfSkel) -> Result<Vec<Cpumask>> {
+    let mut l3_to_cpus = vec![];
+    for l3 in 0..*NR_CPUS_POSSIBLE {
+        let key = (l3 as u32).to_ne_bytes();
+        let mask = if let Some(v) = skel
+            .maps
+            .l3_to_cpus
+            .lookup(&key, libbpf_rs::MapFlags::ANY)?
+        {
+            let bytes = v.as_slice();
+            let mut longs = [0u64; CPUMASK_LONG_ENTRIES];
+            let mut i = 0;
+            while i < CPUMASK_LONG_ENTRIES && i * 8 + 8 <= bytes.len() {
+                longs[i] = u64::from_ne_bytes(bytes[i * 8..i * 8 + 8].try_into().unwrap());
+                i += 1;
+            }
+            Cpumask::from_vec(longs.to_vec())
+        } else {
+            Cpumask::new()
+        };
+        l3_to_cpus.push(mask);
+    }
+    Ok(l3_to_cpus)
 }
 
 fn main() -> Result<()> {
