@@ -89,6 +89,14 @@ static inline struct cgroup *lookup_cgrp_ancestor(struct cgroup *cgrp,
 	return cg;
 }
 
+// A CPU -> L3 cache ID map
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__type(key, u32);
+	__type(value, u32);
+	__uint(max_entries, MAX_CPUS);
+} cpu_to_l3 SEC(".maps");
+
 struct {
 	__uint(type, BPF_MAP_TYPE_CGRP_STORAGE);
 	__uint(map_flags, BPF_F_NO_PREALLOC);

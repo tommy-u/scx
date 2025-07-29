@@ -396,6 +396,11 @@ impl<'a> Scheduler<'a> {
             trace!("CELL[{}]: {}", cell_id, cell.cpus);
         }
 
+        let cpu_to_l3 = read_cpu_to_l3(&self.skel)?;
+        for (cpu, l3) in cpu_to_l3.iter().enumerate() {
+            trace!("cpu_to_l3[{cpu}] = {l3}");
+        }
+
         for (cell_id, cell) in self.cells.iter() {
             // Assume we have a CellMetrics entry if we have a known cell
             self.metrics
@@ -462,6 +467,21 @@ fn read_cpu_ctxs(skel: &BpfSkel) -> Result<Vec<bpf_intf::cpu_ctx>> {
         });
     }
     Ok(cpu_ctxs)
+}
+
+fn read_cpu_to_l3(skel: &BpfSkel) -> Result<Vec<u32>> {
+    let mut cpu_to_l3 = vec![];
+    for cpu in 0..*NR_CPUS_POSSIBLE {
+        let key = (cpu as u32).to_ne_bytes();
+        let val = skel
+            .maps
+            .cpu_to_l3
+            .lookup(&key, libbpf_rs::MapFlags::ANY)?
+            .map(|v| u32::from_ne_bytes(v.try_into().unwrap()))
+            .unwrap_or(0);
+        cpu_to_l3.push(val);
+    }
+    Ok(cpu_to_l3)
 }
 
 fn main() -> Result<()> {
