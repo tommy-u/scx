@@ -1733,6 +1733,7 @@ dependencies = [
  "clap",
  "libbpf-rs 0.25.0",
  "scx_utils",
+ "serde_json",
 ]
 
 [[package]]

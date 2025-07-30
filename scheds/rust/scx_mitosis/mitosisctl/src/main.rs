@@ -2,12 +2,15 @@ mod bpf_intf;
 mod bpf_skel;
 mod cli;
 
-use anyhow::Result;
+use anyhow::{bail, Context, Result};
 use bpf_skel::{BpfSkel, BpfSkelBuilder};
 use clap::Parser;
 use cli::{Cli, Commands};
 use libbpf_rs::skel::OpenSkel;
-use libbpf_rs::{MapCore, MapFlags};
+use libbpf_rs::{MapCore, MapFlags, MapHandle, OpenMapMut};
+use serde_json::Value;
+use std::os::unix::io::AsFd;
+use std::process::Command;
 use scx_utils::scx_ops_open;
 use scx_utils::Topology;
 use std::io::{self, BufRead, BufReader};
@@ -16,6 +19,43 @@ use std::path::Path;
 
 pub const LONG_HELP: &str = "mitosisctl is a small helper for the scx_mitosis\
 scheduler.\n\n";// ;
+
+fn check_bpftool_available() -> Result<()> {
+    let output = Command::new("bpftool").args(["--version"]).output()?;
+    if !output.status.success() {
+        bail!("bpftool command failed. Check if it's properly installed.");
+    }
+    Ok(())
+}
+
+fn find_map_id_by_name(map_name: &str) -> Result<u32> {
+    let output = Command::new("bpftool")
+        .args(["map", "show", "name", map_name, "--json"])
+        .output()?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("bpftool map show failed: {}", stderr);
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if stdout.trim().is_empty() {
+        bail!("Map '{}' not found. Is scx_mitosis running?", map_name);
+    }
+
+    let json: Value = serde_json::from_str(&stdout).context("Failed to parse bpftool JSON output")?;
+    let id = json["id"].as_u64().context("Missing or invalid 'id' field in bpftool output")?;
+    Ok(id as u32)
+}
+
+fn attach_to_existing_map(existing_map_name: &str, new_map: &mut OpenMapMut) -> Result<MapHandle> {
+    check_bpftool_available()?;
+    let map_id = find_map_id_by_name(existing_map_name)?;
+    let map_handle = MapHandle::from_map_id(map_id)?;
+    let borrowed_fd = map_handle.as_fd();
+    new_map.reuse_fd(borrowed_fd)?;
+    Ok(map_handle)
+}
 
 fn print_topology() -> Result<()> {
     let topo = Topology::new()?;
@@ -36,13 +76,14 @@ fn print_topology() -> Result<()> {
     Ok(())
 }
 
-fn open_skel() -> Result<BpfSkel<'static>> {
+fn open_skel() -> Result<(BpfSkel<'static>, MapHandle)> {
     let open_obj = Box::leak(Box::new(MaybeUninit::uninit()));
     let mut builder = BpfSkelBuilder::default();
     builder.obj_builder.debug(false);
-    let skel = scx_ops_open!(builder, open_obj, mitosis)?;
+    let mut skel = scx_ops_open!(builder, open_obj, mitosis)?;
+    let handle = attach_to_existing_map("cpu_to_l3", &mut skel.maps.cpu_to_l3)?;
     let skel = skel.load()?;
-    Ok(skel)
+    Ok((skel, handle))
 }
 
 fn list_maps() {
@@ -140,7 +181,7 @@ fn set_entry(skel: &mut BpfSkel, map: &str, file: Option<String>) -> Result<()> 
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    let mut skel = open_skel()?;
+    let (mut skel, _map_handle) = open_skel()?;
 
     match cli.command {
         Commands::List => list_maps(),
