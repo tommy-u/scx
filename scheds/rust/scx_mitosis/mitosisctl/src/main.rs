@@ -9,15 +9,15 @@ use cli::{Cli, Commands};
 use libbpf_rs::skel::OpenSkel;
 use libbpf_rs::{MapCore, MapFlags};
 use scx_utils::scx_ops_open;
-use std::mem::MaybeUninit;
 use scx_utils::Topology;
+use std::mem::MaybeUninit;
 
 pub const LONG_HELP: &str = "mitosisctl is a small helper for the scx_mitosis\
 scheduler.\n\n\
 Commands:\n\
   list                       list available BPF map names\n\
-  get <MAP> <KEY>            fetch the value stored at KEY in MAP\n\
-  set <MAP> <KEY> <VALUE>    set MAP[KEY] to VALUE\n\
+  get <MAP>                  display current map contents\n\
+  set <MAP>                  load map from host topology\n\
   topology                   display CPU to L3 mappings and vice versa\n";
 
 fn print_topology() -> Result<()> {
@@ -49,92 +49,44 @@ fn open_skel() -> Result<BpfSkel<'static>> {
 }
 
 fn list_maps() {
-    let names = [
-        "cgrp_ctxs",
-        "task_ctxs",
-        "cpu_ctxs",
-        "cell_cpumasks",
-        "percpu_critical_sections",
-        "cgrp_init_percpu_cpumask",
-    ];
+    println!("Available BPF maps:");
+    let names = ["cpu_to_l3"];
     for name in names {
         println!("{name}");
     }
 }
 
-fn get_entry(skel: &BpfSkel, map: &str, key: u32) -> Result<()> {
-    let key_bytes = key.to_ne_bytes();
-    let value = match map {
-        "cgrp_ctxs" => skel
-            .maps
-            .cgrp_ctxs
-            .lookup(&key_bytes, MapFlags::ANY)?
-            .map(|v| u32::from_ne_bytes(v.try_into().unwrap())),
-        "task_ctxs" => skel
-            .maps
-            .task_ctxs
-            .lookup(&key_bytes, MapFlags::ANY)?
-            .map(|v| u32::from_ne_bytes(v.try_into().unwrap())),
-        "cpu_ctxs" => skel
-            .maps
-            .cpu_ctxs
-            .lookup(&key_bytes, MapFlags::ANY)?
-            .map(|v| u32::from_ne_bytes(v.try_into().unwrap())),
-        "cell_cpumasks" => skel
-            .maps
-            .cell_cpumasks
-            .lookup(&key_bytes, MapFlags::ANY)?
-            .map(|v| u32::from_ne_bytes(v.try_into().unwrap())),
-        "percpu_critical_sections" => skel
-            .maps
-            .percpu_critical_sections
-            .lookup(&key_bytes, MapFlags::ANY)?
-            .map(|v| u32::from_ne_bytes(v.try_into().unwrap())),
-        "cgrp_init_percpu_cpumask" => skel
-            .maps
-            .cgrp_init_percpu_cpumask
-            .lookup(&key_bytes, MapFlags::ANY)?
-            .map(|v| u32::from_ne_bytes(v.try_into().unwrap())),
+fn get_entry(skel: &BpfSkel, map: &str) -> Result<()> {
+    match map {
+        "cpu_to_l3" => {
+            for cpu in 0..*scx_utils::NR_CPUS_POSSIBLE {
+                let key = (cpu as u32).to_ne_bytes();
+                let val = skel
+                    .maps
+                    .cpu_to_l3
+                    .lookup(&key, MapFlags::ANY)?
+                    .map(|v| u32::from_ne_bytes(v.try_into().unwrap()))
+                    .unwrap_or(0);
+                println!("cpu {cpu} -> {val}");
+            }
+        }
         _ => {
             anyhow::bail!("unknown map {map}");
         }
-    };
-
-    if let Some(val) = value {
-        println!("{val}");
     }
     Ok(())
 }
 
-fn set_entry(skel: &mut BpfSkel, map: &str, key: u32, value: u32) -> Result<()> {
-    let key_bytes = key.to_ne_bytes();
-    let val_bytes = value.to_ne_bytes();
+fn set_entry(skel: &mut BpfSkel, map: &str) -> Result<()> {
     match map {
-        "cgrp_ctxs" => skel
-            .maps
-            .cgrp_ctxs
-            .update(&key_bytes, &val_bytes, MapFlags::ANY)?,
-        "task_ctxs" => skel
-            .maps
-            .task_ctxs
-            .update(&key_bytes, &val_bytes, MapFlags::ANY)?,
-        "cpu_ctxs" => skel
-            .maps
-            .cpu_ctxs
-            .update(&key_bytes, &val_bytes, MapFlags::ANY)?,
-        "cell_cpumasks" => skel
-            .maps
-            .cell_cpumasks
-            .update(&key_bytes, &val_bytes, MapFlags::ANY)?,
-        "percpu_critical_sections" => {
-            skel.maps
-                .percpu_critical_sections
-                .update(&key_bytes, &val_bytes, MapFlags::ANY)?
-        }
-        "cgrp_init_percpu_cpumask" => {
-            skel.maps
-                .cgrp_init_percpu_cpumask
-                .update(&key_bytes, &val_bytes, MapFlags::ANY)?
+        "cpu_to_l3" => {
+            let topo = Topology::new()?;
+            for cpu in 0..*scx_utils::NR_CPUS_POSSIBLE {
+                let key = (cpu as u32).to_ne_bytes();
+                let l3 = topo.all_cpus.get(&cpu).map(|c| c.l3_id as u32).unwrap_or(0);
+                let val = l3.to_ne_bytes();
+                skel.maps.cpu_to_l3.update(&key, &val, MapFlags::ANY)?;
+            }
         }
         _ => {
             anyhow::bail!("unknown map {map}");
@@ -149,8 +101,8 @@ fn main() -> Result<()> {
 
     match cli.command {
         Commands::List => list_maps(),
-        Commands::Get { map, key } => get_entry(&skel, &map, key)?,
-        Commands::Set { map, key, value } => set_entry(&mut skel, &map, key, value)?,
+        Commands::Get { map } => get_entry(&skel, &map)?,
+        Commands::Set { map } => set_entry(&mut skel, &map)?,
         Commands::Topology => print_topology()?,
     }
     Ok(())

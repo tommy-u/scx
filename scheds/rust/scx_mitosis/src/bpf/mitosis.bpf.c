@@ -906,6 +906,7 @@ struct {
 	__uint(max_entries, MAX_CPUS);
 } cpu_to_l3 SEC(".maps");
 
+// It's also an option to just compute this from the cpu_to_l3 map.
 struct l3_cpu_mask {
         unsigned long cpumask[CPUMASK_LONG_ENTRIES];
 };

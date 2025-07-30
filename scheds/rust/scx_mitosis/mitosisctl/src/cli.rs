@@ -11,21 +11,15 @@ pub struct Cli {
 pub enum Commands {
     /// List available BPF maps
     List,
-    /// Get value of a map entry
+    /// Get state of a map
     Get {
         /// Map name
         map: String,
-        /// Key to look up
-        key: u32,
     },
-    /// Set value of a map entry
+    /// Load map from topology
     Set {
         /// Map name
         map: String,
-        /// Key to update
-        key: u32,
-        /// Value to set
-        value: u32,
     },
     Topology,
 }
