@@ -20,6 +20,7 @@ use std::process::Command;
 pub const LONG_HELP: &str = "mitosisctl is a small helper for the scx_mitosis\
 scheduler.\n\n"; // ;
 
+/// Verify that `bpftool` exists on the system and is executable.
 fn check_bpftool_available() -> Result<()> {
     let output = Command::new("bpftool").args(["--version"]).output()?;
     if !output.status.success() {
@@ -28,6 +29,7 @@ fn check_bpftool_available() -> Result<()> {
     Ok(())
 }
 
+/// Query bpftool for the ID of the BPF map with the given name.
 fn find_map_id_by_name(map_name: &str) -> Result<u32> {
     let output = Command::new("bpftool")
         .args(["map", "show", "name", map_name, "--json"])
@@ -43,6 +45,7 @@ fn find_map_id_by_name(map_name: &str) -> Result<u32> {
         bail!("Map '{}' not found. Is scx_mitosis running? Try mitosisctl list", map_name);
     }
 
+    // bpftool prints JSON like `{ "id": 123 }`; parse it to grab the numeric id
     let json: Value =
         serde_json::from_str(&stdout).context("Failed to parse bpftool JSON output")?;
     let id = json["id"]
@@ -51,15 +54,18 @@ fn find_map_id_by_name(map_name: &str) -> Result<u32> {
     Ok(id as u32)
 }
 
+/// Reuse an already pinned map (created by the scheduler) for our skeleton map.
 fn attach_to_existing_map(existing_map_name: &str, new_map: &mut OpenMapMut) -> Result<MapHandle> {
     check_bpftool_available()?;
     let map_id = find_map_id_by_name(existing_map_name)?;
     let map_handle = MapHandle::from_map_id(map_id)?;
     let borrowed_fd = map_handle.as_fd();
+    // Point the skeleton's map at the existing kernel map by reusing its FD
     new_map.reuse_fd(borrowed_fd)?;
     Ok(map_handle)
 }
 
+/// Display CPU to L3 cache relationships discovered from the host topology.
 fn print_topology() -> Result<()> {
     let topo = Topology::new()?;
     println!("CPU -> L3 id:");
@@ -79,16 +85,23 @@ fn print_topology() -> Result<()> {
     Ok(())
 }
 
+/// Open the BPF skeleton and attach its maps to the scheduler's maps.
 fn open_skel() -> Result<(BpfSkel<'static>, MapHandle)> {
+    // Leak an uninitialized object so the skeleton lives for 'static lifetime
     let open_obj = Box::leak(Box::new(MaybeUninit::uninit()));
     let mut builder = BpfSkelBuilder::default();
+    // Disable libbpf debug messages
     builder.obj_builder.debug(false);
     let mut skel = scx_ops_open!(builder, open_obj, mitosis)?;
+    // Bind our skeleton map to the one already created by the kernel scheduler
     let handle = attach_to_existing_map("cpu_to_l3", &mut skel.maps.cpu_to_l3)?;
+    // Finalise and load the BPF object
     let skel = skel.load()?;
+    // Return both the loaded skeleton and the handle keeping the map alive
     Ok((skel, handle))
 }
 
+/// Count how many BPF maps with the given name currently exist.
 fn count_maps_by_name(map_name: &str) -> Result<usize> {
     let output = Command::new("bpftool")
         .args(["map", "show", "name", map_name, "--json"])
@@ -104,6 +117,7 @@ fn count_maps_by_name(map_name: &str) -> Result<usize> {
     }
 
     let json: Value = serde_json::from_str(&stdout)?;
+    // bpftool returns either a single object or an array depending on how many maps match
     if json.is_array() {
         Ok(json.as_array().unwrap().len())
     } else {
@@ -111,6 +125,7 @@ fn count_maps_by_name(map_name: &str) -> Result<usize> {
     }
 }
 
+/// Print all supported map names along with how many instances exist.
 fn list_maps() {
     println!("Supported BPF Maps    Count");
     let names = ["cpu_to_l3"];
@@ -124,11 +139,13 @@ fn list_maps() {
     }
 }
 
+/// Parse lines of the form `cpu,l3` from the provided reader.
 fn parse_cpu_l3_map<R: BufRead>(reader: R) -> Result<Vec<(usize, usize)>> {
     let mut pairs = Vec::new();
     for line in reader.lines() {
         let line = line?;
         let line = line.trim();
+        // Ignore blank lines and comments
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
@@ -148,6 +165,7 @@ fn parse_cpu_l3_map<R: BufRead>(reader: R) -> Result<Vec<(usize, usize)>> {
     Ok(pairs)
 }
 
+/// Read CPU/L3 pairs either from a file or standard input.
 fn read_cpu_l3_map(path: &str) -> Result<Vec<(usize, usize)>> {
     if path == "-" {
         println!("reading from stdin");
@@ -162,14 +180,17 @@ fn read_cpu_l3_map(path: &str) -> Result<Vec<(usize, usize)>> {
     }
 }
 
+/// Print the contents of the requested map.
 fn get_entry(skel: &BpfSkel, map: &str) -> Result<()> {
     match map {
         "cpu_to_l3" => {
+            // Iterate over all possible CPUs
             for cpu in 0..*scx_utils::NR_CPUS_POSSIBLE {
                 let key = (cpu as u32).to_ne_bytes();
                 let val = skel
                     .maps
                     .cpu_to_l3
+                    // MapFlags::ANY avoids RCU semantics for simple lookups
                     .lookup(&key, MapFlags::ANY)?
                     .map(|v| u32::from_ne_bytes(v.try_into().unwrap()))
                     .unwrap_or(0);
@@ -183,6 +204,7 @@ fn get_entry(skel: &BpfSkel, map: &str) -> Result<()> {
     Ok(())
 }
 
+/// Update map entries either from a file or from the host topology.
 fn set_entry(skel: &mut BpfSkel, map: &str, file: Option<String>) -> Result<()> {
     match map {
         "cpu_to_l3" => {
@@ -193,10 +215,12 @@ fn set_entry(skel: &mut BpfSkel, map: &str, file: Option<String>) -> Result<()> 
                 println!("loading from host topology");
                 let topo = Topology::new()?;
                 (0..*scx_utils::NR_CPUS_POSSIBLE)
+                    // Use 0 if a CPU is missing from the topology
                     .map(|cpu| (cpu, topo.all_cpus.get(&cpu).map(|c| c.l3_id).unwrap_or(0)))
                     .collect()
             };
             for (cpu, l3) in map_entries {
+                // Each CPU index is stored as a 32bit key mapping to its L3 id
                 let key = (cpu as u32).to_ne_bytes();
                 let val = (l3 as u32).to_ne_bytes();
                 skel.maps.cpu_to_l3.update(&key, &val, MapFlags::ANY)?;
@@ -209,12 +233,14 @@ fn set_entry(skel: &mut BpfSkel, map: &str, file: Option<String>) -> Result<()> 
     Ok(())
 }
 
+/// Entry point for the CLI application.
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
         Commands::List => list_maps(),
         Commands::Get { map } => {
+            // Keep the returned MapHandle alive while operating on the map
             let (mut skel, _map_handle) = open_skel()?;
             get_entry(&skel, &map)?;
         }
