@@ -8,17 +8,17 @@ use clap::Parser;
 use cli::{Cli, Commands};
 use libbpf_rs::skel::OpenSkel;
 use libbpf_rs::{MapCore, MapFlags, MapHandle, OpenMapMut};
-use serde_json::Value;
-use std::os::unix::io::AsFd;
-use std::process::Command;
 use scx_utils::scx_ops_open;
 use scx_utils::Topology;
+use serde_json::Value;
 use std::io::{self, BufRead, BufReader};
 use std::mem::MaybeUninit;
+use std::os::unix::io::AsFd;
 use std::path::Path;
+use std::process::Command;
 
 pub const LONG_HELP: &str = "mitosisctl is a small helper for the scx_mitosis\
-scheduler.\n\n";// ;
+scheduler.\n\n"; // ;
 
 fn check_bpftool_available() -> Result<()> {
     let output = Command::new("bpftool").args(["--version"]).output()?;
@@ -35,16 +35,19 @@ fn find_map_id_by_name(map_name: &str) -> Result<u32> {
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("bpftool map show failed: {}", stderr);
+        bail!("bpftool map show failed. Is scx_mitosis running? Try mitosisctl list: {}", stderr);
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     if stdout.trim().is_empty() {
-        bail!("Map '{}' not found. Is scx_mitosis running?", map_name);
+        bail!("Map '{}' not found. Is scx_mitosis running? Try mitosisctl list", map_name);
     }
 
-    let json: Value = serde_json::from_str(&stdout).context("Failed to parse bpftool JSON output")?;
-    let id = json["id"].as_u64().context("Missing or invalid 'id' field in bpftool output")?;
+    let json: Value =
+        serde_json::from_str(&stdout).context("Failed to parse bpftool JSON output")?;
+    let id = json["id"]
+        .as_u64()
+        .context("Missing or invalid 'id' field in bpftool output")?;
     Ok(id as u32)
 }
 
@@ -86,11 +89,38 @@ fn open_skel() -> Result<(BpfSkel<'static>, MapHandle)> {
     Ok((skel, handle))
 }
 
+fn count_maps_by_name(map_name: &str) -> Result<usize> {
+    let output = Command::new("bpftool")
+        .args(["map", "show", "name", map_name, "--json"])
+        .output()?;
+
+    if !output.status.success() {
+        return Ok(0);
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if stdout.trim().is_empty() {
+        return Ok(0);
+    }
+
+    let json: Value = serde_json::from_str(&stdout)?;
+    if json.is_array() {
+        Ok(json.as_array().unwrap().len())
+    } else {
+        Ok(1)
+    }
+}
+
 fn list_maps() {
-    println!("Available BPF maps:");
+    println!("Supported BPF Maps    Count");
     let names = ["cpu_to_l3"];
     for name in names {
-        println!("{name}");
+        let count = count_maps_by_name(name).unwrap_or(0);
+        if count == 1 {
+            println!("{:<20} {}", name, count);
+        } else {
+            println!("{:<20} \x1b[31m{}\x1b[0m", name, count);
+        }
     }
 }
 
@@ -181,12 +211,17 @@ fn set_entry(skel: &mut BpfSkel, map: &str, file: Option<String>) -> Result<()> 
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    let (mut skel, _map_handle) = open_skel()?;
 
     match cli.command {
         Commands::List => list_maps(),
-        Commands::Get { map } => get_entry(&skel, &map)?,
-        Commands::Set { map, file } => set_entry(&mut skel, &map, file)?,
+        Commands::Get { map } => {
+            let (mut skel, _map_handle) = open_skel()?;
+            get_entry(&skel, &map)?;
+        }
+        Commands::Set { map, file } => {
+            let (mut skel, _map_handle) = open_skel()?;
+            set_entry(&mut skel, &map, file)?;
+        }
         Commands::Topology => print_topology()?,
     }
     Ok(())
