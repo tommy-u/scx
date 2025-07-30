@@ -10,15 +10,12 @@ use libbpf_rs::skel::OpenSkel;
 use libbpf_rs::{MapCore, MapFlags};
 use scx_utils::scx_ops_open;
 use scx_utils::Topology;
+use std::io::{self, BufRead, BufReader};
 use std::mem::MaybeUninit;
+use std::path::Path;
 
 pub const LONG_HELP: &str = "mitosisctl is a small helper for the scx_mitosis\
-scheduler.\n\n\
-Commands:\n\
-  list                       list available BPF map names\n\
-  get <MAP>                  display current map contents\n\
-  set <MAP>                  load map from host topology\n\
-  topology                   display CPU to L3 mappings and vice versa\n";
+scheduler.\n\n";// ;
 
 fn print_topology() -> Result<()> {
     let topo = Topology::new()?;
@@ -56,6 +53,44 @@ fn list_maps() {
     }
 }
 
+fn parse_cpu_l3_map<R: BufRead>(reader: R) -> Result<Vec<(usize, usize)>> {
+    let mut pairs = Vec::new();
+    for line in reader.lines() {
+        let line = line?;
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut parts = line.split(',');
+        let cpu = parts
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("missing cpu"))?
+            .trim()
+            .parse::<usize>()?;
+        let l3 = parts
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("missing l3"))?
+            .trim()
+            .parse::<usize>()?;
+        pairs.push((cpu, l3));
+    }
+    Ok(pairs)
+}
+
+fn read_cpu_l3_map(path: &str) -> Result<Vec<(usize, usize)>> {
+    if path == "-" {
+        println!("reading from stdin");
+        let stdin = io::stdin();
+        let reader = BufReader::new(stdin.lock());
+        parse_cpu_l3_map(reader)
+    } else {
+        println!("reading from {path}");
+        let file = std::fs::File::open(Path::new(path))?;
+        let reader = BufReader::new(file);
+        parse_cpu_l3_map(reader)
+    }
+}
+
 fn get_entry(skel: &BpfSkel, map: &str) -> Result<()> {
     match map {
         "cpu_to_l3" => {
@@ -77,14 +112,22 @@ fn get_entry(skel: &BpfSkel, map: &str) -> Result<()> {
     Ok(())
 }
 
-fn set_entry(skel: &mut BpfSkel, map: &str) -> Result<()> {
+fn set_entry(skel: &mut BpfSkel, map: &str, file: Option<String>) -> Result<()> {
     match map {
         "cpu_to_l3" => {
-            let topo = Topology::new()?;
-            for cpu in 0..*scx_utils::NR_CPUS_POSSIBLE {
+            let map_entries = if let Some(path) = file {
+                println!("loading from {path}");
+                read_cpu_l3_map(&path)?
+            } else {
+                println!("loading from host topology");
+                let topo = Topology::new()?;
+                (0..*scx_utils::NR_CPUS_POSSIBLE)
+                    .map(|cpu| (cpu, topo.all_cpus.get(&cpu).map(|c| c.l3_id).unwrap_or(0)))
+                    .collect()
+            };
+            for (cpu, l3) in map_entries {
                 let key = (cpu as u32).to_ne_bytes();
-                let l3 = topo.all_cpus.get(&cpu).map(|c| c.l3_id as u32).unwrap_or(0);
-                let val = l3.to_ne_bytes();
+                let val = (l3 as u32).to_ne_bytes();
                 skel.maps.cpu_to_l3.update(&key, &val, MapFlags::ANY)?;
             }
         }
@@ -102,7 +145,7 @@ fn main() -> Result<()> {
     match cli.command {
         Commands::List => list_maps(),
         Commands::Get { map } => get_entry(&skel, &map)?,
-        Commands::Set { map } => set_entry(&mut skel, &map)?,
+        Commands::Set { map, file } => set_entry(&mut skel, &map, file)?,
         Commands::Topology => print_topology()?,
     }
     Ok(())
