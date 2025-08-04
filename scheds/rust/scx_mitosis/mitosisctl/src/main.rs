@@ -8,6 +8,7 @@ use clap::Parser;
 use cli::{Cli, Commands};
 use libbpf_rs::skel::OpenSkel;
 use libbpf_rs::{MapCore, MapFlags, MapHandle, OpenMapMut};
+use rand::Rng;
 use scx_utils::scx_ops_open;
 use scx_utils::Topology;
 use serde_json::Value;
@@ -233,15 +234,69 @@ fn set_entry(skel: &mut BpfSkel, map: &str, file: Option<String>) -> Result<()> 
     Ok(())
 }
 
+use colored::Colorize;
+
+const TITLE: &[&str] = &[
+    "   ███╗   ███╗██╗████████╗ ██████╗ ███████╗██╗███████╗",
+    "   ████╗ ████║██║╚══██╔══╝██╔═══██╗██╔════╝  ║██╔════╝",
+    "   ██╔████╔██║██║   ██║   ██║   ██║███████╗██║███████╗",
+    "   ██║╚██╔╝██║██║   ██║   ██║   ██║╚════██║██║╚════██║",
+    "   ██║ ╚═╝ ██║██║   ██║   ╚██████╔╝███████║██║███████║",
+    "   ╚═╝     ╚═╝╚═╝   ╚═╝    ╚═════╝ ╚══════╝╚═╝╚══════╝",
+];
+
+const CELLS: &[&str] = &[
+    "          .---------.            .---------.          ",
+    "       _ /           \\ _      _ /           \\ _       ",
+    "      ( (    o   o    ) )~~~~( (    o   o    ) )      ",
+    "       \\  \\    ^    /  /      \\  \\    ^    /  /       ",
+    "        '. '._____.' .'        '. '._____.' .'        ",
+    "          '-----------'          '-----------'         ",
+];
+
+/// Print the colourful ASCII-art splash.
+pub fn print_splash() {
+    let mut rng = rand::thread_rng();
+
+    /* Banner — random colour per line */
+    for line in TITLE.iter() {
+        let r = rng.gen_range(100..=255);
+        let g = rng.gen_range(100..=255);
+        let b = rng.gen_range(100..=255);
+        println!("{}", line.truecolor(r, g, b));
+    }
+    println!(); // spacer
+
+    /* Cell art — random colors for left and right halves */
+    for line in CELLS.iter() {
+        let mid = line.len() / 2;
+        let left  = &line[..mid];
+        let right = &line[mid..];
+
+        // Generate random colors for left and right sides
+        let lr = rng.gen_range(100..=255);
+        let lg = rng.gen_range(100..=255);
+        let lb = rng.gen_range(100..=255);
+        
+        let rr = rng.gen_range(100..=255);
+        let rg = rng.gen_range(100..=255);
+        let rb = rng.gen_range(100..=255);
+
+        print!("{}",  left.truecolor(lr, lg, lb));
+        println!("{}", right.truecolor(rr, rg, rb));
+    }
+    }
+
 /// Entry point for the CLI application.
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
+        Commands::Splash => print_splash(),
         Commands::List => list_maps(),
         Commands::Get { map } => {
             // Keep the returned MapHandle alive while operating on the map
-            let (mut skel, _map_handle) = open_skel()?;
+            let (skel, _map_handle) = open_skel()?;
             get_entry(&skel, &map)?;
         }
         Commands::Set { map, file } => {

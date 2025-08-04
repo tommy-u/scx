@@ -9,6 +9,8 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Commands {
+    /// Splash screen
+    Splash,
     /// List available BPF maps
     List,
     /// Get state of a map

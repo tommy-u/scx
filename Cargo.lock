@@ -1731,7 +1731,9 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "clap",
+ "colored 2.2.0",
  "libbpf-rs 0.25.0",
+ "rand",
  "scx_utils",
  "serde_json",
 ]
