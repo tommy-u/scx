@@ -95,7 +95,6 @@ static inline struct cgroup *lookup_cgrp_ancestor(struct cgroup *cgrp,
 	return cg;
 }
 
-
 struct {
 	__uint(type, BPF_MAP_TYPE_CGRP_STORAGE);
 	__uint(map_flags, BPF_F_NO_PREALLOC);
@@ -218,9 +217,10 @@ static inline int allocate_cell()
 		if (!(c = lookup_cell(cell_idx)))
 			return -1;
 
-		if (__sync_bool_compare_and_swap(&c->in_use, 0, 1)){
+		if (__sync_bool_compare_and_swap(&c->in_use, 0, 1)) {
 			// These might need to be made concurrent safe
-			__builtin_memset(c->l3_cpu_cnt, 0, sizeof(c->l3_cpu_cnt));
+			__builtin_memset(c->l3_cpu_cnt, 0,
+					 sizeof(c->l3_cpu_cnt));
 			c->l3_present_cnt = 0;
 			return cell_idx;
 		}
@@ -307,6 +307,117 @@ static __always_inline int critical_section()
 	WRITE_ONCE(*data, *data + 1);
 	return 0;
 }
+
+/*
+ * A couple of tricky things about checking a cgroup's cpumask:
+ *
+ * First, we need an RCU pointer to pass to cpumask kfuncs. The only way to get
+ * this right now is to copy the cpumask to a map entry. Given that cgroup init
+ * could be re-entrant we have a few per-cpu entries in a map to make this
+ * doable.
+ *
+ * Second, cpumask can sometimes be stored as an array in-situ or as a pointer
+ * and with different lengths. Some bpf_core_type_matches finagling can make
+ * this all work.
+ */
+#define MAX_CPUMASK_ENTRIES (4)
+
+/*
+ * We don't know how big struct cpumask is at compile time, so just allocate a
+ * large space and check that it is big enough at runtime
+ */
+#define CPUMASK_LONG_ENTRIES (128)
+#define CPUMASK_SIZE (sizeof(long) * CPUMASK_LONG_ENTRIES)
+
+struct cpumask_entry {
+	unsigned long cpumask[CPUMASK_LONG_ENTRIES];
+	u64 used;
+};
+
+
+// ************************* L3 *************************** //
+// This might be the eventual way to do it, but let's stick with the array for now.
+
+// #define MAX_L3S  64
+
+// struct l3_cpumask_wrapper {
+//     struct bpf_cpumask __kptr *mask;
+// };
+
+// struct {
+//     __uint(type, BPF_MAP_TYPE_ARRAY);   /* or HASH if sparse */
+//     __type(key, u32);                   /* L3 id             */
+//     __type(value, struct l3_cpumask_wrapper);
+//     __uint(max_entries, MAX_L3S);
+// } l3_cpumasks SEC(".maps");
+
+// A CPU -> L3 cache ID map
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__type(key, u32);
+	__type(value, u32);
+	__uint(max_entries, MAX_CPUS);
+} cpu_to_l3 SEC(".maps");
+
+// It's also an option to just compute this from the cpu_to_l3 map.
+struct l3_cpu_mask {
+	unsigned long cpumask[CPUMASK_LONG_ENTRIES];
+};
+
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__type(key, u32);
+	__type(value, struct l3_cpu_mask);
+	__uint(max_entries, MAX_L3S);
+} l3_to_cpus SEC(".maps");
+
+static inline const struct cpumask *lookup_l3_cpumask(u32 l3)
+{
+	struct l3_cpu_mask *mask;
+
+	if (!(mask = bpf_map_lookup_elem(&l3_to_cpus, &l3))) {
+		scx_bpf_error("no l3 cpumask");
+		return NULL;
+	}
+
+	return (const struct cpumask *)mask;
+}
+
+static inline u32 pick_l3_for_task(u32 cell_id)
+{
+	struct cell *cell;
+	u32 l3, total = 0, target, cur = 0, ret = 0;
+
+	if (!(cell = lookup_cell(cell_id)))
+		return 0;
+
+	bpf_for(l3, 0, nr_possible_cpus) total += cell->l3_cpu_cnt[l3];
+
+	if (!total)
+		return 0;
+
+	target = bpf_get_prandom_u32() % total;
+
+	bpf_for(l3, 0, nr_possible_cpus)
+	{
+		cur += cell->l3_cpu_cnt[l3];
+		if (target < cur) {
+			ret = l3;
+			break;
+		}
+	}
+
+	return ret;
+}
+
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__type(key, u32);
+	__type(value, struct l3_ctx);
+	__uint(max_entries, MAX_L3S);
+} l3_ctxs SEC(".maps");
+
+// ************************* L3 *************************** //
 
 #define critical_section_enter() critical_section()
 #define critical_section_exit() critical_section()
@@ -537,6 +648,8 @@ s32 BPF_STRUCT_OPS(mitosis_select_cpu, struct task_struct *p, s32 prev_cpu,
 	s32 cpu;
 	struct cpu_ctx *cctx;
 	struct task_ctx *tctx;
+	u32 l3;
+	const struct cpumask *l3_cpumask;
 
 	if (!(cctx = lookup_cpu_ctx(-1)) || !(tctx = lookup_task_ctx(p)))
 		return prev_cpu;
@@ -561,10 +674,34 @@ s32 BPF_STRUCT_OPS(mitosis_select_cpu, struct task_struct *p, s32 prev_cpu,
 		goto out;
 	}
 
-	if ((cpu = pick_idle_cpu(p, prev_cpu, cctx, tctx)) >= 0) {
-		cstat_inc(CSTAT_LOCAL, tctx->cell, cctx);
-		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_ns, 0);
-		goto out;
+	if (1) {
+		if ((cpu = pick_idle_cpu(p, prev_cpu, cctx, tctx)) >= 0) {
+			cstat_inc(CSTAT_LOCAL, tctx->cell, cctx);
+			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_ns, 0);
+			goto out;
+		}
+	} else {
+		// Get the L3
+		l3 = pick_l3_for_task(tctx->cell);
+		tctx->dsq = l3_dsq(l3);
+		l3_cpumask = lookup_l3_cpumask(l3);
+		if (l3_cpumask) {
+			const struct cpumask *idle_smtmask;
+			idle_smtmask = scx_bpf_get_idle_smtmask();
+			if (idle_smtmask) {
+				cpu = pick_idle_cpu_from(p, l3_cpumask, prev_cpu,
+							 idle_smtmask);
+				if (cpu == -EBUSY)
+					cpu = bpf_cpumask_any_distribute(l3_cpumask);
+				scx_bpf_put_idle_cpumask(idle_smtmask);
+				if (cpu >= 0) {
+					cstat_inc(CSTAT_LOCAL, tctx->cell, cctx);
+					scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_ns,
+							   0);
+					goto out;
+				}
+			}
+		}
 	}
 
 	if (!tctx->cpumask) {
@@ -694,7 +831,8 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 	u64 min_vtime;
 
 	struct task_struct *p;
-	bpf_for_each(scx_dsq, p, cell, 0) {
+	bpf_for_each(scx_dsq, p, cell, 0)
+	{
 		min_vtime = p->scx.dsq_vtime;
 		min_vtime_dsq = cell;
 		found = true;
@@ -702,7 +840,8 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 	}
 
 	u64 dsq = cpu_dsq(cpu);
-	bpf_for_each(scx_dsq, p, dsq, 0) {
+	bpf_for_each(scx_dsq, p, dsq, 0)
+	{
 		if (!found || time_before(p->scx.dsq_vtime, min_vtime)) {
 			min_vtime = p->scx.dsq_vtime;
 			min_vtime_dsq = dsq;
@@ -865,117 +1004,8 @@ void BPF_STRUCT_OPS(mitosis_stopping, struct task_struct *p, bool runnable)
 	}
 }
 
-/*
- * A couple of tricky things about checking a cgroup's cpumask:
- *
- * First, we need an RCU pointer to pass to cpumask kfuncs. The only way to get
- * this right now is to copy the cpumask to a map entry. Given that cgroup init
- * could be re-entrant we have a few per-cpu entries in a map to make this
- * doable.
- *
- * Second, cpumask can sometimes be stored as an array in-situ or as a pointer
- * and with different lengths. Some bpf_core_type_matches finagling can make
- * this all work.
- */
-#define MAX_CPUMASK_ENTRIES (4)
-
-/*
- * We don't know how big struct cpumask is at compile time, so just allocate a
- * large space and check that it is big enough at runtime
- */
-#define CPUMASK_LONG_ENTRIES (128)
-#define CPUMASK_SIZE (sizeof(long) * CPUMASK_LONG_ENTRIES)
-
-struct cpumask_entry {
-	unsigned long cpumask[CPUMASK_LONG_ENTRIES];
-	u64 used;
-};
 
 
-// ************************* L3 *************************** //
-// This might be the eventual way to do it, but let's stick with the array for now.
-
-// #define MAX_L3S  64
-
-// struct l3_cpumask_wrapper {
-//     struct bpf_cpumask __kptr *mask;
-// };
-
-// struct {
-//     __uint(type, BPF_MAP_TYPE_ARRAY);   /* or HASH if sparse */
-//     __type(key, u32);                   /* L3 id             */
-//     __type(value, struct l3_cpumask_wrapper);
-//     __uint(max_entries, MAX_L3S);
-// } l3_cpumasks SEC(".maps");
-
-// A CPU -> L3 cache ID map
-struct {
-	__uint(type, BPF_MAP_TYPE_ARRAY);
-	__type(key, u32);
-	__type(value, u32);
-	__uint(max_entries, MAX_CPUS);
-} cpu_to_l3 SEC(".maps");
-
-// It's also an option to just compute this from the cpu_to_l3 map.
-struct l3_cpu_mask {
-        unsigned long cpumask[CPUMASK_LONG_ENTRIES];
-};
-
-struct {
-        __uint(type, BPF_MAP_TYPE_ARRAY);
-        __type(key, u32);
-        __type(value, struct l3_cpu_mask);
-        __uint(max_entries, MAX_L3S);
-} l3_to_cpus SEC(".maps");
-
-static inline const struct cpumask *lookup_l3_cpumask(u32 l3)
-{
-	struct l3_cpu_mask *mask;
-
-	if (!(mask = bpf_map_lookup_elem(&l3_to_cpus, &l3))) {
-		scx_bpf_error("no l3 cpumask");
-		return NULL;
-	}
-
-	return (const struct cpumask *)mask;
-}
-
-static inline u32 pick_l3_for_task(u32 cell_id)
-{
-	struct cell *cell;
-	u32 l3, total = 0, target, cur = 0, ret = 0;
-
-	if (!(cell = lookup_cell(cell_id)))
-		return 0;
-
-	bpf_for(l3, 0, nr_possible_cpus)
-		total += cell->l3_cpu_cnt[l3];
-
-	if (!total)
-		return 0;
-
-	target = bpf_get_prandom_u32() % total;
-
-	bpf_for(l3, 0, nr_possible_cpus)
-	{
-		cur += cell->l3_cpu_cnt[l3];
-		if (target < cur) {
-			ret = l3;
-			break;
-		}
-	}
-
-	return ret;
-}
-
-struct {
-	__uint(type, BPF_MAP_TYPE_ARRAY);
-	__type(key, u32);
-	__type(value, struct l3_ctx);
-	__uint(max_entries, MAX_L3S);
-} l3_ctxs SEC(".maps");
-
-// ************************* L3 *************************** //
 
 struct {
 	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
