@@ -24,9 +24,12 @@ enum consts {
 	MAX_CPUS = 1 << MAX_CPUS_SHIFT,
 	MAX_CPUS_U8 = MAX_CPUS / 8,
 	MAX_CELLS = 16,
+	MAX_L3S = 64,
 	USAGE_HALF_LIFE = 100000000, /* 100ms */
 
-	PCPU_BASE = 0x80000000
+	PCPU_BASE = 0x80000000,
+	L3_DSQ_BASE = 0x40000000
+
 };
 
 /* Statistics */
@@ -58,6 +61,14 @@ struct cell {
 	u64 vtime_now;
 	// Whether or not the cell is used or not
 	u32 in_use;
+	// Number of CPUs from each L3 assigned to this cell
+	u32 l3_cpu_cnt[MAX_L3S];
+	// Number of L3s with at least one CPU in this cell
+	u32 l3_present_cnt;
+};
+
+struct l3_ctx {
+	u64 vtime_now;
 };
 
 #endif /* __INTF_H */

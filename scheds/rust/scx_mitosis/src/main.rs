@@ -164,6 +164,8 @@ impl<'a> Scheduler<'a> {
             skel.maps.rodata_data.as_mut().unwrap().all_cpus[cpu / 8] |= 1 << (cpu % 8);
         }
 
+        skel.maps.rodata_data.as_mut().unwrap().nr_l3 = topology.all_llcs.len() as u32;
+
         let skel = scx_ops_load!(skel, mitosis, uei)?;
 
         let stats_server = StatsServer::new(stats::server_data()).launch()?;

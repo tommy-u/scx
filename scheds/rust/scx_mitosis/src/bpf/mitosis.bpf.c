@@ -29,6 +29,7 @@ char _license[] SEC("license") = "GPL";
  * Variables populated by userspace
  */
 const volatile u32 nr_possible_cpus = 1;
+const volatile u32 nr_l3 = 1;
 const volatile bool smt_enabled = true;
 const volatile unsigned char all_cpus[MAX_CPUS_U8];
 
@@ -58,6 +59,11 @@ static inline u32 cpu_dsq(u32 cpu)
 static inline u32 cell_dsq(u32 cell)
 {
 	return cell;
+}
+
+static inline u32 l3_dsq(u32 l3)
+{
+	return L3_DSQ_BASE | l3;
 }
 
 static inline u32 dsq_to_cpu(u32 dsq)
@@ -212,8 +218,12 @@ static inline int allocate_cell()
 		if (!(c = lookup_cell(cell_idx)))
 			return -1;
 
-		if (__sync_bool_compare_and_swap(&c->in_use, 0, 1))
+		if (__sync_bool_compare_and_swap(&c->in_use, 0, 1)){
+			// These might need to be made concurrent safe
+			__builtin_memset(c->l3_cpu_cnt, 0, sizeof(c->l3_cpu_cnt));
+			c->l3_present_cnt = 0;
 			return cell_idx;
+		}
 	}
 	scx_bpf_error("No available cells to allocate");
 	return -1;
@@ -915,8 +925,56 @@ struct {
         __uint(type, BPF_MAP_TYPE_ARRAY);
         __type(key, u32);
         __type(value, struct l3_cpu_mask);
-        __uint(max_entries, MAX_CPUS);
+        __uint(max_entries, MAX_L3S);
 } l3_to_cpus SEC(".maps");
+
+static inline const struct cpumask *lookup_l3_cpumask(u32 l3)
+{
+	struct l3_cpu_mask *mask;
+
+	if (!(mask = bpf_map_lookup_elem(&l3_to_cpus, &l3))) {
+		scx_bpf_error("no l3 cpumask");
+		return NULL;
+	}
+
+	return (const struct cpumask *)mask;
+}
+
+static inline u32 pick_l3_for_task(u32 cell_id)
+{
+	struct cell *cell;
+	u32 l3, total = 0, target, cur = 0, ret = 0;
+
+	if (!(cell = lookup_cell(cell_id)))
+		return 0;
+
+	bpf_for(l3, 0, nr_possible_cpus)
+		total += cell->l3_cpu_cnt[l3];
+
+	if (!total)
+		return 0;
+
+	target = bpf_get_prandom_u32() % total;
+
+	bpf_for(l3, 0, nr_possible_cpus)
+	{
+		cur += cell->l3_cpu_cnt[l3];
+		if (target < cur) {
+			ret = l3;
+			break;
+		}
+	}
+
+	return ret;
+}
+
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__type(key, u32);
+	__type(value, struct l3_ctx);
+	__uint(max_entries, MAX_L3S);
+} l3_ctxs SEC(".maps");
+
 // ************************* L3 *************************** //
 
 struct {
@@ -1328,6 +1386,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 	if (cpumask)
 		bpf_cpumask_release(cpumask);
 
+	/* Create Cell DSQs */
 	bpf_for(i, 0, MAX_CELLS)
 	{
 		struct cell_cpumask_wrapper *cpumaskw;
@@ -1368,6 +1427,15 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 	}
 
 	cells[0].in_use = true;
+
+	/* Create L3 DSQs */
+	bpf_for(i, 0, nr_l3)
+	{
+		ret = scx_bpf_create_dsq(l3_dsq(i), -1);
+		if (ret < 0)
+			return ret;
+	}
+	// TODO: Set cpumasks here? Should userspace have populated the maps already?
 
 	return 0;
 }
