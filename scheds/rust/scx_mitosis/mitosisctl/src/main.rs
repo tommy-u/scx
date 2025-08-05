@@ -12,6 +12,7 @@ use rand::Rng;
 use scx_utils::scx_ops_open;
 use scx_utils::Topology;
 use serde_json::Value;
+use std::collections::HashMap;
 use std::io::{self, BufRead, BufReader};
 use std::mem::MaybeUninit;
 use std::os::unix::io::AsFd;
@@ -69,6 +70,7 @@ fn attach_to_existing_map(existing_map_name: &str, new_map: &mut OpenMapMut) -> 
 /// Display CPU to L3 cache relationships discovered from the host topology.
 fn print_topology() -> Result<()> {
     let topo = Topology::new()?;
+    println!("Number L3 caches: {}", topo.all_llcs.len());
     println!("CPU -> L3 id:");
     for cpu in topo.all_cpus.values() {
         println!("cpu {} -> {}", cpu.id, cpu.l3_id);
@@ -87,19 +89,21 @@ fn print_topology() -> Result<()> {
 }
 
 /// Open the BPF skeleton and attach its maps to the scheduler's maps.
-fn open_skel() -> Result<(BpfSkel<'static>, MapHandle)> {
+fn open_skel() -> Result<(BpfSkel<'static>, HashMap<&'static str, MapHandle>)> {
     // Leak an uninitialized object so the skeleton lives for 'static lifetime
     let open_obj = Box::leak(Box::new(MaybeUninit::uninit()));
     let mut builder = BpfSkelBuilder::default();
     // Disable libbpf debug messages
     builder.obj_builder.debug(false);
     let mut skel = scx_ops_open!(builder, open_obj, mitosis)?;
+    let mut handles = HashMap::new();
     // Bind our skeleton map to the one already created by the kernel scheduler
     let handle = attach_to_existing_map("cpu_to_l3", &mut skel.maps.cpu_to_l3)?;
+    handles.insert("cpu_to_l3", handle);
     // Finalise and load the BPF object
     let skel = skel.load()?;
     // Return both the loaded skeleton and the handle keeping the map alive
-    Ok((skel, handle))
+    Ok((skel, handles))
 }
 
 /// Count how many BPF maps with the given name currently exist.
@@ -277,7 +281,7 @@ pub fn print_splash() {
         let lr = rng.gen_range(100..=255);
         let lg = rng.gen_range(100..=255);
         let lb = rng.gen_range(100..=255);
-        
+
         let rr = rng.gen_range(100..=255);
         let rg = rng.gen_range(100..=255);
         let rb = rng.gen_range(100..=255);
@@ -296,11 +300,11 @@ fn main() -> Result<()> {
         Commands::List => list_maps(),
         Commands::Get { map } => {
             // Keep the returned MapHandle alive while operating on the map
-            let (skel, _map_handle) = open_skel()?;
+            let (skel, _map_handles) = open_skel()?;
             get_entry(&skel, &map)?;
         }
         Commands::Set { map, file } => {
-            let (mut skel, _map_handle) = open_skel()?;
+            let (mut skel, _map_handles) = open_skel()?;
             set_entry(&mut skel, &map, file)?;
         }
         Commands::Topology => print_topology()?,

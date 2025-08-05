@@ -33,3 +33,4 @@ directory.
 
 * Support more `scx_mitosis` maps and operations.
 * Ability to export map contents to files.
+* Make L3 aware
