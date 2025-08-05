@@ -399,13 +399,25 @@ impl<'a> Scheduler<'a> {
         }
 
         let cpu_to_l3 = read_cpu_to_l3(&self.skel)?;
-        for (cpu, l3) in cpu_to_l3.iter().enumerate() {
-            trace!("cpu_to_l3[{cpu}] = {l3}");
-        }
+        let cpu_l3_pairs: Vec<String> = cpu_to_l3.iter().enumerate()
+            .map(|(cpu, l3)| format!("[{:3}] = {:2}", cpu, l3))
+            .collect();
+        let chunked_output = cpu_l3_pairs
+            .chunks(8)
+            .map(|chunk| chunk.join(", "))
+            .collect::<Vec<_>>()
+            .join("\n        ");
+        info!("cpu_to_l3:\n        {}", chunked_output);
 
         let l3_to_cpus = read_l3_to_cpus(&self.skel)?;
         for (l3, mask) in l3_to_cpus.iter().enumerate() {
-            trace!("l3_to_cpus[{l3}] = {mask}");
+            trace!("l3_to_cpus:\n[{:2}] = {mask}", l3);
+            // If L3 is same as number of LLCs, break
+            // XXX
+            if l3 == 0 {
+                break;
+            }
+
         }
 
         for (cell_id, cell) in self.cells.iter() {

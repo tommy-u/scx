@@ -144,6 +144,8 @@ struct task_ctx {
 	u32 configuration_seq;
 	/* Is this task allowed on all cores of its cell? */
 	bool all_cell_cpus_allowed;
+	// Which L3 this task is assigned to
+	s32 l3;
 };
 
 struct {
@@ -376,33 +378,41 @@ static inline const struct cpumask *lookup_l3_cpumask(u32 l3)
 	struct l3_cpu_mask *mask;
 
 	if (!(mask = bpf_map_lookup_elem(&l3_to_cpus, &l3))) {
-		scx_bpf_error("no l3 cpumask");
+		scx_bpf_error("no l3 cpumask, l3: %d, %p", l3, &l3_to_cpus);
 		return NULL;
 	}
 
 	return (const struct cpumask *)mask;
 }
 
-static inline u32 pick_l3_for_task(u32 cell_id)
+static inline s32 pick_l3_for_task(u32 cell_id)
 {
 	struct cell *cell;
-	u32 l3, total = 0, target, cur = 0, ret = 0;
+	u32 l3, total = 0, target, cur = 0;
+	s32 ret = -1; // Default to error
 
 	if (!(cell = lookup_cell(cell_id)))
-		return 0;
+		return ret;
 
-	bpf_for(l3, 0, nr_possible_cpus) total += cell->l3_cpu_cnt[l3];
+	bpf_for(l3, 0, nr_l3)
+	{
+		total += cell->l3_cpu_cnt[l3];
+		if (l3 != 0)
+			scx_bpf_error("l3 != 0");
+	}
 
-	if (!total)
-		return 0;
+	if (!total) {
+		scx_bpf_error("Cell %d has no cpus", cell_id);
+		return ret;
+	}
 
 	target = bpf_get_prandom_u32() % total;
 
-	bpf_for(l3, 0, nr_possible_cpus)
+	bpf_for(l3, 0, nr_l3)
 	{
 		cur += cell->l3_cpu_cnt[l3];
 		if (target < cur) {
-			ret = l3;
+			ret = (s32)l3;
 			break;
 		}
 	}
@@ -648,7 +658,6 @@ s32 BPF_STRUCT_OPS(mitosis_select_cpu, struct task_struct *p, s32 prev_cpu,
 	s32 cpu;
 	struct cpu_ctx *cctx;
 	struct task_ctx *tctx;
-	u32 l3;
 	const struct cpumask *l3_cpumask;
 
 	if (!(cctx = lookup_cpu_ctx(-1)) || !(tctx = lookup_task_ctx(p)))
@@ -674,7 +683,8 @@ s32 BPF_STRUCT_OPS(mitosis_select_cpu, struct task_struct *p, s32 prev_cpu,
 		goto out;
 	}
 
-	if (1) {
+	if (0) {
+		// Grab an idle core
 		if ((cpu = pick_idle_cpu(p, prev_cpu, cctx, tctx)) >= 0) {
 			cstat_inc(CSTAT_LOCAL, tctx->cell, cctx);
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_ns, 0);
@@ -682,22 +692,41 @@ s32 BPF_STRUCT_OPS(mitosis_select_cpu, struct task_struct *p, s32 prev_cpu,
 		}
 	} else {
 		// Get the L3
-		l3 = pick_l3_for_task(tctx->cell);
-		tctx->dsq = l3_dsq(l3);
-		l3_cpumask = lookup_l3_cpumask(l3);
+		// If the value is -1, then we need to pick an L3
+		if (tctx->l3 == -1) {
+			tctx->l3 = pick_l3_for_task(tctx->cell);
+			if (tctx->l3 < 0) {
+				scx_bpf_error("Failed to pick L3 for task %d", p->pid);
+			}
+		}
+		// L3 has to be correctly configured now.
+		if (tctx->l3 == -1)
+			scx_bpf_error("L3 is -1");
+		if (tctx->l3 >= MAX_L3S)
+			scx_bpf_error("L3 %d is out of range", tctx->l3);
+
+		// XXX
+		if (tctx->l3 != 0)
+			scx_bpf_error("L3 was supposed to be 0");
+
+		tctx->dsq = l3_dsq(tctx->l3);
+
+		l3_cpumask = lookup_l3_cpumask(tctx->l3);
 		if (l3_cpumask) {
 			const struct cpumask *idle_smtmask;
 			idle_smtmask = scx_bpf_get_idle_smtmask();
 			if (idle_smtmask) {
-				cpu = pick_idle_cpu_from(p, l3_cpumask, prev_cpu,
-							 idle_smtmask);
+				cpu = pick_idle_cpu_from(
+					p, l3_cpumask, prev_cpu, idle_smtmask);
 				if (cpu == -EBUSY)
-					cpu = bpf_cpumask_any_distribute(l3_cpumask);
+					cpu = bpf_cpumask_any_distribute(
+						l3_cpumask);
 				scx_bpf_put_idle_cpumask(idle_smtmask);
 				if (cpu >= 0) {
-					cstat_inc(CSTAT_LOCAL, tctx->cell, cctx);
-					scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_ns,
-							   0);
+					cstat_inc(CSTAT_LOCAL, tctx->cell,
+						  cctx);
+					scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL,
+							   slice_ns, 0);
 					goto out;
 				}
 			}
@@ -820,23 +849,58 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 {
 	struct cpu_ctx *cctx;
 	u32 cell;
+	u32 *l3p;
+	u32 l3;
+	u64 l3dsq;
 
 	if (!(cctx = lookup_cpu_ctx(-1)))
 		return;
 
 	cell = READ_ONCE(cctx->cell);
 
+	if (0) {
+		/* Lookup the L3 ID for this cpu and corresponding DSQ. */
+		l3p = bpf_map_lookup_elem(&cpu_to_l3, &cpu);
+		if (!l3p)
+			return;
+		l3 = *l3p;
+		l3dsq = l3_dsq(l3);
+
+		/* If the L3 DSQ is empty, pull a task from the cell DSQ into it. */
+		if (!scx_bpf_dsq_nr_queued(l3dsq)) {
+			struct task_struct *tp;
+
+			bpf_for_each(scx_dsq, tp, cell, 0)
+			{
+				__COMPAT_scx_bpf_dsq_move(BPF_FOR_EACH_ITER, tp, l3dsq,
+							0);
+				break;
+			}
+		}
+	}
+
 	bool found = false;
 	u64 min_vtime_dsq;
 	u64 min_vtime;
 
 	struct task_struct *p;
-	bpf_for_each(scx_dsq, p, cell, 0)
-	{
-		min_vtime = p->scx.dsq_vtime;
-		min_vtime_dsq = cell;
-		found = true;
-		break;
+	if (1) {
+		bpf_for_each(scx_dsq, p, cell, 0)
+		{
+			min_vtime = p->scx.dsq_vtime;
+			min_vtime_dsq = cell;
+			found = true;
+			break;
+		}
+	} else {
+		struct task_struct *p;
+		bpf_for_each(scx_dsq, p, l3dsq, 0)
+		{
+			min_vtime = p->scx.dsq_vtime;
+			min_vtime_dsq = l3dsq;
+			found = true;
+			break;
+		}
 	}
 
 	u64 dsq = cpu_dsq(cpu);
@@ -851,10 +915,10 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 	}
 
 	/*
-	 * The move_to_local can fail if we raced with some other cpu in the cell
-	 * and now the cell is empty. We have to ensure to try the cpu_dsq or else
-	 * we might never wakeup.
-	 */
+         * The move_to_local can fail if we raced with some other cpu in the cell
+         * and now the cell is empty. We have to ensure to try the cpu_dsq or else
+         * we might never wakeup.
+         */
 	if (!scx_bpf_dsq_move_to_local(min_vtime_dsq))
 		scx_bpf_dsq_move_to_local(dsq);
 }
@@ -1004,9 +1068,6 @@ void BPF_STRUCT_OPS(mitosis_stopping, struct task_struct *p, bool runnable)
 	}
 }
 
-
-
-
 struct {
 	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
 	__type(key, u32);
@@ -1123,6 +1184,10 @@ static inline int cgroup_init_with_cpuset(struct cgrp_ctx *cgc,
 	struct cell *cell = lookup_cell(cell_idx);
 	if (!cell)
 		return -ENOENT;
+
+	// XXX just for vm
+	cell->l3_present_cnt = 1;
+	cell->l3_cpu_cnt[0] = 32;
 
 	struct cell_cpumask_wrapper *cell_cpumaskw;
 	if (!(cell_cpumaskw = bpf_map_lookup_elem(&cell_cpumasks, &cell_idx))) {
@@ -1289,6 +1354,10 @@ s32 BPF_STRUCT_OPS(mitosis_init_task, struct task_struct *p,
 	if ((ret = update_task_cell(p, tctx, args->cgroup))) {
 		return ret;
 	}
+
+	// XXX
+	// set the task's l3 to -1 to indicate that its l3 has not been set yet
+	tctx->l3 = -1;
 
 	return 0;
 }
@@ -1458,7 +1527,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 
 	cells[0].in_use = true;
 
-	/* Create L3 DSQs */
+	/* Create L3 DSQs. We actually want l3 dsqs for each cell XXX */
 	bpf_for(i, 0, nr_l3)
 	{
 		ret = scx_bpf_create_dsq(l3_dsq(i), -1);
@@ -1466,6 +1535,17 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 			return ret;
 	}
 	// TODO: Set cpumasks here? Should userspace have populated the maps already?
+	// set l3_to_cpus cpumask for element 0
+	u32 l3_zero = 0;
+	struct l3_cpu_mask *l3_mask = bpf_map_lookup_elem(&l3_to_cpus, &l3_zero);
+	if (l3_mask) {
+		l3_mask->cpumask[0] = 0xFFFFFFFF;
+	} else {
+		scx_bpf_error("Failed to lookup l3_to_cpus map");
+	}
+
+	cells[0].l3_present_cnt = 1;
+	cells[0].l3_cpu_cnt[0] = 32;
 
 	return 0;
 }
