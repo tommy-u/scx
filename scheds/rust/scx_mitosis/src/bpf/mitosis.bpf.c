@@ -48,6 +48,26 @@ private(all_cpumask) struct bpf_cpumask __kptr *all_cpumask;
 UEI_DEFINE(uei);
 
 /*
+ * Counters for tracking function invocations
+ */
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__type(key, u32);
+	__type(value, u64);
+	__uint(max_entries, NR_COUNTERS);
+} function_counters SEC(".maps");
+
+static inline void increment_counter(enum counter_idx idx)
+{
+	u64 *counter;
+	u32 key = idx;
+
+	counter = bpf_map_lookup_elem(&function_counters, &key);
+	if (counter)
+		(*counter)++;
+}
+
+/*
  * We store per-cpu values along with per-cell values. Helper functions to
  * translate.
  */
@@ -387,6 +407,7 @@ static inline const struct cpumask *lookup_l3_cpumask(u32 l3)
 
 static inline s32 pick_l3_for_task(u32 cell_id)
 {
+	return 0;
 	struct cell *cell;
 	u32 l3, total = 0, target, cur = 0;
 	s32 ret = -1; // Default to error
@@ -660,6 +681,8 @@ s32 BPF_STRUCT_OPS(mitosis_select_cpu, struct task_struct *p, s32 prev_cpu,
 	struct task_ctx *tctx;
 	const struct cpumask *l3_cpumask;
 
+	increment_counter(COUNTER_SELECT_CPU);
+
 	if (!(cctx = lookup_cpu_ctx(-1)) || !(tctx = lookup_task_ctx(p)))
 		return prev_cpu;
 
@@ -683,7 +706,7 @@ s32 BPF_STRUCT_OPS(mitosis_select_cpu, struct task_struct *p, s32 prev_cpu,
 		goto out;
 	}
 
-	if (0) {
+	if (1) {
 		// Grab an idle core
 		if ((cpu = pick_idle_cpu(p, prev_cpu, cctx, tctx)) >= 0) {
 			cstat_inc(CSTAT_LOCAL, tctx->cell, cctx);
@@ -762,6 +785,8 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 	u64 vtime = p->scx.dsq_vtime;
 	s32 cpu = -1;
 	u64 basis_vtime;
+
+	increment_counter(COUNTER_ENQUEUE);
 
 	if (!(tctx = lookup_task_ctx(p)) || !(cctx = lookup_cpu_ctx(-1)))
 		return;
@@ -852,6 +877,8 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 	u32 *l3p;
 	u32 l3;
 	u64 l3dsq;
+
+	increment_counter(COUNTER_DISPATCH);
 
 	if (!(cctx = lookup_cpu_ctx(-1)))
 		return;

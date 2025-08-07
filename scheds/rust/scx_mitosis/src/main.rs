@@ -394,6 +394,9 @@ impl<'a> Scheduler<'a> {
 
         self.log_all_queue_stats(&cell_stats_delta)?;
 
+        // Read and print function counters
+        self.print_and_reset_function_counters()?;
+
         for (cell_id, cell) in &self.cells {
             trace!("CELL[{}]: {}", cell_id, cell.cpus);
         }
@@ -428,6 +431,90 @@ impl<'a> Scheduler<'a> {
                 .and_modify(|cell_metrics| cell_metrics.num_cpus = cell.cpus.weight() as u32);
         }
         self.metrics.num_cells = self.cells.len() as u32;
+
+        Ok(())
+    }
+
+    fn print_and_reset_function_counters(&mut self) -> Result<()> {
+        let counter_names = ["select_cpu", "enqueue", "dispatch"];
+        let mut all_counters = Vec::new();
+
+        // Read counters for each function
+        for counter_idx in 0..bpf_intf::counter_idx_NR_COUNTERS {
+            let key = (counter_idx as u32).to_ne_bytes();
+            
+            // Read per-CPU values
+            let percpu_values = self.skel
+                .maps
+                .function_counters
+                .lookup_percpu(&key, libbpf_rs::MapFlags::ANY)
+                .context("Failed to lookup function counter")?
+                .unwrap_or_default();
+
+            let mut cpu_values = Vec::new();
+            for cpu in 0..*NR_CPUS_POSSIBLE {
+                if cpu < percpu_values.len() {
+                    let value = u64::from_ne_bytes(
+                        percpu_values[cpu].as_slice().try_into()
+                            .context("Failed to convert counter bytes")?
+                    );
+                    cpu_values.push(value);
+                }
+            }
+
+            all_counters.push(cpu_values);
+        }
+
+        // Calculate and print statistics for each counter
+        for (idx, counter_values) in all_counters.iter().enumerate() {
+            if idx >= counter_names.len() {
+                break;
+            }
+
+            let name = counter_names[idx];
+            let non_zero_values: Vec<u64> = counter_values.iter().filter(|&&v| v > 0).copied().collect();
+            
+            if non_zero_values.is_empty() {
+                info!("Function counter [{}]: no activity", name);
+                continue;
+            }
+
+            let total: u64 = non_zero_values.iter().sum();
+            let min = *non_zero_values.iter().min().unwrap();
+            let max = *non_zero_values.iter().max().unwrap();
+            
+            // Calculate median
+            let mut sorted_values = non_zero_values.clone();
+            sorted_values.sort();
+            let median = if sorted_values.len() % 2 == 0 {
+                let mid = sorted_values.len() / 2;
+                (sorted_values[mid - 1] + sorted_values[mid]) / 2
+            } else {
+                sorted_values[sorted_values.len() / 2]
+            };
+
+            info!(
+                "Function counter [{}]: total={}, min={}, median={}, max={} (across {} active CPUs)",
+                name, total, min, median, max, non_zero_values.len()
+            );
+        }
+
+        // Zero out all counters after printing
+        for counter_idx in 0..bpf_intf::counter_idx_NR_COUNTERS {
+            let key = (counter_idx as u32).to_ne_bytes();
+            let zero_value = 0u64.to_ne_bytes().to_vec();
+            
+            // Create per-CPU values array (all zeros)
+            let percpu_values: Vec<Vec<u8>> = (0..*NR_CPUS_POSSIBLE)
+                .map(|_| zero_value.clone())
+                .collect();
+            
+            self.skel
+                .maps
+                .function_counters
+                .update_percpu(&key, &percpu_values, libbpf_rs::MapFlags::ANY)
+                .context("Failed to reset function counter")?;
+        }
 
         Ok(())
     }
