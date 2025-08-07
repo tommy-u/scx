@@ -434,15 +434,15 @@ impl<'a> Scheduler<'a> {
 
         Ok(())
     }
-
     fn print_and_reset_function_counters(&mut self) -> Result<()> {
-        let counter_names = ["select_cpu", "enqueue", "dispatch"];
+        let counter_names = ["select", "enqueue", "dispatch"];
+        let max_name_len = counter_names.iter().map(|name| name.len()).max().unwrap_or(0);
         let mut all_counters = Vec::new();
 
         // Read counters for each function
         for counter_idx in 0..bpf_intf::counter_idx_NR_COUNTERS {
             let key = (counter_idx as u32).to_ne_bytes();
-            
+
             // Read per-CPU values
             let percpu_values = self.skel
                 .maps
@@ -473,16 +473,16 @@ impl<'a> Scheduler<'a> {
 
             let name = counter_names[idx];
             let non_zero_values: Vec<u64> = counter_values.iter().filter(|&&v| v > 0).copied().collect();
-            
+
             if non_zero_values.is_empty() {
-                info!("Function counter [{}]: no activity", name);
+                info!("Fn[{:<width$}]: no activity", name, width = max_name_len);
                 continue;
             }
 
             let total: u64 = non_zero_values.iter().sum();
             let min = *non_zero_values.iter().min().unwrap();
             let max = *non_zero_values.iter().max().unwrap();
-            
+
             // Calculate median
             let mut sorted_values = non_zero_values.clone();
             sorted_values.sort();
@@ -494,8 +494,8 @@ impl<'a> Scheduler<'a> {
             };
 
             info!(
-                "Function counter [{}]: total={}, min={}, median={}, max={} (across {} active CPUs)",
-                name, total, min, median, max, non_zero_values.len()
+                "Fn[{:<width$}]: tot={:>5} min={:>5} med={:>5} max={:>5} ({} CPUs)",
+                name, total, min, median, max, non_zero_values.len(), width = max_name_len
             );
         }
 
@@ -503,12 +503,12 @@ impl<'a> Scheduler<'a> {
         for counter_idx in 0..bpf_intf::counter_idx_NR_COUNTERS {
             let key = (counter_idx as u32).to_ne_bytes();
             let zero_value = 0u64.to_ne_bytes().to_vec();
-            
+
             // Create per-CPU values array (all zeros)
             let percpu_values: Vec<Vec<u8>> = (0..*NR_CPUS_POSSIBLE)
                 .map(|_| zero_value.clone())
                 .collect();
-            
+
             self.skel
                 .maps
                 .function_counters
