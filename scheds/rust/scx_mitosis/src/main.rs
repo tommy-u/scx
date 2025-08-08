@@ -45,6 +45,7 @@ use stats::Metrics;
 
 const MAX_CELLS: usize = bpf_intf::consts_MAX_CELLS as usize;
 const NR_CSTATS: usize = bpf_intf::cell_stat_idx_NR_CSTATS as usize;
+const CPUMASK_LONG_ENTRIES: usize = 128;
 
 /// scx_mitosis: A dynamic affinity scheduler
 ///
@@ -165,10 +166,16 @@ impl<'a> Scheduler<'a> {
 
         skel.maps.rodata_data.as_mut().unwrap().nr_l3 = topology.all_llcs.len() as u32;
 
+        // print the number of l3s we detected
+        info!("Found {} L3s", topology.all_llcs.len());
+
         let mut skel = scx_ops_load!(skel, mitosis, uei)?;
 
         // Set up CPU to L3 topology mapping using the CLI functionality
         set_entry(&mut skel, "cpu_to_l3", None)?;
+
+        // Set up L3 to CPUs mapping using the CLI functionality
+        set_entry(&mut skel, "l3_to_cpus", None)?;
 
         let stats_server = StatsServer::new(stats::server_data()).launch()?;
 
@@ -415,14 +422,8 @@ impl<'a> Scheduler<'a> {
         info!("cpu_to_l3:\n{}", chunked_output);
 
         let l3_to_cpus = read_l3_to_cpus(&self.skel)?;
-        for (l3, mask) in l3_to_cpus.iter().enumerate() {
-            trace!("l3_to_cpus:\n                  [{:2}] = {mask}", l3);
-            // If L3 is same as number of LLCs, break
-            // XXX
-            if l3 == 0 {
-                break;
-            }
-
+        for (l3_id, mask) in l3_to_cpus.iter() {
+            trace!("l3_to_cpus: [{:2}] = {}", l3_id, mask);
         }
 
         for (cell_id, cell) in self.cells.iter() {
@@ -592,11 +593,13 @@ fn read_cpu_to_l3(skel: &BpfSkel) -> Result<Vec<u32>> {
     Ok(cpu_to_l3)
 }
 
-const CPUMASK_LONG_ENTRIES: usize = 128;
-
-fn read_l3_to_cpus(skel: &BpfSkel) -> Result<Vec<Cpumask>> {
+fn read_l3_to_cpus(skel: &BpfSkel) -> Result<Vec<(u32, Cpumask)>> {
     let mut l3_to_cpus = vec![];
-    for l3 in 0..*NR_CPUS_POSSIBLE {
+
+    // Get the number of L3 caches from the BPF rodata
+    let nr_l3 = skel.maps.rodata_data.as_ref().unwrap().nr_l3;
+
+    for l3 in 0..nr_l3 {
         let key = (l3 as u32).to_ne_bytes();
         let mask = if let Some(v) = skel
             .maps
@@ -614,7 +617,7 @@ fn read_l3_to_cpus(skel: &BpfSkel) -> Result<Vec<Cpumask>> {
         } else {
             Cpumask::new()
         };
-        l3_to_cpus.push(mask);
+        l3_to_cpus.push((l3, mask));
     }
     Ok(l3_to_cpus)
 }
@@ -682,8 +685,6 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-// mod bpf_intf;
-// mod bpf_skel;
 mod cli;
 
 use bpf_skel::{BpfSkel, BpfSkelBuilder};
@@ -907,6 +908,46 @@ fn set_entry(skel: &mut BpfSkel, map: &str, file: Option<String>) -> Result<()> 
                 let key = (cpu as u32).to_ne_bytes();
                 let val = (l3 as u32).to_ne_bytes();
                 skel.maps.cpu_to_l3.update(&key, &val, MapFlags::ANY)?;
+            }
+        }
+        "l3_to_cpus" => {
+            if file.is_some() {
+                anyhow::bail!("Loading l3_to_cpus from file is not supported yet");
+            }
+
+            println!("loading l3_to_cpus from host topology");
+            let topo = Topology::new()?;
+
+            // Group CPUs by L3 cache ID
+            let mut l3_to_cpus: HashMap<usize, Vec<usize>> = HashMap::new();
+            for cpu in topo.all_cpus.values() {
+                l3_to_cpus.entry(cpu.l3_id).or_default().push(cpu.id);
+            }
+
+            // For each L3 cache, create a cpumask and populate the map
+            for (l3_id, cpus) in l3_to_cpus {
+                let key = (l3_id as u32).to_ne_bytes();
+
+                // Create a cpumask structure that matches the BPF side
+                let mut cpumask_longs = [0u64; CPUMASK_LONG_ENTRIES];
+
+                // Set bits for each CPU in this L3 cache
+                for cpu in cpus {
+                    let long_idx = cpu / 64;
+                    let bit_idx = cpu % 64;
+                    if long_idx < CPUMASK_LONG_ENTRIES {
+                        cpumask_longs[long_idx] |= 1u64 << bit_idx;
+                    }
+                }
+
+                // Convert to bytes for the map update
+                let mut value_bytes = Vec::new();
+                for long_val in cpumask_longs {
+                    value_bytes.extend_from_slice(&long_val.to_ne_bytes());
+                }
+
+                skel.maps.l3_to_cpus.update(&key, &value_bytes, MapFlags::ANY)
+                    .context(format!("Failed to update l3_to_cpus map for L3 {}", l3_id))?;
             }
         }
         _ => {

@@ -1588,16 +1588,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 	}
 	// TODO: Set cpumasks here? Should userspace have populated the maps already?
 	// set l3_to_cpus cpumask for element 0
-	u32 l3_zero = 0;
-	struct l3_cpu_mask *l3_mask = bpf_map_lookup_elem(&l3_to_cpus, &l3_zero);
-	if (l3_mask) {
-		l3_mask->cpumask[0] = 0xFFFFFFFF;
-	} else {
-		scx_bpf_error("Failed to lookup l3_to_cpus map");
-	}
 
-	cells[0].l3_present_cnt = 1;
-	cells[0].l3_cpu_cnt[0] = 32;
 
 	return 0;
 }
