@@ -22,7 +22,6 @@ members = [
     "scheds/rust/scx_wd40",
     "tools/scx_loader",
     "tools/scxctl",
-    "scheds/rust/scx_mitosis/mitosisctl",
     "tools/scxtop",
     "tools/vmlinux_docify",
 ]
