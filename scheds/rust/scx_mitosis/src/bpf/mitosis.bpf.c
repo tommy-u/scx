@@ -71,35 +71,34 @@ static inline void increment_counter(enum counter_idx idx)
  * We store per-cpu values along with per-cell values. Helper functions to
  * translate.
  */
-static inline u32 cpu_dsq(u32 cpu)
-{
-	return PCPU_BASE | cpu;
-}
+// static inline u32 cpu_dsq(u32 cpu)
+// {
+// 	return PCPU_BASE | cpu;
+// }
 
 static inline u32 cell_dsq(u32 cell)
 {
 	return cell;
 }
 
-static inline u32 l3_dsq(u32 l3)
-{
-	return L3_DSQ_BASE | l3;
-}
-
-static inline u32 dsq_to_cpu(u32 dsq)
-{
-	return dsq & ~PCPU_BASE;
-}
+// static inline u32 dsq_to_cpu(u32 dsq)
+// {
+// 	return dsq & ~PCPU_BASE;
+// }
 
 static inline u32 dsq_to_cell(u32 dsq)
 {
 	return dsq;
 }
 
-static inline bool is_pcpu(u32 dsq)
-{
-	return dsq & PCPU_BASE;
-}
+// static inline bool is_pcpu(u32 dsq)
+// {
+// 	return dsq & PCPU_BASE;
+// }
+
+static inline u32 cpu_dsq(u32 cpu)      { return make_cpu_dsq(cpu); }
+static inline u32 dsq_to_cpu(u32 dsq)   { return get_cpu_from_dsq(dsq); }
+static inline bool is_pcpu(u32 dsq)     { return is_cpu_dsq(dsq); }
 
 static inline struct cgroup *lookup_cgrp_ancestor(struct cgroup *cgrp,
 						  u32 ancestor)
@@ -214,6 +213,7 @@ static inline struct cpu_ctx *lookup_cpu_ctx(int cpu)
 
 struct cell cells[MAX_CELLS];
 
+// Get a kernel pointer to a cell struct from an index into the cell
 static inline struct cell *lookup_cell(int idx)
 {
 	struct cell *cell;
@@ -527,6 +527,9 @@ static void cstat_inc(enum cell_stat_idx idx, u32 cell, struct cpu_ctx *cctx)
 static inline int update_task_cpumask(struct task_struct *p,
 				      struct task_ctx *tctx)
 {
+	// Add a counter for this
+	increment_counter(COUNTER_UPDATE_TASK_CPUMASK);
+
 	const struct cpumask *cell_cpumask;
 	struct cpu_ctx *cpu_ctx;
 	struct cell *cell;
@@ -554,10 +557,18 @@ static inline int update_task_cpumask(struct task_struct *p,
 	 * Revisit if high frequency dynamic cell switching
 	 * needs to be supported.
 	 */
+
+	// We want to set the task vtime to that of the cell it's joining.
+	// This used to be done by looking up the cell's dsq
+	// but now each cell has potentially multiple per l3 dsqs.
 	if (tctx->all_cell_cpus_allowed) {
+		// Use the cell to pick a Q
 		tctx->dsq = cell_dsq(tctx->cell);
+		// use cell idx to safely get cell ptr
 		if (!(cell = lookup_cell(tctx->cell)))
 			return -ENOENT;
+		// This used to set the task vtime from the cell vtime.
+		// Now we need to
 		p->scx.dsq_vtime = READ_ONCE(cell->vtime_now);
 	} else {
 		cpu = bpf_cpumask_any_distribute(p->cpus_ptr);
@@ -578,6 +589,7 @@ static inline int update_task_cell(struct task_struct *p, struct task_ctx *tctx,
 				   struct cgroup *cg)
 {
 	struct cgrp_ctx *cgc;
+	increment_counter(COUNTER_UPDATE_TASK_CELL);
 
 	if (!(cgc = lookup_cgrp_ctx(cg)))
 		return -ENOENT;
@@ -629,7 +641,9 @@ static __always_inline int maybe_refresh_cell(struct task_struct *p,
 					      struct task_ctx *tctx)
 {
 	struct cgroup *cgrp;
+	increment_counter(COUNTER_MAYBE_REFRESH_CELL);
 	if (tctx->configuration_seq != READ_ONCE(applied_configuration_seq)) {
+		increment_counter(COUNTER_MAYBE_REFRESH_CELL_TRUE);
 		if (!(cgrp = task_cgroup(p)))
 			return -1;
 		if (update_task_cell(p, tctx, cgrp)) {
@@ -714,6 +728,7 @@ s32 BPF_STRUCT_OPS(mitosis_select_cpu, struct task_struct *p, s32 prev_cpu,
 			goto out;
 		}
 	} else {
+		#if 0
 		// Get the L3
 		// If the value is -1, then we need to pick an L3
 		if (tctx->l3 == -1) {
@@ -754,6 +769,7 @@ s32 BPF_STRUCT_OPS(mitosis_select_cpu, struct task_struct *p, s32 prev_cpu,
 				}
 			}
 		}
+		#endif
 	}
 
 	if (!tctx->cpumask) {
@@ -874,9 +890,11 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 {
 	struct cpu_ctx *cctx;
 	u32 cell;
+	#if 0
 	u32 *l3p;
 	u32 l3;
 	u64 l3dsq;
+	#endif
 
 	increment_counter(COUNTER_DISPATCH);
 
@@ -886,6 +904,7 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 	cell = READ_ONCE(cctx->cell);
 
 	if (0) {
+		#if 0
 		/* Lookup the L3 ID for this cpu and corresponding DSQ. */
 		l3p = bpf_map_lookup_elem(&cpu_to_l3, &cpu);
 		if (!l3p)
@@ -904,6 +923,7 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 				break;
 			}
 		}
+		#endif
 	}
 
 	bool found = false;
@@ -920,6 +940,7 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 			break;
 		}
 	} else {
+		#if 0
 		struct task_struct *p;
 		bpf_for_each(scx_dsq, p, l3dsq, 0)
 		{
@@ -928,6 +949,7 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 			found = true;
 			break;
 		}
+		#endif
 	}
 
 	u64 dsq = cpu_dsq(cpu);
@@ -1324,6 +1346,7 @@ void BPF_STRUCT_OPS(mitosis_cgroup_move, struct task_struct *p,
 		    struct cgroup *from, struct cgroup *to)
 {
 	struct task_ctx *tctx;
+	increment_counter(COUNTER_MITOSIS_CGROUP_MOVE);
 
 	if (!(tctx = lookup_task_ctx(p)))
 		return;
@@ -1557,9 +1580,11 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 	/* Create L3 DSQs. We actually want l3 dsqs for each cell XXX */
 	bpf_for(i, 0, nr_l3)
 	{
+		#if 0
 		ret = scx_bpf_create_dsq(l3_dsq(i), -1);
 		if (ret < 0)
 			return ret;
+		#endif
 	}
 	// TODO: Set cpumasks here? Should userspace have populated the maps already?
 	// set l3_to_cpus cpumask for element 0

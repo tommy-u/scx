@@ -403,14 +403,14 @@ impl<'a> Scheduler<'a> {
 
         let cpu_to_l3 = read_cpu_to_l3(&self.skel)?;
         let cpu_l3_pairs: Vec<String> = cpu_to_l3.iter().enumerate()
-            .map(|(cpu, l3)| format!("[{:3}]={:2}", cpu, l3))
+            .map(|(cpu, l3)| format!("{:3}:{:2}", cpu, l3))
             .collect();
         let chunked_output = cpu_l3_pairs
-            .chunks(8)
+            .chunks(16)
             .map(|chunk| chunk.join(" "))
             .collect::<Vec<_>>()
-            .join("\n                 ");
-        info!("cpu_to_l3:\n                 {}", chunked_output);
+            .join("\n");
+        info!("cpu_to_l3:\n{}", chunked_output);
 
         let l3_to_cpus = read_l3_to_cpus(&self.skel)?;
         for (l3, mask) in l3_to_cpus.iter().enumerate() {
@@ -435,7 +435,7 @@ impl<'a> Scheduler<'a> {
         Ok(())
     }
     fn print_and_reset_function_counters(&mut self) -> Result<()> {
-        let counter_names = ["select", "enqueue", "dispatch"];
+        let counter_names = ["select", "enqueue", "dispatch", "update_task_cpumask", "maybe_refresh_cell", "maybe_refresh_cell_true", "update_task_cell", "mitosis_cgroup_move"];
         let max_name_len = counter_names.iter().map(|name| name.len()).max().unwrap_or(0);
         let mut all_counters = Vec::new();
 
