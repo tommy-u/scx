@@ -623,6 +623,11 @@ fn read_l3_to_cpus(skel: &BpfSkel) -> Result<Vec<(u32, Cpumask)>> {
 }
 
 fn main() -> Result<()> {
+    // If this is a cli invocation, run it
+    if std::env::args().nth(1).as_deref() == Some("cli") {
+        return cli_main();
+    }
+
     let opts = Opts::parse();
 
     let llv = match opts.verbose {
@@ -812,7 +817,7 @@ fn count_maps_by_name(map_name: &str) -> Result<usize> {
 /// Print all supported map names along with how many instances exist.
 fn list_maps() {
     println!("Supported BPF Maps    Count");
-    let names = ["cpu_to_l3"];
+    let names = ["cpu_to_l3", "l3_to_cpus"];
     for name in names {
         let count = count_maps_by_name(name).unwrap_or(0);
         if count == 1 {
@@ -879,6 +884,32 @@ fn get_entry(skel: &BpfSkel, map: &str) -> Result<()> {
                     .map(|v| u32::from_ne_bytes(v.try_into().unwrap()))
                     .unwrap_or(0);
                 println!("cpu {cpu} -> {val}");
+            }
+        }
+        "l3_to_cpus" => {
+            // Get the number of L3 caches from the BPF rodata
+            let nr_l3 = skel.maps.rodata_data.as_ref().unwrap().nr_l3;
+
+            // Iterate over all L3 caches
+            for l3 in 0..nr_l3 {
+                let key = (l3 as u32).to_ne_bytes();
+                let mask = if let Some(v) = skel
+                    .maps
+                    .l3_to_cpus
+                    .lookup(&key, MapFlags::ANY)?
+                {
+                    let bytes = v.as_slice();
+                    let mut longs = [0u64; CPUMASK_LONG_ENTRIES];
+                    let mut i = 0;
+                    while i < CPUMASK_LONG_ENTRIES && i * 8 + 8 <= bytes.len() {
+                        longs[i] = u64::from_ne_bytes(bytes[i * 8..i * 8 + 8].try_into().unwrap());
+                        i += 1;
+                    }
+                    Cpumask::from_vec(longs.to_vec())
+                } else {
+                    Cpumask::new()
+                };
+                println!("l3 {l3} -> {mask}");
             }
         }
         _ => {
@@ -1012,7 +1043,7 @@ pub fn print_splash() {
 
 /// Entry point for the CLI application.
 fn cli_main() -> Result<()> {
-    let cli = Cli::parse();
+    let cli = Cli::parse_from(std::env::args().skip(1));
 
     match cli.command {
         Commands::Splash => print_splash(),
