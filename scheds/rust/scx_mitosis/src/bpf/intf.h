@@ -24,7 +24,7 @@ enum consts {
 	MAX_CPUS = 1 << MAX_CPUS_SHIFT,
 	MAX_CPUS_U8 = MAX_CPUS / 8,
 	MAX_CELLS = 16,
-	MAX_L3S = 64,
+	MAX_L3S = 16,
 	USAGE_HALF_LIFE = 100000000, /* 100ms */
 	DSQ_ERROR = 0xFFFFFFFF, /* Error value for DSQ functions */
 
