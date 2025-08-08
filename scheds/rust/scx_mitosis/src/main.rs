@@ -165,7 +165,10 @@ impl<'a> Scheduler<'a> {
 
         skel.maps.rodata_data.as_mut().unwrap().nr_l3 = topology.all_llcs.len() as u32;
 
-        let skel = scx_ops_load!(skel, mitosis, uei)?;
+        let mut skel = scx_ops_load!(skel, mitosis, uei)?;
+
+        // Set up CPU to L3 topology mapping using the CLI functionality
+        set_entry(&mut skel, "cpu_to_l3", None)?;
 
         let stats_server = StatsServer::new(stats::server_data()).launch()?;
 
