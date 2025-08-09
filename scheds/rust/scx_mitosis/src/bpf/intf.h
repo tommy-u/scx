@@ -216,9 +216,7 @@ static inline u32 make_cpu_dsq(u32 cpu)
 {
 	if (cpu >= MAX_CPUS)
 		return DSQ_ERROR;
-	union dsq_id id = { .cpu = { .cpu = cpu & 0xFFFF,
-				     .unused = 0,
-				     .type = DSQ_TYPE_CPU } };
+	union dsq_id id = { .cpu = { .cpu = cpu, .unused = 0, .type = DSQ_TYPE_CPU } };
 	return id.raw;
 }
 
@@ -226,9 +224,7 @@ static inline u32 make_cell_l3_dsq(u32 cell, u32 l3)
 {
 	if (cell >= MAX_CELLS || l3 >= MAX_L3S)
 		return DSQ_ERROR;
-	union dsq_id id = { .cell_l3 = { .l3 = l3 & 0xFFFF,
-					 .cell = cell & 0xFF,
-					 .type = DSQ_TYPE_CELL_L3 } };
+	union dsq_id id = { .cell_l3 = {.l3 = l3, .cell = cell, .type = DSQ_TYPE_CELL_L3 } };
 	return id.raw;
 }
 
