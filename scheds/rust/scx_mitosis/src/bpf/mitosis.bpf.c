@@ -625,13 +625,13 @@ static void cstat_inc(enum cell_stat_idx idx, u32 cell, struct cpu_ctx *cctx)
 static inline int update_task_cpumask(struct task_struct *p,
 				      struct task_ctx *tctx)
 {
-	// Add a counter for this
-	increment_counter(COUNTER_UPDATE_TASK_CPUMASK);
 	const struct cpumask *l3_mask;
 	const struct cpumask *cell_cpumask;
 	struct cpu_ctx *cpu_ctx;
 	struct cell *cell;
 	u32 cpu;
+
+	increment_counter(COUNTER_UPDATE_TASK_CPUMASK);
 
 	if (!(cell_cpumask = lookup_cell_cpumask(tctx->cell)))
 		return -ENOENT;
@@ -639,11 +639,27 @@ static inline int update_task_cpumask(struct task_struct *p,
 	if (!tctx->cpumask)
 		return -EINVAL;
 
+	/*
+	 * Calculate the intersection of CPUs that are both:
+	 * 1. In this task's assigned cell (cell_cpumask)
+	 * 2. Allowed by the task's CPU affinity (p->cpus_ptr)
+	 * Store result in tctx->cpumask - this becomes the effective CPU set
+	 * where this task can actually run.
+	 */
 	bpf_cpumask_and(tctx->cpumask, cell_cpumask, p->cpus_ptr);
 
-	if (cell_cpumask)
-		tctx->all_cell_cpus_allowed =
-			bpf_cpumask_subset(cell_cpumask, p->cpus_ptr);
+	/*
+	 * Check if the task can run on ALL CPUs in its assigned cell.
+	 * If cell_cpumask is a subset of p->cpus_ptr, it means the task's
+	 * CPU affinity doesn't restrict it within the cell - it can use
+	 * any CPU in the cell. This affects scheduling decisions later.
+	 * True if all the bits in cell_cpumask are set in p->cpus_ptr.
+	 *
+	 * I'm leaving this in for now, but we might remove it for l3 stuff
+	 * or really change the meaning to any within l3
+	 */
+	tctx->all_cell_cpus_allowed =
+		bpf_cpumask_subset(cell_cpumask, p->cpus_ptr);
 
 	/*
 	 * XXX - To be correct, we'd need to calculate the vtime
@@ -660,11 +676,9 @@ static inline int update_task_cpumask(struct task_struct *p,
 	// This used to be done by looking up the cell's dsq
 	// but now each cell has potentially multiple per l3 dsqs.
 	if (tctx->all_cell_cpus_allowed) {
-		// If the task's L3 is not set, pick one
+		/* If the task's L3 is not set, pick one */
 		if (tctx->l3 == INVALID_L3_ID) {
 			tctx->l3 = pick_l3_for_task(tctx->cell);
-			bpf_printk("Picked L3 %d for task in cell %d", tctx->l3,
-				   tctx->cell);
 			if (tctx->l3 < 0) {
 				scx_bpf_error(
 					"Failed to pick L3 for task in cell %d",
@@ -673,15 +687,46 @@ static inline int update_task_cpumask(struct task_struct *p,
 			}
 		}
 
-		// we have a valid l3,
+		/* Get the L3 mask and intersect with current effective cpumask */
+		l3_mask = lookup_l3_cpumask((u32)tctx->l3);
+		if (!l3_mask) {
+			scx_bpf_error("Failed to lookup L3 cpumask for L3 %d",
+				      tctx->l3);
+			return -ENOENT;
+		}
 
-		// use cell idx to safely get cell ptr
+		if (!tctx->cpumask) {
+			scx_bpf_error(
+				"tctx->cpumask is NULL before L3 intersection");
+			return -EINVAL;
+		}
+
+		if (!l3_mask) {
+			scx_bpf_error("l3_mask is NULL before cpumask_and");
+			return -ENOENT;
+		}
+		bpf_cpumask_and(tctx->cpumask,
+				(const struct cpumask *)tctx->cpumask, l3_mask);
+
+		if (!tctx->cpumask) {
+			scx_bpf_error(
+				"tctx->cpumask is NULL before bpf_cpumask_empty check");
+			return -EINVAL;
+		}
+		/* Verify the task has at least one CPU it can run on after L3 intersection */
+		if (bpf_cpumask_empty((const struct cpumask *)tctx->cpumask)) {
+			scx_bpf_error(
+				"Task %d has no available CPUs after L3 intersection (cell=%d, l3=%d)",
+				p->pid, tctx->cell, tctx->l3);
+			return -ENODEV;
+		}
+
+		/* Set task vtime to cell vtime */
 		if (!(cell = lookup_cell(tctx->cell)))
 			return -ENOENT;
-		// This used to set the task vtime from the cell vtime.
-		// Now we need to
 		p->scx.dsq_vtime = READ_ONCE(cell->vtime_now);
 	} else {
+		/* Task is CPU-restricted, use per-CPU scheduling */
 		cpu = bpf_cpumask_any_distribute(p->cpus_ptr);
 		if (!(cpu_ctx = lookup_cpu_ctx(cpu)))
 			return -ENOENT;
@@ -960,10 +1005,12 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 		// This is a task that can run on any cpu in the cell
 
 		cstat_inc(CSTAT_CELL_DSQ, tctx->cell, cctx);
-		/* Task can use any CPU in its cell, so use the cell DSQ */
+
+		/* Task can use any CPU in its cell, set basis_vtime from cell */
 		if (!(cell = lookup_cell(tctx->cell)))
 			goto out;
 		basis_vtime = READ_ONCE(cell->vtime_now);
+
 	} else {
 		// This is a task that can only run on a specific cpu
 		cstat_inc(CSTAT_CPU_DSQ, tctx->cell, cctx);
