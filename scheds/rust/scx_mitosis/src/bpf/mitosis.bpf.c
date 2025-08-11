@@ -95,35 +95,22 @@ static inline void increment_counter(enum counter_idx idx)
  * We store per-cpu values along with per-cell values. Helper functions to
  * translate.
  */
-// static inline u32 cpu_dsq(u32 cpu)
-// {
-// 	return PCPU_BASE | cpu;
-// }
 
 static inline u32 cell_dsq(u32 cell)
 {
 	return cell;
 }
 
-// static inline u32 dsq_to_cpu(u32 dsq)
-// {
-// 	return dsq & ~PCPU_BASE;
-// }
-
 static inline u32 dsq_to_cell(u32 dsq)
 {
 	return dsq;
 }
 
-// static inline bool is_pcpu(u32 dsq)
-// {
-// 	return dsq & PCPU_BASE;
-// }
-
 static inline u32 cpu_dsq(u32 cpu)
 {
 	return make_cpu_dsq(cpu);
 }
+
 static inline u32 dsq_to_cpu(u32 dsq)
 {
 	return get_cpu_from_dsq(dsq);
@@ -437,26 +424,39 @@ static inline const struct cpumask *lookup_l3_cpumask(u32 l3)
 	return (const struct cpumask *)mask;
 }
 
-/* Weighted pick of an L3 for this task based on current cell membership. */
+/**
+ * Weighted random selection of an L3 cache domain for a task.
+ *
+ * Uses the CPU count in each L3 domain within the cell as weights to
+ * probabilistically select an L3. L3 domains with more CPUs in the cell
+ * have higher probability of being selected.
+ *
+ * @cell_id: The cell ID to select an L3 from
+ * @return: L3 ID on success, INVALID_L3_ID on error, or 0 as fallback
+ */
 static inline s32 pick_l3_for_task(u32 cell_id)
 {
 	struct cell *cell;
-	u32 l3, total = 0, target, cur = 0;
-	s32 ret = -1;
+	u32 l3, target, cur = 0;
+	s32 ret = INVALID_L3_ID;
 
+	/* Look up the cell structure */
 	if (!(cell = lookup_cell(cell_id)))
-		return ret;
+		return INVALID_L3_ID;
 
-	bpf_for(l3, 0, nr_l3)
-	{
-		total += cell->l3_cpu_cnt[l3];
-	}
-	if (!total) {
-		/* Fallback: if the cell has no CPUs accounted yet, choose 0. */
-		return 0;
+	/* Handle case where cell has no CPUs assigned yet */
+	if (!cell->cpu_cnt) {
+		scx_bpf_error(
+			"pick_l3_for_task: cell %d has no CPUs accounted yet",
+			cell_id);
+		return INVALID_L3_ID;
 	}
 
-	target = bpf_get_prandom_u32() % total;
+	/* Generate random target value in range [0, cpu_cnt) */
+	target = bpf_get_prandom_u32() % cell->cpu_cnt;
+
+	/* Find the L3 domain corresponding to the target value using
+	 * weighted selection - accumulate CPU counts until we exceed target */
 	bpf_for(l3, 0, nr_l3)
 	{
 		cur += cell->l3_cpu_cnt[l3];
@@ -465,45 +465,78 @@ static inline s32 pick_l3_for_task(u32 cell_id)
 			break;
 		}
 	}
-	return ret < 0 ? 0 : ret;
+	return ret;
+}
+
+/* Print cell state for debugging */
+static __always_inline void print_cell_state(u32 cell_idx)
+{
+	struct cell *cell = lookup_cell(cell_idx);
+	if (!cell) {
+		bpf_printk("Cell %d: NOT FOUND", cell_idx);
+		return;
+	}
+
+	bpf_printk(
+		"Cell %d: in_use=%d, cpu_cnt=%d, l3_present_cnt=%d, vtime=%llu",
+		cell_idx, cell->in_use, cell->cpu_cnt, cell->l3_present_cnt,
+		cell->vtime_now);
+
+	u32 l3;
+	bpf_for(l3, 0, nr_l3)
+	{
+		if (cell->l3_cpu_cnt[l3] > 0) {
+			bpf_printk("  L3[%d]: %d CPUs", l3,
+				   cell->l3_cpu_cnt[l3]);
+		}
+	}
 }
 
 /* Recompute cell->l3_cpu_cnt[] after cell cpumask changes (no persistent kptrs). */
 static __always_inline void recalc_cell_l3_counts(u32 cell_idx)
 {
-    struct cell *cell = lookup_cell(cell_idx);
-    if (!cell)
-        return;
+	struct cell *cell = lookup_cell(cell_idx);
+	if (!cell)
+		return;
 
-    struct bpf_cpumask *tmp = bpf_cpumask_create();
-    if (!tmp)
-        return;
+	struct bpf_cpumask *tmp = bpf_cpumask_create();
+	if (!tmp)
+		return;
 
-    u32 l3, present = 0;
+	u32 l3, present = 0, total_cpus = 0;
 
-    bpf_rcu_read_lock();
-    const struct cpumask *cell_mask = lookup_cell_cpumask(cell_idx);  // RCU ptr
-    if (!cell_mask) {
-        bpf_rcu_read_unlock();
-        bpf_cpumask_release(tmp);
-        return;
-    }
+	bpf_rcu_read_lock();
+	const struct cpumask *cell_mask =
+		lookup_cell_cpumask(cell_idx); // RCU ptr
+	if (!cell_mask) {
+		bpf_rcu_read_unlock();
+		bpf_cpumask_release(tmp);
+		return;
+	}
 
-    bpf_for (l3, 0, nr_l3) {
-        const struct cpumask *l3_mask = lookup_l3_cpumask(l3); // plain map memory
-        if (!l3_mask) { cell->l3_cpu_cnt[l3] = 0; continue; }
+	bpf_for(l3, 0, nr_l3)
+	{
+		const struct cpumask *l3_mask =
+			lookup_l3_cpumask(l3); // plain map memory
+		if (!l3_mask) {
+			cell->l3_cpu_cnt[l3] = 0;
+			continue;
+		}
 
-        /* ok: dst is bpf_cpumask*, sources are (RCU cpumask*, plain cpumask*) */
-        bpf_cpumask_and(tmp, cell_mask, l3_mask);
+		/* ok: dst is bpf_cpumask*, sources are (RCU cpumask*, plain cpumask*) */
+		bpf_cpumask_and(tmp, cell_mask, l3_mask);
 
-        u32 cnt = bpf_cpumask_weight(tmp);
-        cell->l3_cpu_cnt[l3] = cnt;
-        if (cnt) present++;
-    }
-    bpf_rcu_read_unlock();
+		u32 cnt = bpf_cpumask_weight((const struct cpumask *)tmp);
+		cell->l3_cpu_cnt[l3] = cnt;
+		total_cpus += cnt;
+		if (cnt)
+			present++;
+	}
+	bpf_rcu_read_unlock();
 
-    cell->l3_present_cnt = present;
-    bpf_cpumask_release(tmp);
+	cell->l3_present_cnt = present;
+	cell->cpu_cnt = total_cpus;
+	bpf_cpumask_release(tmp);
 }
 
 struct {
@@ -594,7 +627,7 @@ static inline int update_task_cpumask(struct task_struct *p,
 {
 	// Add a counter for this
 	increment_counter(COUNTER_UPDATE_TASK_CPUMASK);
-
+	const struct cpumask *l3_mask;
 	const struct cpumask *cell_cpumask;
 	struct cpu_ctx *cpu_ctx;
 	struct cell *cell;
@@ -628,8 +661,10 @@ static inline int update_task_cpumask(struct task_struct *p,
 	// but now each cell has potentially multiple per l3 dsqs.
 	if (tctx->all_cell_cpus_allowed) {
 		// If the task's L3 is not set, pick one
-		if (tctx->l3 == -1) {
+		if (tctx->l3 == INVALID_L3_ID) {
 			tctx->l3 = pick_l3_for_task(tctx->cell);
+			bpf_printk("Picked L3 %d for task in cell %d", tctx->l3,
+				   tctx->cell);
 			if (tctx->l3 < 0) {
 				scx_bpf_error(
 					"Failed to pick L3 for task in cell %d",
@@ -638,14 +673,7 @@ static inline int update_task_cpumask(struct task_struct *p,
 			}
 		}
 
-		// Use the cell-L3 DSQ
-		tctx->dsq = make_cell_l3_dsq(tctx->cell, tctx->l3);
-		if (tctx->dsq == DSQ_ERROR) {
-			scx_bpf_error(
-				"Failed to create cell-L3 DSQ for cell %d, L3 %d",
-				tctx->cell, tctx->l3);
-			return -EINVAL;
-		}
+		// we have a valid l3,
 
 		// use cell idx to safely get cell ptr
 		if (!(cell = lookup_cell(tctx->cell)))
@@ -777,7 +805,6 @@ s32 BPF_STRUCT_OPS(mitosis_select_cpu, struct task_struct *p, s32 prev_cpu,
 	s32 cpu;
 	struct cpu_ctx *cctx;
 	struct task_ctx *tctx;
-	const struct cpumask *l3_cpumask;
 
 	increment_counter(COUNTER_SELECT_CPU);
 
@@ -904,9 +931,9 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 	if (maybe_refresh_cell(p, tctx) < 0)
 		goto out;
 
+	// Cpu pinned work
 	if (!tctx->all_cell_cpus_allowed) {
 		cpu = dsq_to_cpu(tctx->dsq);
-		bpf_printk("mitosis_enqueue %d", cpu);
 	} else if (!__COMPAT_is_enq_cpu_selected(enq_flags)) {
 		/*
 		 * If we haven't selected a cpu, then we haven't looked for and kicked an
@@ -930,12 +957,15 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 	}
 
 	if (tctx->all_cell_cpus_allowed) {
+		// This is a task that can run on any cpu in the cell
+
 		cstat_inc(CSTAT_CELL_DSQ, tctx->cell, cctx);
 		/* Task can use any CPU in its cell, so use the cell DSQ */
 		if (!(cell = lookup_cell(tctx->cell)))
 			goto out;
 		basis_vtime = READ_ONCE(cell->vtime_now);
 	} else {
+		// This is a task that can only run on a specific cpu
 		cstat_inc(CSTAT_CPU_DSQ, tctx->cell, cctx);
 
 		/*
@@ -963,6 +993,9 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 		vtime = basis_vtime - slice_ns;
 
 	bpf_printk("inserting into dsq %u", tctx->dsq);
+	if (tctx->dsq == 0) {
+		scx_bpf_error("dsq is 0 in enqueue");
+	}
 	scx_bpf_dsq_insert_vtime(p, tctx->dsq, slice_ns, vtime, enq_flags);
 
 	/* Kick the CPU if needed */
@@ -1114,6 +1147,22 @@ void BPF_STRUCT_OPS(mitosis_tick, struct task_struct *p_run)
 		scx_bpf_error("tmp_cpumask should be null");
 		goto out;
 	}
+
+	// /* Recalculate L3 counts for all active cells after CPU assignment changes */
+	// bpf_for(cell_idx, 1, MAX_CELLS) {
+	// 	struct cell *cell;
+	// 	if (!(cell = lookup_cell(cell_idx)))
+	// 		goto out;
+
+	// 	if (!cell->in_use)
+	// 		continue;
+
+	// 	/* Recalculate L3 counts for each active cell */
+	// 	recalc_cell_l3_counts(cell_idx);
+	// }
+
+	/* Recalculate root cell's L3 counts after cpumask update */
+	// recalc_cell_l3_counts(ROOT_CELL_ID);
 
 	barrier();
 	WRITE_ONCE(applied_configuration_seq, local_configuration_seq);
@@ -1345,6 +1394,9 @@ static inline int cgroup_init_with_cpuset(struct cgrp_ctx *cgc,
 		bpf_cpumask_release(bpf_cpumask);
 		return -ENOENT;
 	}
+
+	/* Calculate L3 counts for the new cell */
+	recalc_cell_l3_counts(cell_idx);
 
 	cgc->cell = cell_idx;
 	cgc->cell_owner = true;
@@ -1647,7 +1699,8 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 	/* Configure root cell (cell 0) topology at init time using nr_l3 and l3_to_cpu masks */
 	recalc_cell_l3_counts(ROOT_CELL_ID);
 
-
+	/* Print root cell state for debugging */
+	print_cell_state(ROOT_CELL_ID);
 
 	/* Create (cell,L3) DSQs for all pairs. Userspace will populate maps. */
 	// This is a crazy over-estimate
