@@ -882,8 +882,9 @@ s32 BPF_STRUCT_OPS(mitosis_select_cpu, struct task_struct *p, s32 prev_cpu,
 	struct task_ctx *tctx;
 
 	static u64 select_cpu_counter = 0;
-	if ((++select_cpu_counter % 100) == 0)
-		bpf_printk("mitosis_select_cpu (count: %llu)", select_cpu_counter);
+	if ((++select_cpu_counter % 10000) == 0)
+		bpf_printk("mitosis_select_cpu (count: %llu)",
+			   select_cpu_counter);
 
 	increment_counter(COUNTER_SELECT_CPU);
 
@@ -949,7 +950,7 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 	u64 basis_vtime;
 
 	static u64 enqueue_counter = 0;
-	if ((++enqueue_counter % 100) == 0)
+	if ((++enqueue_counter % 1000) == 0)
 		bpf_printk("mitosis_enqueue (count: %llu)", enqueue_counter);
 
 	increment_counter(COUNTER_ENQUEUE);
@@ -1062,9 +1063,10 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 {
 	struct cpu_ctx *cctx;
 	u32 cell;
+	struct task_struct *p;
 
 	static u64 dispatch_counter = 0;
-	if ((++dispatch_counter % 100) == 0)
+	if ((++dispatch_counter % 10000) == 0)
 		bpf_printk("mitosis_dispatch (count: %llu)", dispatch_counter);
 
 	increment_counter(COUNTER_DISPATCH);
@@ -1074,19 +1076,23 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 
 	cell = READ_ONCE(cctx->cell);
 
-	bool found = false;
-	// Can we get into trouble when this isn't initialized?
-	u64 min_vtime_dsq;
-	u64 min_vtime;
+	/* Start from a valid DSQ */
+	u64 local_dsq = cpu_dsq(cpu);
+	if (!local_dsq) {
+		scx_bpf_error("cpu_dsq(%d) returned 0", cpu);
+		return;
+	}
 
-	struct task_struct *p;
+	u64 min_vtime_dsq = local_dsq;
+	u64 min_vtime = ~0ULL;      /* U64_MAX */
+	bool found = false;
 
 	// Get L3
 	u32 cpu_key = (u32)cpu;
 	u32 *l3_ptr = bpf_map_lookup_elem(&cpu_to_l3, &cpu_key);
 	s32 l3 = l3_ptr ? (s32)*l3_ptr : INVALID_L3_ID;
 
-	// With that we can peek make_cell_l3_dsq(cell, l3) for this min time value
+	/* Check the L3 queue */
 	if (l3 != INVALID_L3_ID) {
 		u64 cell_l3_dsq = make_cell_l3_dsq(cell, l3);
 		if (cell_l3_dsq != DSQ_ERROR) {
@@ -1096,6 +1102,7 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 				// 	"DISPATCH: cpu=%d l3=%d cell=%u dsq=%llu vtime=%llu task=%d",
 				// 	cpu, l3, cell, cell_l3_dsq,
 				// 	p->scx.dsq_vtime, p->pid);
+
 				min_vtime = p->scx.dsq_vtime;
 				min_vtime_dsq = cell_l3_dsq;
 				found = true;
@@ -1104,32 +1111,25 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 		}
 	}
 
-	u64 dsq = cpu_dsq(cpu);
-	if (!dsq)
-		scx_bpf_error(
-			"We got 0 for a dsq in dispatch, that ain't going to work");
-
-	bpf_for_each(scx_dsq, p, dsq, 0)
+	/* Check the CPU DSQ for a lower vtime */
+	bpf_for_each(scx_dsq, p, local_dsq, 0)
 	{
 		if (!found || time_before(p->scx.dsq_vtime, min_vtime)) {
 			min_vtime = p->scx.dsq_vtime;
-			min_vtime_dsq = dsq;
+			min_vtime_dsq = local_dsq;
 			found = true;
 		}
 		break;
 	}
 
-	// if (!min_vtime_dsq)
-	// 	scx_bpf_error(
-	// 		"We got 0 for a min_vtime_dsq in dispatch, that ain't going to work");
-
 	/*
-         * The move_to_local can fail if we raced with some other cpu in the cell
-         * and now the cell is empty. We have to ensure to try the cpu_dsq or else
-         * we might never wakeup.
-         */
+	* The move_to_local can fail if we raced with some other cpu in the cell
+	* and now the cell is empty. We have to ensure to try the cpu_dsq or else
+	* we might never wakeup.
+	*/
 	if (!scx_bpf_dsq_move_to_local(min_vtime_dsq))
-		scx_bpf_dsq_move_to_local(dsq);
+		scx_bpf_dsq_move_to_local(local_dsq);
+
 }
 
 /*
@@ -1138,7 +1138,7 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 void BPF_STRUCT_OPS(mitosis_tick, struct task_struct *p_run)
 {
 	static u64 tick_counter = 0;
-	if ((++tick_counter % 100) == 0) {
+	if ((++tick_counter % 1000) == 0) {
 		bpf_printk("mitosis_tick (count: %llu)", tick_counter);
 	}
 
@@ -1251,7 +1251,7 @@ void BPF_STRUCT_OPS(mitosis_running, struct task_struct *p)
 	struct cell *cell;
 
 	static u64 running_counter = 0;
-	if ((++running_counter % 100) == 0)
+	if ((++running_counter % 10000) == 0)
 		bpf_printk("mitosis_running (count: %llu)", running_counter);
 
 	if (!(tctx = lookup_task_ctx(p)) || !(cctx = lookup_cpu_ctx(-1)) ||
@@ -1307,7 +1307,7 @@ void BPF_STRUCT_OPS(mitosis_stopping, struct task_struct *p, bool runnable)
 	u32 cidx;
 
 	static u64 stopping_counter = 0;
-	if ((++stopping_counter % 100) == 0)
+	if ((++stopping_counter % 10000) == 0)
 		bpf_printk("mitosis_stopping (count: %llu)", stopping_counter);
 
 	if (!(cctx = lookup_cpu_ctx(-1)) || !(tctx = lookup_task_ctx(p)))
