@@ -47,6 +47,8 @@ pub enum Commands {
     },
     /// Print processor topology
     Topology,
+    /// Check if scx_mitosis is currently running
+    Running,
 }
 
 /// Verify that `bpftool` exists on the system and is executable.
@@ -399,6 +401,37 @@ pub fn run_cli() -> Result<()> {
             set_entry(&mut skel, &map, file)?;
         }
         Commands::Topology => print_topology()?,
+        Commands::Running => {
+            println!("{}", is_scx_mitosis_running()?);
+        }
     }
     Ok(())
+}
+
+/// Check if scx_mitosis is currently running by checking system files
+fn is_scx_mitosis_running() -> Result<bool> {
+    // Check if the sched_ext state file exists
+    let state_path = "/sys/kernel/sched_ext/state";
+    if !Path::new(state_path).exists() {
+        return Ok(false);
+    }
+
+    // Read the state file to see if sched_ext is enabled
+    let state = std::fs::read_to_string(state_path)
+        .context("Failed to read sched_ext state")?;
+
+    if state.trim() != "enabled" {
+        return Ok(false);
+    }
+
+    // If enabled, check if the current scheduler is mitosis
+    let opt_path = "/sys/kernel/sched_ext/root/ops";
+    if !Path::new(opt_path).exists() {
+        return Ok(false);
+    }
+
+    let opt = std::fs::read_to_string(opt_path)
+        .context("Failed to read sched_ext opt")?;
+
+    Ok(opt.trim() == "mitosis")
 }

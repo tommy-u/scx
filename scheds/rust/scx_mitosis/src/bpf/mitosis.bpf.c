@@ -1873,5 +1873,6 @@ struct sched_ext_ops mitosis = {
 	.dump_task = (void *)mitosis_dump_task,
 	.init = (void *)mitosis_init,
 	.exit = (void *)mitosis_exit,
+	/* The CLI expects name to remain "mitosis"*/
 	.name = "mitosis",
 };
