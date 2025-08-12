@@ -622,6 +622,22 @@ static void cstat_inc(enum cell_stat_idx idx, u32 cell, struct cpu_ctx *cctx)
 	cstat_add(idx, cell, cctx, 1);
 }
 
+/* Debug helper to decode and print DSQ components */
+static void debug_print_dsq(u32 dsq_id, const char *action)
+{
+	if (is_cpu_dsq(dsq_id)) {
+		u32 cpu = get_cpu_from_dsq(dsq_id);
+		bpf_printk("%s CPU_DSQ(cpu=%u) raw=%u", action, cpu, dsq_id);
+	} else if (is_cell_l3_dsq(dsq_id)) {
+		u32 cell = get_cell(dsq_id);
+		u32 l3 = get_l3(dsq_id);
+		bpf_printk("%s CELL_L3_DSQ(cell=%u,l3=%u) raw=%u", action, cell,
+			   l3, dsq_id);
+	} else {
+		bpf_printk("%s UNKNOWN_DSQ raw=%u", action, dsq_id);
+	}
+}
+
 static inline int update_task_cpumask(struct task_struct *p,
 				      struct task_ctx *tctx)
 {
@@ -721,10 +737,25 @@ static inline int update_task_cpumask(struct task_struct *p,
 			return -ENODEV;
 		}
 
-		/* Set task vtime to cell vtime */
+		/* Set target DSQ to cell+L3 DSQ for cell-schedulable tasks */
+		tctx->dsq = make_cell_l3_dsq(tctx->cell, tctx->l3);
+		if (tctx->dsq == DSQ_ERROR) {
+			scx_bpf_error(
+				"Failed invalid input for l3 dsq for cell=%d, l3=%d",
+				tctx->cell, tctx->l3);
+			return -EINVAL;
+		}
+
+		/* Set task vtime to per-(cell, L3) vtime */
 		if (!(cell = lookup_cell(tctx->cell)))
 			return -ENOENT;
-		p->scx.dsq_vtime = READ_ONCE(cell->vtime_now);
+
+		if (tctx->l3 < 0 || tctx->l3 >= MAX_L3S) {
+			scx_bpf_error("Invalid L3 ID %d for task %d in enqueue",
+				      tctx->l3, p->pid);
+			return -EINVAL;
+		}
+		p->scx.dsq_vtime = READ_ONCE(cell->l3_vtime_now[tctx->l3]);
 	} else {
 		/* Task is CPU-restricted, use per-CPU scheduling */
 		cpu = bpf_cpumask_any_distribute(p->cpus_ptr);
@@ -846,10 +877,13 @@ out:
 s32 BPF_STRUCT_OPS(mitosis_select_cpu, struct task_struct *p, s32 prev_cpu,
 		   u64 wake_flags)
 {
-	bpf_printk("mitosis_select_cpu");
 	s32 cpu;
 	struct cpu_ctx *cctx;
 	struct task_ctx *tctx;
+
+	static u64 select_cpu_counter = 0;
+	if ((++select_cpu_counter % 100) == 0)
+		bpf_printk("mitosis_select_cpu (count: %llu)", select_cpu_counter);
 
 	increment_counter(COUNTER_SELECT_CPU);
 
@@ -868,6 +902,7 @@ s32 BPF_STRUCT_OPS(mitosis_select_cpu, struct task_struct *p, s32 prev_cpu,
 		goto out;
 	}
 
+	/* Pinned path: only if our task really requires a per-CPU queue. */
 	if (!tctx->all_cell_cpus_allowed) {
 		cstat_inc(CSTAT_AFFN_VIOL, tctx->cell, cctx);
 		cpu = dsq_to_cpu(tctx->dsq);
@@ -876,56 +911,11 @@ s32 BPF_STRUCT_OPS(mitosis_select_cpu, struct task_struct *p, s32 prev_cpu,
 		goto out;
 	}
 
-	if (1) {
-		// Grab an idle core
-		if ((cpu = pick_idle_cpu(p, prev_cpu, cctx, tctx)) >= 0) {
-			cstat_inc(CSTAT_LOCAL, tctx->cell, cctx);
-			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_ns, 0);
-			goto out;
-		}
-	} else {
-#if 0
-		// Get the L3
-		// If the value is -1, then we need to pick an L3
-		if (tctx->l3 == -1) {
-			tctx->l3 = pick_l3_for_task(tctx->cell);
-			if (tctx->l3 < 0) {
-				scx_bpf_error("Failed to pick L3 for task %d", p->pid);
-			}
-		}
-		// L3 has to be correctly configured now.
-		if (tctx->l3 == -1)
-			scx_bpf_error("L3 is -1");
-		if (tctx->l3 >= MAX_L3S)
-			scx_bpf_error("L3 %d is out of range", tctx->l3);
-
-		// XXX
-		if (tctx->l3 != 0)
-			scx_bpf_error("L3 was supposed to be 0");
-
-		tctx->dsq = l3_dsq(tctx->l3);
-
-		l3_cpumask = lookup_l3_cpumask(tctx->l3);
-		if (l3_cpumask) {
-			const struct cpumask *idle_smtmask;
-			idle_smtmask = scx_bpf_get_idle_smtmask();
-			if (idle_smtmask) {
-				cpu = pick_idle_cpu_from(
-					p, l3_cpumask, prev_cpu, idle_smtmask);
-				if (cpu == -EBUSY)
-					cpu = bpf_cpumask_any_distribute(
-						l3_cpumask);
-				scx_bpf_put_idle_cpumask(idle_smtmask);
-				if (cpu >= 0) {
-					cstat_inc(CSTAT_LOCAL, tctx->cell,
-						  cctx);
-					scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL,
-							   slice_ns, 0);
-					goto out;
-				}
-			}
-		}
-#endif
+	// Grab an idle core
+	if ((cpu = pick_idle_cpu(p, prev_cpu, cctx, tctx)) >= 0) {
+		cstat_inc(CSTAT_LOCAL, tctx->cell, cctx);
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_ns, 0);
+		goto out;
 	}
 
 	if (!tctx->cpumask) {
@@ -950,7 +940,6 @@ out:
 
 void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 {
-	bpf_printk("mitosis_enqueue");
 	struct cpu_ctx *cctx;
 	struct task_ctx *tctx;
 	struct cell *cell;
@@ -958,6 +947,10 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 	u64 vtime = p->scx.dsq_vtime;
 	s32 cpu = -1;
 	u64 basis_vtime;
+
+	static u64 enqueue_counter = 0;
+	if ((++enqueue_counter % 100) == 0)
+		bpf_printk("mitosis_enqueue (count: %llu)", enqueue_counter);
 
 	increment_counter(COUNTER_ENQUEUE);
 
@@ -1006,10 +999,19 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 
 		cstat_inc(CSTAT_CELL_DSQ, tctx->cell, cctx);
 
-		/* Task can use any CPU in its cell, set basis_vtime from cell */
+		// I don't understand how a task could have an invalid l3 at this point
+		// because we configure them in mitosis_init
+
+		/* Task can use any CPU in its cell, set basis_vtime from per-(cell, L3) vtime */
 		if (!(cell = lookup_cell(tctx->cell)))
 			goto out;
-		basis_vtime = READ_ONCE(cell->vtime_now);
+
+		if (tctx->l3 < 0 || tctx->l3 >= MAX_L3S) {
+			scx_bpf_error("Invalid L3 ID %d for task %d in enqueue",
+				      tctx->l3, p->pid);
+			return;
+		}
+		basis_vtime = READ_ONCE(cell->l3_vtime_now[tctx->l3]);
 
 	} else {
 		// This is a task that can only run on a specific cpu
@@ -1039,7 +1041,7 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 	if (time_before(vtime, basis_vtime - slice_ns))
 		vtime = basis_vtime - slice_ns;
 
-	bpf_printk("inserting into dsq %u", tctx->dsq);
+	// debug_print_dsq(tctx->dsq, "inserting into");
 	if (tctx->dsq == 0) {
 		scx_bpf_error("dsq is 0 in enqueue");
 	}
@@ -1054,12 +1056,16 @@ out:
 		return;
 }
 
+// get_cell_from_cpu
+
 void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 {
-	// This cpu is associated with ONE L3, check the vtime compared to
-	// bpf_printk("mitosis_dispatch");
 	struct cpu_ctx *cctx;
 	u32 cell;
+
+	static u64 dispatch_counter = 0;
+	if ((++dispatch_counter % 100) == 0)
+		bpf_printk("mitosis_dispatch (count: %llu)", dispatch_counter);
 
 	increment_counter(COUNTER_DISPATCH);
 
@@ -1075,12 +1081,27 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 
 	struct task_struct *p;
 
-	bpf_for_each(scx_dsq, p, cell, 0)
-	{
-		min_vtime = p->scx.dsq_vtime;
-		min_vtime_dsq = cell;
-		found = true;
-		break;
+	// Get L3
+	u32 cpu_key = (u32)cpu;
+	u32 *l3_ptr = bpf_map_lookup_elem(&cpu_to_l3, &cpu_key);
+	s32 l3 = l3_ptr ? (s32)*l3_ptr : INVALID_L3_ID;
+
+	// With that we can peek make_cell_l3_dsq(cell, l3) for this min time value
+	if (l3 != INVALID_L3_ID) {
+		u64 cell_l3_dsq = make_cell_l3_dsq(cell, l3);
+		if (cell_l3_dsq != DSQ_ERROR) {
+			bpf_for_each(scx_dsq, p, cell_l3_dsq, 0)
+			{
+				// bpf_printk(
+				// 	"DISPATCH: cpu=%d l3=%d cell=%u dsq=%llu vtime=%llu task=%d",
+				// 	cpu, l3, cell, cell_l3_dsq,
+				// 	p->scx.dsq_vtime, p->pid);
+				min_vtime = p->scx.dsq_vtime;
+				min_vtime_dsq = cell_l3_dsq;
+				found = true;
+				break;
+			}
+		}
 	}
 
 	u64 dsq = cpu_dsq(cpu);
@@ -1098,9 +1119,9 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 		break;
 	}
 
-	if (!min_vtime_dsq)
-		scx_bpf_error(
-			"We got 0 for a min_vtime_dsq in dispatch, that ain't going to work");
+	// if (!min_vtime_dsq)
+	// 	scx_bpf_error(
+	// 		"We got 0 for a min_vtime_dsq in dispatch, that ain't going to work");
 
 	/*
          * The move_to_local can fail if we raced with some other cpu in the cell
@@ -1116,7 +1137,11 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
  */
 void BPF_STRUCT_OPS(mitosis_tick, struct task_struct *p_run)
 {
-	bpf_printk("mitosis_tick");
+	static u64 tick_counter = 0;
+	if ((++tick_counter % 100) == 0) {
+		bpf_printk("mitosis_tick (count: %llu)", tick_counter);
+	}
+
 	if (bpf_get_smp_processor_id())
 		return;
 
@@ -1221,22 +1246,52 @@ out:
 
 void BPF_STRUCT_OPS(mitosis_running, struct task_struct *p)
 {
-	// bpf_printk("mitosis_running");
 	struct cpu_ctx *cctx;
 	struct task_ctx *tctx;
 	struct cell *cell;
+
+	static u64 running_counter = 0;
+	if ((++running_counter % 100) == 0)
+		bpf_printk("mitosis_running (count: %llu)", running_counter);
 
 	if (!(tctx = lookup_task_ctx(p)) || !(cctx = lookup_cpu_ctx(-1)) ||
 	    !(cell = lookup_cell(cctx->cell)))
 		return;
 
+	/* Validate task's DSQ before it starts running */
+	if (tctx->dsq == 0) {
+		if (tctx->all_cell_cpus_allowed) {
+			scx_bpf_error(
+				"Task %d has invalid DSQ 0 in running callback (CELL-SCHEDULABLE task, can run on any CPU in cell %d)",
+				p->pid, tctx->cell);
+		} else {
+			scx_bpf_error(
+				"Task %d has invalid DSQ 0 in running callback (CORE-PINNED task, restricted to specific CPUs)",
+				p->pid);
+		}
+		return;
+	}
+
 	/*
-	 * Update both the CPU's cell and the cpu's vtime so the vtime's are
-	 * comparable at dispatch time.
+	 * Update legacy cell vtime for backwards compatibility
 	 */
 	if (time_before(READ_ONCE(cell->vtime_now), p->scx.dsq_vtime))
 		WRITE_ONCE(cell->vtime_now, p->scx.dsq_vtime);
 
+	/*
+	 * Update per-(cell, L3) vtime for cell-schedulable tasks
+	 */
+	if (tctx->all_cell_cpus_allowed && tctx->l3 >= 0 &&
+	    tctx->l3 < MAX_L3S) {
+		if (time_before(READ_ONCE(cell->l3_vtime_now[tctx->l3]),
+				p->scx.dsq_vtime))
+			WRITE_ONCE(cell->l3_vtime_now[tctx->l3],
+				   p->scx.dsq_vtime);
+	}
+
+	/*
+	 * Update CPU vtime for CPU-pinned tasks
+	 */
 	if (time_before(READ_ONCE(cctx->vtime_now), p->scx.dsq_vtime))
 		WRITE_ONCE(cctx->vtime_now, p->scx.dsq_vtime);
 
@@ -1245,12 +1300,15 @@ void BPF_STRUCT_OPS(mitosis_running, struct task_struct *p)
 
 void BPF_STRUCT_OPS(mitosis_stopping, struct task_struct *p, bool runnable)
 {
-	// bpf_printk("mitosis_stopping");
 	struct cpu_ctx *cctx;
 	struct task_ctx *tctx;
 	struct cell *cell;
 	u64 now, used;
 	u32 cidx;
+
+	static u64 stopping_counter = 0;
+	if ((++stopping_counter % 100) == 0)
+		bpf_printk("mitosis_stopping (count: %llu)", stopping_counter);
 
 	if (!(cctx = lookup_cpu_ctx(-1)) || !(tctx = lookup_task_ctx(p)))
 		return;
@@ -1272,6 +1330,18 @@ void BPF_STRUCT_OPS(mitosis_stopping, struct task_struct *p, bool runnable)
 			return;
 		}
 		*cell_cycles += used;
+
+		/*
+		 * For cell-schedulable tasks, also accumulate vtime into
+		 * per-cell per-L3 queues
+		 */
+		if (tctx->all_cell_cpus_allowed && tctx->l3 >= 0 &&
+		    tctx->l3 < MAX_L3S) {
+			/* Accumulate weighted execution time into per-(cell, L3) vtime */
+			cell->l3_vtime_now[tctx->l3] +=
+				used * DEFAULT_WEIGHT_MULTIPLIER /
+				p->scx.weight;
+		}
 	}
 }
 
@@ -1573,14 +1643,14 @@ s32 BPF_STRUCT_OPS(mitosis_init_task, struct task_struct *p,
 		return -EINVAL;
 	}
 
+	/* Initialize L3 to invalid before cell assignment */
+	tctx->l3 = INVALID_L3_ID;
+
 	if ((ret = update_task_cell(p, tctx, args->cgroup))) {
 		return ret;
 	}
 
-	// XXX
-	// set the task's l3 to -1 to indicate that its l3 has not been set yet
-	tctx->l3 = INVALID_L3_ID;
-
+	/* L3 should now be set by update_task_cell -> update_task_cpumask */
 	return 0;
 }
 
