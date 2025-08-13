@@ -5,12 +5,22 @@
 #   ./cgroup_cli.sh stop  [unit_name|all]
 #   ./cgroup_cli.sh status [unit_name|all]
 #   ./cgroup_cli.sh list
+#   ./cgroup_cli.sh util
 # Notes:
 # - cpuspec uses cpuset syntax: "0-7,16,18".
 # - unit names are prefixed with "mito-spin-".
 set -euo pipefail
 
 UNIT_PREFIX="mito-spin"
+
+ensure_cpuset() {
+  # Require cpuset controller under cgroup v2
+  local ctrls="/sys/fs/cgroup/cgroup.controllers"
+  if [[ ! -r "$ctrls" ]] || ! grep -qw cpuset "$ctrls"; then
+    echo "Error: cpuset controller not available (cgroup v2). Enable cpuset on your systemd hierarchy." >&2
+    exit 2
+  fi
+}
 
 unit_pat() {
   # Build a systemctl pattern like: mito-spin-<name>.service  (or mito-spin-*.service)
@@ -23,6 +33,8 @@ start_service() {
   local name=${1:?unit name required}
   local cpus=${2:?cpuspec required}
   local n=${3:?nthreads required}
+
+  ensure_cpuset
 
   [[ "$name" == "all" ]] && { echo "Error: 'all' is not a valid unit name."; exit 2; }
   [[ "$n" =~ ^[0-9]+$ && "$n" -gt 0 ]] || { echo "Error: nthreads must be a positive integer."; exit 2; }
@@ -40,7 +52,12 @@ start_service() {
     --unit="$unit" \
     "${props[@]}" \
     -E N="$n" \
-    bash -lc 'for i in $(seq 1 "$N"); do while :; do :; done & done; exec sleep infinity'
+    bash -lc '
+      for i in $(seq 1 "$N"); do
+        while :; do :; done &
+      done
+      exec sleep infinity
+    '
 
   echo "Started $unit on CPUs [$cpus] with $n spinner(s)."
 }
@@ -63,6 +80,10 @@ list_services() {
   systemctl list-units --type=service --all --plain --no-legend "$pat" || echo "  (none)"
 }
 
+mpstat_util() {
+  mpstat --dec=0 -P ALL 1
+}
+
 usage() {
   cat <<EOF
 Usage:
@@ -70,6 +91,7 @@ Usage:
   $0 stop   [unit_name|all]
   $0 status [unit_name|all]
   $0 list
+  $0 util
 Notes:
   - cpuspec like "0-7,16,18" (cpuset syntax).
   - unit name is prefixed with "$UNIT_PREFIX-".
@@ -81,5 +103,6 @@ case "${1:-}" in
   stop)   stop_service "${2:-all}";;
   status) status_service "${2:-all}";;
   list)   list_services;;
+  util) mpstat_util;;
   *)      usage; exit 1;;
 esac
