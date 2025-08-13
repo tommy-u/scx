@@ -97,7 +97,7 @@ fn attach_to_existing_map(existing_map_name: &str, new_map: &mut OpenMapMut) -> 
 }
 
 /// Display CPU to L3 cache relationships discovered from the host topology.
-fn print_topology() -> Result<()> {
+pub fn print_topology() -> Result<()> {
     let topo = Topology::new()?;
     println!("Number L3 caches: {}", topo.all_llcs.len());
     println!("CPU -> L3 id:");
@@ -160,7 +160,12 @@ fn count_maps_by_name(map_name: &str) -> Result<usize> {
 }
 
 /// Print all supported map names along with how many instances exist.
-fn list_maps() {
+fn list_maps() -> Result<()> {
+    // Check if scx_mitosis is running before listing maps
+    if !is_scx_mitosis_running()? {
+        println!("scx_mitosis is not currently running. Map counts may be 0 or inaccurate.");
+    }
+
     println!("Supported BPF Maps    Count");
     let names = ["cpu_to_l3", "l3_to_cpus"];
     for name in names {
@@ -171,6 +176,7 @@ fn list_maps() {
             println!("{:<20} \x1b[31m{}\x1b[0m", name, count);
         }
     }
+    Ok(())
 }
 
 /// Parse lines of the form `cpu,l3` from the provided reader.
@@ -216,6 +222,11 @@ fn read_cpu_l3_map(path: &str) -> Result<Vec<(usize, usize)>> {
 
 /// Print the contents of the requested map.
 fn get_entry(skel: &BpfSkel, map: &str) -> Result<()> {
+    // Ensure scx_mitosis is running before accessing BPF maps
+    if !is_scx_mitosis_running()? {
+        bail!("scx_mitosis is not currently running. Please start the scheduler first.");
+    }
+
     match map {
         "cpu_to_l3" => {
             // Iterate over all possible CPUs
@@ -266,6 +277,11 @@ fn get_entry(skel: &BpfSkel, map: &str) -> Result<()> {
 
 /// Update map entries either from a file or from the host topology.
 pub fn set_entry(skel: &mut BpfSkel, map: &str, file: Option<String>) -> Result<()> {
+    // Ensure scx_mitosis is running before modifying BPF maps
+    if !is_scx_mitosis_running()? {
+        bail!("scx_mitosis is not currently running. Please start the scheduler first.");
+    }
+
     match map {
         "cpu_to_l3" => {
             let map_entries = if let Some(path) = file {
@@ -390,7 +406,7 @@ pub fn run_cli() -> Result<()> {
 
     match cli.command {
         Commands::Splash => print_splash(),
-        Commands::List => list_maps(),
+        Commands::List => list_maps()?,
         Commands::Get { map } => {
             // Keep the returned MapHandle alive while operating on the map
             let (skel, _map_handles) = open_skel()?;

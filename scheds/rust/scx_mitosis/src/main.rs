@@ -5,7 +5,7 @@
 mod bpf_skel;
 pub use bpf_skel::*;
 pub mod bpf_intf;
-mod cli;
+pub mod cli;
 mod stats;
 
 use std::cmp::max;

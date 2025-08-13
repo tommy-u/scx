@@ -2754,6 +2754,7 @@ dependencies = [
  "log",
  "maplit",
  "rand",
+ "regex",
  "scx_stats",
  "scx_stats_derive",
  "scx_utils",
