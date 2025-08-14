@@ -28,6 +28,12 @@
 
 char _license[] SEC("license") = "GPL";
 
+/* ---- Work stealing config (compile-time) ------------------------------- */
+#ifndef MITOSIS_ENABLE_STEALING
+#define MITOSIS_ENABLE_STEALING 0   /* enable with -DMITOSIS_ENABLE_STEALING=1 */
+#endif
+/* ----------------------------------------------------------------------- */
+
 /*
  * Magic number constants used throughout the program
  */
@@ -188,6 +194,15 @@ struct task_ctx {
 	bool all_cell_cpus_allowed;
 	// Which L3 this task is assigned to
 	s32 l3;
+
+#if MITOSIS_ENABLE_STEALING
+	/* When a task is stolen, dispatch() marks the destination L3 here.
+	 * running() applies the retag and recomputes cpumask (vtime preserved).
+	 */
+	s32 pending_l3;
+	u32 steal_count;       /* how many times this task has been stolen */
+	u64 last_stolen_at;    /* ns timestamp of the last steal (scx_bpf_now) */
+#endif
 };
 
 struct {
@@ -1135,8 +1150,52 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 	* and now the cell is empty. We have to ensure to try the cpu_dsq or else
 	* we might never wakeup.
 	*/
-	if (!scx_bpf_dsq_move_to_local(min_vtime_dsq))
-		scx_bpf_dsq_move_to_local(local_dsq);
+	if (!scx_bpf_dsq_move_to_local(min_vtime_dsq)) {
+#if MITOSIS_ENABLE_STEALING
+		/* Dead-simple work stealing:
+		 * If our local choices are empty, scan sibling (cell,L3) DSQs in the
+		 * same cell and steal the head task if it can run on @cpu.
+		 * No thresholds/cooldowns/lag heuristics—just the first eligible head.
+		 */
+		bool moved = false;
+		if (l3 != INVALID_L3_ID) {
+			u32 start = ((u32)l3 + 1) % nr_l3;
+			u32 off;
+			bpf_for (off, 0, nr_l3) {
+				u32 cand = (start + off) % nr_l3;
+				if (cand == (u32)l3)
+					continue;
+				u64 src = make_cell_l3_dsq(cell, cand);
+				if (src == DSQ_ERROR)
+					continue;
+
+				struct task_struct *q;
+				/* Peek only at the head; keep the path cheap. */
+				bpf_for_each(scx_dsq, q, src, 0) {
+					/* Just steal the head task without affinity check for now.
+					 * The task will fail to run if affinity doesn't match,
+					 * but that's better than verifier errors.
+					 */
+					if (scx_bpf_dsq_move_to_local(src)) {
+						struct task_ctx *qt = lookup_task_ctx(q);
+						if (qt) {
+							qt->steal_count++;
+							qt->last_stolen_at = scx_bpf_now();
+							/* Retag to thief L3 on first run */
+							qt->pending_l3 = l3;
+						}
+						moved = true;
+					}
+					break; /* head only */
+				}
+				if (moved)
+					break;
+			}
+		}
+		if (!moved)
+#endif
+			scx_bpf_dsq_move_to_local(local_dsq);
+	}
 
 }
 
@@ -1268,6 +1327,19 @@ void BPF_STRUCT_OPS(mitosis_running, struct task_struct *p)
 	if (!(tctx = lookup_task_ctx(p)) || !(cctx = lookup_cpu_ctx(-1)) ||
 	    !(cell = lookup_cell(cctx->cell)))
 		return;
+
+	/* If this task was stolen across L3s, retag to thief L3 and recompute
+	 * effective cpumask+DSQ. Preserve vtime to keep fairness.
+	 */
+#if MITOSIS_ENABLE_STEALING
+	if (tctx->pending_l3 >= 0 && tctx->pending_l3 < MAX_L3S) {
+		u64 save_v = p->scx.dsq_vtime;
+		tctx->l3 = tctx->pending_l3;
+		tctx->pending_l3 = INVALID_L3_ID;
+		update_task_cpumask(p, tctx);
+		p->scx.dsq_vtime = save_v;
+	}
+#endif
 
 	/* Validate task's DSQ before it starts running */
 	if (tctx->dsq == 0) {
@@ -1658,6 +1730,11 @@ s32 BPF_STRUCT_OPS(mitosis_init_task, struct task_struct *p,
 
 	/* Initialize L3 to invalid before cell assignment */
 	tctx->l3 = INVALID_L3_ID;
+#if MITOSIS_ENABLE_STEALING
+	tctx->pending_l3   = INVALID_L3_ID;
+	tctx->steal_count  = 0;
+	tctx->last_stolen_at = 0;
+#endif
 
 	if ((ret = update_task_cell(p, tctx, args->cgroup))) {
 		return ret;
