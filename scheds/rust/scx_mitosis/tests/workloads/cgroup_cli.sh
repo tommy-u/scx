@@ -75,9 +75,9 @@ status_service() {
 list_services() {
   local pat; pat=$(unit_pat '*')
   echo "Active:"
-  systemctl list-units --type=service --state=active --plain --no-legend "$pat" || echo "  (none)"
+  systemctl --no-pager list-units --type=service --state=active --plain --no-legend "$pat" || echo "  (none)"
   echo "All:"
-  systemctl list-units --type=service --all --plain --no-legend "$pat" || echo "  (none)"
+  systemctl --no-pager list-units --type=service --all --plain --no-legend "$pat" || echo "  (none)"
 }
 
 mpstat_util() {
