@@ -222,10 +222,6 @@ fn read_cpu_l3_map(path: &str) -> Result<Vec<(usize, usize)>> {
 
 /// Print the contents of the requested map.
 fn get_entry(skel: &BpfSkel, map: &str) -> Result<()> {
-    // Ensure scx_mitosis is running before accessing BPF maps
-    if !is_scx_mitosis_running()? {
-        bail!("scx_mitosis is not currently running. Please start the scheduler first.");
-    }
 
     match map {
         "cpu_to_l3" => {
@@ -277,10 +273,6 @@ fn get_entry(skel: &BpfSkel, map: &str) -> Result<()> {
 
 /// Update map entries either from a file or from the host topology.
 pub fn set_entry(skel: &mut BpfSkel, map: &str, file: Option<String>) -> Result<()> {
-    // Ensure scx_mitosis is running before modifying BPF maps
-    if !is_scx_mitosis_running()? {
-        bail!("scx_mitosis is not currently running. Please start the scheduler first.");
-    }
 
     match map {
         "cpu_to_l3" => {
