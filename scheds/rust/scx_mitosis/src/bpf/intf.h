@@ -5,6 +5,12 @@
 #ifndef __INTF_H
 #define __INTF_H
 
+/* ---- Work stealing config (compile-time) ------------------------------- */
+#ifndef MITOSIS_ENABLE_STEALING
+#define MITOSIS_ENABLE_STEALING 0   /* enable with -DMITOSIS_ENABLE_STEALING=1 */
+#endif
+/* ----------------------------------------------------------------------- */
+
 #ifndef __KERNEL__
 typedef unsigned long long u64;
 typedef unsigned int u32;

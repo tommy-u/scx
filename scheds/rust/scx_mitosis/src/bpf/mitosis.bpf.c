@@ -28,12 +28,6 @@
 
 char _license[] SEC("license") = "GPL";
 
-/* ---- Work stealing config (compile-time) ------------------------------- */
-#ifndef MITOSIS_ENABLE_STEALING
-#define MITOSIS_ENABLE_STEALING 0   /* enable with -DMITOSIS_ENABLE_STEALING=1 */
-#endif
-/* ----------------------------------------------------------------------- */
-
 /*
  * Magic number constants used throughout the program
  */
@@ -67,6 +61,14 @@ const volatile bool smt_enabled = true;
 const volatile unsigned char all_cpus[MAX_CPUS_U8];
 
 const volatile u64 slice_ns;
+
+/* Work stealing statistics map - accessible from both BPF and userspace */
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__type(key, u32);
+	__type(value, u64);
+	__uint(max_entries, 1);
+} steal_stats SEC(".maps");
 
 /*
  * CPU assignment changes aren't fully in effect until a subsequent tick()
@@ -200,8 +202,8 @@ struct task_ctx {
 	 * running() applies the retag and recomputes cpumask (vtime preserved).
 	 */
 	s32 pending_l3;
-	u32 steal_count;       /* how many times this task has been stolen */
-	u64 last_stolen_at;    /* ns timestamp of the last steal (scx_bpf_now) */
+	u32 steal_count; /* how many times this task has been stolen */
+	u64 last_stolen_at; /* ns timestamp of the last steal (scx_bpf_now) */
 #endif
 };
 
@@ -902,7 +904,8 @@ s32 BPF_STRUCT_OPS(mitosis_select_cpu, struct task_struct *p, s32 prev_cpu,
 #if ENABLE_CALLBACK_COUNTERS
 	static u64 select_cpu_counter = 0;
 	if ((++select_cpu_counter % 10000) == 0)
-		bpf_printk("mitosis_select_cpu (count: %lluk)", select_cpu_counter / 1000);
+		bpf_printk("mitosis_select_cpu (count: %lluk)",
+			   select_cpu_counter / 1000);
 #endif
 
 	increment_counter(COUNTER_SELECT_CPU);
@@ -971,7 +974,8 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 #if ENABLE_CALLBACK_COUNTERS
 	static u64 enqueue_counter = 0;
 	if ((++enqueue_counter % 1000) == 0)
-		bpf_printk("mitosis_enqueue (count: %lluk)", enqueue_counter / 1000);
+		bpf_printk("mitosis_enqueue (count: %lluk)",
+			   enqueue_counter / 1000);
 #endif
 
 	increment_counter(COUNTER_ENQUEUE);
@@ -1089,7 +1093,8 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 #if ENABLE_CALLBACK_COUNTERS
 	static u64 dispatch_counter = 0;
 	if ((++dispatch_counter % 10000) == 0)
-		bpf_printk("mitosis_dispatch (count: %lluk)", dispatch_counter / 1000);
+		bpf_printk("mitosis_dispatch (count: %lluk)",
+			   dispatch_counter / 1000);
 #endif
 
 	increment_counter(COUNTER_DISPATCH);
@@ -1107,7 +1112,7 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 	}
 
 	u64 min_vtime_dsq = local_dsq;
-	u64 min_vtime = ~0ULL;      /* U64_MAX */
+	u64 min_vtime = ~0ULL; /* U64_MAX */
 	bool found = false;
 
 	// Get L3
@@ -1184,6 +1189,13 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 							/* Retag to thief L3 on first run */
 							qt->pending_l3 = l3;
 						}
+						/* Increment steal counter in map */
+						u32 key = 0;
+						u64 *count = bpf_map_lookup_elem(
+							&steal_stats, &key);
+						if (count)
+							__sync_fetch_and_add(
+								count, 1);
 						moved = true;
 					}
 					break; /* head only */
@@ -1196,7 +1208,6 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 #endif
 			scx_bpf_dsq_move_to_local(local_dsq);
 	}
-
 }
 
 /*
@@ -1289,27 +1300,34 @@ void BPF_STRUCT_OPS(mitosis_tick, struct task_struct *p_run)
 	}
 
 	// /* Recalculate L3 counts for all active cells after CPU assignment changes */
-	// bpf_for(cell_idx, 1, MAX_CELLS) {
-	// 	struct cell *cell;
-	// 	if (!(cell = lookup_cell(cell_idx)))
-	// 		goto out;
+	bpf_for(cell_idx, 1, MAX_CELLS) {
+		struct cell *cell;
+		if (!(cell = lookup_cell(cell_idx))) {
+			scx_bpf_error("Lookup for cell %d failed in tick()", cell_idx);
+			goto out;
+		}
 
-	// 	if (!cell->in_use)
-	// 		continue;
+		if (!cell->in_use)
+			continue;
 
-	// 	/* Recalculate L3 counts for each active cell */
-	// 	recalc_cell_l3_counts(cell_idx);
-	// }
+		/* Recalculate L3 counts for each active cell */
+		recalc_cell_l3_counts(cell_idx);
+	}
 
 	/* Recalculate root cell's L3 counts after cpumask update */
-	// recalc_cell_l3_counts(ROOT_CELL_ID);
+	recalc_cell_l3_counts(ROOT_CELL_ID);
 
 	barrier();
 	WRITE_ONCE(applied_configuration_seq, local_configuration_seq);
 
 	return;
 out:
-	bpf_cpumask_release(root_bpf_cpumask);
+
+	// Trying to make the verifier happy
+	if (root_bpf_cpumask)
+		bpf_cpumask_release(root_bpf_cpumask);
+	else
+		scx_bpf_error("root_bpf_cpumask should never be null");
 }
 
 void BPF_STRUCT_OPS(mitosis_running, struct task_struct *p)
@@ -1321,14 +1339,15 @@ void BPF_STRUCT_OPS(mitosis_running, struct task_struct *p)
 #if ENABLE_CALLBACK_COUNTERS
 	static u64 running_counter = 0;
 	if ((++running_counter % 10000) == 0)
-		bpf_printk("mitosis_running (count: %lluk)", running_counter / 1000);
+		bpf_printk("mitosis_running (count: %lluk)",
+			   running_counter / 1000);
 #endif
 
 	if (!(tctx = lookup_task_ctx(p)) || !(cctx = lookup_cpu_ctx(-1)) ||
 	    !(cell = lookup_cell(cctx->cell)))
 		return;
 
-	/* If this task was stolen across L3s, retag to thief L3 and recompute
+		/* If this task was stolen across L3s, retag to thief L3 and recompute
 	 * effective cpumask+DSQ. Preserve vtime to keep fairness.
 	 */
 #if MITOSIS_ENABLE_STEALING
@@ -1392,7 +1411,8 @@ void BPF_STRUCT_OPS(mitosis_stopping, struct task_struct *p, bool runnable)
 #if ENABLE_CALLBACK_COUNTERS
 	static u64 stopping_counter = 0;
 	if ((++stopping_counter % 10000) == 0)
-		bpf_printk("mitosis_stopping (count: %lluk)", stopping_counter / 1000);
+		bpf_printk("mitosis_stopping (count: %lluk)",
+			   stopping_counter / 1000);
 #endif
 
 	if (!(cctx = lookup_cpu_ctx(-1)) || !(tctx = lookup_task_ctx(p)))
@@ -1731,8 +1751,8 @@ s32 BPF_STRUCT_OPS(mitosis_init_task, struct task_struct *p,
 	/* Initialize L3 to invalid before cell assignment */
 	tctx->l3 = INVALID_L3_ID;
 #if MITOSIS_ENABLE_STEALING
-	tctx->pending_l3   = INVALID_L3_ID;
-	tctx->steal_count  = 0;
+	tctx->pending_l3 = INVALID_L3_ID;
+	tctx->steal_count = 0;
 	tctx->last_stolen_at = 0;
 #endif
 

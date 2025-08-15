@@ -405,6 +405,9 @@ impl<'a> Scheduler<'a> {
 
         self.log_all_queue_stats(&cell_stats_delta)?;
 
+        // Read total steals from BPF and update metrics
+        self.update_steal_metrics()?;
+
         // Read and print function counters
         self.print_and_reset_function_counters()?;
 
@@ -519,6 +522,52 @@ impl<'a> Scheduler<'a> {
                 .function_counters
                 .update_percpu(&key, &percpu_values, libbpf_rs::MapFlags::ANY)
                 .context("Failed to reset function counter")?;
+        }
+
+        Ok(())
+    }
+
+    fn update_steal_metrics(&mut self) -> Result<()> {
+        // Check if work stealing is enabled at compile time using the constant from intf.h
+        let stealing_enabled = bpf_intf::MITOSIS_ENABLE_STEALING != 0;
+        
+        if stealing_enabled {
+            // Work stealing is enabled, read from the BPF map
+            let key = 0u32.to_ne_bytes();
+            let steal_count = match self.skel.maps.steal_stats.lookup(&key, libbpf_rs::MapFlags::ANY) {
+                Ok(Some(data)) => {
+                    if data.len() >= 8 {
+                        u64::from_ne_bytes(data[0..8].try_into().unwrap())
+                    } else {
+                        debug!("steal_stats map data too small");
+                        0
+                    }
+                }
+                Ok(None) => {
+                    // Map entry doesn't exist, initialize it to 0
+                    let zero_val = 0u64.to_ne_bytes();
+                    if let Err(e) = self.skel.maps.steal_stats.update(&key, &zero_val, libbpf_rs::MapFlags::ANY) {
+                        debug!("Failed to initialize steal_stats map: {}", e);
+                    }
+                    0
+                }
+                Err(e) => {
+                    debug!("Failed to read steal_stats map: {}", e);
+                    0
+                }
+            };
+            
+            self.metrics.total_steals = steal_count;
+            
+            if steal_count > 0 {
+                info!("Work stealing active: total_steals={}", steal_count);
+            } else {
+                debug!("Work stealing enabled but no steals yet: total_steals=0");
+            }
+        } else {
+            // Work stealing is disabled at compile time
+            self.metrics.total_steals = 0;
+            debug!("Work stealing disabled at compile time (MITOSIS_ENABLE_STEALING=0)");
         }
 
         Ok(())
