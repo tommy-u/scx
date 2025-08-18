@@ -1,17 +1,27 @@
 #!/usr/bin/env bash
-# cgroup_cli.sh — start/stop N busy loops in transient systemd units bound to CPU sets.
-# Usage:
-#   ./cgroup_cli.sh start <unit_name> <cpuspec> <nthreads>
-#   ./cgroup_cli.sh stop  [unit_name|all]
-#   ./cgroup_cli.sh status [unit_name|all]
-#   ./cgroup_cli.sh list
-#   ./cgroup_cli.sh util
-# Notes:
-# - cpuspec uses cpuset syntax: "0-7,16,18".
-# - unit names are prefixed with "mito-spin-".
+
+# cgroup_cli.sh — Creates transient systemd services that run busy loops on specified CPU sets.
+# ./cgroup_cli.sh start <unit_name> <cpuspec> <nthreads>
+# see usage() for more details
+
 set -euo pipefail
 
+# Developed for the mitosis scheduler.
 UNIT_PREFIX="mito-spin"
+
+usage() {
+  cat <<EOF
+Usage:
+  $0 start  <unit_name> <cpuspec> <nthreads>
+  $0 stop   [unit_name|all]
+  $0 status [unit_name|all]
+  $0 list
+  $0 monitor
+Notes:
+  - cpuspec like "0-7,16,18" (cpuset syntax).
+  - unit name is prefixed with "$UNIT_PREFIX-".
+EOF
+}
 
 ensure_cpuset() {
   # Require cpuset controller under cgroup v2
@@ -22,7 +32,7 @@ ensure_cpuset() {
   fi
 }
 
-unit_pat() {
+unit_pattern() {
   # Build a systemctl pattern like: mito-spin-<name>.service  (or mito-spin-*.service)
   local name="${1:-*}"
   [[ "$name" == "all" || -z "$name" ]] && name="*"
@@ -39,7 +49,7 @@ start_service() {
   [[ "$name" == "all" ]] && { echo "Error: 'all' is not a valid unit name."; exit 2; }
   [[ "$n" =~ ^[0-9]+$ && "$n" -gt 0 ]] || { echo "Error: nthreads must be a positive integer."; exit 2; }
 
-  local unit; unit=$(unit_pat "$name")   # e.g., mito-spin-foo.service
+  local unit; unit=$(unit_pattern "$name")   # e.g., mito-spin-foo.service
 
   # Stop any stale instance quietly
   sudo systemctl stop "$unit" >/dev/null 2>&1 || true
@@ -63,46 +73,32 @@ start_service() {
 }
 
 stop_service() {
-  local pat; pat=$(unit_pat "${1:-all}")
-  sudo systemctl stop "$pat" || true
+  local pattern; pattern=$(unit_pattern "${1:-all}")
+  sudo systemctl stop "$pattern" || true
 }
 
 status_service() {
-  local pat; pat=$(unit_pat "${1:-all}")
-  systemctl --no-pager status "$pat" || true
+  local pattern; pattern=$(unit_pattern "${1:-all}")
+  systemctl --no-pager status "$pattern" || true
 }
 
 list_services() {
-  local pat; pat=$(unit_pat '*')
+  local pattern; pattern=$(unit_pattern '*')
   echo "Active:"
-  systemctl --no-pager list-units --type=service --state=active --plain --no-legend "$pat" || echo "  (none)"
+  systemctl --no-pager list-units --type=service --state=active --plain --no-legend "$pattern" || echo "  (none)"
   echo "All:"
-  systemctl --no-pager list-units --type=service --all --plain --no-legend "$pat" || echo "  (none)"
+  systemctl --no-pager list-units --type=service --all --plain --no-legend "$pattern" || echo "  (none)"
 }
 
-mpstat_util() {
+mpstat_monitor() {
   mpstat --dec=0 -P ALL 1
 }
 
-usage() {
-  cat <<EOF
-Usage:
-  $0 start  <unit_name> <cpuspec> <nthreads>
-  $0 stop   [unit_name|all]
-  $0 status [unit_name|all]
-  $0 list
-  $0 util
-Notes:
-  - cpuspec like "0-7,16,18" (cpuset syntax).
-  - unit name is prefixed with "$UNIT_PREFIX-".
-EOF
-}
-
 case "${1:-}" in
-  start)  start_service "${2:-}" "${3:-}" "${4:-}";;
-  stop)   stop_service "${2:-all}";;
-  status) status_service "${2:-all}";;
-  list)   list_services;;
-  util) mpstat_util;;
-  *)      usage; exit 1;;
+  start)   start_service "${2:-}" "${3:-}" "${4:-}";;
+  stop)    stop_service "${2:-all}";;
+  status)  status_service "${2:-all}";;
+  list)    list_services;;
+  monitor) mpstat_monitor;;
+  *)       usage; exit 1;;
 esac
