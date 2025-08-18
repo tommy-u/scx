@@ -571,62 +571,64 @@ impl<'a> Scheduler<'a> {
         Ok(())
     }
 
-    fn update_steal_metrics(&mut self) -> Result<()> {
-        // Check if work stealing is enabled at compile time using the constant from intf.h
-        let stealing_enabled = bpf_intf::MITOSIS_ENABLE_STEALING != 0;
-        let steals_debug = is_debug_flag_enabled("steals");
+fn update_steal_metrics(&mut self) -> Result<()> {
+    let steals_debug = is_debug_flag_enabled("steals");
 
-        if stealing_enabled {
-            // Work stealing is enabled, read from the BPF map
-            let key = 0u32.to_ne_bytes();
-            let steal_count = match self.skel.maps.steal_stats.lookup(&key, libbpf_rs::MapFlags::ANY) {
-                Ok(Some(data)) => {
-                    if data.len() >= 8 {
-                        u64::from_ne_bytes(data[0..8].try_into().unwrap())
-                    } else {
-                        if steals_debug {
-                            debug!("steal_stats map data too small");
-                        }
-                        0
-                    }
-                }
-                Ok(None) => {
-                    // Map entry doesn't exist, initialize it to 0
-                    let zero_val = 0u64.to_ne_bytes();
-                    if let Err(e) = self.skel.maps.steal_stats.update(&key, &zero_val, libbpf_rs::MapFlags::ANY) {
-                        if steals_debug {
-                            debug!("Failed to initialize steal_stats map: {}", e);
-                        }
-                    }
-                    0
-                }
-                Err(e) => {
-                    if steals_debug {
-                        debug!("Failed to read steal_stats map: {}", e);
-                    }
-                    0
-                }
-            };
-
-            self.metrics.total_steals = steal_count;
-
-            if steals_debug {
-                if steal_count > 0 {
-                    info!("Work stealing active: total_steals={}", steal_count);
-                } else {
-                    debug!("Work stealing enabled but no steals yet: total_steals=0");
-                }
-            }
-        } else {
-            // Work stealing is disabled at compile time
-            self.metrics.total_steals = 0;
-            if steals_debug {
-                debug!("Work stealing disabled at compile time (MITOSIS_ENABLE_STEALING=0)");
-            }
+    // Early out if stealing is compiled out.
+    if bpf_intf::MITOSIS_ENABLE_STEALING == 0 {
+        self.metrics.total_steals = 0;
+        if steals_debug {
+            debug!("Work stealing disabled at compile time (MITOSIS_ENABLE_STEALING=0)");
         }
-
-        Ok(())
+        return Ok(());
     }
+
+    let key = 0u32.to_ne_bytes();
+
+    // Read the count; lazily initialize the slot to 0 if it doesn't exist.
+    let steal_count = match self.skel.maps.steal_stats.lookup(&key, libbpf_rs::MapFlags::ANY) {
+        Ok(Some(data)) if data.len() >= 8 => {
+            u64::from_ne_bytes(data[..8].try_into().unwrap())
+        }
+        Ok(Some(_)) => {
+            if steals_debug {
+                debug!("steal_stats map data too small");
+            }
+            0
+        }
+        Ok(None) => {
+            let zero = 0u64.to_ne_bytes();
+            if let Err(e) = self.skel.maps.steal_stats.update(&key, &zero, libbpf_rs::MapFlags::ANY) {
+                if steals_debug {
+                    debug!("Failed to initialize steal_stats map: {e}");
+                }
+            }
+            0
+        }
+        Err(e) => {
+            if steals_debug {
+                debug!("Failed to read steal_stats map: {e}");
+            }
+            0
+        }
+    };
+
+    self.metrics.total_steals = steal_count;
+
+    // Early out if we aren't logging.
+    if !steals_debug {
+        return Ok(());
+    }
+
+    if steal_count > 0 {
+        info!("Work stealing active: total_steals={}", steal_count);
+    } else {
+        debug!("Work stealing enabled but no steals yet: total_steals=0");
+    }
+
+    Ok(())
+}
+
 
     fn refresh_bpf_cells(&mut self) -> Result<()> {
         // collect all cpus per cell.
