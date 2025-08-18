@@ -29,4 +29,4 @@ printf "Monitoring. Expect CPUs %s and %s ≈ 100%% busy; others mostly idle. Pr
 printf "Alternatively, we may see both tasks allocated to the same CPU, motivating work stealing."
 
 # Monitor
-"$CGROUP_CLI" util
+"$CGROUP_CLI" monitor

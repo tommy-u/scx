@@ -48,4 +48,4 @@ printf "  Cgroup 4: %s on CPUs %s\n" "$UNIT_NAME_4" "$TARGET_CPU_4"
 printf "\nMonitoring. Expect load distributed across 4 CPU groups. Press Ctrl+C to stop.\n\n"
 
 # Monitor
-"$CGROUP_CLI" util
+"$CGROUP_CLI" monitor

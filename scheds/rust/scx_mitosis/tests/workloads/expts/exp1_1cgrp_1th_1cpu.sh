@@ -27,4 +27,4 @@ printf "Starting workload:\n"
 printf "Monitoring. Expect CPU %s ≈ 100%% busy; others mostly idle. Press Ctrl+C to stop.\n\n" "$TARGET_CPU"
 
 # Monitor
-"$CGROUP_CLI" util
+"$CGROUP_CLI" monitor

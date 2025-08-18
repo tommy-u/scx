@@ -27,4 +27,4 @@ printf "Starting workload:\n"
 printf "Monitoring. Single thread can migrate across CPUs %s. Press Ctrl+C to stop.\n\n" "$TARGET_CPU"
 
 # Monitor
-"$CGROUP_CLI" util
+"$CGROUP_CLI" monitor
