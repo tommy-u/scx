@@ -7,7 +7,7 @@
 
 /* ---- Work stealing config (compile-time) ------------------------------- */
 #ifndef MITOSIS_ENABLE_STEALING
-#define MITOSIS_ENABLE_STEALING 0   /* enable with -DMITOSIS_ENABLE_STEALING=1 */
+#define MITOSIS_ENABLE_STEALING 1   /* enable with -DMITOSIS_ENABLE_STEALING=1 */
 #endif
 /* ----------------------------------------------------------------------- */
 

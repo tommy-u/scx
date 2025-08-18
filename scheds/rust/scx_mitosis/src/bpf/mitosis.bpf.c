@@ -661,10 +661,8 @@ static void debug_print_dsq(u32 dsq_id, const char *action)
 static inline int update_task_cpumask(struct task_struct *p,
 				      struct task_ctx *tctx)
 {
-	const struct cpumask *l3_mask;
 	const struct cpumask *cell_cpumask;
 	struct cpu_ctx *cpu_ctx;
-	struct cell *cell;
 	u32 cpu;
 
 	increment_counter(COUNTER_UPDATE_TASK_CPUMASK);
@@ -712,69 +710,50 @@ static inline int update_task_cpumask(struct task_struct *p,
 	// This used to be done by looking up the cell's dsq
 	// but now each cell has potentially multiple per l3 dsqs.
 	if (tctx->all_cell_cpus_allowed) {
-		/* If the task's L3 is not set, pick one */
+		/* --- Revalidate cached L3 before using it --- */
+		const struct cpumask *cell_mask = lookup_cell_cpumask(tctx->cell);
+		if (!cell_mask)
+			return -ENOENT;
+
+		const struct cpumask *l3_mask = NULL;
+		if (tctx->l3 != INVALID_L3_ID) {
+			l3_mask = lookup_l3_cpumask((u32)tctx->l3);
+			/* If the L3 no longer intersects the cell's cpumask, invalidate it */
+			if (!l3_mask || !bpf_cpumask_intersects(cell_mask, l3_mask))
+				tctx->l3 = INVALID_L3_ID;
+		}
+
+		/* --- Pick a new L3 if needed --- */
 		if (tctx->l3 == INVALID_L3_ID) {
-			tctx->l3 = pick_l3_for_task(tctx->cell);
-			if (tctx->l3 < 0) {
-				scx_bpf_error(
-					"Failed to pick L3 for task in cell %d",
-					tctx->cell);
+			s32 new_l3 = pick_l3_for_task(tctx->cell);
+			if (new_l3 < 0)
+				return -ENODEV;
+			tctx->l3 = new_l3;
+			l3_mask = lookup_l3_cpumask((u32)tctx->l3);
+			if (!l3_mask)
 				return -ENOENT;
-			}
 		}
 
-		/* Get the L3 mask and intersect with current effective cpumask */
-		l3_mask = lookup_l3_cpumask((u32)tctx->l3);
-		if (!l3_mask) {
-			scx_bpf_error("Failed to lookup L3 cpumask for L3 %d",
-				      tctx->l3);
-			return -ENOENT;
-		}
+		/* --- Narrow the effective cpumask by the chosen L3 --- */
+		/* tctx->cpumask already contains (task_affinity ∧ cell_mask) */
+		if (tctx->cpumask)
+			bpf_cpumask_and(tctx->cpumask, (const struct cpumask *)tctx->cpumask, l3_mask);
 
-		if (!tctx->cpumask) {
-			scx_bpf_error(
-				"tctx->cpumask is NULL before L3 intersection");
-			return -EINVAL;
-		}
-
-		if (!l3_mask) {
-			scx_bpf_error("l3_mask is NULL before cpumask_and");
-			return -ENOENT;
-		}
-		bpf_cpumask_and(tctx->cpumask,
-				(const struct cpumask *)tctx->cpumask, l3_mask);
-
-		if (!tctx->cpumask) {
-			scx_bpf_error(
-				"tctx->cpumask is NULL before bpf_cpumask_empty check");
-			return -EINVAL;
-		}
-		/* Verify the task has at least one CPU it can run on after L3 intersection */
-		if (bpf_cpumask_empty((const struct cpumask *)tctx->cpumask)) {
-			scx_bpf_error(
-				"Task %d has no available CPUs after L3 intersection (cell=%d, l3=%d)",
-				p->pid, tctx->cell, tctx->l3);
+		/* If empty after intersection, nothing can run here → error */
+		if (tctx->cpumask && bpf_cpumask_empty((const struct cpumask *)tctx->cpumask))
 			return -ENODEV;
-		}
 
-		/* Set target DSQ to cell+L3 DSQ for cell-schedulable tasks */
+		/* --- Point to the correct (cell,L3) DSQ and set vtime baseline --- */
 		tctx->dsq = make_cell_l3_dsq(tctx->cell, tctx->l3);
-		if (tctx->dsq == DSQ_ERROR) {
-			scx_bpf_error(
-				"Failed invalid input for l3 dsq for cell=%d, l3=%d",
-				tctx->cell, tctx->l3);
+		if (tctx->dsq == DSQ_ERROR)
 			return -EINVAL;
-		}
 
-		/* Set task vtime to per-(cell, L3) vtime */
-		if (!(cell = lookup_cell(tctx->cell)))
+		struct cell *cell = lookup_cell(tctx->cell);
+		if (!cell)
 			return -ENOENT;
 
-		if (tctx->l3 < 0 || tctx->l3 >= MAX_L3S) {
-			scx_bpf_error("Invalid L3 ID %d for task %d in enqueue",
-				      tctx->l3, p->pid);
+		if (tctx->l3 >= MAX_L3S)
 			return -EINVAL;
-		}
 		p->scx.dsq_vtime = READ_ONCE(cell->l3_vtime_now[tctx->l3]);
 	} else {
 		/* Task is CPU-restricted, use per-CPU scheduling */
