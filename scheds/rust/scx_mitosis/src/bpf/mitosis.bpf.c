@@ -23,9 +23,6 @@
 #include <scx/ravg_impl.bpf.h>
 #endif
 
-/* Enable/disable callback counter debugging */
-#define ENABLE_CALLBACK_COUNTERS 1
-
 char _license[] SEC("license") = "GPL";
 
 /*
@@ -880,13 +877,6 @@ s32 BPF_STRUCT_OPS(mitosis_select_cpu, struct task_struct *p, s32 prev_cpu,
 	struct cpu_ctx *cctx;
 	struct task_ctx *tctx;
 
-#if ENABLE_CALLBACK_COUNTERS
-	static u64 select_cpu_counter = 0;
-	if ((++select_cpu_counter % 10000) == 0)
-		bpf_printk("mitosis_select_cpu (count: %lluk)",
-			   select_cpu_counter / 1000);
-#endif
-
 	increment_counter(COUNTER_SELECT_CPU);
 
 	if (!(cctx = lookup_cpu_ctx(-1)) || !(tctx = lookup_task_ctx(p)))
@@ -949,13 +939,6 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 	u64 vtime = p->scx.dsq_vtime;
 	s32 cpu = -1;
 	u64 basis_vtime;
-
-#if ENABLE_CALLBACK_COUNTERS
-	static u64 enqueue_counter = 0;
-	if ((++enqueue_counter % 1000) == 0)
-		bpf_printk("mitosis_enqueue (count: %lluk)",
-			   enqueue_counter / 1000);
-#endif
 
 	increment_counter(COUNTER_ENQUEUE);
 
@@ -1068,13 +1051,6 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 	struct cpu_ctx *cctx;
 	u32 cell;
 	struct task_struct *p;
-
-#if ENABLE_CALLBACK_COUNTERS
-	static u64 dispatch_counter = 0;
-	if ((++dispatch_counter % 10000) == 0)
-		bpf_printk("mitosis_dispatch (count: %lluk)",
-			   dispatch_counter / 1000);
-#endif
 
 	increment_counter(COUNTER_DISPATCH);
 
@@ -1194,12 +1170,6 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
  */
 void BPF_STRUCT_OPS(mitosis_tick, struct task_struct *p_run)
 {
-#if ENABLE_CALLBACK_COUNTERS
-	static u64 tick_counter = 0;
-	if ((++tick_counter % 1000) == 0)
-		bpf_printk("mitosis_tick (count: %lluk)", tick_counter / 1000);
-#endif
-
 	if (bpf_get_smp_processor_id())
 		return;
 
@@ -1315,13 +1285,6 @@ void BPF_STRUCT_OPS(mitosis_running, struct task_struct *p)
 	struct task_ctx *tctx;
 	struct cell *cell;
 
-#if ENABLE_CALLBACK_COUNTERS
-	static u64 running_counter = 0;
-	if ((++running_counter % 10000) == 0)
-		bpf_printk("mitosis_running (count: %lluk)",
-			   running_counter / 1000);
-#endif
-
 	if (!(tctx = lookup_task_ctx(p)) || !(cctx = lookup_cpu_ctx(-1)) ||
 	    !(cell = lookup_cell(cctx->cell)))
 		return;
@@ -1386,13 +1349,6 @@ void BPF_STRUCT_OPS(mitosis_stopping, struct task_struct *p, bool runnable)
 	struct cell *cell;
 	u64 now, used;
 	u32 cidx;
-
-#if ENABLE_CALLBACK_COUNTERS
-	static u64 stopping_counter = 0;
-	if ((++stopping_counter % 10000) == 0)
-		bpf_printk("mitosis_stopping (count: %lluk)",
-			   stopping_counter / 1000);
-#endif
 
 	if (!(cctx = lookup_cpu_ctx(-1)) || !(tctx = lookup_task_ctx(p)))
 		return;
