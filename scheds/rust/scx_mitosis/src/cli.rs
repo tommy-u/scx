@@ -53,6 +53,11 @@ pub enum Commands {
     Running,
     /// Send hello command to debug socket
     Hello,
+    /// Enable/disable debug flags or show status
+    Debug {
+        /// Debug flags (+flag to enable, -flag to disable, ++ to enable all, -- to disable all) or "status"
+        flags: Vec<String>,
+    },
 }
 
 /// Verify that `bpftool` exists on the system and is executable.
@@ -419,19 +424,52 @@ pub fn run_cli() -> Result<()> {
         Commands::Hello => {
             send_hello_command()?;
         }
+        Commands::Debug { flags } => {
+            send_debug_commands(&flags)?;
+        }
     }
     Ok(())
 }
 
 fn send_hello_command() -> Result<()> {
     let socket_path = "/tmp/scx_mitosis.sock";
-    
+
     let mut stream = UnixStream::connect(socket_path)
         .context("Failed to connect to socket. Is scx_mitosis running?")?;
-    
+
     stream.write_all(b"hello\n")?;
-    
+
     println!("Hello command sent to scx_mitosis");
+    Ok(())
+}
+
+fn send_debug_commands(flags: &[String]) -> Result<()> {
+    if flags.is_empty() {
+        bail!("No flags provided. Use +flag to enable, -flag to disable, or 'status' to show current state");
+    }
+
+    let socket_path = "/tmp/scx_mitosis.sock";
+
+    let mut stream = UnixStream::connect(socket_path)
+        .context("Failed to connect to socket. Is scx_mitosis running?")?;
+
+    for flag in flags {
+        let flag = flag.trim();
+
+        if flag == "status" {
+            stream.write_all(b"debug-status\n")?;
+            continue;
+        }
+
+        if flag.starts_with('+') || flag.starts_with('-') {
+            stream.write_all(format!("{}\n", flag).as_bytes())?;
+        } else {
+            eprintln!("Invalid flag format: '{}'. Use +flag to enable or -flag to disable", flag);
+            continue;
+        }
+    }
+
+    println!("Debug commands sent to scx_mitosis");
     Ok(())
 }
 

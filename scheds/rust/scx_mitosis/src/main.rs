@@ -20,6 +20,7 @@ use std::time::Duration;
 use std::thread;
 use std::os::unix::net::UnixListener;
 use std::io::{BufRead, BufReader};
+use std::sync::Mutex;
 
 use anyhow::bail;
 use anyhow::Context;
@@ -51,6 +52,27 @@ use crate::cli::set_entry;
 const MAX_CELLS: usize = bpf_intf::consts_MAX_CELLS as usize;
 const NR_CSTATS: usize = bpf_intf::cell_stat_idx_NR_CSTATS as usize;
 const CPUMASK_LONG_ENTRIES: usize = 128;
+
+// Global debug flags
+static DEBUG_FLAGS: std::sync::LazyLock<Mutex<HashMap<String, bool>>> = std::sync::LazyLock::new(|| {
+    let mut flags = HashMap::new();
+    flags.insert("cpu_to_l3".to_string(), true);
+    flags.insert("l3_to_cpus".to_string(), true);
+    flags.insert("cells".to_string(), true);
+    flags.insert("counters".to_string(), true);
+    flags.insert("steals".to_string(), true);
+    flags.insert("metrics".to_string(), true);
+    Mutex::new(flags)
+});
+
+/// Check if a debug flag is enabled
+fn is_debug_flag_enabled(flag: &str) -> bool {
+    if let Ok(flags) = DEBUG_FLAGS.lock() {
+        flags.get(flag).copied().unwrap_or(false)
+    } else {
+        false
+    }
+}
 
 /// scx_mitosis: A dynamic affinity scheduler
 ///
@@ -304,7 +326,9 @@ impl<'a> Scheduler<'a> {
 
         self.metrics.update(&stats);
 
-        trace!("{} {}", prefix, stats);
+        if is_debug_flag_enabled("metrics") {
+            trace!("{} {}", prefix, stats);
+        }
 
         Ok(())
     }
@@ -353,7 +377,9 @@ impl<'a> Scheduler<'a> {
                 .or_default()
                 .update(&stats);
 
-            trace!("{} {}", prefix, stats);
+            if is_debug_flag_enabled("metrics") {
+                trace!("{} {}", prefix, stats);
+            }
         }
         Ok(())
     }
@@ -407,6 +433,9 @@ impl<'a> Scheduler<'a> {
 
     /// Collect metrics and out various debugging data like per cell stats, per-cpu stats, etc.
     fn collect_metrics(&mut self) -> Result<()> {
+        if is_debug_flag_enabled("metrics") {
+            trace!("Starting metrics collection cycle");
+        }
         let cell_stats_delta = self.calculate_cell_stat_delta()?;
 
         self.log_all_queue_stats(&cell_stats_delta)?;
@@ -416,25 +445,30 @@ impl<'a> Scheduler<'a> {
 
         // Read and print function counters
         self.print_and_reset_function_counters()?;
-
-        for (cell_id, cell) in &self.cells {
-            trace!("CELL[{}]: {}", cell_id, cell.cpus);
+        if is_debug_flag_enabled("cells") {
+            for (cell_id, cell) in &self.cells {
+                trace!("CELL[{}]: {}", cell_id, cell.cpus);
+            }
         }
 
-        let cpu_to_l3 = read_cpu_to_l3(&self.skel)?;
-        let cpu_l3_pairs: Vec<String> = cpu_to_l3.iter().enumerate()
-            .map(|(cpu, l3)| format!("{:3}:{:2}", cpu, l3))
-            .collect();
-        let chunked_output = cpu_l3_pairs
-            .chunks(16)
-            .map(|chunk| chunk.join(" "))
-            .collect::<Vec<_>>()
-            .join("\n");
-        info!("cpu_to_l3:\n{}", chunked_output);
+        if is_debug_flag_enabled("cpu_to_l3") {
+            let cpu_to_l3 = read_cpu_to_l3(&self.skel)?;
+            let cpu_l3_pairs: Vec<String> = cpu_to_l3.iter().enumerate()
+                .map(|(cpu, l3)| format!("{:3}:{:2}", cpu, l3))
+                .collect();
+            let chunked_output = cpu_l3_pairs
+                .chunks(16)
+                .map(|chunk| chunk.join(" "))
+                .collect::<Vec<_>>()
+                .join("\n");
+            info!("cpu_to_l3:\n{}", chunked_output);
+        }
 
-        let l3_to_cpus = read_l3_to_cpus(&self.skel)?;
-        for (l3_id, mask) in l3_to_cpus.iter() {
-            trace!("l3_to_cpus: [{:2}] = {}", l3_id, mask);
+        if is_debug_flag_enabled("l3_to_cpus") {
+            let l3_to_cpus = read_l3_to_cpus(&self.skel)?;
+            for (l3_id, mask) in l3_to_cpus.iter() {
+                trace!("l3_to_cpus: [{:2}] = {}", l3_id, mask);
+            }
         }
 
         for (cell_id, cell) in self.cells.iter() {
@@ -449,6 +483,10 @@ impl<'a> Scheduler<'a> {
         Ok(())
     }
     fn print_and_reset_function_counters(&mut self) -> Result<()> {
+        if !is_debug_flag_enabled("counters") {
+            return Ok(());
+        }
+
         let counter_names = ["select", "enqueue", "dispatch", "update_task_cpumask", "maybe_refresh_cell", "maybe_refresh_cell_true", "update_task_cell", "mitosis_cgroup_move"];
         let max_name_len = counter_names.iter().map(|name| name.len()).max().unwrap_or(0);
         let mut all_counters = Vec::new();
@@ -536,6 +574,7 @@ impl<'a> Scheduler<'a> {
     fn update_steal_metrics(&mut self) -> Result<()> {
         // Check if work stealing is enabled at compile time using the constant from intf.h
         let stealing_enabled = bpf_intf::MITOSIS_ENABLE_STEALING != 0;
+        let steals_debug = is_debug_flag_enabled("steals");
 
         if stealing_enabled {
             // Work stealing is enabled, read from the BPF map
@@ -545,7 +584,9 @@ impl<'a> Scheduler<'a> {
                     if data.len() >= 8 {
                         u64::from_ne_bytes(data[0..8].try_into().unwrap())
                     } else {
-                        debug!("steal_stats map data too small");
+                        if steals_debug {
+                            debug!("steal_stats map data too small");
+                        }
                         0
                     }
                 }
@@ -553,27 +594,35 @@ impl<'a> Scheduler<'a> {
                     // Map entry doesn't exist, initialize it to 0
                     let zero_val = 0u64.to_ne_bytes();
                     if let Err(e) = self.skel.maps.steal_stats.update(&key, &zero_val, libbpf_rs::MapFlags::ANY) {
-                        debug!("Failed to initialize steal_stats map: {}", e);
+                        if steals_debug {
+                            debug!("Failed to initialize steal_stats map: {}", e);
+                        }
                     }
                     0
                 }
                 Err(e) => {
-                    debug!("Failed to read steal_stats map: {}", e);
+                    if steals_debug {
+                        debug!("Failed to read steal_stats map: {}", e);
+                    }
                     0
                 }
             };
 
             self.metrics.total_steals = steal_count;
 
-            if steal_count > 0 {
-                info!("Work stealing active: total_steals={}", steal_count);
-            } else {
-                debug!("Work stealing enabled but no steals yet: total_steals=0");
+            if steals_debug {
+                if steal_count > 0 {
+                    info!("Work stealing active: total_steals={}", steal_count);
+                } else {
+                    debug!("Work stealing enabled but no steals yet: total_steals=0");
+                }
             }
         } else {
             // Work stealing is disabled at compile time
             self.metrics.total_steals = 0;
-            debug!("Work stealing disabled at compile time (MITOSIS_ENABLE_STEALING=0)");
+            if steals_debug {
+                debug!("Work stealing disabled at compile time (MITOSIS_ENABLE_STEALING=0)");
+            }
         }
 
         Ok(())
@@ -683,11 +732,75 @@ fn handle_hello_command() {
     println!("hello world");
 }
 
+fn handle_enable_debug_command(flag: &str) {
+    if let Ok(mut flags) = DEBUG_FLAGS.lock() {
+        if flags.contains_key(flag) {
+            flags.insert(flag.to_string(), true);
+            println!("Debug flag '{}' enabled", flag);
+        } else {
+            println!("Unknown debug flag: {}", flag);
+        }
+    }
+}
+
+fn handle_disable_debug_command(flag: &str) {
+    if let Ok(mut flags) = DEBUG_FLAGS.lock() {
+        if flags.contains_key(flag) {
+            flags.insert(flag.to_string(), false);
+            println!("Debug flag '{}' disabled", flag);
+        } else {
+            println!("Unknown debug flag: {}", flag);
+        }
+    }
+}
+
+fn handle_debug_status_command() {
+    if let Ok(flags) = DEBUG_FLAGS.lock() {
+        println!("Debug flags status:");
+        for (flag, enabled) in flags.iter() {
+            println!("  {}: {}", flag, if *enabled { "enabled" } else { "disabled" });
+        }
+    }
+}
+
+fn handle_enable_all_debug_command() {
+    if let Ok(mut flags) = DEBUG_FLAGS.lock() {
+        let flag_names: Vec<String> = flags.keys().cloned().collect();
+        for flag in flag_names {
+            flags.insert(flag, true);
+        }
+        println!("All debug flags enabled");
+    }
+}
+
+fn handle_disable_all_debug_command() {
+    if let Ok(mut flags) = DEBUG_FLAGS.lock() {
+        let flag_names: Vec<String> = flags.keys().cloned().collect();
+        for flag in flag_names {
+            flags.insert(flag, false);
+        }
+        println!("All debug flags disabled");
+    }
+}
+
 fn handle_socket_command(cmd: &str) {
-    match cmd.trim() {
-        "hello" => handle_hello_command(),
-        _ => {
-            eprintln!("Unknown command: {}", cmd);
+    let cmd = cmd.trim();
+
+    if cmd == "++" {
+        handle_enable_all_debug_command();
+    } else if cmd == "--" {
+        handle_disable_all_debug_command();
+    } else if cmd.starts_with('+') {
+        handle_enable_debug_command(&cmd[1..]);
+    } else if cmd.starts_with('-') {
+        handle_disable_debug_command(&cmd[1..]);
+    } else {
+        match cmd {
+            "hello" => handle_hello_command(),
+            "debug-status" => handle_debug_status_command(),
+            _ => {
+                eprintln!("Unknown command: {}", cmd);
+            }
         }
     }
 }
@@ -696,7 +809,7 @@ fn start_socket() {
     thread::spawn(|| {
         let socket_path = "/tmp/scx_mitosis.sock";
         let _ = std::fs::remove_file(socket_path); // Clean up old socket
-        
+
         let listener = match UnixListener::bind(socket_path) {
             Ok(l) => l,
             Err(e) => {
@@ -704,7 +817,7 @@ fn start_socket() {
                 return;
             }
         };
-        
+
         for stream in listener.incoming() {
             match stream {
                 Ok(stream) => {
