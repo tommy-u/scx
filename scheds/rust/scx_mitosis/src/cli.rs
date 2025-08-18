@@ -9,6 +9,8 @@ use std::mem::MaybeUninit;
 use std::os::unix::io::AsFd;
 use std::path::Path;
 use std::process::Command;
+use std::os::unix::net::UnixStream;
+use std::io::Write;
 
 use crate::bpf_skel::{BpfSkel, BpfSkelBuilder};
 use libbpf_rs::skel::OpenSkel;
@@ -49,6 +51,8 @@ pub enum Commands {
     Topology,
     /// Check if scx_mitosis is currently running
     Running,
+    /// Send hello command to debug socket
+    Hello,
 }
 
 /// Verify that `bpftool` exists on the system and is executable.
@@ -412,7 +416,22 @@ pub fn run_cli() -> Result<()> {
         Commands::Running => {
             println!("{}", is_scx_mitosis_running()?);
         }
+        Commands::Hello => {
+            send_hello_command()?;
+        }
     }
+    Ok(())
+}
+
+fn send_hello_command() -> Result<()> {
+    let socket_path = "/tmp/scx_mitosis.sock";
+    
+    let mut stream = UnixStream::connect(socket_path)
+        .context("Failed to connect to socket. Is scx_mitosis running?")?;
+    
+    stream.write_all(b"hello\n")?;
+    
+    println!("Hello command sent to scx_mitosis");
     Ok(())
 }
 

@@ -17,6 +17,9 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
+use std::thread;
+use std::os::unix::net::UnixListener;
+use std::io::{BufRead, BufReader};
 
 use anyhow::bail;
 use anyhow::Context;
@@ -180,6 +183,9 @@ impl<'a> Scheduler<'a> {
         set_entry(&mut skel, "l3_to_cpus", None)?;
 
         let stats_server = StatsServer::new(stats::server_data()).launch()?;
+
+        // Start the simple socket server
+        start_socket();
 
         Ok(Self {
             skel,
@@ -530,7 +536,7 @@ impl<'a> Scheduler<'a> {
     fn update_steal_metrics(&mut self) -> Result<()> {
         // Check if work stealing is enabled at compile time using the constant from intf.h
         let stealing_enabled = bpf_intf::MITOSIS_ENABLE_STEALING != 0;
-        
+
         if stealing_enabled {
             // Work stealing is enabled, read from the BPF map
             let key = 0u32.to_ne_bytes();
@@ -556,9 +562,9 @@ impl<'a> Scheduler<'a> {
                     0
                 }
             };
-            
+
             self.metrics.total_steals = steal_count;
-            
+
             if steal_count > 0 {
                 info!("Work stealing active: total_steals={}", steal_count);
             } else {
@@ -671,6 +677,48 @@ fn read_l3_to_cpus(skel: &BpfSkel) -> Result<Vec<(u32, Cpumask)>> {
         l3_to_cpus.push((l3, mask));
     }
     Ok(l3_to_cpus)
+}
+
+fn handle_hello_command() {
+    println!("hello world");
+}
+
+fn handle_socket_command(cmd: &str) {
+    match cmd.trim() {
+        "hello" => handle_hello_command(),
+        _ => {
+            eprintln!("Unknown command: {}", cmd);
+        }
+    }
+}
+
+fn start_socket() {
+    thread::spawn(|| {
+        let socket_path = "/tmp/scx_mitosis.sock";
+        let _ = std::fs::remove_file(socket_path); // Clean up old socket
+        
+        let listener = match UnixListener::bind(socket_path) {
+            Ok(l) => l,
+            Err(e) => {
+                eprintln!("Failed to bind socket: {}", e);
+                return;
+            }
+        };
+        
+        for stream in listener.incoming() {
+            match stream {
+                Ok(stream) => {
+                    let reader = BufReader::new(&stream);
+                    for line in reader.lines() {
+                        if let Ok(cmd) = line {
+                            handle_socket_command(&cmd);
+                        }
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
 }
 
 fn main() -> Result<()> {
