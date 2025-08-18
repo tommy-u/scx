@@ -68,7 +68,6 @@ start_service() {
       done
       exec sleep infinity
     '
-
   echo "Started $unit on CPUs [$cpus] with $n spinner(s)."
 }
 
@@ -84,10 +83,8 @@ status_service() {
 
 list_services() {
   local pattern; pattern=$(unit_pattern '*')
-  echo "Active:"
-  systemctl --no-pager list-units --type=service --state=active --plain --no-legend "$pattern" || echo "  (none)"
-  echo "All:"
-  systemctl --no-pager list-units --type=service --all --plain --no-legend "$pattern" || echo "  (none)"
+  echo "Active $UNIT_PREFIX services:"
+  systemctl --no-pager list-units --type=service --state=active --plain --no-legend "$pattern" | awk '{print $1}' || echo "  (none)"
 }
 
 mpstat_monitor() {
