@@ -56,14 +56,20 @@ const CPUMASK_LONG_ENTRIES: usize = 128;
 // Global debug flags
 static DEBUG_FLAGS: std::sync::LazyLock<Mutex<HashMap<String, bool>>> = std::sync::LazyLock::new(|| {
     let mut flags = HashMap::new();
-    flags.insert("cpu_to_l3".to_string(), true);
-    flags.insert("l3_to_cpus".to_string(), true);
+    flags.insert("cpu_to_l3".to_string(), false);
+    flags.insert("l3_to_cpus".to_string(), false);
     flags.insert("cells".to_string(), true);
     flags.insert("counters".to_string(), true);
     flags.insert("steals".to_string(), true);
     flags.insert("metrics".to_string(), true);
     Mutex::new(flags)
 });
+
+/// Debug Printers
+const ANSI_RED: &str = "\x1b[31m";
+const ANSI_GREEN: &str = "\x1b[32m";
+const ANSI_RESET: &str = "\x1b[0m";
+
 
 /// Check if a debug flag is enabled
 fn is_debug_flag_enabled(flag: &str) -> bool {
@@ -329,6 +335,7 @@ impl<'a> Scheduler<'a> {
         self.metrics.update(&stats);
 
         if is_debug_flag_enabled("metrics") {
+            trace!("{}{}{}", ANSI_GREEN, "metrics:", ANSI_RESET);
             trace!("{} {}", prefix, stats);
         }
 
@@ -432,12 +439,18 @@ impl<'a> Scheduler<'a> {
         }
         Ok(cell_stats_delta)
     }
+    /// Print debug printer status summary
+    fn print_debug_status(&self) {
+        if let Ok(flags) = DEBUG_FLAGS.lock() {
+            let mut disabled: Vec<_> = flags.iter().filter_map(|(flag, &enabled)| (!enabled).then_some(format!("{}-{}{}", ANSI_RED, flag, ANSI_RESET))).collect();
+            let mut enabled: Vec<_> = flags.iter().filter_map(|(flag, &enabled)| enabled.then_some(format!("{}+{}{}", ANSI_GREEN, flag, ANSI_RESET))).collect();
+            disabled.extend(enabled);
+            trace!("DEBUG: {}", if disabled.is_empty() { "none".to_string() } else { disabled.join(" ") });
+        }
+    }
 
     /// Collect metrics and out various debugging data like per cell stats, per-cpu stats, etc.
     fn collect_metrics(&mut self) -> Result<()> {
-        if is_debug_flag_enabled("metrics") {
-            trace!("Starting metrics collection cycle");
-        }
         let cell_stats_delta = self.calculate_cell_stat_delta()?;
 
         self.log_all_queue_stats(&cell_stats_delta)?;
@@ -448,6 +461,7 @@ impl<'a> Scheduler<'a> {
         // Read and print function counters
         self.print_and_reset_function_counters()?;
         if is_debug_flag_enabled("cells") {
+            trace!("{}cells:{}", ANSI_GREEN, ANSI_RESET);
             for (cell_id, cell) in &self.cells {
                 trace!("CELL[{}]: {}", cell_id, cell.cpus);
             }
@@ -463,10 +477,11 @@ impl<'a> Scheduler<'a> {
                 .map(|chunk| chunk.join(" "))
                 .collect::<Vec<_>>()
                 .join("\n");
-            info!("cpu_to_l3:\n{}", chunked_output);
+            trace!("{}cpu_to_l3:{}\n{}", ANSI_GREEN, ANSI_RESET, chunked_output);
         }
 
         if is_debug_flag_enabled("l3_to_cpus") {
+            trace!("{}l3_to_cpus:{}", ANSI_GREEN, ANSI_RESET);
             let l3_to_cpus = read_l3_to_cpus(&self.skel)?;
             for (l3_id, mask) in l3_to_cpus.iter() {
                 trace!("l3_to_cpus: [{:2}] = {}", l3_id, mask);
@@ -482,12 +497,16 @@ impl<'a> Scheduler<'a> {
         }
         self.metrics.num_cells = self.cells.len() as u32;
 
+        // Print debug printer status at the end of each cycle
+        self.print_debug_status();
+
         Ok(())
     }
     fn print_and_reset_function_counters(&mut self) -> Result<()> {
         if !is_debug_flag_enabled("counters") {
             return Ok(());
         }
+        trace!("{}counters:{}", ANSI_GREEN, ANSI_RESET);
 
         let counter_names = ["select", "enqueue", "dispatch", "update_task_cpumask", "maybe_refresh_cell", "maybe_refresh_cell_true", "update_task_cell", "mitosis_cgroup_move"];
         let max_name_len = counter_names.iter().map(|name| name.len()).max().unwrap_or(0);
@@ -529,7 +548,7 @@ impl<'a> Scheduler<'a> {
             let non_zero_values: Vec<u64> = counter_values.iter().filter(|&&v| v > 0).copied().collect();
 
             if non_zero_values.is_empty() {
-                info!("Fn[{:<width$}]: no activity", name, width = max_name_len);
+                trace!("Fn[{:<width$}]: no activity", name, width = max_name_len);
                 continue;
             }
 
@@ -547,7 +566,7 @@ impl<'a> Scheduler<'a> {
                 sorted_values[sorted_values.len() / 2]
             };
 
-            info!(
+            trace!(
                 "Fn[{:<width$}]: tot={:>5} min={:>5} med={:>5} max={:>5} ({} CPUs)",
                 name, total, min, median, max, non_zero_values.len(), width = max_name_len
             );
@@ -580,7 +599,8 @@ fn update_steal_metrics(&mut self) -> Result<()> {
     if bpf_intf::MITOSIS_ENABLE_STEALING == 0 {
         self.metrics.total_steals = 0;
         if steals_debug {
-            debug!("Work stealing disabled at compile time (MITOSIS_ENABLE_STEALING=0)");
+            trace!("{}steals:{}", ANSI_GREEN, ANSI_RESET);
+            trace!("Work stealing disabled at compile time (MITOSIS_ENABLE_STEALING=0)");
         }
         return Ok(());
     }
@@ -626,9 +646,11 @@ fn update_steal_metrics(&mut self) -> Result<()> {
     }
 
     if steals_delta > 0 {
-        info!("Work stealing active: steals_since_last={}", steals_delta);
+        trace!("{}steals:{}", ANSI_GREEN, ANSI_RESET);
+        trace!("Work stealing active: steals_since_last={}", steals_delta);
     } else {
-        debug!("Work stealing enabled but no new steals: steals_since_last={}", steals_delta);
+        trace!("{}steals:{}", ANSI_GREEN, ANSI_RESET);
+        trace!("Work stealing enabled but no new steals: steals_since_last={}", steals_delta);
     }
 
     Ok(())
