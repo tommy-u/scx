@@ -14,7 +14,7 @@ A utility script that creates transient systemd services running busy loops on s
 ./cgroup_cli.sh monitor                                 # Monitor CPU usage
 ```
 
-# How I've used cgroup_cli.sh to test scx_mitosis
+### How I've used cgroup_cli.sh to test scx_mitosis
 It's easy to make different numbers of cgroups, with different cpusets, and with different numbers of threads.
 This can be useful for testing hypotheses about why scx_mitosis barfed on a macrobenchmark.
 
