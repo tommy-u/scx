@@ -471,7 +471,7 @@ impl<'a> Scheduler<'a> {
             trace!("{}cells:{}", ANSI_GREEN, ANSI_RESET);
             for i in 0..self.cells.len() {
                 if let Some(cell) = self.cells.get(&(i as u32)) {
-                    trace!("  CELL[{}]: {}", i, cell.cpus);
+                    trace!("  CELL[{}]: {} ({:3} CPUs)", i, cell.cpus, cell.cpus.weight());
                 }
             }
         }
@@ -576,7 +576,7 @@ impl<'a> Scheduler<'a> {
             };
 
             trace!(
-                "  Fn[{:<width$}]: tot={:>6} min={:>4} med={:>4} max={:>5} ({} CPUs)",
+                "  Fn[{:<width$}]: tot={:>6} min={:>4} med={:>4} max={:>5} ({:3} CPUs)",
                 name, total, min, median, max, non_zero_values.len(), width = max_name_len
             );
         }
