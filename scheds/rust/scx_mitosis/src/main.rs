@@ -142,6 +142,7 @@ struct Scheduler<'a> {
     prev_total_steals: u64,
     metrics: Metrics,
     stats_server: StatsServer<(), Metrics>,
+    iteration_count: u64,
 }
 
 struct DistributionStats {
@@ -168,7 +169,7 @@ impl Display for DistributionStats {
         );
         write!(
             f,
-            "{:width$} {:5.1}% | Local:{:4.1}% From: CPU:{:4.1}% Cell:{:4.1}% | V:{:4.1}%",
+            "{:width$} {:5.1}% | Local:{:5.1}% From: CPU:{:4.1}% Cell:{:5.1}% | V:{:4.1}%",
             self.total_decisions,
             self.share_of_decisions_pct,
             self.local_q_pct,
@@ -224,6 +225,7 @@ impl<'a> Scheduler<'a> {
             prev_total_steals: 0,
             metrics: Metrics::default(),
             stats_server,
+            iteration_count: 0,
         })
     }
 
@@ -235,6 +237,7 @@ impl<'a> Scheduler<'a> {
         let (res_ch, req_ch) = self.stats_server.channels();
 
         while !shutdown.load(Ordering::Relaxed) && !uei_exited!(&self.skel, uei) {
+            self.iteration_count += 1;
             self.refresh_bpf_cells()?;
             self.collect_metrics()?;
 
@@ -316,7 +319,7 @@ impl<'a> Scheduler<'a> {
             }
         }
 
-        let prefix = "Total Decisions:";
+        let prefix = "  Total:  ";
 
         // Here we want to sum the affinity violations over all cells.
         let scope_affn_viols: u64 = cell_stats_delta
@@ -367,7 +370,7 @@ impl<'a> Scheduler<'a> {
             const MIN_CELL_WIDTH: usize = 2;
             let cell_width: usize = max(MIN_CELL_WIDTH, (MAX_CELLS as f64).log10().ceil() as usize);
 
-            let prefix = format!("        Cell {:width$}:", cell, width = cell_width);
+            let prefix = format!("  Cell {:width$}:", cell, width = cell_width);
 
             // Sum affinity violations for this cell
             let scope_affn_viols: u64 =
@@ -452,6 +455,9 @@ impl<'a> Scheduler<'a> {
 
     /// Collect metrics and out various debugging data like per cell stats, per-cpu stats, etc.
     fn collect_metrics(&mut self) -> Result<()> {
+        trace!("");
+        trace!("Iteration #{}", self.iteration_count);
+
         let cell_stats_delta = self.calculate_cell_stat_delta()?;
 
         self.log_all_queue_stats(&cell_stats_delta)?;
@@ -463,8 +469,10 @@ impl<'a> Scheduler<'a> {
         self.print_and_reset_function_counters()?;
         if is_debug_flag_enabled("cells") {
             trace!("{}cells:{}", ANSI_GREEN, ANSI_RESET);
-            for (cell_id, cell) in &self.cells {
-                trace!("CELL[{}]: {}", cell_id, cell.cpus);
+            for i in 0..self.cells.len() {
+                if let Some(cell) = self.cells.get(&(i as u32)) {
+                    trace!("  CELL[{}]: {}", i, cell.cpus);
+                }
             }
         }
 
@@ -568,7 +576,7 @@ impl<'a> Scheduler<'a> {
             };
 
             trace!(
-                "Fn[{:<width$}]: tot={:>5} min={:>5} med={:>5} max={:>5} ({} CPUs)",
+                "Fn[{:<width$}]: tot={:>6} min={:>4} med={:>4} max={:>5} ({} CPUs)",
                 name, total, min, median, max, non_zero_values.len(), width = max_name_len
             );
         }
@@ -601,7 +609,7 @@ fn update_steal_metrics(&mut self) -> Result<()> {
         self.metrics.total_steals = 0;
         if steals_debug {
             trace!("{}steals:{}", ANSI_GREEN, ANSI_RESET);
-            trace!("Work stealing disabled at compile time (MITOSIS_ENABLE_STEALING=0)");
+            trace!("  Work stealing disabled at compile time (MITOSIS_ENABLE_STEALING=0)");
         }
         return Ok(());
     }
@@ -648,10 +656,10 @@ fn update_steal_metrics(&mut self) -> Result<()> {
 
     if steals_delta > 0 {
         trace!("{}steals:{}", ANSI_GREEN, ANSI_RESET);
-        trace!("Work stealing active: steals_since_last={}", steals_delta);
+        trace!("  Work stealing active: steals_since_last={}", steals_delta);
     } else {
         trace!("{}steals:{}", ANSI_GREEN, ANSI_RESET);
-        trace!("Work stealing enabled but no new steals: steals_since_last={}", steals_delta);
+        trace!("  Work stealing enabled but no new steals: steals_since_last={}", steals_delta);
     }
 
     Ok(())
