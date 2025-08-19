@@ -557,7 +557,7 @@ impl<'a> Scheduler<'a> {
             let non_zero_values: Vec<u64> = counter_values.iter().filter(|&&v| v > 0).copied().collect();
 
             if non_zero_values.is_empty() {
-                trace!("Fn[{:<width$}]: no activity", name, width = max_name_len);
+                trace!("  Fn[{:<width$}]: no activity", name, width = max_name_len);
                 continue;
             }
 
@@ -576,7 +576,7 @@ impl<'a> Scheduler<'a> {
             };
 
             trace!(
-                "Fn[{:<width$}]: tot={:>6} min={:>4} med={:>4} max={:>5} ({} CPUs)",
+                "  Fn[{:<width$}]: tot={:>6} min={:>4} med={:>4} max={:>5} ({} CPUs)",
                 name, total, min, median, max, non_zero_values.len(), width = max_name_len
             );
         }
