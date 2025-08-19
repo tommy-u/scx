@@ -19,3 +19,6 @@ It's easy to make different numbers of cgroups, with different cpusets, and with
 This can be useful for testing hypotheses about why scx_mitosis barfed on a macrobenchmark.
 
 One time this was useful was showing that (before adding work stealing), scx_mitosis could get into states where it was not doing a good job with work conservation. It's easier to demonstrate this and narrow in on the simplest reproducible experiment. In this case I started by launching 80 threads on 80 cpus and saw that many were idle. Then I simplified it to launching 2 threads on 2 cpus that were members of different L3s. I could show that 50% of the time, a CPU would sit idle while the remaining one ran both threads. After adding work stealing, both experiments showed ideal work conservation.
+
+### Future use
+This may prove useful for developing and testing dynamic cell creation and destruction.
