@@ -55,7 +55,7 @@ pub enum Commands {
     Hello,
     /// Enable/disable debug flags or show status
     Debug {
-        /// Debug flags (+flag to enable, -flag to disable, ++ to enable all, -- to disable all) or "status"
+        /// Debug flags (+flag to enable, ~flag to disable, ++ to enable all, ~~ to disable all) or "status"
         flags: Vec<String>,
     },
 }
@@ -445,7 +445,7 @@ fn send_hello_command() -> Result<()> {
 
 fn send_debug_commands(flags: &[String]) -> Result<()> {
     if flags.is_empty() {
-        bail!("No flags provided. Use +flag to enable, -flag to disable, or 'status' to show current state");
+        bail!("No flags provided. Use +flag to enable, ~flag to disable, or 'status' to show current state");
     }
 
     let socket_path = "/tmp/scx_mitosis.sock";
@@ -461,10 +461,10 @@ fn send_debug_commands(flags: &[String]) -> Result<()> {
             continue;
         }
 
-        if flag.starts_with('+') || flag.starts_with('-') {
+        if flag.starts_with('+') || flag.starts_with('~') {
             stream.write_all(format!("{}\n", flag).as_bytes())?;
         } else {
-            eprintln!("Invalid flag format: '{}'. Use +flag to enable or -flag to disable", flag);
+            eprintln!("Invalid flag format: '{}'. Use +flag to enable or ~flag to disable", flag);
             continue;
         }
     }

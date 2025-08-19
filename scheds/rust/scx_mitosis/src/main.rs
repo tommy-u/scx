@@ -442,10 +442,11 @@ impl<'a> Scheduler<'a> {
     /// Print debug printer status summary
     fn print_debug_status(&self) {
         if let Ok(flags) = DEBUG_FLAGS.lock() {
-            let mut disabled: Vec<_> = flags.iter().filter_map(|(flag, &enabled)| (!enabled).then_some(format!("{}-{}{}", ANSI_RED, flag, ANSI_RESET))).collect();
+            let mut disabled: Vec<_> = flags.iter().filter_map(|(flag, &enabled)| (!enabled).then_some(format!("{}~{}{}", ANSI_RED, flag, ANSI_RESET))).collect();
             let mut enabled: Vec<_> = flags.iter().filter_map(|(flag, &enabled)| enabled.then_some(format!("{}+{}{}", ANSI_GREEN, flag, ANSI_RESET))).collect();
             disabled.extend(enabled);
-            trace!("DEBUG: {}", if disabled.is_empty() { "none".to_string() } else { disabled.join(" ") });
+            trace!("Debug Flags: {}", if disabled.is_empty() { "none".to_string() } else { disabled.join(" ") });
+            trace!("hint: sudo ./scx_mitosis cli debug ~/+<flag_name>");
         }
     }
 
@@ -817,11 +818,11 @@ fn handle_socket_command(cmd: &str) {
 
     if cmd == "++" {
         handle_enable_all_debug_command();
-    } else if cmd == "--" {
+    } else if cmd == "~~" {
         handle_disable_all_debug_command();
     } else if cmd.starts_with('+') {
         handle_enable_debug_command(&cmd[1..]);
-    } else if cmd.starts_with('-') {
+    } else if cmd.starts_with('~') {
         handle_disable_debug_command(&cmd[1..]);
     } else {
         match cmd {
