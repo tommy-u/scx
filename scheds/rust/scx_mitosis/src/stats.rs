@@ -65,7 +65,7 @@ pub struct Metrics {
     pub share_of_decisions_pct: f64,
     #[stat(desc = "Cell scheduling decisions")]
     total_decisions: u64,
-    #[stat(desc = "Total work steals")]
+    #[stat(desc = "Work steals since last update")]
     pub total_steals: u64,
     #[stat(desc = "Per-cell metrics")] // TODO: cell names
     pub cells: BTreeMap<u32, CellMetrics>,

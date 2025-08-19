@@ -133,6 +133,7 @@ struct Scheduler<'a> {
     // These are the per-cell cstats.
     // Note these are accumulated across all CPUs.
     prev_cell_stats: [[u64; NR_CSTATS]; MAX_CELLS],
+    prev_total_steals: u64,
     metrics: Metrics,
     stats_server: StatsServer<(), Metrics>,
 }
@@ -214,6 +215,7 @@ impl<'a> Scheduler<'a> {
             monitor_interval: Duration::from_secs(opts.monitor_interval_s),
             cells: HashMap::new(),
             prev_cell_stats: [[0; NR_CSTATS]; MAX_CELLS],
+            prev_total_steals: 0,
             metrics: Metrics::default(),
             stats_server,
         })
@@ -613,17 +615,20 @@ fn update_steal_metrics(&mut self) -> Result<()> {
         }
     };
 
-    self.metrics.total_steals = steal_count;
+    // Calculate steals since last update (delta)
+    let steals_delta = steal_count - self.prev_total_steals;
+    self.prev_total_steals = steal_count;
+    self.metrics.total_steals = steals_delta;
 
     // Early out if we aren't logging.
     if !steals_debug {
         return Ok(());
     }
 
-    if steal_count > 0 {
-        info!("Work stealing active: total_steals={}", steal_count);
+    if steals_delta > 0 {
+        info!("Work stealing active: steals_since_last={}", steals_delta);
     } else {
-        debug!("Work stealing enabled but no steals yet: total_steals=0");
+        debug!("Work stealing enabled but no new steals: steals_since_last={}", steals_delta);
     }
 
     Ok(())
