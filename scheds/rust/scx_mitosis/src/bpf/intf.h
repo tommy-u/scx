@@ -90,10 +90,6 @@ struct cell {
 	u32 l3_present_cnt;
 };
 
-struct l3_ctx {
-	u64 vtime_now;
-};
-
 // BPF DSQ IDs are 64 bits wide.
 // Bits: [63] [62 ..  0]
 //       [ B] [   ID   ]

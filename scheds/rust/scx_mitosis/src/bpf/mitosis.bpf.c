@@ -556,13 +556,6 @@ static __always_inline void recalc_cell_l3_counts(u32 cell_idx)
 	bpf_cpumask_release(tmp);
 }
 
-struct {
-	__uint(type, BPF_MAP_TYPE_ARRAY);
-	__type(key, u32);
-	__type(value, struct l3_ctx);
-	__uint(max_entries, MAX_L3S);
-} l3_ctxs SEC(".maps");
-
 // ************************* L3 *************************** //
 
 #define critical_section_enter() critical_section()
