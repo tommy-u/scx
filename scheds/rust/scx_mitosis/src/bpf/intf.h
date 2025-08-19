@@ -33,8 +33,6 @@ enum consts {
 	MAX_L3S = 16,
 	USAGE_HALF_LIFE = 100000000, /* 100ms */
 	DSQ_ERROR = 0xFFFFFFFF, /* Error value for DSQ functions */
-
-	PCPU_BASE = 1 << 24,
 };
 
 
@@ -172,25 +170,6 @@ static inline bool is_cpu_dsq(u32 dsq_id)
 	return id.common.type == DSQ_TYPE_CPU;
 }
 
-// Is this a per cell and per l3 dsq?
-static inline bool is_cell_l3_dsq(u32 dsq_id)
-{
-	union dsq_id id = { .raw = dsq_id };
-	return id.common.type == DSQ_TYPE_CELL_L3;
-}
-
-// Get the Queue type
-static inline enum dsq_type queue_type(u32 dsq_id)
-{
-	union dsq_id id = { .raw = dsq_id };
-	if (id.common.type == DSQ_TYPE_CPU)
-		return DSQ_TYPE_CPU;
-	else if (id.common.type == DSQ_TYPE_CELL_L3)
-		return DSQ_TYPE_CELL_L3;
-	else
-		return DSQ_UNKNOWN; /* Invalid/unknown type */
-}
-
 // If this is a per cpu dsq, return the cpu
 static inline u32 get_cpu_from_dsq(u32 dsq_id)
 {
@@ -200,24 +179,7 @@ static inline u32 get_cpu_from_dsq(u32 dsq_id)
 	return id.cpu.cpu;
 }
 
-static inline u32 get_cell(u32 dsq_id)
-{
-	union dsq_id id = { .raw = dsq_id };
-	if (id.common.type != DSQ_TYPE_CELL_L3)
-		return DSQ_ERROR;
-	return id.cell_l3.cell;
-}
-
-static inline u32 get_l3(u32 dsq_id)
-{
-	union dsq_id id = { .raw = dsq_id };
-	if (id.common.type != DSQ_TYPE_CELL_L3)
-		return DSQ_ERROR;
-	return id.cell_l3.l3;
-}
-
 /* Helper functions to construct DSQ IDs */
-
 static inline u32 make_cpu_dsq(u32 cpu)
 {
 	if (cpu >= MAX_CPUS)

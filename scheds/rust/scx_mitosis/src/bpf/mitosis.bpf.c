@@ -104,15 +104,6 @@ static inline void increment_counter(enum counter_idx idx)
  * translate.
  */
 
-static inline u32 cell_dsq(u32 cell)
-{
-	return cell;
-}
-
-static inline u32 dsq_to_cell(u32 dsq)
-{
-	return dsq;
-}
 
 static inline u32 cpu_dsq(u32 cpu)
 {
@@ -122,10 +113,6 @@ static inline u32 cpu_dsq(u32 cpu)
 static inline u32 dsq_to_cpu(u32 dsq)
 {
 	return get_cpu_from_dsq(dsq);
-}
-static inline bool is_pcpu(u32 dsq)
-{
-	return is_cpu_dsq(dsq);
 }
 
 static inline struct cgroup *lookup_cgrp_ancestor(struct cgroup *cgrp,
@@ -632,22 +619,6 @@ static void cstat_inc(enum cell_stat_idx idx, u32 cell, struct cpu_ctx *cctx)
 	cstat_add(idx, cell, cctx, 1);
 }
 
-/* Debug helper to decode and print DSQ components */
-static void debug_print_dsq(u32 dsq_id, const char *action)
-{
-	if (is_cpu_dsq(dsq_id)) {
-		u32 cpu = get_cpu_from_dsq(dsq_id);
-		bpf_printk("%s CPU_DSQ(cpu=%u) raw=%u", action, cpu, dsq_id);
-	} else if (is_cell_l3_dsq(dsq_id)) {
-		u32 cell = get_cell(dsq_id);
-		u32 l3 = get_l3(dsq_id);
-		bpf_printk("%s CELL_L3_DSQ(cell=%u,l3=%u) raw=%u", action, cell,
-			   l3, dsq_id);
-	} else {
-		bpf_printk("%s UNKNOWN_DSQ raw=%u", action, dsq_id);
-	}
-}
-
 static inline int update_task_cpumask(struct task_struct *p,
 				      struct task_ctx *tctx)
 {
@@ -1022,7 +993,6 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 	if (time_before(vtime, basis_vtime - slice_ns))
 		vtime = basis_vtime - slice_ns;
 
-	// debug_print_dsq(tctx->dsq, "inserting into");
 	if (tctx->dsq == 0) {
 		scx_bpf_error("dsq is 0 in enqueue");
 	}
