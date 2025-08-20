@@ -196,7 +196,7 @@ static inline u32 make_cpu_dsq(u32 cpu)
 	return id.raw;
 }
 
-static inline u32 make_cell_l3_dsq(u32 cell, u32 l3)
+static inline u32 get_cell_l3_dsq_id(u32 cell, u32 l3)
 {
 	if (cell >= MAX_CELLS || l3 >= MAX_L3S)
 		return DSQ_ERROR;

@@ -14,8 +14,7 @@
 
 // TODO:
 // remove cell vtime: done
-// remove cell dsqs
-// remove cell dsqs.
+// remove cell dsqs: done
 // fix debug printer.
 // move stuff to l3_aware.
 
@@ -53,6 +52,9 @@ enum mitosis_constants {
 
 	/* Bits per u32 for cpumask operations */
 	BITS_PER_U32 = 32,
+
+	/* No NUMA constraint for DSQ creation */
+	ANY_NUMA = -1,
 
 };
 
@@ -487,9 +489,8 @@ static __always_inline void print_cell_state(u32 cell_idx)
 		return;
 	}
 
-	bpf_printk(
-		"Cell %d: in_use=%d, cpu_cnt=%d, l3_present_cnt=%d",
-		cell_idx, cell->in_use, cell->cpu_cnt, cell->l3_present_cnt);
+	bpf_printk("Cell %d: in_use=%d, cpu_cnt=%d, l3_present_cnt=%d",
+		   cell_idx, cell->in_use, cell->cpu_cnt, cell->l3_present_cnt);
 
 	u32 l3;
 	// Print vtimes for L3s
@@ -709,7 +710,7 @@ static inline int update_task_cpumask(struct task_struct *p,
 			return -ENODEV;
 
 		/* --- Point to the correct (cell,L3) DSQ and set vtime baseline --- */
-		tctx->dsq = make_cell_l3_dsq(tctx->cell, tctx->l3);
+		tctx->dsq = get_cell_l3_dsq_id(tctx->cell, tctx->l3);
 		if (tctx->dsq == DSQ_ERROR)
 			return -EINVAL;
 
@@ -1040,7 +1041,7 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 
 	/* Check the L3 queue */
 	if (l3 != INVALID_L3_ID) {
-		u64 cell_l3_dsq = make_cell_l3_dsq(cell, l3);
+		u64 cell_l3_dsq = get_cell_l3_dsq_id(cell, l3);
 		if (cell_l3_dsq != DSQ_ERROR) {
 			bpf_for_each(scx_dsq, p, cell_l3_dsq, 0)
 			{
@@ -1088,7 +1089,7 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 				u32 cand = (start + off) % nr_l3;
 				if (cand == (u32)l3)
 					continue;
-				u64 src = make_cell_l3_dsq(cell, cand);
+				u64 src = get_cell_l3_dsq_id(cell, cand);
 				if (src == DSQ_ERROR)
 					continue;
 
@@ -1759,7 +1760,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 		if ((u8_ptr = MEMBER_VPTR(all_cpus, [i / 8]))) {
 			if (*u8_ptr & (1 << (i % 8))) {
 				bpf_cpumask_set_cpu(i, cpumask);
-				ret = scx_bpf_create_dsq(cpu_dsq(i), -1);
+				ret = scx_bpf_create_dsq(cpu_dsq(i), ANY_NUMA);
 				if (ret < 0) {
 					bpf_cpumask_release(cpumask);
 					return ret;
@@ -1823,10 +1824,10 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 		u32 l3;
 		bpf_for(l3, 0, nr_l3)
 		{
-			u32 id = make_cell_l3_dsq(i, l3);
+			u32 id = get_cell_l3_dsq_id(i, l3);
 			if (id == DSQ_ERROR)
 				return -EINVAL;
-			ret = scx_bpf_create_dsq(id, -1);
+			ret = scx_bpf_create_dsq(id, ANY_NUMA);
 			if (ret < 0)
 				return ret;
 		}
