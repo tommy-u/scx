@@ -69,13 +69,13 @@ struct cgrp_ctx {
 */
 struct cell {
 	// current vtime of the cell (for backwards compatibility)
-	u64 vtime_now;
-	// per-L3 vtimes within this cell
-	u64 l3_vtime_now[MAX_L3S];
+	// u64 vtime_now;
 	// Whether or not the cell is used or not
 	u32 in_use;
 	// Number of CPUs in this cell
 	u32 cpu_cnt;
+	// per-L3 vtimes within this cell
+	u64 l3_vtime_now[MAX_L3S];
 	// Number of CPUs from each L3 assigned to this cell
 	u32 l3_cpu_cnt[MAX_L3S];
 	// Number of L3s with at least one CPU in this cell

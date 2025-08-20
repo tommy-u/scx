@@ -12,6 +12,13 @@
  * cgroups belonging to the cell.
  */
 
+// TODO:
+// remove cell vtime: done
+// remove cell dsqs
+// remove cell dsqs.
+// fix debug printer.
+// move stuff to l3_aware.
+
 #include "intf.h"
 
 #ifdef LSP
@@ -481,11 +488,11 @@ static __always_inline void print_cell_state(u32 cell_idx)
 	}
 
 	bpf_printk(
-		"Cell %d: in_use=%d, cpu_cnt=%d, l3_present_cnt=%d, vtime=%llu",
-		cell_idx, cell->in_use, cell->cpu_cnt, cell->l3_present_cnt,
-		cell->vtime_now);
+		"Cell %d: in_use=%d, cpu_cnt=%d, l3_present_cnt=%d",
+		cell_idx, cell->in_use, cell->cpu_cnt, cell->l3_present_cnt);
 
 	u32 l3;
+	// Print vtimes for L3s
 	bpf_for(l3, 0, nr_l3)
 	{
 		if (cell->l3_cpu_cnt[l3] > 0) {
@@ -1273,20 +1280,11 @@ void BPF_STRUCT_OPS(mitosis_running, struct task_struct *p)
 	}
 
 	/*
-	 * Update legacy cell vtime for backwards compatibility
-	 */
-	if (time_before(READ_ONCE(cell->vtime_now), p->scx.dsq_vtime))
-		WRITE_ONCE(cell->vtime_now, p->scx.dsq_vtime);
-
-	/*
 	 * Update per-(cell, L3) vtime for cell-schedulable tasks
 	 */
-	if (tctx->all_cell_cpus_allowed && tctx->l3 >= 0 &&
-	    tctx->l3 < MAX_L3S) {
-		if (time_before(READ_ONCE(cell->l3_vtime_now[tctx->l3]),
-				p->scx.dsq_vtime))
-			WRITE_ONCE(cell->l3_vtime_now[tctx->l3],
-				   p->scx.dsq_vtime);
+	if (tctx->all_cell_cpus_allowed && tctx->l3 >= 0 && tctx->l3 < MAX_L3S) {
+		if (time_before(READ_ONCE(cell->l3_vtime_now[tctx->l3]), p->scx.dsq_vtime))
+			WRITE_ONCE(cell->l3_vtime_now[tctx->l3], p->scx.dsq_vtime);
 	}
 
 	/*
@@ -1710,9 +1708,8 @@ void BPF_STRUCT_OPS(mitosis_dump, struct scx_dump_ctx *dctx)
 		scx_bpf_dump("CELL[%d] CPUS=", i);
 		dump_cell_cpumask(i);
 		scx_bpf_dump("\n");
-		scx_bpf_dump("CELL[%d] vtime=%llu nr_queued=%d\n", i,
-			     READ_ONCE(cell->vtime_now),
-			     scx_bpf_dsq_nr_queued(i));
+		// TODO print L3 vtimes and number queued.
+		// scx_bpf_dump("CELL[%d] vtime=%llu nr_queued=%d\n", i, READ_ONCE(cell->vtime_now), scx_bpf_dsq_nr_queued(i));
 	}
 
 	bpf_for(i, 0, nr_possible_cpus)
