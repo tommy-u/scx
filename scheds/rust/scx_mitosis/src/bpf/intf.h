@@ -88,34 +88,50 @@ struct cell {
 	u32 l3_present_cnt;
 };
 
-// BPF DSQ IDs are 64 bits wide.
-// Bits: [63] [62 ..  0]
-//       [ B] [   ID   ]
-
-// When B is 1, it is a built-in DSQ. And you interpret it like this:
-// Bits: [63] [62] [61..32] [31 ..  0]
-//       [ 1] [ L] [   R  ] [    V   ]
-// Where L is the LOCAL_ON flag. When L is 1, V is the CPU number.
-
-// When B is 0, it's a user defined DSQ. Mitosis only writes the botom 32 bits.
-// Bits: [63] [62..32] [31 ..  0]
-//       [ 0] [00..00] [   VAL  ]
-
-// When B is 0, We consider it as follows:
-// Bits: [31..24] [        23..0        ]
-//       [Q-TYPE] [         DATA        ]
-
-// Only 1 bit of Q-TYPE will be set:
-
-// Q-TYPE = 0x1 = Per-CPU Q
-// Bits: [ 31..24 ] [ 23..16 ] [15..8] [7..0]
-//       [Q-TYPE:1] [ UNUSED ] [   CPU#     ]
-//       [00000001] [00000000]
-
-// Q-TYPE = 0x2 =
-// Bits: [ 31..24 ] [ 23..16 ] [15..8] [7..0]
-//       [Q-TYPE:2] [  CELL# ] [   L3 ID    ]
-//       [00000010]
+/*
+ * ================================
+ * BPF DSQ ID Layout (64 bits wide)
+ * ================================
+ *
+ * Top-level format:
+ *   [63] [62..0]
+ *   [ B] [  ID ]
+ *
+ * If B == 1 it is a Built-in DSQ
+ * -------------------------
+ *   [63] [62] [61 .. 32]  [31..0]
+ *   [ 1] [ L] [   R    ]  [  V  ]
+ *
+ *   - L (bit 62): LOCAL_ON flag
+ *       If L == 1 -> V = CPU number
+ *   - R (30 bits): reserved / unused
+ *   - V (32 bits): value (e.g., CPU#)
+ *
+ * If B == 0 -> User-defined DSQ
+ * -----------------------------
+ * Only the low 32 bits are used.
+ *
+ *   [63     ..     32] [31..0]
+ *   [  0s or unused  ] [ VAL ]
+ *
+ *   Mitosis uses VAL as follows:
+ *
+ *   [31..24] [23..0]
+ *   [QTYPE ] [DATA ]
+ *
+ *   QTYPE encodes the queue type (exactly one bit set):
+ *
+ *     QTYPE = 0x1 -> Per-CPU Q
+ *       [31 .. 24] [23 .. 16] [15    ..      0]
+ *       [00000001] [00000000] [      CPU#     ]
+ *       [Q-TYPE:1]
+ *
+ *     QTYPE = 0x2 -> Cell+L3 Q
+ *       [31 .. 24] [23 .. 16] [15      ..    0]
+ *       [00000010] [  CELL# ] [      L3ID     ]
+ *       [Q-TYPE:2]
+ *
+ */
 
 /* DSQ type enumeration */
 enum dsq_type {
