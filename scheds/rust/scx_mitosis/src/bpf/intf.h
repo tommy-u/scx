@@ -68,8 +68,6 @@ struct cgrp_ctx {
  * cell is the per-cell book-keeping
 */
 struct cell {
-	// current vtime of the cell (for backwards compatibility)
-	// u64 vtime_now;
 	// Whether or not the cell is used or not
 	u32 in_use;
 	// Number of CPUs in this cell
