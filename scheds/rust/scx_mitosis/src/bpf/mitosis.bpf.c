@@ -104,7 +104,6 @@ static inline void increment_counter(enum counter_idx idx)
  * translate.
  */
 
-
 static inline u32 cpu_dsq(u32 cpu)
 {
 	return make_cpu_dsq(cpu);
@@ -626,8 +625,6 @@ static inline int update_task_cpumask(struct task_struct *p,
 	struct cpu_ctx *cpu_ctx;
 	u32 cpu;
 
-	increment_counter(COUNTER_UPDATE_TASK_CPUMASK);
-
 	if (!(cell_cpumask = lookup_cell_cpumask(tctx->cell)))
 		return -ENOENT;
 
@@ -736,8 +733,6 @@ static inline int update_task_cell(struct task_struct *p, struct task_ctx *tctx,
 				   struct cgroup *cg)
 {
 	struct cgrp_ctx *cgc;
-	increment_counter(COUNTER_UPDATE_TASK_CELL);
-
 	if (!(cgc = lookup_cgrp_ctx(cg)))
 		return -ENOENT;
 
@@ -788,9 +783,7 @@ static __always_inline int maybe_refresh_cell(struct task_struct *p,
 					      struct task_ctx *tctx)
 {
 	struct cgroup *cgrp;
-	increment_counter(COUNTER_MAYBE_REFRESH_CELL);
 	if (tctx->configuration_seq != READ_ONCE(applied_configuration_seq)) {
-		increment_counter(COUNTER_MAYBE_REFRESH_CELL_TRUE);
 		if (!(cgrp = task_cgroup(p)))
 			return -1;
 		if (update_task_cell(p, tctx, cgrp)) {
@@ -1591,7 +1584,6 @@ void BPF_STRUCT_OPS(mitosis_cgroup_move, struct task_struct *p,
 		    struct cgroup *from, struct cgroup *to)
 {
 	struct task_ctx *tctx;
-	increment_counter(COUNTER_MITOSIS_CGROUP_MOVE);
 
 	if (!(tctx = lookup_task_ctx(p)))
 		return;

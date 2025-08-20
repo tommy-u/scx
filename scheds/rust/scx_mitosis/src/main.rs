@@ -517,7 +517,7 @@ impl<'a> Scheduler<'a> {
         }
         trace!("{}counters:{}", ANSI_GREEN, ANSI_RESET);
 
-        let counter_names = ["select", "enqueue", "dispatch", "update_task_cpumask", "maybe_refresh_cell", "maybe_refresh_cell_true", "update_task_cell", "mitosis_cgroup_move"];
+        let counter_names = ["select", "enqueue", "dispatch"];
         let max_name_len = counter_names.iter().map(|name| name.len()).max().unwrap_or(0);
         let mut all_counters = Vec::new();
 
