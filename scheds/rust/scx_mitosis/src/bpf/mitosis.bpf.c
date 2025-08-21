@@ -19,8 +19,10 @@
 // move stuff to l3_aware.
 // Do we update all cached cell state when they change?
 // One call to check if dsq input is valid
+// should have ifdef around steal_stats map?
 
 #include "intf.h"
+#include "common.bpf.h"
 
 #ifdef LSP
 #define __bpf__
@@ -42,7 +44,6 @@ const volatile bool smt_enabled = true;
 const volatile unsigned char all_cpus[MAX_CPUS_U8];
 
 const volatile u64 slice_ns;
-
 
 /*
  * Magic number constants used throughout the program
@@ -69,14 +70,7 @@ enum mitosis_constants {
 	/* No NUMA constraint for DSQ creation */
 	ANY_NUMA = -1,
 };
-
-/* Work stealing statistics map - accessible from both BPF and userspace */
-struct {
-	__uint(type, BPF_MAP_TYPE_ARRAY);
-	__type(key, u32);
-	__type(value, u64);
-	__uint(max_entries, 1);
-} steal_stats SEC(".maps");
+#include "l3_aware.c"
 
 /*
  * CPU assignment changes aren't fully in effect until a subsequent tick()
@@ -166,18 +160,10 @@ union dsq_id {
 } __attribute__((packed));
 
 /* Static assertions to ensure correct sizes */
-#ifdef __KERNEL__
-/* In kernel/BPF context, use BUILD_BUG_ON */
-#define STATIC_ASSERT(cond, msg) BUILD_BUG_ON(!(cond))
-#else
-/* In userspace, use _Static_assert (C11) */
-#define STATIC_ASSERT(cond, msg) _Static_assert(cond, msg)
-#endif
-
 /* Verify that all DSQ structures are exactly 32 bits */
-STATIC_ASSERT(sizeof(struct dsq_cpu) == 4, "dsq_cpu must be 32 bits");
-STATIC_ASSERT(sizeof(struct dsq_cell_l3) == 4, "dsq_cell_l3 must be 32 bits");
-STATIC_ASSERT(sizeof(union dsq_id) == 4, "dsq_id union must be 32 bits");
+_Static_assert(sizeof(struct dsq_cpu) == 4, "dsq_cpu must be 32 bits");
+_Static_assert(sizeof(struct dsq_cell_l3) == 4, "dsq_cell_l3 must be 32 bits");
+_Static_assert(sizeof(union dsq_id) == 4, "dsq_id union must be 32 bits");
 
 /* Inline helper functions for DSQ ID manipulation */
 
@@ -224,6 +210,14 @@ struct {
 	__uint(max_entries, NR_COUNTERS);
 } function_counters SEC(".maps");
 
+/* Work stealing statistics map - accessible from both BPF and userspace */
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__type(key, u32);
+	__type(value, u64);
+	__uint(max_entries, 1);
+} steal_stats SEC(".maps");
+
 static inline void increment_counter(enum counter_idx idx)
 {
 	u64 *counter;
@@ -234,17 +228,6 @@ static inline void increment_counter(enum counter_idx idx)
 		(*counter)++;
 }
 
-/*
- * We store per-cpu values along with per-cell values. Helper functions to
- * translate.
- */
-
-
-
-static inline u32 dsq_to_cpu(u32 dsq)
-{
-	return get_cpu_from_dsq(dsq);
-}
 
 static inline struct cgroup *lookup_cgrp_ancestor(struct cgroup *cgrp,
 						  u32 ancestor)
@@ -315,7 +298,7 @@ struct task_ctx {
 #if MITOSIS_ENABLE_STEALING
 	/* When a task is stolen, dispatch() marks the destination L3 here.
 	 * running() applies the retag and recomputes cpumask (vtime preserved).
-	 */
+	*/
 	s32 pending_l3;
 	u32 steal_count; /* how many times this task has been stolen */
 	u64 last_stolen_at; /* ns timestamp of the last steal (scx_bpf_now) */
@@ -368,7 +351,6 @@ static inline struct cpu_ctx *lookup_cpu_ctx(int cpu)
 
 struct cell cells[MAX_CELLS];
 
-// Get a kernel pointer to a cell struct from an index into the cell
 static inline struct cell *lookup_cell(int idx)
 {
 	struct cell *cell;
@@ -395,9 +377,8 @@ static inline int allocate_cell()
 			return -1;
 
 		if (__sync_bool_compare_and_swap(&c->in_use, 0, 1)) {
-			// These might need to be made concurrent safe
-			__builtin_memset(c->l3_cpu_cnt, 0,
-					 sizeof(c->l3_cpu_cnt));
+			// TODO: is this concurrent safe?
+			__builtin_memset(c->l3_cpu_cnt, 0, sizeof(c->l3_cpu_cnt));
 			c->l3_present_cnt = 0;
 			return cell_idx;
 		}
@@ -485,123 +466,8 @@ static __always_inline int critical_section()
 	return 0;
 }
 
-/*
- * A couple of tricky things about checking a cgroup's cpumask:
- *
- * First, we need an RCU pointer to pass to cpumask kfuncs. The only way to get
- * this right now is to copy the cpumask to a map entry. Given that cgroup init
- * could be re-entrant we have a few per-cpu entries in a map to make this
- * doable.
- *
- * Second, cpumask can sometimes be stored as an array in-situ or as a pointer
- * and with different lengths. Some bpf_core_type_matches finagling can make
- * this all work.
- */
-#define MAX_CPUMASK_ENTRIES (4)
 
-/*
- * We don't know how big struct cpumask is at compile time, so just allocate a
- * large space and check that it is big enough at runtime
- */
-#define CPUMASK_LONG_ENTRIES (128)
-#define CPUMASK_SIZE (sizeof(long) * CPUMASK_LONG_ENTRIES)
 
-struct cpumask_entry {
-	unsigned long cpumask[CPUMASK_LONG_ENTRIES];
-	u64 used;
-};
-
-// ************************* L3 *************************** //
-// This might be the eventual way to do it, but let's stick with the array for now.
-
-// #define MAX_L3S  64
-
-// struct l3_cpumask_wrapper {
-//     struct bpf_cpumask __kptr *mask;
-// };
-
-// struct {
-//     __uint(type, BPF_MAP_TYPE_ARRAY);   /* or HASH if sparse */
-//     __type(key, u32);                   /* L3 id             */
-//     __type(value, struct l3_cpumask_wrapper);
-//     __uint(max_entries, MAX_L3S);
-// } l3_cpumasks SEC(".maps");
-
-// A CPU -> L3 cache ID map
-struct {
-	__uint(type, BPF_MAP_TYPE_ARRAY);
-	__type(key, u32);
-	__type(value, u32);
-	__uint(max_entries, MAX_CPUS);
-} cpu_to_l3 SEC(".maps");
-
-// It's also an option to just compute this from the cpu_to_l3 map.
-struct l3_cpu_mask {
-	unsigned long cpumask[CPUMASK_LONG_ENTRIES];
-};
-
-struct {
-	__uint(type, BPF_MAP_TYPE_ARRAY);
-	__type(key, u32);
-	__type(value, struct l3_cpu_mask);
-	__uint(max_entries, MAX_L3S);
-} l3_to_cpus SEC(".maps");
-
-static inline const struct cpumask *lookup_l3_cpumask(u32 l3)
-{
-	struct l3_cpu_mask *mask;
-
-	if (!(mask = bpf_map_lookup_elem(&l3_to_cpus, &l3))) {
-		scx_bpf_error("no l3 cpumask, l3: %d, %p", l3, &l3_to_cpus);
-		return NULL;
-	}
-
-	return (const struct cpumask *)mask;
-}
-
-/**
- * Weighted random selection of an L3 cache domain for a task.
- *
- * Uses the CPU count in each L3 domain within the cell as weights to
- * probabilistically select an L3. L3 domains with more CPUs in the cell
- * have higher probability of being selected.
- *
- * @cell_id: The cell ID to select an L3 from
- * @return: L3 ID on success, INVALID_L3_ID on error, or 0 as fallback
- */
-static inline s32 pick_l3_for_task(u32 cell_id)
-{
-	struct cell *cell;
-	u32 l3, target, cur = 0;
-	s32 ret = INVALID_L3_ID;
-
-	/* Look up the cell structure */
-	if (!(cell = lookup_cell(cell_id)))
-		return INVALID_L3_ID;
-
-	/* Handle case where cell has no CPUs assigned yet */
-	if (!cell->cpu_cnt) {
-		scx_bpf_error(
-			"pick_l3_for_task: cell %d has no CPUs accounted yet",
-			cell_id);
-		return INVALID_L3_ID;
-	}
-
-	/* Generate random target value in range [0, cpu_cnt) */
-	target = bpf_get_prandom_u32() % cell->cpu_cnt;
-
-	/* Find the L3 domain corresponding to the target value using
-	 * weighted selection - accumulate CPU counts until we exceed target */
-	bpf_for(l3, 0, nr_l3)
-	{
-		cur += cell->l3_cpu_cnt[l3];
-		if (target < cur) {
-			ret = (s32)l3;
-			break;
-		}
-	}
-	return ret;
-}
 
 /* Print cell state for debugging */
 static __always_inline void print_cell_state(u32 cell_idx)
@@ -626,54 +492,7 @@ static __always_inline void print_cell_state(u32 cell_idx)
 	}
 }
 
-/* Recompute cell->l3_cpu_cnt[] after cell cpumask changes (no persistent kptrs). */
-static __always_inline void recalc_cell_l3_counts(u32 cell_idx)
-{
-	struct cell *cell = lookup_cell(cell_idx);
-	if (!cell)
-		return;
 
-	struct bpf_cpumask *tmp = bpf_cpumask_create();
-	if (!tmp)
-		return;
-
-	u32 l3, present = 0, total_cpus = 0;
-
-	bpf_rcu_read_lock();
-	const struct cpumask *cell_mask =
-		lookup_cell_cpumask(cell_idx); // RCU ptr
-	if (!cell_mask) {
-		bpf_rcu_read_unlock();
-		bpf_cpumask_release(tmp);
-		return;
-	}
-
-	bpf_for(l3, 0, nr_l3)
-	{
-		const struct cpumask *l3_mask =
-			lookup_l3_cpumask(l3); // plain map memory
-		if (!l3_mask) {
-			cell->l3_cpu_cnt[l3] = 0;
-			continue;
-		}
-
-		/* ok: dst is bpf_cpumask*, sources are (RCU cpumask*, plain cpumask*) */
-		bpf_cpumask_and(tmp, cell_mask, l3_mask);
-
-		u32 cnt = bpf_cpumask_weight((const struct cpumask *)tmp);
-		cell->l3_cpu_cnt[l3] = cnt;
-		total_cpus += cnt;
-		if (cnt)
-			present++;
-	}
-	bpf_rcu_read_unlock();
-
-	cell->l3_present_cnt = present;
-	cell->cpu_cnt = total_cpus;
-	bpf_cpumask_release(tmp);
-}
-
-// ************************* L3 *************************** //
 
 #define critical_section_enter() critical_section()
 #define critical_section_exit() critical_section()
@@ -985,7 +804,7 @@ s32 BPF_STRUCT_OPS(mitosis_select_cpu, struct task_struct *p, s32 prev_cpu,
 	/* Pinned path: only if our task really requires a per-CPU queue. */
 	if (!tctx->all_cell_cpus_allowed) {
 		cstat_inc(CSTAT_AFFN_VIOL, tctx->cell, cctx);
-		cpu = dsq_to_cpu(tctx->dsq);
+		cpu = get_cpu_from_dsq(tctx->dsq);
 		if (scx_bpf_test_and_clear_cpu_idle(cpu))
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_ns, 0);
 		goto out;
@@ -1047,7 +866,7 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 
 	// Cpu pinned work
 	if (!tctx->all_cell_cpus_allowed) {
-		cpu = dsq_to_cpu(tctx->dsq);
+		cpu = get_cpu_from_dsq(tctx->dsq);
 	} else if (!__COMPAT_is_enq_cpu_selected(enq_flags)) {
 		/*
 		 * If we haven't selected a cpu, then we haven't looked for and kicked an
@@ -1463,12 +1282,18 @@ void BPF_STRUCT_OPS(mitosis_stopping, struct task_struct *p, bool runnable)
 	}
 }
 
+
 struct {
 	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
 	__type(key, u32);
 	__type(value, struct cpumask_entry);
 	__uint(max_entries, MAX_CPUMASK_ENTRIES);
 } cgrp_init_percpu_cpumask SEC(".maps");
+
+struct cpumask_entry {
+	unsigned long cpumask[CPUMASK_LONG_ENTRIES];
+	u64 used;
+};
 
 static inline struct cpumask_entry *allocate_cpumask_entry()
 {
@@ -1958,6 +1783,8 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 
 	return 0;
 }
+
+
 
 void BPF_STRUCT_OPS(mitosis_exit, struct scx_exit_info *ei)
 {
