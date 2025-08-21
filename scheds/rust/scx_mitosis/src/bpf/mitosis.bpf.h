@@ -6,6 +6,22 @@
 /* Structs */
 
 /*
+ * cell is the per-cell book-keeping
+*/
+struct cell {
+	// Whether or not the cell is used or not
+	u32 in_use;
+	// Number of CPUs in this cell
+	u32 cpu_cnt;
+	// per-L3 vtimes within this cell
+	u64 l3_vtime_now[MAX_L3S];
+	// Number of CPUs from each L3 assigned to this cell
+	u32 l3_cpu_cnt[MAX_L3S];
+	// Number of L3s with at least one CPU in this cell
+	u32 l3_present_cnt;
+};
+
+/*
  * Store the cpumask for each cell (owned by BPF logic). We need this in an
  * explicit map to allow for these to be kptrs.
  */

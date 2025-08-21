@@ -13,10 +13,7 @@
  */
 
 // TODO:
-// remove cell vtime: done
-// remove cell dsqs: done
 // fix debug printer.
-// move stuff to l3_aware.
 // Do we update all cached cell state when they change?
 // One call to check if dsq input is valid
 // should have ifdef around steal_stats map?
@@ -357,9 +354,6 @@ static inline int update_task_cpumask(struct task_struct *p,
 	 * CPU affinity doesn't restrict it within the cell - it can use
 	 * any CPU in the cell. This affects scheduling decisions later.
 	 * True if all the bits in cell_cpumask are set in p->cpus_ptr.
-	 *
-	 * I'm leaving this in for now, but we might remove it for l3 stuff
-	 * or really change the meaning to any within l3
 	 */
 	tctx->all_cell_cpus_allowed =
 		bpf_cpumask_subset(cell_cpumask, p->cpus_ptr);
@@ -655,9 +649,6 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 
 		cstat_inc(CSTAT_CELL_DSQ, tctx->cell, cctx);
 
-		// I don't understand how a task could have an invalid l3 at this point
-		// because we configure them in mitosis_init
-
 		/* Task can use any CPU in its cell, set basis_vtime from per-(cell, L3) vtime */
 		if (!(cell = lookup_cell(tctx->cell)))
 			goto out;
@@ -697,9 +688,6 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 	if (time_before(vtime, basis_vtime - slice_ns))
 		vtime = basis_vtime - slice_ns;
 
-	if (tctx->dsq == 0) {
-		scx_bpf_error("dsq is 0 in enqueue");
-	}
 	scx_bpf_dsq_insert_vtime(p, tctx->dsq, slice_ns, vtime, enq_flags);
 
 	/* Kick the CPU if needed */
@@ -710,8 +698,6 @@ out:
 	if (critical_section_exit())
 		return;
 }
-
-// get_cell_from_cpu
 
 void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 {
@@ -1078,11 +1064,6 @@ static inline void free_cpumask_entry(struct cpumask_entry *entry)
  * This function is called during cgroup initialization to check if the cgroup
  * has cpuset restrictions. If it does, we create a dedicated scheduling cell
  * for that cgroup with the specified CPU affinity.
- *
- * Returns:
- *   1 - Successfully created a new cell for this cgroup
- *   0 - No cpuset found, cgroup should inherit parent's cell
- *  <0 - Error occurred during cell creation
  */
 static inline int cgroup_init_with_cpuset(struct cgrp_ctx *cgc,
 					  struct cgroup *cgrp)
@@ -1224,10 +1205,8 @@ s32 BPF_STRUCT_OPS(mitosis_cgroup_init, struct cgroup *cgrp,
 	int rc = cgroup_init_with_cpuset(cgc, cgrp);
 	if (rc < 0)
 		return rc;
-	if (rc) {
-		bpf_printk("found a cpuset cgroup! Made a cell!");
+	if (rc)
 		return 0;
-	}
 
 	struct cgroup *parent_cg;
 	if (!(parent_cg = lookup_cgrp_ancestor(cgrp, cgrp->level - 1)))
@@ -1247,7 +1226,6 @@ s32 BPF_STRUCT_OPS(mitosis_cgroup_init, struct cgroup *cgrp,
 
 s32 BPF_STRUCT_OPS(mitosis_cgroup_exit, struct cgroup *cgrp)
 {
-	// bpf_printk("mitosis_cgroup_exit");
 	struct cgrp_ctx *cgc;
 	if (!(cgc = bpf_cgrp_storage_get(&cgrp_ctxs, cgrp, 0,
 					 BPF_LOCAL_STORAGE_GET_F_CREATE))) {
@@ -1332,7 +1310,6 @@ s32 BPF_STRUCT_OPS(mitosis_init_task, struct task_struct *p,
 		return ret;
 	}
 
-	/* L3 should now be set by update_task_cell -> update_task_cpumask */
 	return 0;
 }
 
@@ -1497,9 +1474,6 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 	/* Configure root cell (cell 0) topology at init time using nr_l3 and l3_to_cpu masks */
 	recalc_cell_l3_counts(ROOT_CELL_ID);
 
-	/* Print root cell state for debugging */
-	print_cell_state(ROOT_CELL_ID);
-
 	/* Create (cell,L3) DSQs for all pairs. Userspace will populate maps. */
 	// This is a crazy over-estimate
 	bpf_for(i, 0, MAX_CELLS)
@@ -1518,8 +1492,6 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 
 	return 0;
 }
-
-
 
 void BPF_STRUCT_OPS(mitosis_exit, struct scx_exit_info *ei)
 {
