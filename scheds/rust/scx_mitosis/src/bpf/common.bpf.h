@@ -37,6 +37,9 @@
 static inline struct cell *lookup_cell(int idx);
 static inline const struct cpumask *lookup_cell_cpumask(int idx);
 
+/*
+ * Magic number constants used throughout the program
+ */
 enum mitosis_constants {
 	/* Default weight divisor for vtime calculation */
 	DEFAULT_WEIGHT_MULTIPLIER = 100,

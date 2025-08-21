@@ -22,6 +22,7 @@
 // should have ifdef around steal_stats map?
 
 #include "intf.h"
+#include "mitosis.bpf.h"
 #include "common.bpf.h"
 #include "dsq.bpf.h"
 
@@ -37,11 +38,7 @@ const volatile unsigned char all_cpus[MAX_CPUS_U8];
 
 const volatile u64 slice_ns;
 
-#include "l3_aware.c"
-/*
- * Magic number constants used throughout the program
- */
-
+#include "l3_aware.bpf.c"
 
 /*
  * CPU assignment changes aren't fully in effect until a subsequent tick()
@@ -54,25 +51,11 @@ u32 applied_configuration_seq;
 private(all_cpumask) struct bpf_cpumask __kptr *all_cpumask;
 
 UEI_DEFINE(uei);
+/* Debug counters for tracking function invocations */
+struct function_counters_map function_counters SEC(".maps");
 
-
-/*
- * Counters for tracking function invocations
- */
-struct {
-	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
-	__type(key, u32);
-	__type(value, u64);
-	__uint(max_entries, NR_COUNTERS);
-} function_counters SEC(".maps");
-
-/* Work stealing statistics map - accessible from both BPF and userspace */
-struct {
-	__uint(type, BPF_MAP_TYPE_ARRAY);
-	__type(key, u32);
-	__type(value, u64);
-	__uint(max_entries, 1);
-} steal_stats SEC(".maps");
+/* Work stealing statistics map */
+struct steal_stats_map steal_stats SEC(".maps");
 
 static inline void increment_counter(enum counter_idx idx)
 {
@@ -83,7 +66,6 @@ static inline void increment_counter(enum counter_idx idx)
 	if (counter)
 		(*counter)++;
 }
-
 
 static inline struct cgroup *lookup_cgrp_ancestor(struct cgroup *cgrp,
 						  u32 ancestor)
@@ -99,12 +81,7 @@ static inline struct cgroup *lookup_cgrp_ancestor(struct cgroup *cgrp,
 	return cg;
 }
 
-struct {
-	__uint(type, BPF_MAP_TYPE_CGRP_STORAGE);
-	__uint(map_flags, BPF_F_NO_PREALLOC);
-	__type(key, int);
-	__type(value, struct cgrp_ctx);
-} cgrp_ctxs SEC(".maps");
+struct cgrp_ctx_map cgrp_ctxs SEC(".maps");
 
 static inline struct cgrp_ctx *lookup_cgrp_ctx(struct cgroup *cgrp)
 {
@@ -128,45 +105,7 @@ static inline struct cgroup *task_cgroup(struct task_struct *p)
 	return cgrp;
 }
 
-/*
- * task_ctx is the per-task information kept by scx_mitosis
- */
-struct task_ctx {
-	/* cpumask is the set of valid cpus this task can schedule on */
-	/* (tasks cpumask anded with its cell cpumask) */
-	struct bpf_cpumask __kptr *cpumask;
-	/* started_running_at for recording runtime */
-	u64 started_running_at;
-	u64 basis_vtime;
-	/* For the sake of monitoring, each task is owned by a cell */
-	u32 cell;
-	/* For the sake of scheduling, a task is exclusively owned by either a cell
-	 * or a cpu */
-	u32 dsq;
-	/* latest configuration that was applied for this task */
-	/* (to know if it has to be re-applied) */
-	u32 configuration_seq;
-	/* Is this task allowed on all cores of its cell? */
-	bool all_cell_cpus_allowed;
-	// Which L3 this task is assigned to
-	s32 l3;
-
-#if MITOSIS_ENABLE_STEALING
-	/* When a task is stolen, dispatch() marks the destination L3 here.
-	 * running() applies the retag and recomputes cpumask (vtime preserved).
-	*/
-	s32 pending_l3;
-	u32 steal_count; /* how many times this task has been stolen */
-	u64 last_stolen_at; /* ns timestamp of the last steal (scx_bpf_now) */
-#endif
-};
-
-struct {
-	__uint(type, BPF_MAP_TYPE_TASK_STORAGE);
-	__uint(map_flags, BPF_F_NO_PREALLOC);
-	__type(key, int);
-	__type(value, struct task_ctx);
-} task_ctxs SEC(".maps");
+struct task_ctx_map task_ctxs SEC(".maps");
 
 static inline struct task_ctx *lookup_task_ctx(struct task_struct *p)
 {
@@ -180,12 +119,7 @@ static inline struct task_ctx *lookup_task_ctx(struct task_struct *p)
 	return NULL;
 }
 
-struct {
-	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
-	__type(key, u32);
-	__type(value, struct cpu_ctx);
-	__uint(max_entries, 1);
-} cpu_ctxs SEC(".maps");
+struct cpu_ctx_map cpu_ctxs SEC(".maps");
 
 static inline struct cpu_ctx *lookup_cpu_ctx(int cpu)
 {

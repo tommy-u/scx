@@ -1,5 +1,13 @@
 #include "common.bpf.h"
 
+/* Work stealing statistics map - accessible from both BPF and userspace */
+struct steal_stats_map {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__type(key, u32);
+	__type(value, u64);
+	__uint(max_entries, 1);
+};
+
 // A CPU -> L3 cache ID map
 struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
