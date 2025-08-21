@@ -17,6 +17,8 @@
 // remove cell dsqs: done
 // fix debug printer.
 // move stuff to l3_aware.
+// Do we update all cached cell state when they change?
+// One call to check if dsq input is valid
 
 #include "intf.h"
 
@@ -30,6 +32,17 @@
 #endif
 
 char _license[] SEC("license") = "GPL";
+
+/*
+ * Variables populated by userspace
+ */
+const volatile u32 nr_possible_cpus = 1;
+const volatile u32 nr_l3 = 1;
+const volatile bool smt_enabled = true;
+const volatile unsigned char all_cpus[MAX_CPUS_U8];
+
+const volatile u64 slice_ns;
+
 
 /*
  * Magic number constants used throughout the program
@@ -55,18 +68,7 @@ enum mitosis_constants {
 
 	/* No NUMA constraint for DSQ creation */
 	ANY_NUMA = -1,
-
 };
-
-/*
- * Variables populated by userspace
- */
-const volatile u32 nr_possible_cpus = 1;
-const volatile u32 nr_l3 = 1;
-const volatile bool smt_enabled = true;
-const volatile unsigned char all_cpus[MAX_CPUS_U8];
-
-const volatile u64 slice_ns;
 
 /* Work stealing statistics map - accessible from both BPF and userspace */
 struct {
@@ -87,6 +89,130 @@ u32 applied_configuration_seq;
 private(all_cpumask) struct bpf_cpumask __kptr *all_cpumask;
 
 UEI_DEFINE(uei);
+
+/*
+ * ================================
+ * BPF DSQ ID Layout (64 bits wide)
+ * ================================
+ *
+ * Top-level format:
+ *   [63] [62..0]
+ *   [ B] [  ID ]
+ *
+ * If B == 1 it is a Built-in DSQ
+ * -------------------------
+ *   [63] [62] [61 .. 32]  [31..0]
+ *   [ 1] [ L] [   R    ]  [  V  ]
+ *
+ *   - L (bit 62): LOCAL_ON flag
+ *       If L == 1 -> V = CPU number
+ *   - R (30 bits): reserved / unused
+ *   - V (32 bits): value (e.g., CPU#)
+ *
+ * If B == 0 -> User-defined DSQ
+ * -----------------------------
+ * Only the low 32 bits are used.
+ *
+ *   [63     ..     32] [31..0]
+ *   [  0s or unused  ] [ VAL ]
+ *
+ *   Mitosis uses VAL as follows:
+ *
+ *   [31..24] [23..0]
+ *   [QTYPE ] [DATA ]
+ *
+ *   QTYPE encodes the queue type (exactly one bit set):
+ *
+ *     QTYPE = 0x1 -> Per-CPU Q
+ *       [31 .. 24] [23 .. 16] [15    ..      0]
+ *       [00000001] [00000000] [      CPU#     ]
+ *       [Q-TYPE:1]
+ *
+ *     QTYPE = 0x2 -> Cell+L3 Q
+ *       [31 .. 24] [23 .. 16] [15      ..    0]
+ *       [00000010] [  CELL# ] [      L3ID     ]
+ *       [Q-TYPE:2]
+ *
+ */
+
+/* DSQ type enumeration */
+enum dsq_type {
+	DSQ_UNKNOWN,
+	DSQ_TYPE_CPU,
+	DSQ_TYPE_CELL_L3,
+};
+
+/* DSQ ID structure using unions for type-safe access */
+struct dsq_cpu {
+	u32 cpu : 16;
+	u32 unused : 8;
+	u32 type : 8;
+} __attribute__((packed));
+
+struct dsq_cell_l3 {
+	u32 l3 : 16;
+	u32 cell : 8;
+	u32 type : 8;
+} __attribute__((packed));
+
+union dsq_id {
+	u32 raw;
+	struct dsq_cpu cpu;
+	struct dsq_cell_l3 cell_l3;
+	struct {
+		u32 data : 24;
+		u32 type : 8;
+	} common;
+} __attribute__((packed));
+
+/* Static assertions to ensure correct sizes */
+#ifdef __KERNEL__
+/* In kernel/BPF context, use BUILD_BUG_ON */
+#define STATIC_ASSERT(cond, msg) BUILD_BUG_ON(!(cond))
+#else
+/* In userspace, use _Static_assert (C11) */
+#define STATIC_ASSERT(cond, msg) _Static_assert(cond, msg)
+#endif
+
+/* Verify that all DSQ structures are exactly 32 bits */
+STATIC_ASSERT(sizeof(struct dsq_cpu) == 4, "dsq_cpu must be 32 bits");
+STATIC_ASSERT(sizeof(struct dsq_cell_l3) == 4, "dsq_cell_l3 must be 32 bits");
+STATIC_ASSERT(sizeof(union dsq_id) == 4, "dsq_id union must be 32 bits");
+
+/* Inline helper functions for DSQ ID manipulation */
+
+// Is this a per CPU DSQ?
+static inline bool is_cpu_dsq(u32 dsq_id)
+{
+	union dsq_id id = { .raw = dsq_id };
+	return id.common.type == DSQ_TYPE_CPU;
+}
+
+// If this is a per cpu dsq, return the cpu
+static inline u32 get_cpu_from_dsq(u32 dsq_id)
+{
+	union dsq_id id = { .raw = dsq_id };
+	if (id.common.type != DSQ_TYPE_CPU)
+		return DSQ_ERROR;
+	return id.cpu.cpu;
+}
+
+/* Helper functions to construct DSQ IDs */
+static inline u32 get_cpu_dsq_id(u32 cpu)
+{
+	if (cpu >= MAX_CPUS)
+		return DSQ_ERROR;
+	union dsq_id id = { .cpu = { .cpu = cpu, .unused = 0, .type = DSQ_TYPE_CPU } };
+	return id.raw;
+}
+
+static inline u32 get_cell_l3_dsq_id(u32 cell, u32 l3)
+{
+	if (cell >= MAX_CELLS || l3 >= MAX_L3S)
+		return DSQ_ERROR;
+	union dsq_id id = { .cell_l3 = {.l3 = l3, .cell = cell, .type = DSQ_TYPE_CELL_L3 } };
+	return id.raw;
+}
 
 /*
  * Counters for tracking function invocations
@@ -113,10 +239,7 @@ static inline void increment_counter(enum counter_idx idx)
  * translate.
  */
 
-static inline u32 cpu_dsq(u32 cpu)
-{
-	return make_cpu_dsq(cpu);
-}
+
 
 static inline u32 dsq_to_cpu(u32 dsq)
 {
@@ -726,7 +849,7 @@ static inline int update_task_cpumask(struct task_struct *p,
 		cpu = bpf_cpumask_any_distribute(p->cpus_ptr);
 		if (!(cpu_ctx = lookup_cpu_ctx(cpu)))
 			return -ENOENT;
-		tctx->dsq = cpu_dsq(cpu);
+		tctx->dsq = get_cpu_dsq_id(cpu);
 		p->scx.dsq_vtime = READ_ONCE(cpu_ctx->vtime_now);
 	}
 
@@ -1024,9 +1147,9 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 	cell = READ_ONCE(cctx->cell);
 
 	/* Start from a valid DSQ */
-	u64 local_dsq = cpu_dsq(cpu);
+	u64 local_dsq = get_cpu_dsq_id(cpu);
 	if (!local_dsq) {
-		scx_bpf_error("cpu_dsq(%d) returned 0", cpu);
+		scx_bpf_error("get_cpu_dsq_id(%d) returned 0", cpu);
 		return;
 	}
 
@@ -1718,7 +1841,7 @@ void BPF_STRUCT_OPS(mitosis_dump, struct scx_dump_ctx *dctx)
 		if (!(cpu_ctx = lookup_cpu_ctx(i)))
 			return;
 
-		dsq_id = cpu_dsq(i);
+		dsq_id = get_cpu_dsq_id(i);
 		scx_bpf_dump("CPU[%d] cell=%d vtime=%llu nr_queued=%d\n", i,
 			     cpu_ctx->cell, READ_ONCE(cpu_ctx->vtime_now),
 			     scx_bpf_dsq_nr_queued(dsq_id));
@@ -1760,7 +1883,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(mitosis_init)
 		if ((u8_ptr = MEMBER_VPTR(all_cpus, [i / 8]))) {
 			if (*u8_ptr & (1 << (i % 8))) {
 				bpf_cpumask_set_cpu(i, cpumask);
-				ret = scx_bpf_create_dsq(cpu_dsq(i), ANY_NUMA);
+				ret = scx_bpf_create_dsq(get_cpu_dsq_id(i), ANY_NUMA);
 				if (ret < 0) {
 					bpf_cpumask_release(cpumask);
 					return ret;

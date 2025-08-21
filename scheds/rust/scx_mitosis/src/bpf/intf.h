@@ -7,7 +7,7 @@
 
 /* ---- Work stealing config (compile-time) ------------------------------- */
 #ifndef MITOSIS_ENABLE_STEALING
-#define MITOSIS_ENABLE_STEALING 1   /* enable with -DMITOSIS_ENABLE_STEALING=1 */
+#define MITOSIS_ENABLE_STEALING 1 /* enable with -DMITOSIS_ENABLE_STEALING=1 */
 #endif
 /* ----------------------------------------------------------------------- */
 
@@ -30,8 +30,8 @@ enum consts {
 	MAX_CPUS = 1 << MAX_CPUS_SHIFT,
 	MAX_CPUS_U8 = MAX_CPUS / 8,
 	MAX_CELLS = 16,
-	MAX_L3S = 16,
 	USAGE_HALF_LIFE = 100000000, /* 100ms */
+	MAX_L3S = 16,
 	DSQ_ERROR = 0xFFFFFFFF, /* Error value for DSQ functions */
 };
 
@@ -79,129 +79,5 @@ struct cell {
 	// Number of L3s with at least one CPU in this cell
 	u32 l3_present_cnt;
 };
-
-/*
- * ================================
- * BPF DSQ ID Layout (64 bits wide)
- * ================================
- *
- * Top-level format:
- *   [63] [62..0]
- *   [ B] [  ID ]
- *
- * If B == 1 it is a Built-in DSQ
- * -------------------------
- *   [63] [62] [61 .. 32]  [31..0]
- *   [ 1] [ L] [   R    ]  [  V  ]
- *
- *   - L (bit 62): LOCAL_ON flag
- *       If L == 1 -> V = CPU number
- *   - R (30 bits): reserved / unused
- *   - V (32 bits): value (e.g., CPU#)
- *
- * If B == 0 -> User-defined DSQ
- * -----------------------------
- * Only the low 32 bits are used.
- *
- *   [63     ..     32] [31..0]
- *   [  0s or unused  ] [ VAL ]
- *
- *   Mitosis uses VAL as follows:
- *
- *   [31..24] [23..0]
- *   [QTYPE ] [DATA ]
- *
- *   QTYPE encodes the queue type (exactly one bit set):
- *
- *     QTYPE = 0x1 -> Per-CPU Q
- *       [31 .. 24] [23 .. 16] [15    ..      0]
- *       [00000001] [00000000] [      CPU#     ]
- *       [Q-TYPE:1]
- *
- *     QTYPE = 0x2 -> Cell+L3 Q
- *       [31 .. 24] [23 .. 16] [15      ..    0]
- *       [00000010] [  CELL# ] [      L3ID     ]
- *       [Q-TYPE:2]
- *
- */
-
-/* DSQ type enumeration */
-enum dsq_type {
-	DSQ_UNKNOWN,
-	DSQ_TYPE_CPU,
-	DSQ_TYPE_CELL_L3,
-};
-
-/* DSQ ID structure using unions for type-safe access */
-struct dsq_cpu {
-	u32 cpu : 16;
-	u32 unused : 8;
-	u32 type : 8;
-} __attribute__((packed));
-
-struct dsq_cell_l3 {
-	u32 l3 : 16;
-	u32 cell : 8;
-	u32 type : 8;
-} __attribute__((packed));
-
-union dsq_id {
-	u32 raw;
-	struct dsq_cpu cpu;
-	struct dsq_cell_l3 cell_l3;
-	struct {
-		u32 data : 24;
-		u32 type : 8;
-	} common;
-} __attribute__((packed));
-
-/* Static assertions to ensure correct sizes */
-#ifdef __KERNEL__
-/* In kernel/BPF context, use BUILD_BUG_ON */
-#define STATIC_ASSERT(cond, msg) BUILD_BUG_ON(!(cond))
-#else
-/* In userspace, use _Static_assert (C11) */
-#define STATIC_ASSERT(cond, msg) _Static_assert(cond, msg)
-#endif
-
-/* Verify that all DSQ structures are exactly 32 bits */
-STATIC_ASSERT(sizeof(struct dsq_cpu) == 4, "dsq_cpu must be 32 bits");
-STATIC_ASSERT(sizeof(struct dsq_cell_l3) == 4, "dsq_cell_l3 must be 32 bits");
-STATIC_ASSERT(sizeof(union dsq_id) == 4, "dsq_id union must be 32 bits");
-
-/* Inline helper functions for DSQ ID manipulation */
-
-// Is this a per CPU DSQ?
-static inline bool is_cpu_dsq(u32 dsq_id)
-{
-	union dsq_id id = { .raw = dsq_id };
-	return id.common.type == DSQ_TYPE_CPU;
-}
-
-// If this is a per cpu dsq, return the cpu
-static inline u32 get_cpu_from_dsq(u32 dsq_id)
-{
-	union dsq_id id = { .raw = dsq_id };
-	if (id.common.type != DSQ_TYPE_CPU)
-		return DSQ_ERROR;
-	return id.cpu.cpu;
-}
-
-/* Helper functions to construct DSQ IDs */
-static inline u32 make_cpu_dsq(u32 cpu)
-{
-	if (cpu >= MAX_CPUS)
-		return DSQ_ERROR;
-	union dsq_id id = { .cpu = { .cpu = cpu, .unused = 0, .type = DSQ_TYPE_CPU } };
-	return id.raw;
-}
-
-static inline u32 get_cell_l3_dsq_id(u32 cell, u32 l3)
-{
-	if (cell >= MAX_CELLS || l3 >= MAX_L3S)
-		return DSQ_ERROR;
-	union dsq_id id = { .cell_l3 = {.l3 = l3, .cell = cell, .type = DSQ_TYPE_CELL_L3 } };
-	return id.raw;
-}
 
 #endif /* __INTF_H */
