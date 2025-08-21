@@ -2,6 +2,42 @@
 #define __MITOSIS_BPF_H
 
 #include "common.bpf.h"
+
+/* Structs */
+
+/*
+ * Store the cpumask for each cell (owned by BPF logic). We need this in an
+ * explicit map to allow for these to be kptrs.
+ */
+struct cell_cpumask_wrapper {
+	struct bpf_cpumask __kptr *cpumask;
+	/*
+	 * To avoid allocation on the reconfiguration path, have a second cpumask we
+	 * can just do an xchg on.
+	 */
+	struct bpf_cpumask __kptr *tmp_cpumask;
+};
+
+struct cpumask_entry {
+	unsigned long cpumask[CPUMASK_LONG_ENTRIES];
+	u64 used;
+};
+
+/* Define types for cpumasks in-situ vs as a ptr in struct cpuset */
+struct cpumask___local {};
+
+typedef struct cpumask___local *cpumask_var_t___ptr;
+
+struct cpuset___cpumask_ptr {
+	cpumask_var_t___ptr cpus_allowed;
+};
+
+typedef struct cpumask___local cpumask_var_t___arr[1];
+
+struct cpuset___cpumask_arr {
+	cpumask_var_t___arr cpus_allowed;
+};
+
 /* MAPS */
 struct function_counters_map {
 	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
@@ -31,7 +67,28 @@ struct cpu_ctx_map {
 	__uint(max_entries, 1);
 };
 
-/* Structs */
+struct cell_cpumask_map {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__type(key, u32);
+	__type(value, struct cell_cpumask_wrapper);
+	__uint(max_entries, MAX_CELLS);
+	__uint(map_flags, 0);
+};
+
+struct percpu_critical_section_map {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__type(key, u32);
+	__type(value, u32);
+	__uint(max_entries, 1);
+};
+
+struct cgrp_init_percpu_cpumask_map {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__type(key, u32);
+	__type(value, struct cpumask_entry);
+	__uint(max_entries, MAX_CPUMASK_ENTRIES);
+};
+
 
 /*
  * task_ctx is the per-task information kept by scx_mitosis
@@ -65,7 +122,5 @@ struct task_ctx {
 	u64 last_stolen_at; /* ns timestamp of the last steal (scx_bpf_now) */
 #endif
 };
-
-
 
 #endif

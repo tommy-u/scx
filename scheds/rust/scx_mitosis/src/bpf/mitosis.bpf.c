@@ -193,26 +193,7 @@ static inline int free_cell(int cell_idx)
 	return 0;
 }
 
-/*
- * Store the cpumask for each cell (owned by BPF logic). We need this in an
- * explicit map to allow for these to be kptrs.
- */
-struct cell_cpumask_wrapper {
-	struct bpf_cpumask __kptr *cpumask;
-	/*
-	 * To avoid allocation on the reconfiguration path, have a second cpumask we
-	 * can just do an xchg on.
-	 */
-	struct bpf_cpumask __kptr *tmp_cpumask;
-};
-
-struct {
-	__uint(type, BPF_MAP_TYPE_ARRAY);
-	__type(key, u32);
-	__type(value, struct cell_cpumask_wrapper);
-	__uint(max_entries, MAX_CELLS);
-	__uint(map_flags, 0);
-} cell_cpumasks SEC(".maps");
+struct cell_cpumask_map cell_cpumasks SEC(".maps");
 
 static inline const struct cpumask *lookup_cell_cpumask(int idx)
 {
@@ -230,12 +211,7 @@ static inline const struct cpumask *lookup_cell_cpumask(int idx)
  * This is an RCU-like implementation to keep track of scheduling events so we
  * can establish when cell assignments have propagated completely.
  */
-struct {
-	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
-	__type(key, u32);
-	__type(value, u32);
-	__uint(max_entries, 1);
-} percpu_critical_sections SEC(".maps");
+struct percpu_critical_section_map percpu_critical_sections SEC(".maps");
 
 /* Same implementation for enter/exit */
 static __always_inline int critical_section()
@@ -255,9 +231,6 @@ static __always_inline int critical_section()
 	WRITE_ONCE(*data, *data + 1);
 	return 0;
 }
-
-
-
 
 /* Print cell state for debugging */
 static __always_inline void print_cell_state(u32 cell_idx)
@@ -281,8 +254,6 @@ static __always_inline void print_cell_state(u32 cell_idx)
 		}
 	}
 }
-
-
 
 #define critical_section_enter() critical_section()
 #define critical_section_exit() critical_section()
@@ -1072,18 +1043,7 @@ void BPF_STRUCT_OPS(mitosis_stopping, struct task_struct *p, bool runnable)
 	}
 }
 
-
-struct {
-	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
-	__type(key, u32);
-	__type(value, struct cpumask_entry);
-	__uint(max_entries, MAX_CPUMASK_ENTRIES);
-} cgrp_init_percpu_cpumask SEC(".maps");
-
-struct cpumask_entry {
-	unsigned long cpumask[CPUMASK_LONG_ENTRIES];
-	u64 used;
-};
+struct cgrp_init_percpu_cpumask_map cgrp_init_percpu_cpumask SEC(".maps");
 
 static inline struct cpumask_entry *allocate_cpumask_entry()
 {
@@ -1107,21 +1067,6 @@ static inline void free_cpumask_entry(struct cpumask_entry *entry)
 {
 	WRITE_ONCE(entry->used, 0);
 }
-
-/* Define types for cpumasks in-situ vs as a ptr in struct cpuset */
-struct cpumask___local {};
-
-typedef struct cpumask___local *cpumask_var_t___ptr;
-
-struct cpuset___cpumask_ptr {
-	cpumask_var_t___ptr cpus_allowed;
-};
-
-typedef struct cpumask___local cpumask_var_t___arr[1];
-
-struct cpuset___cpumask_arr {
-	cpumask_var_t___arr cpus_allowed;
-};
 
 /*
  * If we see a cgroup with a cpuset, that will define a new cell and we can
