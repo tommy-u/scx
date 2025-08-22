@@ -12,7 +12,7 @@ use std::os::unix::net::UnixStream;
 use std::io::Write;
 
 use crate::bpf_skel::{BpfSkel, BpfSkelBuilder};
-use crate::mitosis_topology_utils::{populate_topology_maps, print_topology};
+use crate::mitosis_topology_utils::{populate_topology_maps, print_topology, MapKind, SUPPORTED_MAPS};
 use libbpf_rs::skel::OpenSkel;
 use libbpf_rs::{MapCore, MapFlags, MapHandle, OpenMapMut};
 use scx_utils::{scx_ops_open, Cpumask};
@@ -154,8 +154,8 @@ fn list_maps() -> Result<()> {
     }
 
     println!("Supported BPF Maps    Count");
-    let names = ["cpu_to_l3", "l3_to_cpus"];
-    for name in names {
+    for kind in SUPPORTED_MAPS {
+        let name = &kind.to_string();
         let count = count_maps_by_name(name).unwrap_or(0);
         if count == 1 {
             println!("{:<20} {}", name, count);
@@ -168,10 +168,10 @@ fn list_maps() -> Result<()> {
 
 
 /// Print the contents of the requested map.
-fn get_entry(skel: &BpfSkel, map: &str) -> Result<()> {
+fn get_entry(skel: &BpfSkel, map: MapKind) -> Result<()> {
 
     match map {
-        "cpu_to_l3" => {
+        MapKind::CpuToL3 => {
             // Iterate over all possible CPUs
             for cpu in 0..*scx_utils::NR_CPUS_POSSIBLE {
                 let key = (cpu as u32).to_ne_bytes();
@@ -185,7 +185,7 @@ fn get_entry(skel: &BpfSkel, map: &str) -> Result<()> {
                 println!("cpu {cpu} -> {val}");
             }
         }
-        "l3_to_cpus" => {
+        MapKind::L3ToCpus => {
             // Get the number of L3 caches from the BPF rodata
             let nr_l3 = skel.maps.rodata_data.as_ref().unwrap().nr_l3;
 
@@ -210,9 +210,6 @@ fn get_entry(skel: &BpfSkel, map: &str) -> Result<()> {
                 };
                 println!("l3 {l3} -> {mask}");
             }
-        }
-        _ => {
-            anyhow::bail!("unknown map {map}");
         }
     }
     Ok(())
@@ -280,11 +277,13 @@ pub fn run_cli() -> Result<()> {
         Commands::Get { map } => {
             // Keep the returned MapHandle alive while operating on the map
             let (skel, _map_handles) = open_skel()?;
-            get_entry(&skel, &map)?;
+            let map_kind = map.parse::<MapKind>()?;
+            get_entry(&skel, map_kind)?;
         }
         Commands::Set { map, file } => {
             let (mut skel, _map_handles) = open_skel()?;
-            populate_topology_maps(&mut skel, &map, file)?;
+            let map_kind = map.parse::<MapKind>()?;
+            populate_topology_maps(&mut skel, map_kind, file)?;
         }
         Commands::Topology => print_topology()?,
         Commands::Running => {

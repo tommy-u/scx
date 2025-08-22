@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use libbpf_rs::{MapCore, MapFlags};
 use scx_utils::Topology;
 use std::collections::HashMap;
@@ -8,6 +8,34 @@ use std::path::Path;
 use crate::bpf_skel::BpfSkel;
 
 const CPUMASK_LONG_ENTRIES: usize = 128;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MapKind {
+    CpuToL3,
+    L3ToCpus,
+}
+
+impl std::str::FromStr for MapKind {
+    type Err = anyhow::Error;
+    fn from_str(s: &str) -> Result<Self> {
+        match s {
+            "cpu_to_l3" => Ok(MapKind::CpuToL3),
+            "l3_to_cpus" => Ok(MapKind::L3ToCpus),
+            _ => bail!("unknown map {s}"),
+        }
+    }
+}
+
+impl std::fmt::Display for MapKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            MapKind::CpuToL3 => "cpu_to_l3",
+            MapKind::L3ToCpus => "l3_to_cpus",
+        })
+    }
+}
+
+pub const SUPPORTED_MAPS: &[MapKind] = &[MapKind::CpuToL3, MapKind::L3ToCpus];
 
 /// Parse lines of the form `cpu,l3` from the provided reader.
 fn parse_cpu_l3_map<R: BufRead>(reader: R) -> Result<Vec<(usize, usize)>> {
@@ -52,9 +80,9 @@ fn read_cpu_l3_map(path: &str) -> Result<Vec<(usize, usize)>> {
 
 /// Update map entries either from a file or from the host topology.
 /// This function can be used by both the main scheduler and CLI tools.
-pub fn populate_topology_maps(skel: &mut BpfSkel, map: &str, file: Option<String>) -> Result<()> {
+pub fn populate_topology_maps(skel: &mut BpfSkel, map: MapKind, file: Option<String>) -> Result<()> {
     match map {
-        "cpu_to_l3" => {
+        MapKind::CpuToL3 => {
             let map_entries = if let Some(path) = file {
                 println!("loading from {path}");
                 read_cpu_l3_map(&path)?
@@ -73,7 +101,7 @@ pub fn populate_topology_maps(skel: &mut BpfSkel, map: &str, file: Option<String
                 skel.maps.cpu_to_l3.update(&key, &val, MapFlags::ANY)?;
             }
         }
-        "l3_to_cpus" => {
+        MapKind::L3ToCpus => {
             if file.is_some() {
                 anyhow::bail!("Loading l3_to_cpus from file is not supported yet");
             }
@@ -112,9 +140,6 @@ pub fn populate_topology_maps(skel: &mut BpfSkel, map: &str, file: Option<String
                 skel.maps.l3_to_cpus.update(&key, &value_bytes, MapFlags::ANY)
                     .context(format!("Failed to update l3_to_cpus map for L3 {}", l3_id))?;
             }
-        }
-        _ => {
-            anyhow::bail!("unknown map {map}");
         }
     }
     Ok(())

@@ -48,7 +48,7 @@ use scx_utils::NR_CPUS_POSSIBLE;
 
 use stats::CellMetrics;
 use stats::Metrics;
-use crate::mitosis_topology_utils::populate_topology_maps;
+use crate::mitosis_topology_utils::{populate_topology_maps, MapKind};
 
 const MAX_CELLS: usize = bpf_intf::consts_MAX_CELLS as usize;
 const NR_CSTATS: usize = bpf_intf::cell_stat_idx_NR_CSTATS as usize;
@@ -208,10 +208,10 @@ impl<'a> Scheduler<'a> {
         let mut skel = scx_ops_load!(skel, mitosis, uei)?;
 
         // Set up CPU to L3 topology mapping using the common functionality
-        populate_topology_maps(&mut skel, "cpu_to_l3", None)?;
+        populate_topology_maps(&mut skel, MapKind::CpuToL3, None)?;
 
         // Set up L3 to CPUs mapping using the common functionality
-        populate_topology_maps(&mut skel, "l3_to_cpus", None)?;
+        populate_topology_maps(&mut skel, MapKind::L3ToCpus, None)?;
 
         let stats_server = StatsServer::new(stats::server_data()).launch()?;
 
