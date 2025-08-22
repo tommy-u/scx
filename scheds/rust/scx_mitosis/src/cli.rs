@@ -4,7 +4,6 @@ use colored::Colorize;
 use rand::Rng;
 use serde_json::Value;
 use std::collections::HashMap;
-use std::io::{self, BufRead, BufReader};
 use std::mem::MaybeUninit;
 use std::os::unix::io::AsFd;
 use std::path::Path;
@@ -13,9 +12,10 @@ use std::os::unix::net::UnixStream;
 use std::io::Write;
 
 use crate::bpf_skel::{BpfSkel, BpfSkelBuilder};
+use crate::mitosis_topology_utils::{populate_topology_maps, print_topology};
 use libbpf_rs::skel::OpenSkel;
 use libbpf_rs::{MapCore, MapFlags, MapHandle, OpenMapMut};
-use scx_utils::{scx_ops_open, Topology, Cpumask};
+use scx_utils::{scx_ops_open, Cpumask};
 
 const CPUMASK_LONG_ENTRIES: usize = 128;
 
@@ -51,8 +51,6 @@ pub enum Commands {
     Topology,
     /// Check if scx_mitosis is currently running
     Running,
-    /// Send hello command to debug socket
-    Hello,
     /// Enable/disable debug flags or show status
     Debug {
         /// Debug flags (+flag to enable, ~flag to disable, ++ to enable all, ~~ to disable all) or "status"
@@ -105,26 +103,6 @@ fn attach_to_existing_map(existing_map_name: &str, new_map: &mut OpenMapMut) -> 
     Ok(map_handle)
 }
 
-/// Display CPU to L3 cache relationships discovered from the host topology.
-pub fn print_topology() -> Result<()> {
-    let topo = Topology::new()?;
-    println!("Number L3 caches: {}", topo.all_llcs.len());
-    println!("CPU -> L3 id:");
-    for cpu in topo.all_cpus.values() {
-        println!("cpu {} -> {}", cpu.id, cpu.l3_id);
-    }
-    println!("\nL3 id -> [cpus]:");
-    let mut by_l3: std::collections::BTreeMap<usize, Vec<usize>> =
-        std::collections::BTreeMap::new();
-    for cpu in topo.all_cpus.values() {
-        by_l3.entry(cpu.l3_id).or_default().push(cpu.id);
-    }
-    for (l3, mut cpus) in by_l3 {
-        cpus.sort_unstable();
-        println!("{l3} -> {:?}", cpus);
-    }
-    Ok(())
-}
 
 /// Open the BPF skeleton and attach its maps to the scheduler's maps.
 fn open_skel() -> Result<(BpfSkel<'static>, HashMap<&'static str, MapHandle>)> {
@@ -188,46 +166,6 @@ fn list_maps() -> Result<()> {
     Ok(())
 }
 
-/// Parse lines of the form `cpu,l3` from the provided reader.
-fn parse_cpu_l3_map<R: BufRead>(reader: R) -> Result<Vec<(usize, usize)>> {
-    let mut pairs = Vec::new();
-    for line in reader.lines() {
-        let line = line?;
-        let line = line.trim();
-        // Ignore blank lines and comments
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let mut parts = line.split(',');
-        let cpu = parts
-            .next()
-            .ok_or_else(|| anyhow::anyhow!("missing cpu"))?
-            .trim()
-            .parse::<usize>()?;
-        let l3 = parts
-            .next()
-            .ok_or_else(|| anyhow::anyhow!("missing l3"))?
-            .trim()
-            .parse::<usize>()?;
-        pairs.push((cpu, l3));
-    }
-    Ok(pairs)
-}
-
-/// Read CPU/L3 pairs either from a file or standard input.
-fn read_cpu_l3_map(path: &str) -> Result<Vec<(usize, usize)>> {
-    if path == "-" {
-        println!("reading from stdin");
-        let stdin = io::stdin();
-        let reader = BufReader::new(stdin.lock());
-        parse_cpu_l3_map(reader)
-    } else {
-        println!("reading from {path}");
-        let file = std::fs::File::open(Path::new(path))?;
-        let reader = BufReader::new(file);
-        parse_cpu_l3_map(reader)
-    }
-}
 
 /// Print the contents of the requested map.
 fn get_entry(skel: &BpfSkel, map: &str) -> Result<()> {
@@ -280,75 +218,6 @@ fn get_entry(skel: &BpfSkel, map: &str) -> Result<()> {
     Ok(())
 }
 
-/// Update map entries either from a file or from the host topology.
-pub fn set_entry(skel: &mut BpfSkel, map: &str, file: Option<String>) -> Result<()> {
-
-    match map {
-        "cpu_to_l3" => {
-            let map_entries = if let Some(path) = file {
-                println!("loading from {path}");
-                read_cpu_l3_map(&path)?
-            } else {
-                println!("loading from host topology");
-                let topo = Topology::new()?;
-                (0..*scx_utils::NR_CPUS_POSSIBLE)
-                    // Use 0 if a CPU is missing from the topology
-                    .map(|cpu| (cpu, topo.all_cpus.get(&cpu).map(|c| c.l3_id).unwrap_or(0)))
-                    .collect()
-            };
-            for (cpu, l3) in map_entries {
-                // Each CPU index is stored as a 32bit key mapping to its L3 id
-                let key = (cpu as u32).to_ne_bytes();
-                let val = (l3 as u32).to_ne_bytes();
-                skel.maps.cpu_to_l3.update(&key, &val, MapFlags::ANY)?;
-            }
-        }
-        "l3_to_cpus" => {
-            if file.is_some() {
-                anyhow::bail!("Loading l3_to_cpus from file is not supported yet");
-            }
-
-            println!("loading l3_to_cpus from host topology");
-            let topo = Topology::new()?;
-
-            // Group CPUs by L3 cache ID
-            let mut l3_to_cpus: HashMap<usize, Vec<usize>> = HashMap::new();
-            for cpu in topo.all_cpus.values() {
-                l3_to_cpus.entry(cpu.l3_id).or_default().push(cpu.id);
-            }
-
-            // For each L3 cache, create a cpumask and populate the map
-            for (l3_id, cpus) in l3_to_cpus {
-                let key = (l3_id as u32).to_ne_bytes();
-
-                // Create a cpumask structure that matches the BPF side
-                let mut cpumask_longs = [0u64; CPUMASK_LONG_ENTRIES];
-
-                // Set bits for each CPU in this L3 cache
-                for cpu in cpus {
-                    let long_idx = cpu / 64;
-                    let bit_idx = cpu % 64;
-                    if long_idx < CPUMASK_LONG_ENTRIES {
-                        cpumask_longs[long_idx] |= 1u64 << bit_idx;
-                    }
-                }
-
-                // Convert to bytes for the map update
-                let mut value_bytes = Vec::new();
-                for long_val in cpumask_longs {
-                    value_bytes.extend_from_slice(&long_val.to_ne_bytes());
-                }
-
-                skel.maps.l3_to_cpus.update(&key, &value_bytes, MapFlags::ANY)
-                    .context(format!("Failed to update l3_to_cpus map for L3 {}", l3_id))?;
-            }
-        }
-        _ => {
-            anyhow::bail!("unknown map {map}");
-        }
-    }
-    Ok(())
-}
 
 const TITLE: &[&str] = &[
     "   ███╗   ███╗██╗████████╗ ██████╗ ███████╗██╗███████╗",
@@ -415,31 +284,16 @@ pub fn run_cli() -> Result<()> {
         }
         Commands::Set { map, file } => {
             let (mut skel, _map_handles) = open_skel()?;
-            set_entry(&mut skel, &map, file)?;
+            populate_topology_maps(&mut skel, &map, file)?;
         }
         Commands::Topology => print_topology()?,
         Commands::Running => {
             println!("{}", is_scx_mitosis_running()?);
         }
-        Commands::Hello => {
-            send_hello_command()?;
-        }
         Commands::Debug { flags } => {
             send_debug_commands(&flags)?;
         }
     }
-    Ok(())
-}
-
-fn send_hello_command() -> Result<()> {
-    let socket_path = "/tmp/scx_mitosis.sock";
-
-    let mut stream = UnixStream::connect(socket_path)
-        .context("Failed to connect to socket. Is scx_mitosis running?")?;
-
-    stream.write_all(b"hello\n")?;
-
-    println!("Hello command sent to scx_mitosis");
     Ok(())
 }
 
