@@ -5,6 +5,7 @@
 mod bpf_skel;
 pub use bpf_skel::*;
 pub mod bpf_intf;
+mod cli;
 mod stats;
 mod mitosis_topology_utils;
 
@@ -17,6 +18,9 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
+use std::thread;
+use std::os::unix::net::UnixListener;
+use std::io::{BufRead, BufReader};
 use std::sync::Mutex;
 
 use anyhow::bail;
@@ -242,6 +246,8 @@ impl<'a> Scheduler<'a> {
         populate_topology_maps(&mut skel, MapKind::L3ToCpus, None)?;
 
         let stats_server = StatsServer::new(stats::server_data()).launch()?;
+
+        start_socket();
 
         Ok(Self {
             skel,
@@ -824,7 +830,118 @@ fn read_l3_to_cpus(skel: &BpfSkel) -> Result<Vec<(u32, Cpumask)>> {
     Ok(l3_to_cpus)
 }
 
+fn start_socket() {
+    thread::spawn(|| {
+        let socket_path = "/tmp/scx_mitosis.sock";
+        let _ = std::fs::remove_file(socket_path); // Clean up old socket
+
+        let listener = match UnixListener::bind(socket_path) {
+            Ok(l) => l,
+            Err(e) => {
+                eprintln!("Failed to bind socket: {}", e);
+                return;
+            }
+        };
+
+        for stream in listener.incoming() {
+            match stream {
+                Ok(stream) => {
+                    let reader = BufReader::new(&stream);
+                    for line in reader.lines() {
+                        if let Ok(cmd) = line {
+                            handle_socket_command(&cmd);
+                        }
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+}
+
+fn handle_hello_command() {
+    println!("hello world");
+}
+
+fn handle_enable_debug_command(flag: &str) {
+    if let Ok(mut flags) = DEBUG_FLAGS.lock() {
+        if flags.contains_key(flag) {
+            flags.insert(flag.to_string(), true);
+            println!("Debug flag '{}' enabled", flag);
+        } else {
+            println!("Unknown debug flag: {}", flag);
+        }
+    }
+}
+
+fn handle_disable_debug_command(flag: &str) {
+    if let Ok(mut flags) = DEBUG_FLAGS.lock() {
+        if flags.contains_key(flag) {
+            flags.insert(flag.to_string(), false);
+            println!("Debug flag '{}' disabled", flag);
+        } else {
+            println!("Unknown debug flag: {}", flag);
+        }
+    }
+}
+
+fn handle_debug_status_command() {
+    if let Ok(flags) = DEBUG_FLAGS.lock() {
+        println!("Debug flags status:");
+        for (flag, enabled) in flags.iter() {
+            println!("  {}: {}", flag, if *enabled { "enabled" } else { "disabled" });
+        }
+    }
+}
+
+fn handle_enable_all_debug_command() {
+    if let Ok(mut flags) = DEBUG_FLAGS.lock() {
+        let flag_names: Vec<String> = flags.keys().cloned().collect();
+        for flag in flag_names {
+            flags.insert(flag, true);
+        }
+        println!("All debug flags enabled");
+    }
+}
+
+fn handle_disable_all_debug_command() {
+    if let Ok(mut flags) = DEBUG_FLAGS.lock() {
+        let flag_names: Vec<String> = flags.keys().cloned().collect();
+        for flag in flag_names {
+            flags.insert(flag, false);
+        }
+        println!("All debug flags disabled");
+    }
+}
+
+fn handle_socket_command(cmd: &str) {
+    let cmd = cmd.trim();
+
+    if cmd == "++" {
+        handle_enable_all_debug_command();
+    } else if cmd == "~~" {
+        handle_disable_all_debug_command();
+    } else if cmd.starts_with('+') {
+        handle_enable_debug_command(&cmd[1..]);
+    } else if cmd.starts_with('~') {
+        handle_disable_debug_command(&cmd[1..]);
+    } else {
+        match cmd {
+            "hello" => handle_hello_command(),
+            "debug-status" => handle_debug_status_command(),
+            _ => {
+                eprintln!("Unknown command: {}", cmd);
+            }
+        }
+    }
+}
+
 fn main() -> Result<()> {
+
+    // If this is a cli invocation, run it
+    if std::env::args().nth(1).as_deref() == Some("cli") {
+        return cli::run_cli();
+    }
 
     let opts = Opts::parse();
 
