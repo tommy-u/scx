@@ -794,8 +794,19 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 	 * prev->scx.flags & SCX_TASK_QUEUED (we don't set SCX_OPS_ENQ_LAST), and
 	 * otherwise go idle.
 	 */
-	if (!found)
+	if (!found) {
+		/* Try work stealing if enabled */
+		if (enable_llc_awareness && enable_work_stealing) {
+			/* Returns: <0 error, 0 no steal, >0 stole work */
+			s32 ret = try_stealing_work(cell, llc);
+			if (ret < 0)
+				return;
+			if (ret > 0) {
+				cstat_inc(CSTAT_STEAL, cell, cctx);
+			}
+		}
 		return;
+	}
 
 	/*
 	 * The move_to_local can fail if we raced with some other cpu in the cell
@@ -1251,6 +1262,12 @@ void BPF_STRUCT_OPS(mitosis_running, struct task_struct *p)
 	if (!(tctx = lookup_task_ctx(p)))
 		return;
 
+	/* Handle stolen task retag (LLC-aware mode only) */
+	if (enable_llc_awareness && enable_work_stealing) {
+		if (apply_pending_llc_retag(p, tctx) < 0)
+			return;
+	}
+
 	/*
 	 * Legacy approach: Update vtime_now before task runs.
 	 * Only used when split vtime updates is enabled.
@@ -1569,6 +1586,13 @@ s32 validate_flags()
 		scx_bpf_error(
 			"LLC-aware mode requires nr_llc between 1 and %d inclusive, got %d",
 			MAX_LLCS, nr_llc);
+		return -EINVAL;
+	}
+
+	/* Work stealing only makes sense when enable_llc_awareness. */
+	if (enable_work_stealing && (!enable_llc_awareness)) {
+		scx_bpf_error(
+			"Work stealing requires LLC-aware mode to be enabled");
 		return -EINVAL;
 	}
 
