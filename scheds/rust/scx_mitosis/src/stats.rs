@@ -65,6 +65,8 @@ pub struct Metrics {
     pub share_of_decisions_pct: f64,
     #[stat(desc = "Cell scheduling decisions")]
     total_decisions: u64,
+    #[stat(desc = "Warning flags bitmap")]
+    pub warnings: u64,
     #[stat(desc = "Per-cell metrics")] // TODO: cell names
     pub cells: BTreeMap<u32, CellMetrics>,
 }

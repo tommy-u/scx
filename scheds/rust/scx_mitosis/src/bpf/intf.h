@@ -68,6 +68,11 @@ struct cpu_ctx {
 	u64 vtime_now;
 };
 
+enum warning {
+	WARN_EMPTY_CPUMASK_EBUSY = 0, /* cpumask empty in EBUSY fallback */
+	NR_WARNINGS,
+};
+
 struct cgrp_ctx {
 	u32  cell;
 	bool cell_owner;

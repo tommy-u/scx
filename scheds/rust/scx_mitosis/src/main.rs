@@ -487,6 +487,9 @@ impl<'a> Scheduler<'a> {
         }
         self.metrics.num_cells = self.cells.len() as u32;
 
+        // Read warning flags from BPF
+        self.metrics.warnings = self.skel.maps.bss_data.as_ref().unwrap().warnings;
+
         Ok(())
     }
 

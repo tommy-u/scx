@@ -51,6 +51,17 @@ u32 applied_configuration_seq;
  */
 u32 debug_event_pos;
 
+/*
+ * Warning flags - sticky bitmap for non-fatal issues
+ */
+volatile u64		    warnings;
+
+static __always_inline void record_warning(u32 id)
+{
+	if (id < 64)
+		__sync_fetch_and_or(&warnings, 1ULL << id);
+}
+
 struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
 	__uint(max_entries, DEBUG_EVENTS_BUF_SIZE);
@@ -697,9 +708,16 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 			 * the same instruction here. This fixes it
 			 */
 			barrier_var(tctx);
-			if (tctx->cpumask)
-				cpu = bpf_cpumask_any_distribute(
-					(const struct cpumask *)tctx->cpumask);
+			if (tctx->cpumask) {
+				const struct cpumask *mask =
+					(const struct cpumask *)tctx->cpumask;
+
+				if (bpf_cpumask_empty(mask))
+					record_warning(
+						WARN_EMPTY_CPUMASK_EBUSY);
+
+				cpu = bpf_cpumask_any_distribute(mask);
+			}
 		}
 	}
 
