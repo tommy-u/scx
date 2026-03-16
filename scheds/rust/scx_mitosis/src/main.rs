@@ -189,11 +189,22 @@ struct Opts {
     #[clap(long, action = clap::ArgAction::SetTrue)]
     dynamic_affinity_cpu_selection: bool,
 
+    /// Enable preempt-kicking for pinned-to-1-CPU tasks with low vtime.
+    /// When a pinned task wakes with vtime significantly behind the per-CPU
+    /// DSQ, preempt the current task so the waking task runs sooner.
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    pinned_preempt_kick: bool,
+
     /// Enable preempt-kicking for pinned kthreads.
     /// When enabled, kthreads on per-CPU DSQs get a preempt IPI so they
     /// don't wait behind application time slices.
     #[clap(long, action = clap::ArgAction::SetTrue)]
     kthread_preempt_kick: bool,
+
+    /// Enable preempt-kicking for kworker threads on pinned DSQs.
+    /// Tagged at init time, always preempts without vtime check.
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    kworker_preempt_kick: bool,
 
     /// Per-CPU cooldown for kthread preempt-kicks in microseconds.
     /// When set, limits how frequently a given CPU can be preempt-kicked
@@ -201,6 +212,13 @@ struct Opts {
     /// Only effective when --kthread-preempt-kick is enabled.
     #[clap(long)]
     kthread_kick_cooldown_us: Option<u64>,
+
+    /// Per-CPU cooldown for ksoftirqd preempt-kicks in microseconds.
+    /// Breaks the kick amplification loop where kicking ksoftirqd causes
+    /// it to process softirqs in tiny increments, spawning more kworkers.
+    /// Only effective when --kworker-preempt-kick is enabled.
+    #[clap(long)]
+    ksoftirqd_kick_cooldown_us: Option<u64>,
 
     /// Time slice duration in milliseconds. Defaults to the kernel's SCX_SLICE_DFL.
     #[clap(long)]
@@ -235,6 +253,7 @@ struct Scheduler<'a> {
     // Note these are accumulated across all CPUs.
     prev_cell_stats: [[u64; NR_CSTATS]; MAX_CELLS],
     // Per-cell running_ns tracking for demand metrics
+    prev_nr_kworker_kicks: u64,
     prev_cell_running_ns: [u64; MAX_CELLS],
     prev_cell_own_ns: [u64; MAX_CELLS],
     prev_cell_lent_ns: [u64; MAX_CELLS],
@@ -352,8 +371,11 @@ impl<'a> Scheduler<'a> {
         rodata.exiting_task_workaround_enabled = opts.exiting_task_workaround;
         rodata.cpu_controller_disabled = opts.cpu_controller_disabled;
         rodata.dynamic_affinity_cpu_selection = opts.dynamic_affinity_cpu_selection;
+        rodata.pinned_preempt_kick = opts.pinned_preempt_kick;
         rodata.kthread_preempt_kick = opts.kthread_preempt_kick;
+        rodata.kworker_preempt_kick = opts.kworker_preempt_kick;
         rodata.kthread_kick_cooldown_ns = opts.kthread_kick_cooldown_us.unwrap_or(0) * 1000;
+        rodata.ksoftirqd_kick_cooldown_ns = opts.ksoftirqd_kick_cooldown_us.unwrap_or(0) * 1000;
 
         rodata.nr_possible_cpus = *NR_CPUS_POSSIBLE as u32;
         for cpu in topology.all_cpus.keys() {
@@ -436,6 +458,7 @@ impl<'a> Scheduler<'a> {
             monitor_interval: Duration::from_secs(opts.monitor_interval_s),
             cells: HashMap::new(),
             prev_cell_stats: [[0; NR_CSTATS]; MAX_CELLS],
+            prev_nr_kworker_kicks: 0,
             prev_cell_running_ns: [0; MAX_CELLS],
             prev_cell_own_ns: [0; MAX_CELLS],
             prev_cell_lent_ns: [0; MAX_CELLS],
@@ -1079,6 +1102,37 @@ impl<'a> Scheduler<'a> {
                 );
             }
         }
+
+        let nr_kworker_kicks = unsafe {
+            let ptr = &self.skel.maps.bss_data.as_ref().unwrap().nr_kworker_kicks as *const u64;
+            (ptr as *const std::sync::atomic::AtomicU64)
+                .as_ref()
+                .unwrap()
+                .load(std::sync::atomic::Ordering::Relaxed)
+        };
+        let kworker_kicks = nr_kworker_kicks - self.prev_nr_kworker_kicks;
+        self.prev_nr_kworker_kicks = nr_kworker_kicks;
+        let always_preempt_tagged = unsafe {
+            let ptr = &self
+                .skel
+                .maps
+                .bss_data
+                .as_ref()
+                .unwrap()
+                .nr_always_preempt_tagged as *const u64;
+            (ptr as *const std::sync::atomic::AtomicU64)
+                .as_ref()
+                .unwrap()
+                .load(std::sync::atomic::Ordering::Relaxed)
+        };
+        if kworker_kicks > 0 || always_preempt_tagged > 0 {
+            trace!(
+                "        Kworker kicks: {}, always_preempt tagged: {}",
+                kworker_kicks,
+                always_preempt_tagged
+            );
+        }
+
         Ok(())
     }
 
@@ -1449,11 +1503,11 @@ fn main(opts: Opts) -> Result<()> {
         .unwrap_or_else(|_| EnvFilter::new("info"));
 
     match tracing_subscriber::fmt()
-        .with_env_filter(env_filter)
-        .with_target(true)
-        .with_thread_ids(true)
-        .with_file(true)
-        .with_line_number(true)
+        // .with_env_filter(env_filter)
+        // .with_target(true)
+        // .with_thread_ids(true)
+        // .with_file(true)
+        // .with_line_number(true)
         .try_init()
     {
         Ok(()) => {}

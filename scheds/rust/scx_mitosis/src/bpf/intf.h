@@ -89,6 +89,7 @@ struct cpu_ctx {
 	u64 running_ns[MAX_CELLS];
 	u64 vtime_now;
 	u64 last_kthread_kick_ns;
+	u64 last_ksoftirqd_kick_ns;
 	u32 cell;
 	u32 llc;
 };

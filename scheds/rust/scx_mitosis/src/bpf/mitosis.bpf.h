@@ -83,10 +83,13 @@ struct task_ctx {
 	/* Last known cgroup ID for detecting cgroup moves (used when cpu_controller_disabled) */
 	u64 cgid;
 	/* Which LLC this task is assigned to */
-	s32 llc;
+	s32  llc;
 
-	u32 steal_count; /* how many times this task has been stolen */
-	u64 last_stolen_at; /* ns timestamp of the last steal (scx_bpf_now) */
+	u32  steal_count; /* how many times this task has been stolen */
+	u64  last_stolen_at; /* ns timestamp of the last steal (scx_bpf_now) */
+	bool always_preempt; /* Tagged at init for latency-critical kthreads */
+	bool is_ksoftirqd; /* true if this task is a ksoftirqd thread */
+	u64 kick_count; /* Number of times this task triggered a preempt kick */
 };
 
 static inline const struct cpumask *lookup_cell_cpumask(int idx);

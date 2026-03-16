@@ -49,7 +49,10 @@ const volatile bool	     userspace_managed_cell_mode     = false;
 const volatile bool	     enable_borrowing		     = false;
 const volatile bool	     dynamic_affinity_cpu_selection  = false;
 const volatile bool	     kthread_preempt_kick	     = false;
+const volatile bool	     pinned_preempt_kick	     = false;
+const volatile bool	     kworker_preempt_kick	     = false;
 const volatile u64	     kthread_kick_cooldown_ns	     = 0;
+const volatile u64	     ksoftirqd_kick_cooldown_ns	     = 0;
 
 /*
  * Global arrays for LLC topology, populated by userspace before load.
@@ -66,6 +69,9 @@ struct llc_cpumask llc_to_cpus[MAX_LLCS];
 u32 configuration_seq;
 u32 applied_configuration_seq;
 u32 cpuset_seq;
+
+u64 nr_kworker_kicks;
+u64 nr_always_preempt_tagged;
 
 /*
  * Debug events circular buffer
@@ -99,6 +105,72 @@ private(root_cgrp) struct cgroup __kptr *root_cgrp;
 UEI_DEFINE(uei);
 
 struct cell_map cells SEC(".maps");
+
+/* Match bound kworker threads: "kworker/<cpu>:<id>" exactly.
+ * Rejects unbound kworkers ("kworker/u..."), suffixed variants
+ * like "kworker/0:1H", and other kthreads.
+ * TASK_COMM_LEN is 16, so i is bounded to [0, 15].
+ */
+static bool is_bound_kworker(const char *comm)
+{
+	if (__builtin_memcmp(comm, "kworker/", 8) != 0)
+		return false;
+
+	int i = 8;
+
+	/* Must start with at least one digit (CPU number) */
+	if (comm[i] < '0' || comm[i] > '9')
+		return false;
+	/* Swallow CPU digits */
+	for (; i < 15 && comm[i] >= '0' && comm[i] <= '9'; i++)
+		;
+	/* Must hit ':' */
+	if (comm[i] != ':')
+		return false;
+	i++;
+	/* Must have at least one digit (worker id) */
+	if (i >= 15 || comm[i] < '0' || comm[i] > '9')
+		return false;
+	/* Swallow worker id digits */
+	for (; i < 15 && comm[i] >= '0' && comm[i] <= '9'; i++)
+		;
+	/* Optional 'H' suffix for high-priority kworkers */
+	if (i < 15 && comm[i] == 'H')
+		i++;
+	if (comm[i] != '\0')
+		return false;
+
+	return true;
+}
+
+/*
+ * Match "ksoftirqd/N" where N is a CPU number.
+ * Same TASK_COMM_LEN bounds as is_bound_kworker.
+ */
+static bool is_ksoftirqd(const char *comm)
+{
+	if (__builtin_memcmp(comm, "ksoftirqd/", 10) != 0)
+		return false;
+
+	int i = 10;
+
+	/* Must start with at least one digit (CPU number) */
+	if (comm[i] < '0' || comm[i] > '9')
+		return false;
+	/* Swallow CPU digits */
+	for (; i < 15 && comm[i] >= '0' && comm[i] <= '9'; i++)
+		;
+	/* Must end here (null terminator) */
+	if (comm[i] != '\0')
+		return false;
+
+	return true;
+}
+
+static bool is_preempt_kick_kthread(const char *comm)
+{
+	return is_bound_kworker(comm) || is_ksoftirqd(comm);
+}
 
 /* Forward declaration for init_cgrp_ctx_with_ancestors (defined later) */
 static int init_cgrp_ctx_with_ancestors(struct cgroup *cgrp);
@@ -921,10 +993,38 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 
 	scx_bpf_dsq_insert_vtime(p, tctx->dsq.raw, slice_ns, vtime, enq_flags);
 
-	/* Preempt-kick for kthreads on pinned DSQs so they don't wait behind app slices */
-	// Perhaps we could give these a very short vtime?
-	if (kthread_preempt_kick && !tctx->all_cell_cpus_allowed &&
-	    (p->flags & PF_KTHREAD) && cpu >= 0) {
+	/* Late-tag kworkers whose comm wasn't set at init_task time */
+	if (kworker_preempt_kick && !tctx->always_preempt &&
+	    (p->flags & PF_KTHREAD) && is_preempt_kick_kthread(p->comm)) {
+		tctx->always_preempt = true;
+		tctx->is_ksoftirqd   = is_ksoftirqd(p->comm);
+		__atomic_add_fetch(&nr_always_preempt_tagged, 1,
+				   __ATOMIC_RELAXED);
+	}
+
+	/* Always-preempt for tagged kthreads (kworkers) */
+	if (tctx->always_preempt && !tctx->all_cell_cpus_allowed && cpu >= 0) {
+		bool do_kick = true;
+		if (tctx->is_ksoftirqd && ksoftirqd_kick_cooldown_ns) {
+			u64 now = bpf_ktime_get_ns();
+			if (now - cctx->last_ksoftirqd_kick_ns <=
+			    ksoftirqd_kick_cooldown_ns)
+				do_kick = false;
+			else
+				cctx->last_ksoftirqd_kick_ns = now;
+		}
+		if (do_kick) {
+			tctx->kick_count++;
+			__atomic_add_fetch(&nr_kworker_kicks, 1,
+					   __ATOMIC_RELAXED);
+			scx_bpf_kick_cpu(cpu, SCX_KICK_PREEMPT);
+		}
+	} else if (pinned_preempt_kick && !tctx->all_cell_cpus_allowed &&
+		   cpu >= 0 && time_before(vtime, basis_vtime - slice_ns / 2)) {
+		/* Preempt-kick for pinned-to-1-CPU tasks with significant vtime advantage */
+		scx_bpf_kick_cpu(cpu, SCX_KICK_PREEMPT);
+	} else if (kthread_preempt_kick && !tctx->all_cell_cpus_allowed &&
+		   (p->flags & PF_KTHREAD) && cpu >= 0) {
 		u64 now = bpf_ktime_get_ns();
 		if (!kthread_kick_cooldown_ns ||
 		    now - cctx->last_kthread_kick_ns >
@@ -1843,6 +1943,15 @@ static int init_task_impl(struct task_struct *p, struct cgroup *cgrp)
 	if (enable_llc_awareness)
 		init_task_llc(tctx);
 
+	if ((p->flags & PF_KTHREAD) && kworker_preempt_kick) {
+		tctx->always_preempt = is_preempt_kick_kthread(p->comm);
+		if (tctx->always_preempt) {
+			tctx->is_ksoftirqd = is_ksoftirqd(p->comm);
+			__atomic_add_fetch(&nr_always_preempt_tagged, 1,
+					   __ATOMIC_RELAXED);
+		}
+	}
+
 	return update_task_cell(p, tctx, cgrp);
 }
 
@@ -2621,6 +2730,17 @@ int apply_cell_config(void *ctx)
 	return 0;
 }
 
+void BPF_STRUCT_OPS(mitosis_exit_task, struct task_struct *p,
+		    struct scx_exit_task_args *args)
+{
+	struct task_ctx *tctx;
+
+	tctx = bpf_task_storage_get(&task_ctxs, p, 0, 0);
+	if (tctx && tctx->always_preempt)
+		bpf_printk("always_preempt: pid=%d comm=%s kicks=%llu", p->pid,
+			   p->comm, tctx->kick_count);
+}
+
 // clang-format off
 SCX_OPS_DEFINE(mitosis,
 	       .select_cpu		= (void *)mitosis_select_cpu,
@@ -2630,6 +2750,7 @@ SCX_OPS_DEFINE(mitosis,
 	       .stopping		= (void *)mitosis_stopping,
 	       .set_cpumask		= (void *)mitosis_set_cpumask,
 	       .init_task		= (void *)mitosis_init_task,
+	       .exit_task		= (void *)mitosis_exit_task,
 	       .cgroup_init		= (void *)mitosis_cgroup_init,
 	       .cgroup_exit		= (void *)mitosis_cgroup_exit,
 	       .cgroup_move		= (void *)mitosis_cgroup_move,
