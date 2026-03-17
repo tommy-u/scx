@@ -12,7 +12,7 @@ mod stats;
 use cell_manager::{CellManager, CpuAssignment};
 
 use std::cmp::max;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::fmt::Display;
 use std::mem::MaybeUninit;
@@ -109,6 +109,15 @@ struct Opts {
     /// is not launched.
     #[clap(long)]
     monitor: Option<f64>,
+
+    /// Run in dashboard mode with the specified interval (seconds).
+    /// Shows a screen-clearing live view of scheduler stats. Scheduler is not launched.
+    #[clap(long)]
+    dashboard: Option<f64>,
+
+    /// Path to write dashboard history log. Only used with --dashboard.
+    #[clap(long)]
+    dashboard_log: Option<String>,
 
     /// Print scheduler version and exit.
     #[clap(short = 'V', long, action = clap::ArgAction::SetTrue)]
@@ -254,6 +263,7 @@ struct Scheduler<'a> {
     prev_cell_stats: [[u64; NR_CSTATS]; MAX_CELLS],
     // Per-cell running_ns tracking for demand metrics
     prev_nr_kworker_kicks: u64,
+    prev_nr_pinned_kicks: u64,
     prev_cell_running_ns: [u64; MAX_CELLS],
     prev_cell_own_ns: [u64; MAX_CELLS],
     prev_cell_lent_ns: [u64; MAX_CELLS],
@@ -284,6 +294,8 @@ struct Scheduler<'a> {
     epoll: Epoll,
     /// EventFd to wake up main loop when stats are requested
     stats_waker: EventFd,
+    /// LLC ID → CPU span, for per-cell LLC breakdown
+    llc_spans: BTreeMap<usize, Cpumask>,
 }
 
 struct DistributionStats {
@@ -345,6 +357,11 @@ impl<'a> Scheduler<'a> {
         let topology = Topology::new()?;
 
         let nr_llc = topology.all_llcs.len().max(1);
+        let llc_spans: BTreeMap<usize, Cpumask> = topology
+            .all_llcs
+            .iter()
+            .map(|(id, llc)| (*id, llc.span.clone()))
+            .collect();
 
         let mut skel_builder = BpfSkelBuilder::default();
         skel_builder
@@ -459,10 +476,19 @@ impl<'a> Scheduler<'a> {
             cells: HashMap::new(),
             prev_cell_stats: [[0; NR_CSTATS]; MAX_CELLS],
             prev_nr_kworker_kicks: 0,
+            prev_nr_pinned_kicks: 0,
             prev_cell_running_ns: [0; MAX_CELLS],
             prev_cell_own_ns: [0; MAX_CELLS],
             prev_cell_lent_ns: [0; MAX_CELLS],
-            metrics: Metrics::default(),
+            metrics: {
+                let mut m = Metrics::default();
+                m.build_version = build_id::full_version(env!("CARGO_PKG_VERSION"));
+                m.dynamic_affinity_enabled = opts.dynamic_affinity_cpu_selection as u32;
+                m.kworker_kick_enabled = opts.kworker_preempt_kick as u32;
+                m.pinned_kick_enabled = opts.pinned_preempt_kick as u32;
+                m.kthread_kick_enabled = opts.kthread_preempt_kick as u32;
+                m
+            },
             stats_server: Some(stats_server),
             last_configuration_seq: None,
             last_cpuset_seq: 0,
@@ -477,6 +503,7 @@ impl<'a> Scheduler<'a> {
             rebalance_count: 0,
             epoll,
             stats_waker,
+            llc_spans,
         })
     }
 
@@ -950,6 +977,8 @@ impl<'a> Scheduler<'a> {
             .map(|&cell| cell[bpf_intf::cell_stat_idx_CSTAT_PIN_IDLE_MISS as usize])
             .sum::<u64>();
         let pin_total = pin_idle_hits + pin_idle_misses;
+        self.metrics.pin_idle_hits = pin_idle_hits;
+        self.metrics.pin_idle_total = pin_total;
         if pin_total > 0 {
             trace!(
                 "  Pin idle: {:.1}% hit ({}/{})",
@@ -968,6 +997,8 @@ impl<'a> Scheduler<'a> {
             .map(|&cell| cell[bpf_intf::cell_stat_idx_CSTAT_ENQ_PIN_MOVE as usize])
             .sum::<u64>();
         let enq_pin_total = enq_pin_keeps + enq_pin_moves;
+        self.metrics.enq_pin_keeps = enq_pin_keeps;
+        self.metrics.enq_pin_total = enq_pin_total;
         if enq_pin_total > 0 {
             trace!(
                 "  Enq pin: {:.1}% keep ({}/{})",
@@ -990,6 +1021,8 @@ impl<'a> Scheduler<'a> {
             .map(|&cell| cell[bpf_intf::cell_stat_idx_CSTAT_KTHREAD_KICK_THROTTLE as usize])
             .sum::<u64>();
         let kthread_kicks = kthread_kick_sel + kthread_kick_enq;
+        self.metrics.kthread_kicks = kthread_kicks;
+        self.metrics.kthread_kick_throttled = kthread_kick_throttle;
         if kthread_kicks > 0 || kthread_kick_throttle > 0 {
             trace!(
                 "  Kthread kicks: {} (sel={}, enq={}, throttled={})",
@@ -999,6 +1032,8 @@ impl<'a> Scheduler<'a> {
                 kthread_kick_throttle
             );
         }
+
+        // pinned_kicks is read from BSS in update_and_log_cell_queue_stats
 
         Ok(())
     }
@@ -1059,6 +1094,11 @@ impl<'a> Scheduler<'a> {
             let pin_idle_misses: u64 =
                 cell_stats_delta[cell][bpf_intf::cell_stat_idx_CSTAT_PIN_IDLE_MISS as usize];
             let pin_total = pin_idle_hits + pin_idle_misses;
+            {
+                let cm = self.metrics.cells.entry(cell as u32).or_default();
+                cm.pin_idle_hits = pin_idle_hits;
+                cm.pin_idle_total = pin_total;
+            }
             if pin_total > 0 {
                 trace!(
                     "{}   Pin idle: {:.1}% hit ({}/{})",
@@ -1074,6 +1114,11 @@ impl<'a> Scheduler<'a> {
             let enq_pin_moves: u64 =
                 cell_stats_delta[cell][bpf_intf::cell_stat_idx_CSTAT_ENQ_PIN_MOVE as usize];
             let enq_pin_total = enq_pin_keeps + enq_pin_moves;
+            {
+                let cm = self.metrics.cells.entry(cell as u32).or_default();
+                cm.enq_pin_keeps = enq_pin_keeps;
+                cm.enq_pin_total = enq_pin_total;
+            }
             if enq_pin_total > 0 {
                 trace!(
                     "{}   Enq pin: {:.1}% keep ({}/{})",
@@ -1091,6 +1136,11 @@ impl<'a> Scheduler<'a> {
             let kthread_kick_throttle: u64 = cell_stats_delta[cell]
                 [bpf_intf::cell_stat_idx_CSTAT_KTHREAD_KICK_THROTTLE as usize];
             let kthread_kicks = kthread_kick_sel + kthread_kick_enq;
+            {
+                let cm = self.metrics.cells.entry(cell as u32).or_default();
+                cm.kthread_kicks = kthread_kicks;
+                cm.kthread_kick_throttled = kthread_kick_throttle;
+            }
             if kthread_kicks > 0 || kthread_kick_throttle > 0 {
                 trace!(
                     "{}   Kthread kicks: {} (sel={}, enq={}, throttled={})",
@@ -1125,12 +1175,28 @@ impl<'a> Scheduler<'a> {
                 .unwrap()
                 .load(std::sync::atomic::Ordering::Relaxed)
         };
+        self.metrics.kworker_kicks = kworker_kicks;
+        self.metrics.always_preempt_tagged = always_preempt_tagged;
         if kworker_kicks > 0 || always_preempt_tagged > 0 {
             trace!(
                 "        Kworker kicks: {}, always_preempt tagged: {}",
                 kworker_kicks,
                 always_preempt_tagged
             );
+        }
+
+        let nr_pinned_kicks = unsafe {
+            let ptr = &self.skel.maps.bss_data.as_ref().unwrap().nr_pinned_kicks as *const u64;
+            (ptr as *const std::sync::atomic::AtomicU64)
+                .as_ref()
+                .unwrap()
+                .load(std::sync::atomic::Ordering::Relaxed)
+        };
+        let pinned_kicks = nr_pinned_kicks - self.prev_nr_pinned_kicks;
+        self.prev_nr_pinned_kicks = nr_pinned_kicks;
+        self.metrics.pinned_kicks = pinned_kicks;
+        if pinned_kicks > 0 {
+            trace!("        Pinned kicks: {}", pinned_kicks);
         }
 
         Ok(())
@@ -1204,9 +1270,69 @@ impl<'a> Scheduler<'a> {
             self.metrics
                 .cells
                 .entry(*cell_id)
-                .and_modify(|cell_metrics| cell_metrics.num_cpus = cell.cpus.weight() as u32);
+                .and_modify(|cell_metrics| {
+                    cell_metrics.num_cpus = cell.cpus.weight() as u32;
+                    cell_metrics.cpulist = cell.cpus.to_cpulist();
+                    cell_metrics.cgroup_name = self
+                        .cell_manager
+                        .as_ref()
+                        .and_then(|cm| cm.cell_id_to_name(*cell_id))
+                        .unwrap_or_default();
+                    cell_metrics.llc_cpus.clear();
+                    for (llc_id, llc_span) in &self.llc_spans {
+                        let mut intersection = cell.cpus.clone();
+                        intersection &= llc_span;
+                        let count = intersection.weight();
+                        if count > 0 {
+                            cell_metrics.llc_cpus.insert(*llc_id as u32, count as u32);
+                        }
+                    }
+                    cell_metrics.cpumask = {
+                        // Format with full leading zeros on every 32-bit group
+                        let raw = cell.cpus.as_raw_slice();
+                        let nr_u32 = (scx_utils::NR_CPUS_POSSIBLE.max(1) + 31) / 32;
+                        let masks: Vec<u32> = raw
+                            .iter()
+                            .flat_map(|x| [*x as u32, (x >> 32) as u32])
+                            .chain(std::iter::repeat(0))
+                            .take(nr_u32)
+                            .collect();
+                        masks
+                            .iter()
+                            .rev()
+                            .enumerate()
+                            .map(|(i, m)| {
+                                if i == 0 {
+                                    format!("{:08x}", m)
+                                } else {
+                                    format!(",{:08x}", m)
+                                }
+                            })
+                            .collect::<String>()
+                    };
+                });
         }
         self.metrics.num_cells = self.cells.len() as u32;
+
+        // Populate rebalance diagnostics
+        self.metrics.rebalance_enabled = self.enable_rebalancing as u32;
+        if self.enable_rebalancing && self.cells.len() >= 2 {
+            let utils: Vec<f64> = self
+                .cells
+                .keys()
+                .map(|&id| self.smoothed_util[id as usize])
+                .collect();
+            let max = utils.iter().cloned().fold(f64::MIN, f64::max);
+            let min = utils.iter().cloned().fold(f64::MAX, f64::min);
+            self.metrics.rebalance_spread = max - min;
+            self.metrics.rebalance_threshold = self.rebalance_threshold;
+            let elapsed = self.last_rebalance.elapsed();
+            self.metrics.rebalance_cooldown_remaining = if elapsed < self.rebalance_cooldown {
+                (self.rebalance_cooldown - elapsed).as_secs_f64()
+            } else {
+                0.0
+            };
+        }
 
         Ok(())
     }
@@ -1429,7 +1555,7 @@ impl<'a> Scheduler<'a> {
                     cpus: Cpumask::new(),
                 })
                 .cpus = cpus;
-            self.metrics.cells.insert(*cell_idx, CellMetrics::default());
+            self.metrics.cells.entry(*cell_idx).or_default();
         }
 
         // Remove cells that no longer have CPUs assigned
@@ -1503,11 +1629,7 @@ fn main(opts: Opts) -> Result<()> {
         .unwrap_or_else(|_| EnvFilter::new("info"));
 
     match tracing_subscriber::fmt()
-        // .with_env_filter(env_filter)
-        // .with_target(true)
-        // .with_thread_ids(true)
-        // .with_file(true)
-        // .with_line_number(true)
+        .with_env_filter(env_filter)
         .try_init()
     {
         Ok(()) => {}
@@ -1530,6 +1652,26 @@ fn main(opts: Opts) -> Result<()> {
         shutdown_clone.store(true, Ordering::Relaxed);
     })
     .context("Error setting Ctrl-C handler")?;
+
+    if let Some(intv) = opts.dashboard {
+        let shutdown_clone = shutdown.clone();
+        let log_path = opts.dashboard_log.clone();
+        let jh = std::thread::spawn(move || {
+            match stats::dashboard(Duration::from_secs_f64(intv), shutdown_clone, log_path) {
+                Ok(_) => {
+                    debug!("stats dashboard thread finished successfully")
+                }
+                Err(error_object) => {
+                    warn!(
+                        "stats dashboard thread finished because of an error {}",
+                        error_object
+                    )
+                }
+            }
+        });
+        let _ = jh.join();
+        return Ok(());
+    }
 
     if let Some(intv) = opts.monitor {
         let shutdown_clone = shutdown.clone();

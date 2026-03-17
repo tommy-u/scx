@@ -815,6 +815,16 @@ impl CellManager {
         parts.join(" ")
     }
 
+    /// Look up the cgroup directory name for a given cell ID.
+    pub fn cell_id_to_name(&self, cell_id: u32) -> Option<String> {
+        let cgid = self.cell_id_to_cgid.get(&cell_id)?;
+        let info = self.cells.get(cgid)?;
+        info.cgroup_path
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy().into_owned())
+    }
+
     /// Re-read cpuset.cpus for all cells and update stored cpusets.
     /// Returns true if any cell's cpuset changed.
     pub fn refresh_cpusets(&mut self) -> Result<bool> {
