@@ -264,6 +264,8 @@ struct Scheduler<'a> {
     // Per-cell running_ns tracking for demand metrics
     prev_nr_kworker_kicks: u64,
     prev_nr_pinned_kicks: u64,
+    prev_cell_kworker_kicks: [u64; MAX_CELLS],
+    prev_cell_pinned_kicks: [u64; MAX_CELLS],
     prev_cell_running_ns: [u64; MAX_CELLS],
     prev_cell_own_ns: [u64; MAX_CELLS],
     prev_cell_lent_ns: [u64; MAX_CELLS],
@@ -477,6 +479,8 @@ impl<'a> Scheduler<'a> {
             prev_cell_stats: [[0; NR_CSTATS]; MAX_CELLS],
             prev_nr_kworker_kicks: 0,
             prev_nr_pinned_kicks: 0,
+            prev_cell_kworker_kicks: [0; MAX_CELLS],
+            prev_cell_pinned_kicks: [0; MAX_CELLS],
             prev_cell_running_ns: [0; MAX_CELLS],
             prev_cell_own_ns: [0; MAX_CELLS],
             prev_cell_lent_ns: [0; MAX_CELLS],
@@ -1177,6 +1181,23 @@ impl<'a> Scheduler<'a> {
         };
         self.metrics.kworker_kicks = kworker_kicks;
         self.metrics.always_preempt_tagged = always_preempt_tagged;
+        // Per-cell kworker kicks
+        for cell in 0..MAX_CELLS {
+            let nr = unsafe {
+                let ptr = &self.skel.maps.bss_data.as_ref().unwrap().cell_kworker_kicks[cell]
+                    as *const u64;
+                (ptr as *const std::sync::atomic::AtomicU64)
+                    .as_ref()
+                    .unwrap()
+                    .load(std::sync::atomic::Ordering::Relaxed)
+            };
+            let delta = nr - self.prev_cell_kworker_kicks[cell];
+            self.prev_cell_kworker_kicks[cell] = nr;
+            if delta > 0 {
+                let cm = self.metrics.cells.entry(cell as u32).or_default();
+                cm.kworker_kicks = delta;
+            }
+        }
         if kworker_kicks > 0 || always_preempt_tagged > 0 {
             trace!(
                 "        Kworker kicks: {}, always_preempt tagged: {}",
@@ -1195,6 +1216,23 @@ impl<'a> Scheduler<'a> {
         let pinned_kicks = nr_pinned_kicks - self.prev_nr_pinned_kicks;
         self.prev_nr_pinned_kicks = nr_pinned_kicks;
         self.metrics.pinned_kicks = pinned_kicks;
+        // Per-cell pinned kicks
+        for cell in 0..MAX_CELLS {
+            let nr = unsafe {
+                let ptr = &self.skel.maps.bss_data.as_ref().unwrap().cell_pinned_kicks[cell]
+                    as *const u64;
+                (ptr as *const std::sync::atomic::AtomicU64)
+                    .as_ref()
+                    .unwrap()
+                    .load(std::sync::atomic::Ordering::Relaxed)
+            };
+            let delta = nr - self.prev_cell_pinned_kicks[cell];
+            self.prev_cell_pinned_kicks[cell] = nr;
+            if delta > 0 {
+                let cm = self.metrics.cells.entry(cell as u32).or_default();
+                cm.pinned_kicks = delta;
+            }
+        }
         if pinned_kicks > 0 {
             trace!("        Pinned kicks: {}", pinned_kicks);
         }

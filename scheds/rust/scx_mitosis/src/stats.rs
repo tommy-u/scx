@@ -62,6 +62,10 @@ pub struct CellMetrics {
     pub kthread_kicks: u64,
     #[stat(desc = "Kthread kick throttled")]
     pub kthread_kick_throttled: u64,
+    #[stat(desc = "Kworker kicks")]
+    pub kworker_kicks: u64,
+    #[stat(desc = "Pinned preempt kicks")]
+    pub pinned_kicks: u64,
     #[stat(desc = "Per-LLC CPU counts within this cell")]
     pub llc_cpus: BTreeMap<u32, u32>,
     #[stat(desc = "Cgroup name owning this cell")]
@@ -354,6 +358,20 @@ impl Metrics {
                 },
                 ansi("2", &tagged_str, color),
             )?;
+            for (cell_id, cm) in &self.cells {
+                let cell_kick_str = format_count(cm.kworker_kicks);
+                writeln!(
+                    w,
+                    "  {}: {} {}",
+                    cell_label(cell_id, cm, color),
+                    ansi("2", "kworker-kick", color),
+                    if cm.kworker_kicks > 0 {
+                        ansi("33", &cell_kick_str, color)
+                    } else {
+                        cell_kick_str
+                    },
+                )?;
+            }
         }
 
         // --- Kthread Kicks ---
@@ -434,6 +452,20 @@ impl Metrics {
                     format_count(self.pinned_kicks)
                 },
             )?;
+            for (cell_id, cm) in &self.cells {
+                let cell_kick_str = format_count(cm.pinned_kicks);
+                writeln!(
+                    w,
+                    "  {}: {} {}",
+                    cell_label(cell_id, cm, color),
+                    ansi("2", "pinned-kick", color),
+                    if cm.pinned_kicks > 0 {
+                        ansi("33", &cell_kick_str, color)
+                    } else {
+                        cell_kick_str
+                    },
+                )?;
+            }
         }
 
         // --- Demand ---

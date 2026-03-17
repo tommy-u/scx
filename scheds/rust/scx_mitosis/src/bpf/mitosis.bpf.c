@@ -73,6 +73,8 @@ u32 cpuset_seq;
 u64 nr_kworker_kicks;
 u64 nr_pinned_kicks;
 u64 nr_always_preempt_tagged;
+u64 cell_kworker_kicks[MAX_CELLS];
+u64 cell_pinned_kicks[MAX_CELLS];
 
 /*
  * Debug events circular buffer
@@ -1018,12 +1020,17 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 			tctx->kick_count++;
 			__atomic_add_fetch(&nr_kworker_kicks, 1,
 					   __ATOMIC_RELAXED);
+			if (tctx->cell >= 0 && tctx->cell < MAX_CELLS)
+				__sync_fetch_and_add(
+					&cell_kworker_kicks[tctx->cell], 1);
 			scx_bpf_kick_cpu(cpu, SCX_KICK_PREEMPT);
 		}
 	} else if (pinned_preempt_kick && !tctx->all_cell_cpus_allowed &&
 		   cpu >= 0 && time_before(vtime, basis_vtime - slice_ns / 2)) {
 		/* Preempt-kick for pinned-to-1-CPU tasks with significant vtime advantage */
 		__atomic_add_fetch(&nr_pinned_kicks, 1, __ATOMIC_RELAXED);
+		if (tctx->cell >= 0 && tctx->cell < MAX_CELLS)
+			__sync_fetch_and_add(&cell_pinned_kicks[tctx->cell], 1);
 		scx_bpf_kick_cpu(cpu, SCX_KICK_PREEMPT);
 	} else if (kthread_preempt_kick && !tctx->all_cell_cpus_allowed &&
 		   (p->flags & PF_KTHREAD) && cpu >= 0) {
