@@ -90,6 +90,7 @@ struct task_ctx {
 	bool always_preempt; /* Tagged at init for latency-critical kthreads */
 	bool is_ksoftirqd; /* true if this task is a ksoftirqd thread */
 	u64 kick_count; /* Number of times this task triggered a preempt kick */
+	u64 last_preempt_kick_ns; /* Per-task cooldown for unified preemption */
 };
 
 static inline const struct cpumask *lookup_cell_cpumask(int idx);

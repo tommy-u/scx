@@ -53,6 +53,8 @@ const volatile bool	     pinned_preempt_kick	     = false;
 const volatile bool	     kworker_preempt_kick	     = false;
 const volatile u64	     kthread_kick_cooldown_ns	     = 0;
 const volatile u64	     ksoftirqd_kick_cooldown_ns	     = 0;
+const volatile bool	     preempt_unified		     = false;
+const volatile u64	     preempt_unified_cooldown_ns     = 0;
 
 /*
  * Global arrays for LLC topology, populated by userspace before load.
@@ -897,6 +899,91 @@ static __always_inline s32 enqueue_pinned_cpu(struct task_struct *p,
 	return cpu;
 }
 
+static void try_preempt_kick(struct task_struct *p, struct task_ctx *tctx,
+			     struct cpu_ctx *cctx, s32 cpu, u64 vtime,
+			     u64 basis_vtime, u64 slice_ns)
+{
+	if (cpu < 0 || tctx->all_cell_cpus_allowed)
+		return;
+
+	/* Always-preempt for tagged kthreads (kworkers) */
+	if (tctx->always_preempt) {
+		bool do_kick = true;
+		if (tctx->is_ksoftirqd && ksoftirqd_kick_cooldown_ns) {
+			u64 now = bpf_ktime_get_ns();
+			if (now - cctx->last_ksoftirqd_kick_ns <=
+			    ksoftirqd_kick_cooldown_ns)
+				do_kick = false;
+			else
+				cctx->last_ksoftirqd_kick_ns = now;
+		}
+		if (do_kick) {
+			tctx->kick_count++;
+			__atomic_add_fetch(&nr_kworker_kicks, 1,
+					   __ATOMIC_RELAXED);
+			if (tctx->cell >= 0 && tctx->cell < MAX_CELLS)
+				__sync_fetch_and_add(
+					&cell_kworker_kicks[tctx->cell], 1);
+			scx_bpf_kick_cpu(cpu, SCX_KICK_PREEMPT);
+		}
+		return;
+	}
+
+	/* Preempt-kick for pinned-to-1-CPU tasks with significant vtime advantage */
+	if (pinned_preempt_kick &&
+	    time_before(vtime, basis_vtime - slice_ns / 2)) {
+		__atomic_add_fetch(&nr_pinned_kicks, 1, __ATOMIC_RELAXED);
+		if (tctx->cell >= 0 && tctx->cell < MAX_CELLS)
+			__sync_fetch_and_add(&cell_pinned_kicks[tctx->cell], 1);
+		scx_bpf_kick_cpu(cpu, SCX_KICK_PREEMPT);
+		return;
+	}
+
+	/* Preempt-kick for generic kthreads with cooldown */
+	if (kthread_preempt_kick && (p->flags & PF_KTHREAD)) {
+		u64 now = bpf_ktime_get_ns();
+		if (!kthread_kick_cooldown_ns ||
+		    now - cctx->last_kthread_kick_ns >
+			    kthread_kick_cooldown_ns) {
+			cctx->last_kthread_kick_ns = now;
+			cstat_inc(CSTAT_KTHREAD_KICK_ENQ, tctx->cell, cctx);
+			scx_bpf_kick_cpu(cpu, SCX_KICK_PREEMPT);
+		} else {
+			cstat_inc(CSTAT_KTHREAD_KICK_THROTTLE, tctx->cell,
+				  cctx);
+		}
+	}
+}
+
+static void try_preempt_unified(struct task_struct *p, struct task_ctx *tctx,
+				struct cpu_ctx *cctx, s32 cpu, u64 vtime,
+				u64 basis_vtime, u64 slice_ns)
+{
+	/* Only applies to tasks pinned to exactly 1 CPU */
+	if (cpu < 0 || tctx->all_cell_cpus_allowed)
+		return;
+
+	/* Skip if task doesn't have significant vtime advantage */
+	if (!time_before(vtime, basis_vtime - slice_ns / 2))
+		return;
+
+	/* Per-task cooldown */
+	if (preempt_unified_cooldown_ns) {
+		u64 now = bpf_ktime_get_ns();
+		if (now - tctx->last_preempt_kick_ns <=
+		    preempt_unified_cooldown_ns)
+			return;
+		tctx->last_preempt_kick_ns = now;
+	}
+
+	tctx->kick_count++;
+	__atomic_add_fetch(&nr_pinned_kicks, 1, __ATOMIC_RELAXED);
+	if (tctx->cell >= 0 && tctx->cell < MAX_CELLS)
+		__sync_fetch_and_add(&cell_pinned_kicks[tctx->cell], 1);
+
+	scx_bpf_kick_cpu(cpu, SCX_KICK_PREEMPT);
+}
+
 void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 {
 	struct cpu_ctx	*cctx;
@@ -1005,47 +1092,12 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 				   __ATOMIC_RELAXED);
 	}
 
-	/* Always-preempt for tagged kthreads (kworkers) */
-	if (tctx->always_preempt && !tctx->all_cell_cpus_allowed && cpu >= 0) {
-		bool do_kick = true;
-		if (tctx->is_ksoftirqd && ksoftirqd_kick_cooldown_ns) {
-			u64 now = bpf_ktime_get_ns();
-			if (now - cctx->last_ksoftirqd_kick_ns <=
-			    ksoftirqd_kick_cooldown_ns)
-				do_kick = false;
-			else
-				cctx->last_ksoftirqd_kick_ns = now;
-		}
-		if (do_kick) {
-			tctx->kick_count++;
-			__atomic_add_fetch(&nr_kworker_kicks, 1,
-					   __ATOMIC_RELAXED);
-			if (tctx->cell >= 0 && tctx->cell < MAX_CELLS)
-				__sync_fetch_and_add(
-					&cell_kworker_kicks[tctx->cell], 1);
-			scx_bpf_kick_cpu(cpu, SCX_KICK_PREEMPT);
-		}
-	} else if (pinned_preempt_kick && !tctx->all_cell_cpus_allowed &&
-		   cpu >= 0 && time_before(vtime, basis_vtime - slice_ns / 2)) {
-		/* Preempt-kick for pinned-to-1-CPU tasks with significant vtime advantage */
-		__atomic_add_fetch(&nr_pinned_kicks, 1, __ATOMIC_RELAXED);
-		if (tctx->cell >= 0 && tctx->cell < MAX_CELLS)
-			__sync_fetch_and_add(&cell_pinned_kicks[tctx->cell], 1);
-		scx_bpf_kick_cpu(cpu, SCX_KICK_PREEMPT);
-	} else if (kthread_preempt_kick && !tctx->all_cell_cpus_allowed &&
-		   (p->flags & PF_KTHREAD) && cpu >= 0) {
-		u64 now = bpf_ktime_get_ns();
-		if (!kthread_kick_cooldown_ns ||
-		    now - cctx->last_kthread_kick_ns >
-			    kthread_kick_cooldown_ns) {
-			cctx->last_kthread_kick_ns = now;
-			cstat_inc(CSTAT_KTHREAD_KICK_ENQ, tctx->cell, cctx);
-			scx_bpf_kick_cpu(cpu, SCX_KICK_PREEMPT);
-		} else {
-			cstat_inc(CSTAT_KTHREAD_KICK_THROTTLE, tctx->cell,
-				  cctx);
-		}
-	}
+	if (preempt_unified)
+		try_preempt_unified(p, tctx, cctx, cpu, vtime, basis_vtime,
+				    slice_ns);
+	else
+		try_preempt_kick(p, tctx, cctx, cpu, vtime, basis_vtime,
+				 slice_ns);
 
 	/* Kick the CPU if needed */
 	if (!__COMPAT_is_enq_cpu_selected(enq_flags) && cpu >= 0)

@@ -215,6 +215,17 @@ struct Opts {
     #[clap(long, action = clap::ArgAction::SetTrue)]
     kworker_preempt_kick: bool,
 
+    /// Enable unified preemption for all pinned-to-1-CPU tasks.
+    /// Replaces the three separate preempt-kick mechanisms with a single
+    /// vtime-based check plus per-task cooldown.
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    preemption: bool,
+
+    /// Per-task cooldown for unified preemption in microseconds.
+    /// Only effective when --preemption is enabled.
+    #[clap(long)]
+    preemption_cooldown_us: Option<u64>,
+
     /// Per-CPU cooldown for kthread preempt-kicks in microseconds.
     /// When set, limits how frequently a given CPU can be preempt-kicked
     /// for kthread scheduling, reducing IPI pressure.
@@ -393,6 +404,8 @@ impl<'a> Scheduler<'a> {
         rodata.pinned_preempt_kick = opts.pinned_preempt_kick;
         rodata.kthread_preempt_kick = opts.kthread_preempt_kick;
         rodata.kworker_preempt_kick = opts.kworker_preempt_kick;
+        rodata.preempt_unified = opts.preemption;
+        rodata.preempt_unified_cooldown_ns = opts.preemption_cooldown_us.unwrap_or(0) * 1000;
         rodata.kthread_kick_cooldown_ns = opts.kthread_kick_cooldown_us.unwrap_or(0) * 1000;
         rodata.ksoftirqd_kick_cooldown_ns = opts.ksoftirqd_kick_cooldown_us.unwrap_or(0) * 1000;
 
