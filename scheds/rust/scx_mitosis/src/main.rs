@@ -502,7 +502,7 @@ impl<'a> Scheduler<'a> {
                 m.build_version = build_id::full_version(env!("CARGO_PKG_VERSION"));
                 m.dynamic_affinity_enabled = opts.dynamic_affinity_cpu_selection as u32;
                 m.kworker_kick_enabled = opts.kworker_preempt_kick as u32;
-                m.pinned_kick_enabled = opts.pinned_preempt_kick as u32;
+                m.pinned_kick_enabled = (opts.pinned_preempt_kick || opts.preemption) as u32;
                 m.kthread_kick_enabled = opts.kthread_preempt_kick as u32;
                 m
             },
