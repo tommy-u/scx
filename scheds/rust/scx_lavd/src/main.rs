@@ -137,7 +137,7 @@ struct Opts {
 
     /// Low utilization threshold percentage (0-100) for periodic load balancing.
     /// When set to a non-zero value, periodic load balancing is skipped when
-    /// average system utilization is below this percentage.
+    /// the maximum per-domain utilization is below this percentage.
     /// Default is 25 (skip periodic LB below 25% utilization).
     /// Set to 0 to disable. Set to 100 to always skip periodic LB.
     #[clap(long = "lb-low-util-pct", default_value = "25", value_parser=Opts::lb_low_util_pct_range)]
@@ -146,7 +146,7 @@ struct Opts {
     /// Low utilization threshold percentage (0-100) for bypassing deadline
     /// scheduling. When set to a non-zero value, tasks are dispatched directly
     /// to the local DSQ (FIFO) instead of using deadline-based ordering when
-    /// average system utilization is below this percentage.
+    /// the per-CPU utilization is below this percentage.
     /// Default is 10 (bypass deadline scheduling below 10% utilization).
     /// Set to 0 to disable. Set to 100 to always bypass deadline scheduling.
     #[clap(long = "lb-local-dsq-util-pct", default_value = "10", value_parser=Opts::lb_local_dsq_util_pct_range)]
@@ -749,6 +749,10 @@ impl<'a> Scheduler<'a> {
             cpuperf_cur: tx.cpuperf_cur,
             cpu_util_wall: tx.cpu_util_wall,
             cpu_util_invr: tx.cpu_util_invr,
+            steal_util_wall: tx.steal_util_wall,
+            steal_util_invr: tx.steal_util_invr,
+            dom_pinned_util_wall: tx.dom_pinned_util_wall,
+            dom_pinned_util_invr: tx.dom_pinned_util_invr,
             nr_active: tx.nr_active,
             dsq_id: tx.dsq_id,
             dsq_consume_lat: tx.dsq_consume_lat,
