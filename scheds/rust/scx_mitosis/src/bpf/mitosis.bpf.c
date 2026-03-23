@@ -47,6 +47,9 @@ const volatile bool	     cpu_controller_disabled	     = false;
 const volatile bool	     reject_multicpu_pinning	     = false;
 const volatile bool	     userspace_managed_cell_mode     = false;
 const volatile bool	     enable_borrowing		     = false;
+const volatile bool	     skip_dd_enqueue		     = false;
+const volatile bool	     skip_dd_select_cpu		     = false;
+const volatile u32	     tick_preempt_period	     = 0;
 
 /*
  * Global arrays for LLC topology, populated by userspace before load.
@@ -688,6 +691,8 @@ static __always_inline s32 try_pick_idle_cpu(struct task_struct *p,
 s32 BPF_STRUCT_OPS(mitosis_select_cpu, struct task_struct *p, s32 prev_cpu,
 		   u64 wake_flags)
 {
+	return prev_cpu;
+
 	s32		 cpu;
 	struct cpu_ctx	*cctx;
 	struct task_ctx *tctx;
@@ -704,13 +709,30 @@ s32 BPF_STRUCT_OPS(mitosis_select_cpu, struct task_struct *p, s32 prev_cpu,
 		if (cpu < 0)
 			return prev_cpu;
 
-		if (scx_bpf_test_and_clear_cpu_idle(cpu))
+		/* Still return the CPU for placement; skip the dispatch. */
+		if (!skip_dd_select_cpu && scx_bpf_test_and_clear_cpu_idle(cpu))
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_ns, 0);
 		return cpu;
 	}
 
-	if ((cpu = try_pick_idle_cpu(p, prev_cpu, cctx, tctx, false)) >= 0)
+	/*
+	 * pick_idle_cpu selects without dispatching;
+	 * try_pick_idle_cpu also dispatches to SCX_DSQ_LOCAL.
+	 */
+	if (skip_dd_select_cpu) {
+		/* Just a placement hint — don't touch idle masks.
+		 * Task will be enqueued to a DSQ and dispatch() will consume it. */
+		if (tctx->cpumask &&
+		    bpf_cpumask_test_cpu(prev_cpu, cast_mask(tctx->cpumask)))
+			return prev_cpu;
+		if (tctx->cpumask)
+			return bpf_cpumask_any_distribute(
+				cast_mask(tctx->cpumask));
+		return prev_cpu;
+	} else if ((cpu = try_pick_idle_cpu(p, prev_cpu, cctx, tctx, false)) >=
+		   0) {
 		return cpu;
+	}
 
 	if (!tctx->cpumask) {
 		scx_bpf_error("tctx->cpumask should never be NULL");
@@ -759,12 +781,14 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 		 */
 		if (!(cctx = lookup_cpu_ctx(-1)))
 			return;
-		cpu = try_pick_idle_cpu(p, task_cpu, cctx, tctx, true);
-		if (cpu >= 0)
-			return;
-		if (cpu == -1)
-			return;
-		if (cpu == -EBUSY) {
+		if (!skip_dd_enqueue) {
+			cpu = try_pick_idle_cpu(p, task_cpu, cctx, tctx, true);
+			if (cpu >= 0)
+				return;
+			if (cpu == -1)
+				return;
+		}
+		if (cpu == -EBUSY && !skip_dd_enqueue) {
 			/*
 			 * Verifier gets unhappy claiming two different pointer types for
 			 * the same instruction here. This fixes it
@@ -826,6 +850,10 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 	scx_bpf_dsq_insert_vtime(p, tctx->dsq.raw, slice_ns, vtime, enq_flags);
 
 	/* Kick the CPU if needed */
+	if (skip_dd_enqueue && cpu >= 0)
+		scx_bpf_error(
+			"skip_dd_enqueue: unexpected cpu %d selected in enqueue",
+			cpu);
 	if (!__COMPAT_is_enq_cpu_selected(enq_flags) && cpu >= 0)
 		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 }
@@ -855,9 +883,14 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 		return;
 	}
 
+	bool cell_has = false, cpu_has = false;
+	u64  cell_vtime = 0, cpu_vtime = 0;
+
 	/* Peek at cell-LLC DSQ head */
 	p = __COMPAT_scx_bpf_dsq_peek(cell_dsq.raw);
 	if (p) {
+		cell_vtime    = p->scx.dsq_vtime;
+		cell_has      = true;
 		min_vtime     = p->scx.dsq_vtime;
 		min_vtime_dsq = cell_dsq;
 		found	      = true;
@@ -865,10 +898,23 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 
 	/* Peek at CPU DSQ head, prefer if lower vtime */
 	p = __COMPAT_scx_bpf_dsq_peek(cpu_dsq.raw);
-	if (p && (!found || time_before(p->scx.dsq_vtime, min_vtime))) {
-		min_vtime     = p->scx.dsq_vtime;
-		min_vtime_dsq = cpu_dsq;
-		found	      = true;
+	if (p) {
+		cpu_vtime = p->scx.dsq_vtime;
+		cpu_has	  = true;
+		if (!found || time_before(p->scx.dsq_vtime, min_vtime)) {
+			min_vtime     = p->scx.dsq_vtime;
+			min_vtime_dsq = cpu_dsq;
+			found	      = true;
+		}
+	}
+
+	if (cell_has && cpu_has) {
+		cstat_inc(CSTAT_BOTH_DSQS, cell, cctx);
+		if (cell_vtime == cpu_vtime) {
+			cstat_inc(CSTAT_VTIME_TIE, cell, cctx);
+			// default to cell DSQ
+			min_vtime_dsq = cpu_dsq;
+		}
 	}
 
 	/*
@@ -896,6 +942,8 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 	 * we might never wakeup.
 	 */
 
+	cstat_inc(CSTAT_DISPATCH, cell, cctx);
+
 	/* Try the winner first */
 	if (scx_bpf_dsq_move_to_local(min_vtime_dsq.raw))
 		return;
@@ -903,6 +951,53 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 	/* Winner was cell DSQ but failed - try the CPU DSQ */
 	if (min_vtime_dsq.raw == cell_dsq.raw)
 		scx_bpf_dsq_move_to_local(cpu_dsq.raw);
+}
+
+void BPF_STRUCT_OPS(mitosis_tick, struct task_struct *p)
+{
+	struct cpu_ctx	   *cctx;
+	struct task_struct *queued;
+
+	if (!(cctx = lookup_cpu_ctx(-1)))
+		return;
+
+	cstat_inc(CSTAT_TICK, READ_ONCE(cctx->cell), cctx);
+
+	if (!tick_preempt_period)
+		return;
+
+	if (++cctx->tick_counter % tick_preempt_period != 0)
+		return;
+
+	u32 cell      = READ_ONCE(cctx->cell);
+	u32 llc	      = enable_llc_awareness ? cctx->llc : FAKE_FLAT_CELL_LLC;
+	u64 threshold = slice_ns * 95 / 100;
+
+	/* Check CPU DSQ first */
+	dsq_id_t cpu_dsq = get_cpu_dsq_id(scx_bpf_task_cpu(p));
+	if (!dsq_is_invalid(cpu_dsq)) {
+		queued = __COMPAT_scx_bpf_dsq_peek(cpu_dsq.raw);
+		if (queued && time_before(queued->scx.dsq_vtime + threshold,
+					  p->scx.dsq_vtime)) {
+			cstat_inc(CSTAT_TICK_PREEMPT, cell, cctx);
+			scx_bpf_kick_cpu(scx_bpf_task_cpu(p), SCX_KICK_PREEMPT);
+			return;
+		}
+	}
+
+	/* Then check cell DSQ */
+	dsq_id_t cell_dsq = get_cell_llc_dsq_id(cell, llc);
+	if (dsq_is_invalid(cell_dsq))
+		return;
+
+	queued = __COMPAT_scx_bpf_dsq_peek(cell_dsq.raw);
+	if (!queued)
+		return;
+
+	if (time_before(queued->scx.dsq_vtime + threshold, p->scx.dsq_vtime)) {
+		cstat_inc(CSTAT_TICK_PREEMPT, cell, cctx);
+		scx_bpf_kick_cpu(scx_bpf_task_cpu(p), SCX_KICK_PREEMPT);
+	}
 }
 
 /*
@@ -2513,6 +2608,7 @@ SCX_OPS_DEFINE(mitosis,
 	       .select_cpu		= (void *)mitosis_select_cpu,
 	       .enqueue			= (void *)mitosis_enqueue,
 	       .dispatch		= (void *)mitosis_dispatch,
+	       .tick			= (void *)mitosis_tick,
 	       .running			= (void *)mitosis_running,
 	       .stopping		= (void *)mitosis_stopping,
 	       .set_cpumask		= (void *)mitosis_set_cpumask,

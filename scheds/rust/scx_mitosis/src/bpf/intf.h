@@ -73,6 +73,11 @@ enum cell_stat_idx {
 	CSTAT_AFFN_VIOL,
 	CSTAT_BORROWED,
 	CSTAT_STEAL,
+	CSTAT_TICK_PREEMPT,
+	CSTAT_TICK,
+	CSTAT_DISPATCH,
+	CSTAT_BOTH_DSQS,
+	CSTAT_VTIME_TIE,
 	NR_CSTATS,
 };
 
@@ -83,6 +88,7 @@ struct cpu_ctx {
 	u64 vtime_now;
 	u32 cell;
 	u32 llc;
+	u32 tick_counter;
 };
 
 struct cgrp_ctx {

@@ -148,6 +148,14 @@ struct Opts {
     #[clap(long, action = clap::ArgAction::SetTrue)]
     enable_work_stealing: bool,
 
+    /// Disable direct dispatch in enqueue, forcing tasks through dispatch().
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    skip_dd_enqueue: bool,
+
+    /// Disable direct dispatch in select_cpu, forcing tasks through enqueue/dispatch().
+    #[clap(long = "skip-dd-select", action = clap::ArgAction::SetTrue)]
+    skip_dd_select_cpu: bool,
+
     /// Parent cgroup path whose direct children become cells.
     /// When specified, cells are created for each direct child cgroup of this parent,
     /// with CPUs divided equally among cells. Example: --cell-parent-cgroup /workloads
@@ -160,6 +168,11 @@ struct Opts {
     /// Example: --cell-exclude systemd-workaround.service
     #[clap(long)]
     cell_exclude: Vec<String>,
+
+    /// Enable tick-based vtime preemption. Value is the tick period divisor:
+    /// 1 = every tick, 4 = every 4th tick, etc. 0 = disabled (default).
+    #[clap(long, default_value = "0")]
+    tick_preempt: u32,
 
     /// Enable CPU borrowing: cells can use idle CPUs from other cells.
     /// Only meaningful with --cell-parent-cgroup and multiple cells.
@@ -336,10 +349,13 @@ impl<'a> Scheduler<'a> {
         rodata.nr_llc = nr_llc as u32;
         rodata.enable_llc_awareness = opts.enable_llc_awareness;
         rodata.enable_work_stealing = opts.enable_work_stealing;
+        rodata.skip_dd_enqueue = opts.skip_dd_enqueue;
+        rodata.skip_dd_select_cpu = opts.skip_dd_select_cpu;
 
         rodata.userspace_managed_cell_mode = opts.cell_parent_cgroup.is_some();
 
         rodata.enable_borrowing = opts.enable_borrowing;
+        rodata.tick_preempt_period = opts.tick_preempt;
 
         match *compat::SCX_OPS_ALLOW_QUEUED_WAKEUP {
             0 => info!("Kernel does not support queued wakeup optimization."),
@@ -1000,6 +1016,37 @@ impl<'a> Scheduler<'a> {
 
         self.log_all_queue_stats(&cell_stats_delta)?;
 
+        let ticks: u64 = cell_stats_delta
+            .iter()
+            .map(|cell| cell[bpf_intf::cell_stat_idx_CSTAT_TICK as usize])
+            .sum();
+        let tick_preempts: u64 = cell_stats_delta
+            .iter()
+            .map(|cell| cell[bpf_intf::cell_stat_idx_CSTAT_TICK_PREEMPT as usize])
+            .sum();
+        if ticks > 0 || tick_preempts > 0 {
+            info!("Ticks: {} Tick preemptions: {}", ticks, tick_preempts);
+        }
+
+        let dispatches: u64 = cell_stats_delta
+            .iter()
+            .map(|cell| cell[bpf_intf::cell_stat_idx_CSTAT_DISPATCH as usize])
+            .sum();
+        let both_dsqs: u64 = cell_stats_delta
+            .iter()
+            .map(|cell| cell[bpf_intf::cell_stat_idx_CSTAT_BOTH_DSQS as usize])
+            .sum();
+        let vtime_ties: u64 = cell_stats_delta
+            .iter()
+            .map(|cell| cell[bpf_intf::cell_stat_idx_CSTAT_VTIME_TIE as usize])
+            .sum();
+        if dispatches > 0 {
+            info!(
+                "Dispatches: {} Both DSQs: {} Vtime ties: {}",
+                dispatches, both_dsqs, vtime_ties
+            );
+        }
+
         if self.cell_manager.is_some() {
             self.collect_demand_metrics(&cpu_ctxs)?;
         }
@@ -1313,10 +1360,10 @@ fn main(opts: Opts) -> Result<()> {
 
     match tracing_subscriber::fmt()
         .with_env_filter(env_filter)
-        .with_target(true)
-        .with_thread_ids(true)
-        .with_file(true)
-        .with_line_number(true)
+        // .with_target(true)
+        // .with_thread_ids(true)
+        // .with_file(true)
+        // .with_line_number(true)
         .try_init()
     {
         Ok(()) => {}
