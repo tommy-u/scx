@@ -26,6 +26,8 @@
  */
 #define FAKE_FLAT_CELL_LLC 0
 
+#define trace_printk(fmt, args...) bpf_trace_printk(fmt, sizeof(fmt), ##args)
+
 #include "mitosis.bpf.h"
 #include "dsq.bpf.h"
 #include "llc_aware.bpf.h"
@@ -39,6 +41,7 @@ const volatile u32	     nr_possible_cpus = 1;
 const volatile bool	     smt_enabled      = true;
 const volatile unsigned char all_cpus[MAX_CPUS_U8];
 
+const volatile s32	     trace_cpu = -1;
 const volatile u64	     slice_ns;
 const volatile u64	     root_cgid			     = 1;
 const volatile bool	     debug_events_enabled	     = false;
@@ -318,6 +321,32 @@ static inline void record_cgroup_exit(u64 cgid)
 	event->timestamp	= scx_bpf_now();
 	event->event_type	= DEBUG_EVENT_CGROUP_EXIT;
 	event->cgroup_exit.cgid = cgid;
+}
+
+/*
+ * CPU trace: trace_printk-based per-CPU scheduling event tracer.
+ * When trace_cpu >= 0, traces all scheduling events on that CPU.
+ * Since we only trace one CPU, global statics are fine (no contention).
+ */
+static u64	   trace_last_idle_at;
+static u64	   trace_last_wake_at;
+static u64	   trace_busy_ns;
+static u64	   trace_idle_ns;
+
+static inline void trace_get_qs(s32 cpu, s32 *cq, s32 *pq)
+{
+	struct cpu_ctx *cctx = lookup_cpu_ctx(cpu);
+	if (!cctx) {
+		*cq = -1;
+		*pq = -1;
+		return;
+	}
+	u32	 llc = enable_llc_awareness ? cctx->llc : FAKE_FLAT_CELL_LLC;
+	dsq_id_t cell_dsq = get_cell_llc_dsq_id(cctx->cell, llc);
+	dsq_id_t cpu_dsq  = get_cpu_dsq_id(cpu);
+	*cq		  = dsq_is_invalid(cell_dsq) ? -1 :
+						       scx_bpf_dsq_nr_queued(cell_dsq.raw);
+	*pq = dsq_is_invalid(cpu_dsq) ? -1 : scx_bpf_dsq_nr_queued(cpu_dsq.raw);
 }
 
 /*
@@ -695,6 +724,8 @@ s32 BPF_STRUCT_OPS(mitosis_select_cpu, struct task_struct *p, s32 prev_cpu,
 	if (!(cctx = lookup_cpu_ctx(-1)) || !(tctx = lookup_task_ctx(p)))
 		return prev_cpu;
 
+	tctx->runnable_at = bpf_ktime_get_ns();
+
 	if (maybe_refresh_cell(p, tctx) < 0)
 		return prev_cpu;
 
@@ -704,13 +735,30 @@ s32 BPF_STRUCT_OPS(mitosis_select_cpu, struct task_struct *p, s32 prev_cpu,
 		if (cpu < 0)
 			return prev_cpu;
 
-		if (scx_bpf_test_and_clear_cpu_idle(cpu))
+		if (scx_bpf_test_and_clear_cpu_idle(cpu)) {
 			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_ns, 0);
+			if (trace_cpu >= 0 && cpu == trace_cpu) {
+				s32 tcq, tpq;
+				trace_get_qs(cpu, &tcq, &tpq);
+				trace_printk("S> %s/%d:%d", p->comm, p->tgid,
+					     p->pid);
+				trace_printk("S>  vt=%llu cq=%d pq=%d",
+					     p->scx.dsq_vtime, tcq, tpq);
+			}
+		}
 		return cpu;
 	}
 
-	if ((cpu = try_pick_idle_cpu(p, prev_cpu, cctx, tctx, false)) >= 0)
+	if ((cpu = try_pick_idle_cpu(p, prev_cpu, cctx, tctx, false)) >= 0) {
+		if (trace_cpu >= 0 && cpu == trace_cpu) {
+			s32 tcq, tpq;
+			trace_get_qs(cpu, &tcq, &tpq);
+			trace_printk("S> %s/%d:%d", p->comm, p->tgid, p->pid);
+			trace_printk("S>  vt=%llu cq=%d pq=%d",
+				     p->scx.dsq_vtime, tcq, tpq);
+		}
 		return cpu;
+	}
 
 	if (!tctx->cpumask) {
 		scx_bpf_error("tctx->cpumask should never be NULL");
@@ -742,6 +790,9 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 	if (!(tctx = lookup_task_ctx(p)) || !(cctx = lookup_cpu_ctx(-1)))
 		return;
 
+	if (!tctx->runnable_at)
+		tctx->runnable_at = bpf_ktime_get_ns();
+
 	if (maybe_refresh_cell(p, tctx) < 0)
 		return;
 
@@ -760,8 +811,17 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 		if (!(cctx = lookup_cpu_ctx(-1)))
 			return;
 		cpu = try_pick_idle_cpu(p, task_cpu, cctx, tctx, true);
-		if (cpu >= 0)
+		if (cpu >= 0) {
+			if (trace_cpu >= 0 && cpu == trace_cpu) {
+				s32 tcq, tpq;
+				trace_get_qs(cpu, &tcq, &tpq);
+				trace_printk("E> %s/%d:%d", p->comm, p->tgid,
+					     p->pid);
+				trace_printk("E>  vt=%llu cq=%d pq=%d",
+					     p->scx.dsq_vtime, tcq, tpq);
+			}
 			return;
+		}
 		if (cpu == -1)
 			return;
 		if (cpu == -EBUSY) {
@@ -843,6 +903,8 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 	bool		    found	  = false;
 	dsq_id_t	    min_vtime_dsq = DSQ_INVALID;
 	u64		    min_vtime	  = 0;
+	s32		    min_pid	  = 0;
+	s32		    min_tgid	  = 0;
 
 	struct task_struct *p;
 
@@ -856,10 +918,13 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 	}
 
 	/* Peek at cell-LLC DSQ head */
+
 	p = __COMPAT_scx_bpf_dsq_peek(cell_dsq.raw);
 	if (p) {
 		min_vtime     = p->scx.dsq_vtime;
 		min_vtime_dsq = cell_dsq;
+		min_pid	      = p->pid;
+		min_tgid      = p->tgid;
 		found	      = true;
 	}
 
@@ -868,6 +933,8 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 	if (p && (!found || time_before(p->scx.dsq_vtime, min_vtime))) {
 		min_vtime     = p->scx.dsq_vtime;
 		min_vtime_dsq = cpu_dsq;
+		min_pid	      = p->pid;
+		min_tgid      = p->tgid;
 		found	      = true;
 	}
 
@@ -897,12 +964,29 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 	 */
 
 	/* Try the winner first */
-	if (scx_bpf_dsq_move_to_local(min_vtime_dsq.raw))
+	if (scx_bpf_dsq_move_to_local(min_vtime_dsq.raw)) {
+		if (trace_cpu >= 0 && cpu == trace_cpu) {
+			s32 tcq, tpq;
+			trace_get_qs(cpu, &tcq, &tpq);
+			trace_printk("D> %d:%d vt=%llu", min_tgid, min_pid,
+				     min_vtime);
+			trace_printk("D>  cq=%d pq=%d", tcq, tpq);
+		}
 		return;
+	}
 
 	/* Winner was cell DSQ but failed - try the CPU DSQ */
-	if (min_vtime_dsq.raw == cell_dsq.raw)
-		scx_bpf_dsq_move_to_local(cpu_dsq.raw);
+	if (min_vtime_dsq.raw == cell_dsq.raw) {
+		if (scx_bpf_dsq_move_to_local(cpu_dsq.raw)) {
+			if (trace_cpu >= 0 && cpu == trace_cpu) {
+				s32 tcq, tpq;
+				trace_get_qs(cpu, &tcq, &tpq);
+				trace_printk("D> pid=%d vt=%llu", min_pid,
+					     min_vtime);
+				trace_printk("D>  cq=%d pq=%d", tcq, tpq);
+			}
+		}
+	}
 }
 
 /*
@@ -1336,6 +1420,14 @@ void BPF_STRUCT_OPS(mitosis_running, struct task_struct *p)
 	}
 
 	tctx->started_running_at = scx_bpf_now();
+
+	if (trace_cpu >= 0 && scx_bpf_task_cpu(p) == trace_cpu) {
+		u64 runnable = tctx->runnable_at ? bpf_ktime_get_ns() - tctx->runnable_at : 0;
+		trace_printk("R> %s/%d:%d", p->comm, p->tgid, p->pid);
+		trace_printk("R>  slice=%llu runnable=%llu", slice_ns,
+			     runnable);
+	}
+	tctx->runnable_at = 0;
 }
 
 void BPF_STRUCT_OPS(mitosis_stopping, struct task_struct *p, bool runnable)
@@ -1404,6 +1496,20 @@ void BPF_STRUCT_OPS(mitosis_stopping, struct task_struct *p, bool runnable)
 			return;
 		}
 		*running += used;
+	}
+
+	if (trace_cpu >= 0 && scx_bpf_task_cpu(p) == trace_cpu) {
+		s32 tcq, tpq;
+		trace_get_qs(scx_bpf_task_cpu(p), &tcq, &tpq);
+		if (runnable) {
+			trace_printk("XR %s/%d:%d", p->comm, p->tgid, p->pid);
+			trace_printk("XR  used=%llu cq=%d pq=%d", used, tcq,
+				     tpq);
+		} else {
+			trace_printk("Xs %s/%d:%d", p->comm, p->tgid, p->pid);
+			trace_printk("Xs  used=%llu cq=%d pq=%d", used, tcq,
+				     tpq);
+		}
 	}
 }
 
@@ -2508,6 +2614,30 @@ int apply_cell_config(void *ctx)
 	return 0;
 }
 
+void BPF_STRUCT_OPS(mitosis_update_idle, s32 cpu, bool idle)
+{
+	if (trace_cpu < 0 || cpu != trace_cpu)
+		return;
+
+	u64 now = bpf_ktime_get_ns();
+	s32 cq, pq;
+	trace_get_qs(cpu, &cq, &pq);
+
+	if (idle) {
+		trace_busy_ns += now - trace_last_wake_at;
+		trace_last_idle_at = now;
+		u64 total	   = trace_busy_ns + trace_idle_ns;
+		u32 ut = total ? (u32)(trace_busy_ns * 100 / total) : 0;
+		trace_printk("W< cq=%d pq=%d ut=%u", cq, pq, ut);
+	} else {
+		trace_idle_ns += now - trace_last_idle_at;
+		trace_last_wake_at = now;
+		u64 total	   = trace_busy_ns + trace_idle_ns;
+		u32 ut = total ? (u32)(trace_busy_ns * 100 / total) : 0;
+		trace_printk("W> cq=%d pq=%d ut=%u", cq, pq, ut);
+	}
+}
+
 // clang-format off
 SCX_OPS_DEFINE(mitosis,
 	       .select_cpu		= (void *)mitosis_select_cpu,
@@ -2515,6 +2645,7 @@ SCX_OPS_DEFINE(mitosis,
 	       .dispatch		= (void *)mitosis_dispatch,
 	       .running			= (void *)mitosis_running,
 	       .stopping		= (void *)mitosis_stopping,
+	       .update_idle		= (void *)mitosis_update_idle,
 	       .set_cpumask		= (void *)mitosis_set_cpumask,
 	       .init_task		= (void *)mitosis_init_task,
 	       .cgroup_init		= (void *)mitosis_cgroup_init,
@@ -2524,5 +2655,6 @@ SCX_OPS_DEFINE(mitosis,
 	       .dump_task		= (void *)mitosis_dump_task,
 	       .init			= (void *)mitosis_init,
 	       .exit			= (void *)mitosis_exit,
+	       .flags			= SCX_OPS_KEEP_BUILTIN_IDLE,
 	       .name			= "mitosis");
 // clang-format on

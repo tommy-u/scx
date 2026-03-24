@@ -85,6 +85,7 @@ struct task_ctx {
 	/* Which LLC this task is assigned to */
 	s32 llc;
 
+	u64 runnable_at; /* timestamp when task became runnable (for trace_cpu) */
 	u32 steal_count; /* how many times this task has been stolen */
 	u64 last_stolen_at; /* ns timestamp of the last steal (scx_bpf_now) */
 };

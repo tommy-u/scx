@@ -182,6 +182,12 @@ struct Opts {
     #[clap(long, default_value = "0.3", value_parser = parse_ewma_factor)]
     demand_smoothing: f64,
 
+    /// Trace scheduling events on a single CPU via bpf_printk.
+    /// Read output with: sudo cat /sys/kernel/debug/tracing/trace_pipe
+    /// -1 (default) disables tracing.
+    #[clap(long, default_value = "-1")]
+    trace_cpu: i32,
+
     #[clap(flatten, next_help_heading = "Libbpf Options")]
     pub libbpf: LibbpfOpts,
 }
@@ -340,6 +346,7 @@ impl<'a> Scheduler<'a> {
         rodata.userspace_managed_cell_mode = opts.cell_parent_cgroup.is_some();
 
         rodata.enable_borrowing = opts.enable_borrowing;
+        rodata.trace_cpu = opts.trace_cpu;
 
         match *compat::SCX_OPS_ALLOW_QUEUED_WAKEUP {
             0 => info!("Kernel does not support queued wakeup optimization."),
