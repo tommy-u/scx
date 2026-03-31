@@ -764,6 +764,32 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 }
 
 /*
+ * Tracing hook: fires on contested dispatches where both cell and CPU
+ * DSQs have tasks. Two ways to observe:
+ *   1. fentry:bpf:*:dispatch_contested — live counting in bpftrace
+ *   2. make vtime-hist — read log2 histogram from vtdelta_hist map
+ */
+#define VTIME_HIST_BUCKETS 32
+
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__type(key, u32);
+	__type(value, u64);
+	__uint(max_entries, VTIME_HIST_BUCKETS);
+} vtdelta_hist SEC(".maps");
+
+static __noinline void dispatch_contested(u64 cell_vt, u64 cpu_vt)
+{
+	u64 delta  = cell_vt >= cpu_vt ? cell_vt - cpu_vt : cpu_vt - cell_vt;
+	u32 bucket = log2_u64(delta);
+	if (bucket >= VTIME_HIST_BUCKETS)
+		bucket = VTIME_HIST_BUCKETS - 1;
+	u64 *cnt = bpf_map_lookup_elem(&vtdelta_hist, &bucket);
+	if (cnt)
+		(*cnt)++;
+}
+
+/*
  * Peek at the head of a DSQ. By default use a bpf_for_each iterator loop.
  * When use_lockless_peek is set, use the lockless scx_bpf_dsq_peek() kfunc.
  */
@@ -804,21 +830,47 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 		return;
 	}
 
+	u64  cell_vtime = 0, cpu_vtime = 0;
+	bool cell_found = false, cpu_found = false;
+
 	/* Peek at cell-LLC DSQ head */
 	p = dsq_peek(cell_dsq.raw);
 	if (p) {
+<<<<<<< Updated upstream
 		min_vtime = p->scx.dsq_vtime;
 		min_vtime_dsq = cell_dsq;
 		found = true;
+=======
+		cell_vtime    = p->scx.dsq_vtime;
+		min_vtime     = cell_vtime;
+		min_vtime_dsq = cell_dsq;
+		found	      = true;
+		cell_found    = true;
+>>>>>>> Stashed changes
 	}
 
 	/* Peek at CPU DSQ head, prefer if lower vtime */
 	p = dsq_peek(cpu_dsq.raw);
+<<<<<<< Updated upstream
 	if (p && (!found || time_before(p->scx.dsq_vtime, min_vtime))) {
 		min_vtime = p->scx.dsq_vtime;
 		min_vtime_dsq = cpu_dsq;
 		found = true;
+=======
+	if (p) {
+		cpu_vtime = p->scx.dsq_vtime;
+		cpu_found = true;
+		if (!found || time_before(cpu_vtime, min_vtime)) {
+			min_vtime     = cpu_vtime;
+			min_vtime_dsq = cpu_dsq;
+			found	      = true;
+		}
+>>>>>>> Stashed changes
 	}
+
+	/* Hook: emit vtimes for tracing when both DSQs have tasks */
+	if (cell_found && cpu_found)
+		dispatch_contested(cell_vtime, cpu_vtime);
 
 	/*
 	 * If we failed to find an eligible task, try work stealing if enabled.
