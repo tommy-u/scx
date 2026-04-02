@@ -76,6 +76,8 @@ enum cell_stat_idx {
 	CSTAT_CLAMP_USED,
 	CSTAT_PIN_SKIP,
 	CSTAT_PINNED_SLICE_CAP,
+	CSTAT_PINNED_CAP_CEIL,
+	CSTAT_PINNED_CAP_FLOOR,
 	NR_CSTATS,
 };
 
@@ -185,6 +187,15 @@ struct cell_config {
 	struct cell_assignment assignments[MAX_CELLS];
 	struct cell_cpumask_data cpumasks[MAX_CELLS];
 	struct cell_cpumask_data borrowable_cpumasks[MAX_CELLS];
+};
+
+/* Per-task EWMA runtime entry for userspace iteration */
+struct avg_runtime_entry {
+	u32 tgid;
+	u32 pid;
+	char comm[16];
+	u64 avg_runtime_ns;
+	u32 nr_runs;
 };
 
 #endif /* __INTF_H */

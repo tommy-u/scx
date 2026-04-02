@@ -196,6 +196,23 @@ struct Opts {
     #[clap(long, num_args = 0..=1, default_missing_value = "4", value_name = "MS")]
     pinned_slice_cap: Option<u64>,
 
+    /// Track per-task EWMA runtime and include in exit dump.
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    track_avg_runtime: bool,
+
+    /// Multiplier for EWMA-based proportional slice cap (cap = avg_runtime * K).
+    /// Only effective when --track-avg-runtime is also set.
+    #[clap(long, default_value = "2")]
+    pinned_slice_multiplier: u32,
+
+    /// Minimum slice cap (us) for EWMA-based proportional capping.
+    #[clap(long, default_value = "50")]
+    pinned_slice_min_us: u64,
+
+    /// Dump EWMA runtime data to a file on exit instead of stdout.
+    #[clap(long, value_name = "PATH")]
+    avg_runtime_dump: Option<String>,
+
     #[clap(flatten, next_help_heading = "Libbpf Options")]
     pub libbpf: LibbpfOpts,
 }
@@ -255,6 +272,12 @@ struct Scheduler<'a> {
     epoll: Epoll,
     /// EventFd to wake up main loop when stats are requested
     stats_waker: EventFd,
+    /// Whether pinned slice capping is enabled
+    pinned_slice_cap: bool,
+    /// Whether EWMA runtime tracking is enabled
+    track_avg_runtime: bool,
+    /// Optional file path for EWMA runtime dump (None = stdout)
+    avg_runtime_dump: Option<String>,
 }
 
 struct DistributionStats {
@@ -343,6 +366,9 @@ impl<'a> Scheduler<'a> {
         rodata.dynamic_affinity_cpu_selection = opts.dynamic_affinity_cpu_selection;
         rodata.pinned_slice_cap = opts.pinned_slice_cap.is_some();
         rodata.pinned_slice_cap_ns = opts.pinned_slice_cap.unwrap_or(0) * 1_000_000;
+        rodata.track_avg_runtime = opts.track_avg_runtime;
+        rodata.pinned_slice_multiplier = opts.pinned_slice_multiplier;
+        rodata.pinned_slice_min_ns = opts.pinned_slice_min_us * 1_000;
 
         rodata.nr_possible_cpus = *NR_CPUS_POSSIBLE as u32;
         for cpu in topology.all_cpus.keys() {
@@ -444,6 +470,9 @@ impl<'a> Scheduler<'a> {
             rebalance_count: 0,
             epoll,
             stats_waker,
+            pinned_slice_cap: opts.pinned_slice_cap.is_some(),
+            track_avg_runtime: opts.track_avg_runtime,
+            avg_runtime_dump: opts.avg_runtime_dump.clone(),
         })
     }
 
@@ -513,6 +542,14 @@ impl<'a> Scheduler<'a> {
         // Drop stats_server to close the channel, allowing stats_bridge to exit
         drop(self.stats_server.take());
         let _ = stats_bridge.join();
+
+        if self.avg_runtime_dump.is_some() {
+            self.dump_avg_runtimes();
+        }
+        if self.pinned_slice_cap {
+            self.dump_pinned_cap_summary();
+        }
+
         info!("Unregister {SCHEDULER_NAME} scheduler");
         uei_report!(&self.skel, uei)
     }
@@ -986,6 +1023,87 @@ impl<'a> Scheduler<'a> {
         Ok(())
     }
 
+    fn dump_avg_runtimes(&self) {
+        use std::io::Write;
+
+        let map = &self.skel.maps.avg_runtime_map;
+        let mut entries: Vec<bpf_intf::avg_runtime_entry> = Vec::new();
+
+        for key in map.keys() {
+            if let Ok(Some(val)) = map.lookup(&key, libbpf_rs::MapFlags::ANY) {
+                if val.len() >= std::mem::size_of::<bpf_intf::avg_runtime_entry>() {
+                    let entry: bpf_intf::avg_runtime_entry =
+                        unsafe { std::ptr::read_unaligned(val.as_ptr() as *const _) };
+                    entries.push(entry);
+                }
+            }
+        }
+
+        entries.sort_by_key(|e| (e.tgid, e.pid));
+
+        let mut out: Box<dyn Write> = match &self.avg_runtime_dump {
+            Some(path) => match std::fs::File::create(path) {
+                Ok(f) => Box::new(f),
+                Err(e) => {
+                    warn!("Failed to create {}: {}, using stdout", path, e);
+                    Box::new(std::io::stdout())
+                }
+            },
+            None => Box::new(std::io::stdout()),
+        };
+
+        let _ = writeln!(out, "EWMA Runtime Dump ({} tasks):", entries.len());
+        let _ = writeln!(out, "tgid\ttid\tcomm\tavg_us");
+        for e in &entries {
+            let comm_bytes: &[u8] = unsafe { &*(&e.comm as *const [i8; 16] as *const [u8; 16]) };
+            let comm = std::str::from_utf8(comm_bytes)
+                .unwrap_or("?")
+                .trim_end_matches('\0');
+            let _ = writeln!(
+                out,
+                "{}\t{}\t{}\t{}",
+                e.tgid,
+                e.pid,
+                comm,
+                e.avg_runtime_ns / 1000,
+            );
+        }
+    }
+
+    fn dump_pinned_cap_summary(&self) {
+        let cpu_ctxs = match read_cpu_ctxs(&self.skel) {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let mut total: u64 = 0;
+        let mut ceil: u64 = 0;
+        let mut floor: u64 = 0;
+        for cpu_ctx in &cpu_ctxs {
+            for cell in 0..MAX_CELLS {
+                total +=
+                    cpu_ctx.cstats[cell][bpf_intf::cell_stat_idx_CSTAT_PINNED_SLICE_CAP as usize];
+                ceil +=
+                    cpu_ctx.cstats[cell][bpf_intf::cell_stat_idx_CSTAT_PINNED_CAP_CEIL as usize];
+                floor +=
+                    cpu_ctx.cstats[cell][bpf_intf::cell_stat_idx_CSTAT_PINNED_CAP_FLOOR as usize];
+            }
+        }
+        if total > 0 {
+            let prop = total - ceil - floor;
+            let pct = |n: u64| n as f64 / total as f64 * 100.0;
+            eprintln!(
+                "Pinned slice cap totals: {} (ceil={} {:.0}%, prop={} {:.0}%, floor={} {:.0}%)",
+                total,
+                ceil,
+                pct(ceil),
+                prop,
+                pct(prop),
+                floor,
+                pct(floor),
+            );
+        }
+    }
+
     fn log_all_queue_stats(
         &mut self,
         cell_stats_delta: &[[u64; NR_CSTATS]; MAX_CELLS],
@@ -1010,7 +1128,25 @@ impl<'a> Scheduler<'a> {
             .map(|cell| cell[bpf_intf::cell_stat_idx_CSTAT_PINNED_SLICE_CAP as usize])
             .sum();
         if pinned_caps > 0 {
-            trace!("Pinned slice caps: {}", pinned_caps);
+            let ceil: u64 = cell_stats_delta
+                .iter()
+                .map(|cell| cell[bpf_intf::cell_stat_idx_CSTAT_PINNED_CAP_CEIL as usize])
+                .sum();
+            let floor: u64 = cell_stats_delta
+                .iter()
+                .map(|cell| cell[bpf_intf::cell_stat_idx_CSTAT_PINNED_CAP_FLOOR as usize])
+                .sum();
+            let prop = pinned_caps - ceil - floor;
+            trace!(
+                "Pinned slice caps: {} (ceil={} {:.0}%, prop={} {:.0}%, floor={} {:.0}%)",
+                pinned_caps,
+                ceil,
+                ceil as f64 / pinned_caps as f64 * 100.0,
+                prop,
+                prop as f64 / pinned_caps as f64 * 100.0,
+                floor,
+                floor as f64 / pinned_caps as f64 * 100.0,
+            );
         }
 
         Ok(())
