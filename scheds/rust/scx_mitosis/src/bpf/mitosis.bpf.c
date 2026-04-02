@@ -40,6 +40,8 @@ const volatile bool smt_enabled = true;
 const volatile unsigned char all_cpus[MAX_CPUS_U8];
 
 const volatile u64 slice_ns;
+const volatile bool pinned_slice_cap = false;
+const volatile u64 pinned_slice_cap_ns = 4000000ULL; /* 4ms default */
 const volatile u64 root_cgid = 1;
 const volatile bool debug_events_enabled = false;
 const volatile bool exiting_task_workaround_enabled = true;
@@ -869,6 +871,15 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 
 	scx_bpf_dsq_insert_vtime(p, tctx->dsq.raw, slice_ns, vtime, enq_flags);
 
+	/* Cap the currently running task's slice so the pinned waiter doesn't wait a full slice */
+	if (pinned_slice_cap && !tctx->all_cell_cpus_allowed) {
+		struct task_struct *curr = __COMPAT_scx_bpf_cpu_curr(cpu);
+		if (curr && curr->scx.slice > pinned_slice_cap_ns) {
+			curr->scx.slice = pinned_slice_cap_ns;
+			cstat_inc(CSTAT_PINNED_SLICE_CAP, tctx->cell, cctx);
+		}
+	}
+
 	/* Kick the CPU if needed */
 	if (!__COMPAT_is_enq_cpu_selected(enq_flags) && cpu >= 0)
 		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
@@ -1350,6 +1361,15 @@ void BPF_STRUCT_OPS(mitosis_running, struct task_struct *p)
 	}
 
 	tctx->started_running_at = scx_bpf_now();
+
+	/* If pinned tasks are waiting on this CPU, cap our slice */
+	if (pinned_slice_cap) {
+		dsq_id_t cpu_dsq = get_cpu_dsq_id(scx_bpf_task_cpu(p));
+		if (scx_bpf_dsq_nr_queued(cpu_dsq.raw) > 0 && p->scx.slice > pinned_slice_cap_ns) {
+			p->scx.slice = pinned_slice_cap_ns;
+			cstat_inc(CSTAT_PINNED_SLICE_CAP, tctx->cell, cctx);
+		}
+	}
 }
 
 void BPF_STRUCT_OPS(mitosis_stopping, struct task_struct *p, bool runnable)

@@ -192,6 +192,10 @@ struct Opts {
     #[clap(long, action = clap::ArgAction::SetTrue)]
     dynamic_affinity_cpu_selection: bool,
 
+    /// Cap time slice when CPU-pinned tasks are waiting in the same CPU's DSQ (default: 4ms).
+    #[clap(long, num_args = 0..=1, default_missing_value = "4", value_name = "MS")]
+    pinned_slice_cap: Option<u64>,
+
     #[clap(flatten, next_help_heading = "Libbpf Options")]
     pub libbpf: LibbpfOpts,
 }
@@ -337,6 +341,8 @@ impl<'a> Scheduler<'a> {
         rodata.exiting_task_workaround_enabled = opts.exiting_task_workaround;
         rodata.cpu_controller_disabled = opts.cpu_controller_disabled;
         rodata.dynamic_affinity_cpu_selection = opts.dynamic_affinity_cpu_selection;
+        rodata.pinned_slice_cap = opts.pinned_slice_cap.is_some();
+        rodata.pinned_slice_cap_ns = opts.pinned_slice_cap.unwrap_or(0) * 1_000_000;
 
         rodata.nr_possible_cpus = *NR_CPUS_POSSIBLE as u32;
         for cpu in topology.all_cpus.keys() {
@@ -998,6 +1004,14 @@ impl<'a> Scheduler<'a> {
         self.update_and_log_global_queue_stats(global_queue_decisions, &cell_stats_delta)?;
 
         self.update_and_log_cell_queue_stats(global_queue_decisions, &cell_stats_delta)?;
+
+        let pinned_caps: u64 = cell_stats_delta
+            .iter()
+            .map(|cell| cell[bpf_intf::cell_stat_idx_CSTAT_PINNED_SLICE_CAP as usize])
+            .sum();
+        if pinned_caps > 0 {
+            trace!("Pinned slice caps: {}", pinned_caps);
+        }
 
         Ok(())
     }
