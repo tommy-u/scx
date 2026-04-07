@@ -793,6 +793,24 @@ static inline struct task_struct *dsq_peek(u64 dsq_id)
 	return NULL;
 }
 
+static __always_inline void verify_peek_cpu_dsq(u64 dsq_id)
+{
+	struct task_struct *peek_task, *iter_task;
+
+	peek_task = __COMPAT_scx_bpf_dsq_peek(dsq_id);
+	if (!peek_task)
+		return;
+
+	iter_task = NULL;
+	bpf_for_each(scx_dsq, iter_task, dsq_id, 0) {
+		break;
+	}
+
+	if (!iter_task)
+		scx_bpf_error("peek returned task %d but iterator found nothing on DSQ 0x%llx",
+			       peek_task->pid, dsq_id);
+}
+
 void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 {
 	struct cpu_ctx *cctx;
@@ -817,6 +835,8 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 	if (dsq_is_invalid(cell_dsq) || dsq_is_invalid(cpu_dsq)) {
 		return;
 	}
+
+	verify_peek_cpu_dsq(cpu_dsq.raw);
 
 	/* Peek at cell-LLC DSQ head */
 	p = dsq_peek(cell_dsq.raw);
