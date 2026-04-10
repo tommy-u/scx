@@ -65,6 +65,8 @@ struct debug_event {
 	};
 };
 
+enum migration_source { MIG_SELECT_CPU, MIG_ENQUEUE, MIG_DISPATCH, NR_MIG_SOURCES };
+
 /* Statistics */
 enum cell_stat_idx {
 	CSTAT_LOCAL,
@@ -85,6 +87,7 @@ struct cpu_ctx {
 	u64 vtime_now;
 	u32 cell;
 	u32 llc;
+	bool stolen_dispatch;
 };
 
 struct cgrp_ctx {

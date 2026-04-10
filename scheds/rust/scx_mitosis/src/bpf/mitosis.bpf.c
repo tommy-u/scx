@@ -49,6 +49,7 @@ const volatile bool userspace_managed_cell_mode = false;
 const volatile bool enable_borrowing = false;
 const volatile bool use_lockless_peek = false;
 const volatile bool dynamic_affinity_cpu_selection = false;
+u32 per_cell_steal_min_queued[MAX_CELLS]; /* tuned by userspace, fixed range */
 
 /*
  * Global arrays for LLC topology, populated by userspace before load.
@@ -65,6 +66,14 @@ struct llc_cpumask llc_to_cpus[MAX_LLCS];
 u32 configuration_seq;
 u32 applied_configuration_seq;
 u32 cpuset_seq;
+
+/* Global migration counters — 2x3 cross-product (read by userspace) */
+u64 nr_mig_same_select;
+u64 nr_mig_same_enqueue;
+u64 nr_mig_same_dispatch;
+u64 nr_mig_cross_select;
+u64 nr_mig_cross_enqueue;
+u64 nr_mig_cross_dispatch;
 u32 applied_cpuset_seq;
 
 /*
@@ -620,6 +629,31 @@ static __always_inline s32 try_pick_idle_cpu(struct task_struct *p, s32 prev_cpu
 			scx_bpf_error("Failed to get idle smtmask");
 			return -1;
 		}
+		/* Prefer same-LLC borrow to avoid cross-LLC migration */
+		if (enable_llc_awareness && llc_is_valid(tctx->llc)) {
+			const struct cpumask *llc_mask = lookup_llc_cpumask((u32)tctx->llc);
+			if (llc_mask) {
+				struct bpf_cpumask *llc_borrowable __free(bpf_cpumask) =
+					bpf_cpumask_create();
+				if (llc_borrowable) {
+					bpf_cpumask_and(llc_borrowable, borrowable, llc_mask);
+					cpu = pick_idle_cpu_from(
+						p, (const struct cpumask *)llc_borrowable, prev_cpu,
+						idle_smtmask);
+					if (cpu >= 0) {
+						tctx->borrowed = true;
+						cstat_inc(CSTAT_BORROWED, tctx->cell, cctx);
+						scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu,
+								   slice_ns, 0);
+						if (kick)
+							scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+						return cpu;
+					}
+				}
+			}
+		}
+
+		/* Fall back to any borrowable CPU */
 		cpu = pick_idle_cpu_from(p, borrowable, prev_cpu, idle_smtmask);
 		if (cpu >= 0) {
 			tctx->borrowed = true;
@@ -698,6 +732,8 @@ s32 BPF_STRUCT_OPS(mitosis_select_cpu, struct task_struct *p, s32 prev_cpu, u64 
 
 	if (!(cctx = lookup_cpu_ctx(-1)) || !(tctx = lookup_task_ctx(p)))
 		return prev_cpu;
+
+	tctx->last_cpu_source = MIG_SELECT_CPU;
 
 	if (maybe_refresh_cell(p, tctx) < 0)
 		return prev_cpu;
@@ -784,6 +820,8 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 
 	if (!(tctx = lookup_task_ctx(p)) || !(cctx = lookup_cpu_ctx(-1)))
 		return;
+
+	tctx->last_cpu_source = MIG_ENQUEUE;
 
 	if (maybe_refresh_cell(p, tctx) < 0)
 		return;
@@ -924,6 +962,9 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 	/* Peek at cell-LLC DSQ head */
 	p = dsq_peek(cell_dsq.raw);
 	if (p) {
+		struct task_ctx *dtctx = lookup_task_ctx(p);
+		if (dtctx)
+			dtctx->last_cpu_source = MIG_DISPATCH;
 		min_vtime = p->scx.dsq_vtime;
 		min_vtime_dsq = cell_dsq;
 		found = true;
@@ -932,6 +973,9 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 	/* Peek at CPU DSQ head, prefer if lower vtime */
 	p = dsq_peek(cpu_dsq.raw);
 	if (p && (!found || time_before(p->scx.dsq_vtime, min_vtime))) {
+		struct task_ctx *dtctx = lookup_task_ctx(p);
+		if (dtctx)
+			dtctx->last_cpu_source = MIG_DISPATCH;
 		min_vtime = p->scx.dsq_vtime;
 		min_vtime_dsq = cpu_dsq;
 		found = true;
@@ -951,6 +995,7 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 				return;
 			if (ret > 0) {
 				cstat_inc(CSTAT_STEAL, cell, cctx);
+				cctx->stolen_dispatch = true;
 			}
 		}
 		return;
@@ -1349,10 +1394,51 @@ void BPF_STRUCT_OPS(mitosis_running, struct task_struct *p)
 	if (!(cctx = lookup_cpu_ctx(-1)) || !(tctx = lookup_task_ctx(p)))
 		return;
 
+	maybe_refresh_cell(p, tctx);
+
 	/* Handle stolen task retag (LLC-aware mode only) */
 	if (enable_llc_awareness && enable_work_stealing) {
 		if (maybe_retag_stolen_task(p, tctx, cctx) < 0)
 			return;
+	}
+
+	/* Stolen tasks can't be tagged in dispatch — use per-CPU flag */
+	if (cctx->stolen_dispatch) {
+		tctx->last_cpu_source = MIG_DISPATCH;
+		cctx->stolen_dispatch = false;
+	}
+
+	/* Track CPU migrations */
+	s32 cpu = scx_bpf_task_cpu(p);
+	s32 prev = tctx->last_ran_cpu;
+	tctx->last_ran_cpu = cpu;
+
+	if (prev >= 0 && prev != cpu && prev < nr_possible_cpus && cpu < nr_possible_cpus) {
+		if (cpu_to_llc[prev] == cpu_to_llc[cpu]) {
+			switch (tctx->last_cpu_source) {
+			case MIG_SELECT_CPU:
+				__sync_fetch_and_add(&nr_mig_same_select, 1);
+				break;
+			case MIG_ENQUEUE:
+				__sync_fetch_and_add(&nr_mig_same_enqueue, 1);
+				break;
+			case MIG_DISPATCH:
+				__sync_fetch_and_add(&nr_mig_same_dispatch, 1);
+				break;
+			}
+		} else {
+			switch (tctx->last_cpu_source) {
+			case MIG_SELECT_CPU:
+				__sync_fetch_and_add(&nr_mig_cross_select, 1);
+				break;
+			case MIG_ENQUEUE:
+				__sync_fetch_and_add(&nr_mig_cross_enqueue, 1);
+				break;
+			case MIG_DISPATCH:
+				__sync_fetch_and_add(&nr_mig_cross_dispatch, 1);
+				break;
+			}
+		}
 	}
 
 	tctx->started_running_at = scx_bpf_now();
@@ -1738,6 +1824,8 @@ static int init_task_impl(struct task_struct *p, struct cgroup *cgrp)
 		scx_bpf_error("missing all_cpumask");
 		return -EINVAL;
 	}
+
+	tctx->last_ran_cpu = -1;
 
 	/* Initialize LLC assignment fields */
 	if (enable_llc_awareness)

@@ -86,6 +86,10 @@ struct task_ctx {
 	/* Which LLC this task is assigned to */
 	s32 llc;
 
+	u64 avg_runtime_ns; /* EWMA of per-wake runtimes (ns), init to floor */
+	s32 last_ran_cpu; /* CPU this task last ran on (-1 = never) */
+	u32 last_cpu_source; /* enum migration_source: who picked the CPU */
+
 	u32 steal_count; /* how many times this task has been stolen */
 	u64 last_stolen_at; /* ns timestamp of the last steal (scx_bpf_now) */
 };

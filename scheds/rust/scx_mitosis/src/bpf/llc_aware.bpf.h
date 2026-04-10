@@ -24,6 +24,7 @@ typedef u32 llc_id_t;
  */
 extern u32 cpu_to_llc[MAX_CPUS];
 extern struct llc_cpumask llc_to_cpus[MAX_LLCS];
+extern u32 per_cell_steal_min_queued[MAX_CELLS];
 
 static inline bool llc_is_valid(u32 llc_id)
 {
@@ -244,50 +245,38 @@ static inline s32 try_stealing_work(u32 cell, s32 local_llc)
 		return -EINVAL;
 
 	// Loop over all other LLCs, looking for a queued task to steal
+	/* Find the most backed-up sibling LLC and steal from it,
+	 * but only if it has > 1 queued (never steal the last task). */
 	u32 i;
+	u32 max_queued = 0;
+	dsq_id_t max_dsq = DSQ_INVALID;
+
 	bpf_for(i, 1, nr_llc)
 	{
-		// Start with the next one to spread out the load
 		u32 candidate_llc = (local_llc + i) % nr_llc;
 
-		// Prevents the optimizer from removing the following conditional return
-		// so that the verifier knows the read will be safe
 		barrier_var(candidate_llc);
 
 		if (candidate_llc >= MAX_LLCS)
 			continue;
 
-		/*
-    * Skip if the cell doesn't have CPUs in this LLC.
-    * Note: rechecking cell_ptr for verifier.
-    * This is racy with try_stealing_this_task, but we don't care -
-    * if the LLC actually doesn't have CPUs come steal time,
-    * we will fail the steal and continue to the next LLC.
-    */
 		if (cell_ptr && READ_ONCE(cell_ptr->llcs[candidate_llc].cpu_cnt) == 0)
 			continue;
 
 		dsq_id_t candidate_dsq = get_cell_llc_dsq_id(cell, candidate_llc);
 		if (dsq_is_invalid(candidate_dsq))
-			return -EINVAL; // already errored in get_cell_llc_dsq_id
+			return -EINVAL;
 
-		// Optimization: skip if faster than constructing an iterator
-		// Not redundant with later checking if task found (race)
-		if (!scx_bpf_dsq_nr_queued(candidate_dsq.raw))
-			continue;
+		u32 nr = scx_bpf_dsq_nr_queued(candidate_dsq.raw);
+		if (nr > max_queued) {
+			max_queued = nr;
+			max_dsq = candidate_dsq;
+		}
+	}
 
-		/*
-		 * Attempt the steal - can fail because it's a race.
-		 * We don't update task_ctx here because the peeked task_ctx
-		 * may be stale (a different task may now be at head of DSQ).
-		 * Actual retag and accounting happens in running() via
-		 * mismatch detection.
-		 */
-		if (!scx_bpf_dsq_move_to_local(candidate_dsq.raw, 0))
-			continue;
-
-		// Success, we got a task
-		return true;
+	if (max_queued > per_cell_steal_min_queued[cell] && !dsq_is_invalid(max_dsq)) {
+		if (scx_bpf_dsq_move_to_local(max_dsq.raw, 0))
+			return true;
 	}
 	return false;
 }

@@ -191,6 +191,31 @@ struct Opts {
     #[clap(long, action = clap::ArgAction::SetTrue)]
     dynamic_affinity_cpu_selection: bool,
 
+    /// Enable dynamic slice capping for CPU-pinned tasks. Tracks per-task EWMA
+    /// runtime and caps the running task's slice when pinned waiters are queued.
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    enable_dynamic_slices: bool,
+
+    /// Ceiling for dynamic slice capping (us).
+    #[clap(long, default_value = "4000")]
+    dynamic_slice_ceil_us: u64,
+
+    /// Floor for dynamic slice capping (us). Minimum cap for dynamic slices.
+    #[clap(long, default_value = "500")]
+    dynamic_slice_floor_us: u64,
+
+    /// Minimum value for adaptive steal queue depth threshold.
+    #[clap(long, default_value = "1")]
+    steal_queued_min: u32,
+
+    /// Maximum value for adaptive steal queue depth threshold.
+    #[clap(long, default_value = "4")]
+    steal_queued_max: u32,
+
+    /// Target steal percentage for adaptive threshold controller.
+    #[clap(long, default_value = "2.0")]
+    steal_target_pct: f64,
+
     #[clap(flatten, next_help_heading = "Libbpf Options")]
     pub libbpf: LibbpfOpts,
 }
@@ -250,6 +275,12 @@ struct Scheduler<'a> {
     epoll: Epoll,
     /// EventFd to wake up main loop when stats are requested
     stats_waker: EventFd,
+    /// Previous migration counters (2x3 cross-product)
+    prev_mig: [u64; 6], // same_{select,enqueue,dispatch}, cross_{select,enqueue,dispatch}
+    /// Adaptive steal threshold range
+    steal_queued_min: u32,
+    steal_queued_max: u32,
+    steal_target_pct: f64,
 }
 
 struct DistributionStats {
@@ -437,16 +468,32 @@ impl<'a> Scheduler<'a> {
             rebalance_count: 0,
             epoll,
             stats_waker,
+            prev_mig: [0; 6],
+            steal_queued_min: opts.steal_queued_min,
+            steal_queued_max: opts.steal_queued_max,
+            steal_target_pct: opts.steal_target_pct,
         })
     }
 
     fn run(&mut self, shutdown: Arc<AtomicBool>) -> Result<UserExitInfo> {
         let struct_ops = scx_ops_attach!(self.skel, mitosis)?;
 
+        let run_start = Instant::now();
         info!("Mitosis Scheduler Attached. Run `scx_mitosis --monitor` for metrics.");
 
         // Apply initial cell configuration if CellManager is active
         self.apply_initial_cells()?;
+
+        // wait for 1.1 seconds
+        std::thread::sleep(Duration::from_millis(1100));
+
+        // Initialize per-cell steal thresholds
+        {
+            let bss = self.skel.maps.bss_data.as_mut().unwrap();
+            for i in 0..MAX_CELLS {
+                bss.per_cell_steal_min_queued[i] = 1;
+            }
+        }
 
         let (res_ch, req_ch) = self.stats_server.as_ref().unwrap().channels();
 
@@ -506,6 +553,41 @@ impl<'a> Scheduler<'a> {
         // Drop stats_server to close the channel, allowing stats_bridge to exit
         drop(self.stats_server.take());
         let _ = stats_bridge.join();
+        let run_secs = run_start.elapsed().as_secs_f64();
+        if run_secs > 0.0 {
+            let bss = self.skel.maps.bss_data.as_ref().unwrap();
+            let d = [
+                bss.nr_mig_same_select,
+                bss.nr_mig_same_enqueue,
+                bss.nr_mig_same_dispatch,
+                bss.nr_mig_cross_select,
+                bss.nr_mig_cross_enqueue,
+                bss.nr_mig_cross_dispatch,
+            ];
+            let same = d[0] + d[1] + d[2];
+            let cross = d[3] + d[4] + d[5];
+            let total = same + cross;
+            let sel = d[0] + d[3];
+            let enq = d[1] + d[4];
+            let dis = d[2] + d[5];
+
+            let k = |n: u64| n / 1000;
+            let pct = |n: u64, of: u64| if of > 0 { (100 * n / of) as u64 } else { 0 };
+            let rate = |n: u64| (n as f64 / run_secs) as u64 / 1000;
+
+            info!(
+                "Migration summary ({:.0}s, {}k total, {}k/s):",
+                run_secs,
+                k(total),
+                rate(total)
+            );
+            info!("Migrations:{:>5}k        select_cpu:{:>5}k ({:>2}%)   enqueue:{:>5}k ({:>2}%)   dispatch:{:>5}k ({:>2}%)",
+                k(total), k(sel), pct(sel, total), k(enq), pct(enq, total), k(dis), pct(dis, total));
+            info!("  same_llc:{:>5}k ({:>2}%)  select_cpu:{:>5}k ({:>2}%)   enqueue:{:>5}k ({:>2}%)   dispatch:{:>5}k ({:>2}%)",
+                k(same), pct(same, total), k(d[0]), pct(d[0], same), k(d[1]), pct(d[1], same), k(d[2]), pct(d[2], same));
+            info!("  cross_llc:{:>4}k ({:>2}%)  select_cpu:{:>5}k ({:>2}%)   enqueue:{:>5}k ({:>2}%)   dispatch:{:>5}k ({:>2}%)",
+                k(cross), pct(cross, total), k(d[3]), pct(d[3], cross), k(d[4]), pct(d[4], cross), k(d[5]), pct(d[5], cross));
+        }
         info!("Unregister {SCHEDULER_NAME} scheduler");
         uei_report!(&self.skel, uei)
     }
@@ -974,6 +1056,32 @@ impl<'a> Scheduler<'a> {
                 .or_default()
                 .update(&stats);
 
+            // Adaptive steal threshold: target ~1% steal rate
+            let steal_pct = if cell_queue_decisions > 0 {
+                100.0 * scope_steals as f64 / cell_queue_decisions as f64
+            } else {
+                0.0
+            };
+            let bss = self.skel.maps.bss_data.as_mut().unwrap();
+            let cur = bss.per_cell_steal_min_queued[cell];
+            let new_val = if steal_pct > self.steal_target_pct {
+                (cur + 1).min(self.steal_queued_max)
+            } else if steal_pct < self.steal_target_pct && cur > self.steal_queued_min {
+                cur - 1
+            } else {
+                cur
+            };
+            if new_val != cur {
+                unsafe {
+                    let ptr = &mut bss.per_cell_steal_min_queued[cell] as *mut u32;
+                    std::ptr::write_volatile(ptr, new_val);
+                }
+            }
+            info!(
+                "  Cell {:>2} steal: S%={:.1}% thresh={}",
+                cell, steal_pct, new_val
+            );
+
             trace!("{} {}", prefix, stats);
         }
         Ok(())
@@ -1036,6 +1144,43 @@ impl<'a> Scheduler<'a> {
 
         if self.cell_manager.is_some() {
             self.collect_demand_metrics(&cpu_ctxs)?;
+        }
+
+        // Log migration counters (2x3 cross-product)
+        {
+            let bss = self.skel.maps.bss_data.as_ref().unwrap();
+            let cur = [
+                bss.nr_mig_same_select,
+                bss.nr_mig_same_enqueue,
+                bss.nr_mig_same_dispatch,
+                bss.nr_mig_cross_select,
+                bss.nr_mig_cross_enqueue,
+                bss.nr_mig_cross_dispatch,
+            ];
+            let d: Vec<u64> = cur
+                .iter()
+                .zip(self.prev_mig.iter())
+                .map(|(c, p)| c - p)
+                .collect();
+            self.prev_mig = cur;
+
+            // d[0..3] = same_{select,enqueue,dispatch}, d[3..6] = cross_{select,enqueue,dispatch}
+            let same = d[0] + d[1] + d[2];
+            let cross = d[3] + d[4] + d[5];
+            let total = same + cross;
+            let sel = d[0] + d[3];
+            let enq = d[1] + d[4];
+            let dis = d[2] + d[5];
+
+            let k = |n: u64| n / 1000;
+            let pct = |n: u64, of: u64| if of > 0 { (100 * n / of) as u64 } else { 0 };
+
+            info!("Migrations:{:>5}k        select_cpu:{:>5}k ({:>2}%)   enqueue:{:>5}k ({:>2}%)   dispatch:{:>5}k ({:>2}%)",
+                k(total), k(sel), pct(sel, total), k(enq), pct(enq, total), k(dis), pct(dis, total));
+            info!("  same_llc:{:>5}k ({:>2}%)  select_cpu:{:>5}k ({:>2}%)   enqueue:{:>5}k ({:>2}%)   dispatch:{:>5}k ({:>2}%)",
+                k(same), pct(same, total), k(d[0]), pct(d[0], same), k(d[1]), pct(d[1], same), k(d[2]), pct(d[2], same));
+            info!("  cross_llc:{:>4}k ({:>2}%)  select_cpu:{:>5}k ({:>2}%)   enqueue:{:>5}k ({:>2}%)   dispatch:{:>5}k ({:>2}%)",
+                k(cross), pct(cross, total), k(d[3]), pct(d[3], cross), k(d[4]), pct(d[4], cross), k(d[5]), pct(d[5], cross));
         }
 
         for (cell_id, cell) in &self.cells {
