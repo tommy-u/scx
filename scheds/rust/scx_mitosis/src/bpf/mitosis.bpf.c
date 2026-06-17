@@ -59,6 +59,13 @@ u32 cpu_to_llc[MAX_CPUS];
 struct llc_cpumask llc_to_cpus[MAX_LLCS];
 
 /*
+ * Per-cell sibling-LLC queue-depth threshold for try_stealing_work.
+ * Declared in llc_aware.bpf.h as extern; modulated by the userspace
+ * adaptive controller in update_and_log_cell_queue_stats.
+ */
+u32 per_cell_steal_min_queued[MAX_CELLS];
+
+/*
  * CPU assignment changes aren't fully in effect until a subsequent tick()
  * configuration_seq is bumped on each assignment change
  * applied_configuration_seq is bumped when the effect is fully applied

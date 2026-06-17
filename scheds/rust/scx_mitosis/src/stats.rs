@@ -34,6 +34,8 @@ pub struct CellMetrics {
     pub affn_violations_pct: f64,
     #[stat(desc = "Steal %")]
     pub steal_pct: f64,
+    #[stat(desc = "Adaptive steal queue-depth threshold")]
+    pub steal_threshold: u32,
     #[stat(desc = "Orphaned LLC DSQ drain events")]
     pub drain_cnt: u64,
     #[stat(desc = "Pin reject skipped %")]

@@ -209,6 +209,30 @@ struct Opts {
     #[clap(long, default_value = "500")]
     slice_shrink_min_us: u64,
 
+    /// Enable the adaptive steal-threshold controller. When set, the
+    /// scheduler modulates per_cell_steal_min_queued[cell] each monitor
+    /// interval to target --steal-target-pct. When unset the threshold
+    /// stays at 0 and try_stealing_work steals from the deepest sibling
+    /// LLC whenever any has queued work.
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    enable_adaptive_stealing: bool,
+
+    /// Minimum value the adaptive controller may set the per-cell steal
+    /// queue-depth threshold to.
+    #[clap(long, default_value = "0")]
+    steal_queued_min: u32,
+
+    /// Maximum value the adaptive controller may set the per-cell steal
+    /// queue-depth threshold to.
+    #[clap(long, default_value = "20")]
+    steal_queued_max: u32,
+
+    /// Target steal percentage for the adaptive controller. Above this
+    /// the threshold ratchets up (throttling cross-LLC churn); below it
+    /// the threshold ratchets back down.
+    #[clap(long, default_value = "2.0")]
+    steal_target_pct: f64,
+
     #[clap(flatten, next_help_heading = "Libbpf Options")]
     pub libbpf: LibbpfOpts,
 }
@@ -268,6 +292,11 @@ struct Scheduler<'a> {
     epoll: Epoll,
     /// EventFd to wake up main loop when stats are requested
     stats_waker: EventFd,
+    /// Adaptive steal-threshold controller configuration
+    enable_adaptive_stealing: bool,
+    steal_queued_min: u32,
+    steal_queued_max: u32,
+    steal_target_pct: f64,
 }
 
 struct DistributionStats {
@@ -483,6 +512,10 @@ impl<'a> Scheduler<'a> {
             rebalance_count: 0,
             epoll,
             stats_waker,
+            enable_adaptive_stealing: opts.enable_adaptive_stealing,
+            steal_queued_min: opts.steal_queued_min,
+            steal_queued_max: opts.steal_queued_max,
+            steal_target_pct: opts.steal_target_pct,
         })
     }
 
@@ -1076,8 +1109,45 @@ impl<'a> Scheduler<'a> {
                     format!("calculating queue distribution stats for cell {}", cell)
                 })?;
 
+            // Adaptive steal-threshold controller. Bumps the per-cell
+            // threshold up when steal_pct overshoots --steal-target-pct
+            // (throttling cross-LLC steals) and back down when below.
+            // Done before borrowing cell_metrics so the BSS borrow
+            // doesn't overlap with the metrics-map borrow.
+            let steal_threshold = {
+                let bss = self
+                    .skel
+                    .maps
+                    .bss_data
+                    .as_mut()
+                    .expect("BUG: bss_data missing");
+                let cur = bss.per_cell_steal_min_queued[cell];
+                if self.enable_adaptive_stealing {
+                    let new_val = if stats.steal_pct > self.steal_target_pct {
+                        (cur + 1).min(self.steal_queued_max)
+                    } else if stats.steal_pct < self.steal_target_pct && cur > self.steal_queued_min
+                    {
+                        cur - 1
+                    } else {
+                        cur
+                    };
+                    if new_val != cur {
+                        // Volatile write to defeat any caching the
+                        // optimizer might do across the loop iterations.
+                        unsafe {
+                            let ptr = &mut bss.per_cell_steal_min_queued[cell] as *mut u32;
+                            std::ptr::write_volatile(ptr, new_val);
+                        }
+                    }
+                    new_val
+                } else {
+                    cur
+                }
+            };
+
             let cell_metrics = self.metrics.cells.entry(cell as u32).or_default();
             cell_metrics.update(&stats);
+            cell_metrics.steal_threshold = steal_threshold;
 
             // Raw event counts bypass DistributionStats.
             cell_metrics.drain_cnt =
@@ -1092,7 +1162,11 @@ impl<'a> Scheduler<'a> {
                 + cell_metrics.slice_shrink_proportional
                 + cell_metrics.slice_shrink_min;
 
-            trace!("{} {}", prefix, stats);
+            if self.enable_adaptive_stealing {
+                trace!("{} {} T:{}", prefix, stats, steal_threshold);
+            } else {
+                trace!("{} {}", prefix, stats);
+            }
         }
         Ok(())
     }

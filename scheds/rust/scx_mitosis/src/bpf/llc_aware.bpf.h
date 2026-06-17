@@ -26,6 +26,16 @@ _Static_assert(MAX_LLCS <= 64, "MAX_LLCS too high");
 extern u32 cpu_to_llc[MAX_CPUS];
 extern struct llc_cpumask llc_to_cpus[MAX_LLCS];
 
+/*
+ * Per-cell sibling-LLC queue-depth threshold for the adaptive steal
+ * controller. Userspace bumps this up when steal_pct exceeds the target
+ * and drops it back down when steal_pct falls below. try_stealing_work
+ * only steals when the deepest sibling DSQ exceeds this threshold.
+ * Default 0 means "steal whenever a sibling has any queued task," which
+ * matches the non-adaptive behavior.
+ */
+extern u32 per_cell_steal_min_queued[MAX_CELLS];
+
 static inline bool llc_is_valid(u32 llc_id)
 {
 	if (llc_id == LLC_INVALID)
@@ -414,6 +424,27 @@ static inline s32 try_stealing_work(u32 cell_id, s32 local_llc)
 	if (!cell)
 		return -EINVAL;
 
+	/*
+	 * Scan all owned siblings and remember the deepest. The adaptive
+	 * controller modulates per_cell_steal_min_queued[cell_id]: a single
+	 * steal is attempted only if the deepest sibling exceeds the
+	 * threshold. With the threshold at 0 (the default) this matches the
+	 * non-adaptive "steal whenever a sibling has work" behavior, but
+	 * always picks the deepest sibling instead of the first one in
+	 * rotation. Orphan LLCs are filtered by cell_llc_has_cpus() and are
+	 * the responsibility of try_draining_work; this path never touches
+	 * them, so adaptive throttling cannot delay orphan rescue.
+	 *
+	 * Verifier-friendliness: we only carry two narrow scalars across
+	 * iterations (max_queued clamped to 16 bits, max_llc bounded by
+	 * MAX_LLCS). The 64-bit max_dsq is recomputed once at the end from
+	 * max_llc to keep it out of per-iter state. The threshold is loaded
+	 * once before the loop for the same reason.
+	 */
+	u32 max_queued = 0;
+	u32 max_llc = LLC_INVALID;
+	u32 threshold = per_cell_steal_min_queued[cell_id];
+
 	u32 i;
 	bpf_for(i, 0, nr_llc)
 	{
@@ -434,25 +465,36 @@ static inline s32 try_stealing_work(u32 cell_id, s32 local_llc)
 
 		dsq_id_t candidate_dsq = get_cell_llc_dsq_id(cell_id, candidate_llc);
 
-		// Optimization: skip if faster than constructing an iterator
-		// Not redundant with later checking if task found (race)
-
 		/*
-		 * We don't use tracked nr_queued here because we won't be able
-		 * to consume until the actual racy dispatch got comitted.
+		 * Use kernel-side nr_queued, not the tracked count, so that
+		 * we observe a non-zero value only when there's actually
+		 * something we could consume right now. Skip on <= 0 so a
+		 * negative return doesn't sign-extend into a huge u32 below.
+		 * Clamp to 16 bits so the verifier carries a narrow scalar
+		 * range across iterations.
 		 */
-		if (scx_bpf_dsq_nr_queued(candidate_dsq.raw) <= 0)
+		s32 nr = scx_bpf_dsq_nr_queued(candidate_dsq.raw);
+		if (nr <= 0)
 			continue;
+		if (nr > 0xffff)
+			nr = 0xffff;
+		if ((u32)nr > max_queued) {
+			max_queued = (u32)nr;
+			max_llc = candidate_llc;
+		}
+	}
 
-		/*
-		 * Attempt the steal - can fail because it's a race. The task's
-		 * LLC is updated from the CPU it actually runs on in running().
-		 */
-		if (!scx_bpf_dsq_move_to_local(candidate_dsq.raw, 0))
-			continue;
-
-		cell_llc_nr_queued_dec(cell, candidate_llc);
-		return 0;
+	/*
+	 * Single steal attempt. Can fail under race (e.g. another CPU
+	 * consumed the head first). The task's LLC is updated from the CPU
+	 * it actually runs on in running().
+	 */
+	if (max_queued > threshold && llc_is_valid(max_llc)) {
+		dsq_id_t max_dsq = get_cell_llc_dsq_id(cell_id, max_llc);
+		if (!dsq_is_invalid(max_dsq) && scx_bpf_dsq_move_to_local(max_dsq.raw, 0)) {
+			cell_llc_nr_queued_dec(cell, max_llc);
+			return 0;
+		}
 	}
 	return -ENOENT;
 }
