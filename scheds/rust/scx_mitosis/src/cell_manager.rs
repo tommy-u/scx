@@ -205,12 +205,12 @@ fn distribute_cpus_proportional(
     Ok(result)
 }
 
-/// Result of CPU assignment computation, containing both primary and optional borrowable masks.
+/// Result of CPU assignment computation, containing both primary and borrowable masks.
 #[derive(Debug)]
 pub struct CpuAssignment {
     pub cell_id: u32,
     pub primary: Cpumask,
-    pub borrowable: Option<Cpumask>,
+    pub borrowable: Cpumask,
 }
 
 #[derive(Debug, Clone)]
@@ -612,7 +612,6 @@ fn build_cpu_assignments(
     cells: &[CellSpec],
     all_cpus: &Cpumask,
     cell_cpus: HashMap<u32, Cpumask>,
-    compute_borrowable: bool,
 ) -> Vec<CpuAssignment> {
     let cpusets = build_cell_cpuset_map(cells);
     let mut cell_cpus: Vec<(u32, Cpumask)> = cell_cpus.into_iter().collect();
@@ -621,16 +620,11 @@ fn build_cpu_assignments(
     cell_cpus
         .into_iter()
         .map(|(cell_id, primary)| {
-            let borrowable = if compute_borrowable {
-                let mut borrow_mask = all_cpus.and(&primary.not());
-                // If this cell has a cpuset, restrict borrowable to it.
-                if let Some(Some(cpuset)) = cpusets.get(&cell_id) {
-                    borrow_mask = borrow_mask.and(cpuset);
-                }
-                Some(borrow_mask)
-            } else {
-                None
-            };
+            let mut borrowable = all_cpus.and(&primary.not());
+            // If this cell has a cpuset, restrict borrowable to it.
+            if let Some(Some(cpuset)) = cpusets.get(&cell_id) {
+                borrowable = borrowable.and(cpuset);
+            }
             CpuAssignment {
                 cell_id,
                 primary,
@@ -645,7 +639,6 @@ fn validate_cpu_assignments(
     all_cpus: &Cpumask,
     contention: &HashMap<usize, Vec<u32>>,
     assignments: &[CpuAssignment],
-    compute_borrowable: bool,
 ) -> Result<()> {
     let known_cells: HashSet<u32> = cells.iter().map(|spec| spec.cell_id).collect();
     let cpusets = build_cell_cpuset_map(cells);
@@ -683,45 +676,28 @@ fn validate_cpu_assignments(
             }
         }
 
-        match (compute_borrowable, &assignment.borrowable) {
-            (false, None) => {}
-            (false, Some(_)) => {
+        for cpu in assignment.borrowable.iter() {
+            if !all_cpus.test_cpu(cpu) {
                 bail!(
-                    "Cell {} has borrowable CPUs when borrowing is disabled",
-                    assignment.cell_id
+                    "Cell {} borrowable CPU {} is outside all_cpus",
+                    assignment.cell_id,
+                    cpu
                 );
             }
-            (true, None) => {
+            if assignment.primary.test_cpu(cpu) {
                 bail!(
-                    "Cell {} is missing borrowable CPUs when borrowing is enabled",
-                    assignment.cell_id
+                    "Cell {} borrowable CPU {} overlaps primary",
+                    assignment.cell_id,
+                    cpu
                 );
             }
-            (true, Some(borrowable)) => {
-                for cpu in borrowable.iter() {
-                    if !all_cpus.test_cpu(cpu) {
-                        bail!(
-                            "Cell {} borrowable CPU {} is outside all_cpus",
-                            assignment.cell_id,
-                            cpu
-                        );
-                    }
-                    if assignment.primary.test_cpu(cpu) {
-                        bail!(
-                            "Cell {} borrowable CPU {} overlaps primary",
-                            assignment.cell_id,
-                            cpu
-                        );
-                    }
-                    if let Some(Some(cpuset)) = cpusets.get(&assignment.cell_id) {
-                        if !cpuset.test_cpu(cpu) {
-                            bail!(
-                                "Cell {} borrowable CPU {} is outside its cpuset",
-                                assignment.cell_id,
-                                cpu
-                            );
-                        }
-                    }
+            if let Some(Some(cpuset)) = cpusets.get(&assignment.cell_id) {
+                if !cpuset.test_cpu(cpu) {
+                    bail!(
+                        "Cell {} borrowable CPU {} is outside its cpuset",
+                        assignment.cell_id,
+                        cpu
+                    );
                 }
             }
         }
@@ -1156,15 +1132,15 @@ impl CellManager {
     /// When cpusets overlap, contested CPUs are divided proportionally among claimants.
     /// Unclaimed CPUs go to cell 0 and any unpinned cells (cells without cpusets).
     ///
-    /// If `compute_borrowable` is true, each assignment includes a borrowable cpumask
-    /// (all system CPUs minus the cell's own, intersected with cpuset if present).
-    /// Without demand data, borrowable masks are uncapped.
+    /// Each assignment includes a borrowable cpumask (all system CPUs minus the
+    /// cell's own, intersected with cpuset if present). Without demand data,
+    /// borrowable masks are uncapped.
     ///
     /// Returns a Vec of CpuAssignment, or an error if any cell would
     /// receive zero CPUs (which indicates too many cells for available CPUs).
-    pub fn compute_cpu_assignments(&self, compute_borrowable: bool) -> Result<Vec<CpuAssignment>> {
+    pub fn compute_cpu_assignments(&self) -> Result<Vec<CpuAssignment>> {
         // Use equal weights for all cells (no demand data)
-        self.compute_cpu_assignments_inner(None, compute_borrowable)
+        self.compute_cpu_assignments_inner(None)
     }
 
     /// Compute CPU assignments weighted by per-cell demand.
@@ -1172,21 +1148,19 @@ impl CellManager {
     /// `cell_demands` maps cell_id -> smoothed_util_pct. All active cells must be
     /// present in the map; missing entries or negative weights are errors.
     ///
-    /// If `compute_borrowable` is true, each assignment includes a borrowable cpumask
-    /// (all system CPUs minus the cell's own, intersected with cpuset if present).
+    /// Each assignment includes a borrowable cpumask (all system CPUs minus the
+    /// cell's own, intersected with cpuset if present).
     pub fn compute_demand_cpu_assignments(
         &self,
         cell_demands: &HashMap<u32, f64>,
-        compute_borrowable: bool,
     ) -> Result<Vec<CpuAssignment>> {
-        self.compute_cpu_assignments_inner(Some(cell_demands), compute_borrowable)
+        self.compute_cpu_assignments_inner(Some(cell_demands))
     }
 
     /// Internal implementation shared by equal-weight and demand-weighted assignment.
     fn compute_cpu_assignments_inner(
         &self,
         cell_demands: Option<&HashMap<u32, f64>>,
-        compute_borrowable: bool,
     ) -> Result<Vec<CpuAssignment>> {
         // Cells: stable, sorted worklist.
         let cells = build_cell_specs(&self.cells);
@@ -1254,17 +1228,10 @@ impl CellManager {
         )?;
 
         // Build final assignments.
-        let assignments =
-            build_cpu_assignments(&cells, &self.all_cpus, cell_cpus, compute_borrowable);
+        let assignments = build_cpu_assignments(&cells, &self.all_cpus, cell_cpus);
 
         // Validate that every cell has a non-empty primary mask before returning.
-        validate_cpu_assignments(
-            &cells,
-            &self.all_cpus,
-            &contention,
-            &assignments,
-            compute_borrowable,
-        )?;
+        validate_cpu_assignments(&cells, &self.all_cpus, &contention, &assignments)?;
 
         Ok(assignments)
     }
@@ -1446,14 +1413,14 @@ mod tests {
         mask
     }
 
-    fn assignment_signature(assignments: &[CpuAssignment]) -> Vec<(u32, String, Option<String>)> {
+    fn assignment_signature(assignments: &[CpuAssignment]) -> Vec<(u32, String, String)> {
         let mut signature: Vec<_> = assignments
             .iter()
             .map(|assignment| {
                 (
                     assignment.cell_id,
                     assignment.primary.to_cpulist(),
-                    assignment.borrowable.as_ref().map(|mask| mask.to_cpulist()),
+                    assignment.borrowable.to_cpulist(),
                 )
             })
             .collect();
@@ -1464,7 +1431,6 @@ mod tests {
     fn compute_assignments_from_specs(
         cells: &[CellSpec],
         all_cpus: &Cpumask,
-        compute_borrowable: bool,
     ) -> Vec<CpuAssignment> {
         let weights = build_cell_weights(cells, None).unwrap();
         let contention = build_contention(cells);
@@ -1494,15 +1460,8 @@ mod tests {
         )
         .unwrap();
 
-        let assignments = build_cpu_assignments(cells, all_cpus, cell_cpus, compute_borrowable);
-        validate_cpu_assignments(
-            cells,
-            all_cpus,
-            &contention,
-            &assignments,
-            compute_borrowable,
-        )
-        .unwrap();
+        let assignments = build_cpu_assignments(cells, all_cpus, cell_cpus);
+        validate_cpu_assignments(cells, all_cpus, &contention, &assignments).unwrap();
         assignments
     }
 
@@ -1681,10 +1640,8 @@ mod tests {
         ];
         let shuffled = vec![cells[2].clone(), cells[0].clone(), cells[1].clone()];
 
-        let expected =
-            assignment_signature(&compute_assignments_from_specs(&cells, &all_cpus, false));
-        let actual =
-            assignment_signature(&compute_assignments_from_specs(&shuffled, &all_cpus, false));
+        let expected = assignment_signature(&compute_assignments_from_specs(&cells, &all_cpus));
+        let actual = assignment_signature(&compute_assignments_from_specs(&shuffled, &all_cpus));
 
         assert_eq!(actual, expected);
     }
@@ -1707,17 +1664,17 @@ mod tests {
             CpuAssignment {
                 cell_id: 0,
                 primary: cpumask_for_cpus(4, &[0, 1]),
-                borrowable: None,
+                borrowable: Cpumask::new(),
             },
             CpuAssignment {
                 cell_id: 1,
                 primary: cpumask_for_cpus(4, &[1, 2, 3]),
-                borrowable: None,
+                borrowable: Cpumask::new(),
             },
         ];
 
-        let err = validate_cpu_assignments(&cells, &all_cpus, &contention, &assignments, false)
-            .unwrap_err();
+        let err =
+            validate_cpu_assignments(&cells, &all_cpus, &contention, &assignments).unwrap_err();
         assert!(err.to_string().contains("assigned to both cell"));
     }
 
@@ -1738,11 +1695,11 @@ mod tests {
         let assignments = vec![CpuAssignment {
             cell_id: 0,
             primary: cpumask_for_cpus(4, &[0, 1, 2, 3]),
-            borrowable: None,
+            borrowable: Cpumask::new(),
         }];
 
-        let err = validate_cpu_assignments(&cells, &all_cpus, &contention, &assignments, false)
-            .unwrap_err();
+        let err =
+            validate_cpu_assignments(&cells, &all_cpus, &contention, &assignments).unwrap_err();
         assert!(err.to_string().contains("Cell 1 has no CPUs assigned"));
     }
 
@@ -1756,11 +1713,11 @@ mod tests {
         let assignments = vec![CpuAssignment {
             cell_id: 0,
             primary: Cpumask::new(),
-            borrowable: None,
+            borrowable: Cpumask::new(),
         }];
 
-        let err = validate_cpu_assignments(&cells, &all_cpus, &HashMap::new(), &assignments, false)
-            .unwrap_err();
+        let err =
+            validate_cpu_assignments(&cells, &all_cpus, &HashMap::new(), &assignments).unwrap_err();
         assert!(err.to_string().contains("Cell 0 has no CPUs assigned"));
     }
 
@@ -1782,17 +1739,17 @@ mod tests {
             CpuAssignment {
                 cell_id: 0,
                 primary: cpumask_for_cpus(4, &[0, 1, 3]),
-                borrowable: None,
+                borrowable: Cpumask::new(),
             },
             CpuAssignment {
                 cell_id: 1,
                 primary: cpumask_for_cpus(4, &[2]),
-                borrowable: None,
+                borrowable: Cpumask::new(),
             },
         ];
 
-        let err = validate_cpu_assignments(&cells, &all_cpus, &contention, &assignments, false)
-            .unwrap_err();
+        let err =
+            validate_cpu_assignments(&cells, &all_cpus, &contention, &assignments).unwrap_err();
         assert!(err.to_string().contains("outside its cpuset"));
     }
 
@@ -1818,22 +1775,22 @@ mod tests {
             CpuAssignment {
                 cell_id: 0,
                 primary: cpumask_for_cpus(4, &[3]),
-                borrowable: None,
+                borrowable: Cpumask::new(),
             },
             CpuAssignment {
                 cell_id: 1,
                 primary: cpumask_for_cpus(4, &[1]),
-                borrowable: None,
+                borrowable: Cpumask::new(),
             },
             CpuAssignment {
                 cell_id: 2,
                 primary: cpumask_for_cpus(4, &[0, 2]),
-                borrowable: None,
+                borrowable: Cpumask::new(),
             },
         ];
 
-        let err = validate_cpu_assignments(&cells, &all_cpus, &contention, &assignments, false)
-            .unwrap_err();
+        let err =
+            validate_cpu_assignments(&cells, &all_cpus, &contention, &assignments).unwrap_err();
         assert!(err.to_string().contains("assigned to non-claimant cell"));
     }
 
@@ -1847,11 +1804,11 @@ mod tests {
         let assignments = vec![CpuAssignment {
             cell_id: 0,
             primary: cpumask_for_cpus(2, &[0, 1]),
-            borrowable: Some(cpumask_for_cpus(2, &[1])),
+            borrowable: cpumask_for_cpus(2, &[1]),
         }];
 
-        let err = validate_cpu_assignments(&cells, &all_cpus, &HashMap::new(), &assignments, true)
-            .unwrap_err();
+        let err =
+            validate_cpu_assignments(&cells, &all_cpus, &HashMap::new(), &assignments).unwrap_err();
         assert!(err.to_string().contains("overlaps primary"));
     }
 
@@ -2029,7 +1986,7 @@ mod tests {
         )
         .unwrap();
 
-        let assignments = mgr.compute_cpu_assignments(false).unwrap();
+        let assignments = mgr.compute_cpu_assignments().unwrap();
 
         // Only cell 0 with all CPUs
         assert_eq!(assignments.len(), 1);
@@ -2049,7 +2006,7 @@ mod tests {
             HashSet::new(),
         )
         .unwrap();
-        let assignments = mgr.compute_cpu_assignments(false).unwrap();
+        let assignments = mgr.compute_cpu_assignments().unwrap();
 
         // 16 CPUs / 2 cells = 8 each
         assert_eq!(assignments.len(), 2);
@@ -2074,7 +2031,7 @@ mod tests {
             HashSet::new(),
         )
         .unwrap();
-        let assignments = mgr.compute_cpu_assignments(false).unwrap();
+        let assignments = mgr.compute_cpu_assignments().unwrap();
 
         // 10 CPUs / 3 cells = 3 each + 1 remainder to cell 0
         let cell0 = assignments.iter().find(|a| a.cell_id == 0).unwrap();
@@ -2098,7 +2055,7 @@ mod tests {
             HashSet::new(),
         )
         .unwrap();
-        let result = mgr.compute_cpu_assignments(false);
+        let result = mgr.compute_cpu_assignments();
 
         assert!(result.is_err());
         let err_msg = format!("{:#}", result.unwrap_err());
@@ -2129,7 +2086,7 @@ mod tests {
             HashSet::new(),
         )
         .unwrap();
-        let assignments = mgr.compute_cpu_assignments(false).unwrap();
+        let assignments = mgr.compute_cpu_assignments().unwrap();
 
         // Should have 3 assignments: cell1, cell2, and cell0
         assert_eq!(assignments.len(), 3);
@@ -2192,7 +2149,7 @@ mod tests {
             HashSet::new(),
         )
         .unwrap();
-        let result = mgr.compute_cpu_assignments(false);
+        let result = mgr.compute_cpu_assignments();
 
         // Should error because cell 0 has no CPUs
         assert!(result.is_err());
@@ -2231,7 +2188,7 @@ mod tests {
         )
         .unwrap();
         let assignments = mgr
-            .compute_cpu_assignments(false)
+            .compute_cpu_assignments()
             .expect("holdout should populate cell 0");
 
         let cell0 = assignments
@@ -2295,7 +2252,7 @@ mod tests {
         )
         .unwrap();
         let assignments = mgr
-            .compute_cpu_assignments(false)
+            .compute_cpu_assignments()
             .expect("holdout should populate cell 0");
 
         let cell0 = assignments
@@ -2361,7 +2318,7 @@ mod tests {
         )
         .unwrap();
         let assignments = mgr
-            .compute_cpu_assignments(false)
+            .compute_cpu_assignments()
             .expect("holdout should populate cell 0");
 
         let cell0 = assignments
@@ -2424,7 +2381,7 @@ mod tests {
         )
         .unwrap();
         let assignments = mgr
-            .compute_cpu_assignments(false)
+            .compute_cpu_assignments()
             .expect("holdout must not starve a child cell");
 
         let total: usize = assignments.iter().map(|a| a.primary.weight()).sum();
@@ -2483,7 +2440,7 @@ mod tests {
         )
         .unwrap();
         let assignments = mgr
-            .compute_cpu_assignments(false)
+            .compute_cpu_assignments()
             .expect("holdout must not starve a cell that shares a contested CPU");
         // The steal loop runs (3 unclaimed < 4 requested) but no claimed CPU is
         // safely reservable, so it breaks without taking one -- enforced_holdout
@@ -2537,7 +2494,7 @@ mod tests {
             HashSet::new(),
         )
         .unwrap();
-        let assignments = mgr.compute_cpu_assignments(false).unwrap();
+        let assignments = mgr.compute_cpu_assignments().unwrap();
 
         assert_eq!(assignments.len(), 2);
 
@@ -2615,7 +2572,7 @@ mod tests {
         assert!(cell1_info.cpuset.is_some());
         assert!(cell2_info.cpuset.is_none());
 
-        let assignments = mgr.compute_cpu_assignments(false).unwrap();
+        let assignments = mgr.compute_cpu_assignments().unwrap();
 
         // cell1 (pinned) gets its cpuset: 0-3 (4 CPUs)
         // Targets (equal weight, 3 cells, 16 CPUs): cell0=6, cell1=5, cell2=5
@@ -2665,7 +2622,7 @@ mod tests {
             HashSet::new(),
         )
         .unwrap();
-        let assignments = mgr.compute_cpu_assignments(false).unwrap();
+        let assignments = mgr.compute_cpu_assignments().unwrap();
 
         let cell_a_info = mgr.find_cell_by_name("cell_a").unwrap();
         let cell_b_info = mgr.find_cell_by_name("cell_b").unwrap();
@@ -2756,7 +2713,7 @@ mod tests {
             HashSet::new(),
         )
         .unwrap();
-        let assignments = mgr.compute_cpu_assignments(false).unwrap();
+        let assignments = mgr.compute_cpu_assignments().unwrap();
 
         let cell_a_info = mgr.find_cell_by_name("cell_a").unwrap();
         let cell_b_info = mgr.find_cell_by_name("cell_b").unwrap();
@@ -2818,7 +2775,7 @@ mod tests {
             HashSet::new(),
         )
         .unwrap();
-        let assignments = mgr.compute_cpu_assignments(false).unwrap();
+        let assignments = mgr.compute_cpu_assignments().unwrap();
 
         let cell_a_info = mgr.find_cell_by_name("cell_a").unwrap();
         let cell_b_info = mgr.find_cell_by_name("cell_b").unwrap();
@@ -2867,7 +2824,7 @@ mod tests {
             HashSet::new(),
         )
         .unwrap();
-        let assignments = mgr.compute_cpu_assignments(false).unwrap();
+        let assignments = mgr.compute_cpu_assignments().unwrap();
 
         let cell_a_info = mgr.find_cell_by_name("cell_a").unwrap();
         let cell_b_info = mgr.find_cell_by_name("cell_b").unwrap();
@@ -2920,7 +2877,7 @@ mod tests {
             HashSet::new(),
         )
         .unwrap();
-        let assignments = mgr.compute_cpu_assignments(false).unwrap();
+        let assignments = mgr.compute_cpu_assignments().unwrap();
 
         let cell_a_info = mgr.find_cell_by_name("cell_a").unwrap();
         let cell_b_info = mgr.find_cell_by_name("cell_b").unwrap();
@@ -2974,7 +2931,7 @@ mod tests {
         let assignments = vec![CpuAssignment {
             cell_id: 0,
             primary: mask,
-            borrowable: None,
+            borrowable: Cpumask::new(),
         }];
         let result = mgr.format_cell_config(&assignments);
 
@@ -3008,12 +2965,12 @@ mod tests {
             CpuAssignment {
                 cell_id: 0,
                 primary: mask0,
-                borrowable: None,
+                borrowable: Cpumask::new(),
             },
             CpuAssignment {
                 cell_id: 1,
                 primary: mask1,
-                borrowable: None,
+                borrowable: Cpumask::new(),
             },
         ];
         let result = mgr.format_cell_config(&assignments);
@@ -3160,11 +3117,11 @@ mod tests {
             HashSet::new(),
         )
         .unwrap();
-        let assignments = mgr.compute_cpu_assignments(true).unwrap();
+        let assignments = mgr.compute_cpu_assignments().unwrap();
 
         // Each cell should be able to borrow CPUs from other cells
         for assignment in &assignments {
-            let borrow_mask = assignment.borrowable.as_ref().unwrap();
+            let borrow_mask = &assignment.borrowable;
             // borrowable should have no overlap with primary
             let overlap = borrow_mask.and(&assignment.primary);
             assert_eq!(
@@ -3203,11 +3160,11 @@ mod tests {
             HashSet::new(),
         )
         .unwrap();
-        let assignments = mgr.compute_cpu_assignments(true).unwrap();
+        let assignments = mgr.compute_cpu_assignments().unwrap();
 
         // Verify no cell's borrowable mask overlaps with its own primary
         for assignment in &assignments {
-            let borrow_mask = assignment.borrowable.as_ref().unwrap();
+            let borrow_mask = &assignment.borrowable;
             let overlap = borrow_mask.and(&assignment.primary);
             assert_eq!(
                 overlap.weight(),
@@ -3238,7 +3195,7 @@ mod tests {
             HashSet::new(),
         )
         .unwrap();
-        let assignments = mgr.compute_cpu_assignments(true).unwrap();
+        let assignments = mgr.compute_cpu_assignments().unwrap();
 
         let cell1_info = mgr.find_cell_by_name("cell1").unwrap();
         let cell2_info = mgr.find_cell_by_name("cell2").unwrap();
@@ -3250,7 +3207,7 @@ mod tests {
             .iter()
             .find(|a| a.cell_id == cell1_info.cell_id)
             .unwrap();
-        let cell1_borrow = cell1_assignment.borrowable.as_ref().unwrap();
+        let cell1_borrow = &cell1_assignment.borrowable;
         // Cell 1's borrowable should NOT include CPUs outside its cpuset (0-7)
         for cpu in 8..32 {
             assert!(
@@ -3265,7 +3222,7 @@ mod tests {
             .iter()
             .find(|a| a.cell_id == cell2_info.cell_id)
             .unwrap();
-        let cell2_borrow = cell2_assignment.borrowable.as_ref().unwrap();
+        let cell2_borrow = &cell2_assignment.borrowable;
         for cpu in 0..8 {
             assert!(
                 !cell2_borrow.test_cpu(cpu),
@@ -3300,7 +3257,7 @@ mod tests {
 
         // All cells idle (0 demand) -> falls back to equal division
         let demands: HashMap<u32, f64> = [(0, 0.0), (1, 0.0), (2, 0.0)].into();
-        let assignments = mgr.compute_demand_cpu_assignments(&demands, false).unwrap();
+        let assignments = mgr.compute_demand_cpu_assignments(&demands).unwrap();
 
         // 12 / 3 = 4 each
         let cell0 = assignments.iter().find(|a| a.cell_id == 0).unwrap();
@@ -3344,7 +3301,7 @@ mod tests {
             (cell2_info.cell_id, 1.0),
         ]
         .into();
-        let assignments = mgr.compute_demand_cpu_assignments(&demands, false).unwrap();
+        let assignments = mgr.compute_demand_cpu_assignments(&demands).unwrap();
 
         let cell0 = assignments.iter().find(|a| a.cell_id == 0).unwrap();
         let c1 = assignments
@@ -3404,7 +3361,7 @@ mod tests {
             (cell_b_info.cell_id, 10.0),
         ]
         .into();
-        let assignments = mgr.compute_demand_cpu_assignments(&demands, false).unwrap();
+        let assignments = mgr.compute_demand_cpu_assignments(&demands).unwrap();
 
         let cell_a = assignments
             .iter()
@@ -3454,7 +3411,7 @@ mod tests {
             (cell2_info.cell_id, 0.0),
         ]
         .into();
-        let assignments = mgr.compute_demand_cpu_assignments(&demands, false).unwrap();
+        let assignments = mgr.compute_demand_cpu_assignments(&demands).unwrap();
 
         let cell0 = assignments.iter().find(|a| a.cell_id == 0).unwrap();
         let c1 = assignments
@@ -3499,7 +3456,7 @@ mod tests {
         let cell1_info = mgr.find_cell_by_name("cell1").unwrap();
 
         let demands: HashMap<u32, f64> = [(0, 50.0), (cell1_info.cell_id, -10.0)].into();
-        let result = mgr.compute_demand_cpu_assignments(&demands, false);
+        let result = mgr.compute_demand_cpu_assignments(&demands);
         assert!(result.is_err(), "Negative weight should be rejected");
         assert!(
             result
@@ -3548,7 +3505,7 @@ mod tests {
             (cell_b_info.cell_id, 10.0),
         ]
         .into();
-        let assignments = mgr.compute_demand_cpu_assignments(&demands, false).unwrap();
+        let assignments = mgr.compute_demand_cpu_assignments(&demands).unwrap();
 
         let cell_a = assignments
             .iter()
@@ -3606,7 +3563,7 @@ mod tests {
         let cell1_info = mgr.find_cell_by_name("cell1").unwrap();
         let cell2_info = mgr.find_cell_by_name("cell2").unwrap();
 
-        let assignments = mgr.compute_cpu_assignments(false).unwrap();
+        let assignments = mgr.compute_cpu_assignments().unwrap();
 
         let cell0 = assignments.iter().find(|a| a.cell_id == 0).unwrap();
         let cell1 = assignments
@@ -3674,7 +3631,7 @@ mod tests {
         let cell_a_info = mgr.find_cell_by_name("cell_a").unwrap();
         let cell_b_info = mgr.find_cell_by_name("cell_b").unwrap();
 
-        let assignments = mgr.compute_cpu_assignments(false).unwrap();
+        let assignments = mgr.compute_cpu_assignments().unwrap();
 
         let cell_a = assignments
             .iter()
@@ -3857,7 +3814,7 @@ mod tests {
         )
         .unwrap();
 
-        let assignments = mgr.compute_cpu_assignments(false).unwrap();
+        let assignments = mgr.compute_cpu_assignments().unwrap();
 
         let workload: Vec<_> = assignments.iter().filter(|a| a.cell_id != 0).collect();
         assert_eq!(workload.len(), 5, "Expected 5 workload cells");
