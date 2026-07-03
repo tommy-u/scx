@@ -64,6 +64,7 @@
 
 #include "mitosis.bpf.h"
 #include "dsq.bpf.h"
+#include "stats.bpf.h"
 
 /* ── Config (populated by userspace rodata) ────────────────────────── */
 

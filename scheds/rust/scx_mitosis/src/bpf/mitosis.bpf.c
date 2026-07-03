@@ -19,9 +19,12 @@
 #endif
 
 #include "mitosis.bpf.h"
+#include "cell_cpumask.bpf.h"
 #include "dsq.bpf.h"
-#include "slice_shrinking.bpf.h"
 #include "llc_aware.bpf.h"
+#include "slice_shrinking.bpf.h"
+#include "stats.bpf.h"
+#include <lib/cleanup.bpf.h>
 
 char _license[] SEC("license") = "GPL";
 
@@ -29,6 +32,7 @@ char _license[] SEC("license") = "GPL";
  * Variables populated by userspace
  */
 const volatile u32 nr_possible_cpus = 1;
+const volatile u32 nr_llc = 1;
 const volatile unsigned char all_cpus[MAX_CPUS_U8];
 
 const volatile u64 slice_ns;

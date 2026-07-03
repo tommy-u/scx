@@ -9,8 +9,10 @@
  */
 #pragma once
 
-#include "mitosis.bpf.h"
+#include "cell_cpumask.bpf.h"
 #include "intf.h"
+#include "mitosis.bpf.h"
+#include <lib/cleanup.bpf.h>
 
 typedef u32 llc_id_t;
 #define LLC_INVALID ((llc_id_t)~0u)
@@ -25,6 +27,7 @@ _Static_assert(MAX_LLCS <= 64, "MAX_LLCS too high");
  */
 extern u32 cpu_to_llc[MAX_CPUS];
 extern struct llc_cpumask llc_to_cpus[MAX_LLCS];
+extern const volatile u32 nr_llc;
 
 static inline bool llc_is_valid(u32 llc_id)
 {
