@@ -663,45 +663,46 @@ static __always_inline s32 enqueue_pinned_cpu(struct task_struct *p, struct task
 	return cpu;
 }
 
-void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
+static __always_inline int insert_task_with_bounded_vtime(struct task_struct *p,
+							  struct task_ctx *tctx, u64 basis_vtime,
+							  u64 enq_flags)
 {
-	struct cpu_ctx *cctx;
-	struct task_ctx *tctx;
-	struct cell *cell;
-	s32 task_cpu = scx_bpf_task_cpu(p);
 	u64 vtime;
-	s32 cpu = -1;
-	u64 basis_vtime;
-
-	if (!(tctx = lookup_task_ctx(p)) || !(cctx = lookup_cpu_ctx(-1)))
-		return;
-
-	if (maybe_refresh_cell(p, tctx) < 0)
-		return;
 
 	/*
-	 * CPU -> cell mappings can change between enqueue() and stopping().
-	 * If that happens, the task's dsq_vtime may no longer belong to the
-	 * CPU-local or shared cell vtime domains visible at stopping(), and
-	 * advancing either one would charge the wrong domain.
-	 * Direct local insert paths snapshot the same state before inserting.
-	 *
-	 * Snapshot the cell whose vtime domain this placement expects to
-	 * charge. stopping() only advances local and cell vtime if the task
-	 * is not borrowed and the CPU it stops on is still in this same cell.
+	 * Ensure this is done *AFTER* refreshing cell and enqueue_pinned_cpu()
+	 * or maybe_update_task_llc(), which might manipulate vtime.
 	 */
-	tctx->vtime_charge_cell = tctx->cell;
+	vtime = p->scx.dsq_vtime;
+	tctx->basis_vtime = basis_vtime;
 
-	if (!tctx->all_cell_cpus_allowed) {
-		cpu = enqueue_pinned_cpu(p, tctx);
-		/* Kick target CPU — select_cpu may have returned a different one */
-		if (cpu >= 0)
-			scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+	if (time_after(vtime, basis_vtime + 8192 * slice_ns)) {
+		scx_bpf_error("vtime too far ahead: pid=%d vtime=%llu basis=%llu diff=%llu cell=%u",
+			      p->pid, p->scx.dsq_vtime, basis_vtime, p->scx.dsq_vtime - basis_vtime,
+			      tctx->cell);
+		return -1;
+	}
+	/*
+	 * Limit the amount of budget that an idling task can accumulate
+	 * to one slice.
+	 */
+	if (time_before(vtime, basis_vtime - slice_ns))
+		vtime = basis_vtime - slice_ns;
 
-		if (cpu < 0)
-			return;
+	scx_bpf_dsq_insert_vtime(p, tctx->dsq.raw, slice_ns, vtime, enq_flags);
+	return 0;
+}
 
-	} else if (!__COMPAT_is_enq_cpu_selected(enq_flags)) {
+static __always_inline void enqueue_cell_task(struct task_struct *p, u64 enq_flags,
+					      struct cpu_ctx *cctx, struct task_ctx *tctx,
+					      s32 task_cpu)
+{
+	struct cell *cell;
+	s32 cpu = -1;
+	s32 llc;
+	u64 basis_vtime;
+
+	if (!__COMPAT_is_enq_cpu_selected(enq_flags)) {
 		/*
 		 * If we haven't selected a cpu, then we haven't looked for and kicked an
 		 * idle CPU. Let's do the lookup now.
@@ -725,81 +726,109 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 		}
 	}
 
-	if (tctx->all_cell_cpus_allowed) {
-		s32 llc;
+	cstat_inc(CSTAT_CELL_DSQ, tctx->cell, cctx);
+	/* Task can use any CPU in its cell, so use the cell DSQ */
+	if (!(cell = lookup_cell(tctx->cell)))
+		return;
 
-		cstat_inc(CSTAT_CELL_DSQ, tctx->cell, cctx);
-		/* Task can use any CPU in its cell, so use the cell DSQ */
-		if (!(cell = lookup_cell(tctx->cell)))
-			return;
+	if (maybe_update_task_llc(p, tctx, task_cpu))
+		return;
 
-		if (maybe_update_task_llc(p, tctx, task_cpu))
-			return;
-
-		llc = tctx->llc;
-		if (llc < 0 || (u32)llc >= nr_llc || llc >= MAX_LLCS) {
-			scx_bpf_error("Invalid LLC ID: %d", tctx->llc);
-			return;
-		}
-
-		basis_vtime = READ_ONCE(cell->llcs[(u32)llc].vtime_now);
-	} else {
-		cstat_inc(CSTAT_CPU_DSQ, tctx->cell, cctx);
-
-		/*
-		 * cctx is the local core cpu (where enqueue is running), not the core
-		 * the task belongs to. Fetch the right cctx
-		 */
-		if (!(cctx = lookup_cpu_ctx(cpu)))
-			return;
-		/* Task is pinned to specific CPUs, use per-CPU DSQ */
-		basis_vtime = READ_ONCE(cctx->vtime_now);
-	}
-
-	/*
-	 * Ensure this is done *AFTER* refreshing cell and enqueue_pinned_cpu()
-	 * or maybe_update_task_llc(), which might manipulate vtime.
-	 */
-	vtime = p->scx.dsq_vtime;
-	tctx->basis_vtime = basis_vtime;
-
-	if (time_after(vtime, basis_vtime + 8192 * slice_ns)) {
-		scx_bpf_error("vtime too far ahead: pid=%d vtime=%llu basis=%llu diff=%llu cell=%u",
-			      p->pid, p->scx.dsq_vtime, basis_vtime, p->scx.dsq_vtime - basis_vtime,
-			      tctx->cell);
+	llc = tctx->llc;
+	if (llc < 0 || (u32)llc >= nr_llc || llc >= MAX_LLCS) {
+		scx_bpf_error("Invalid LLC ID: %d", tctx->llc);
 		return;
 	}
-	/*
-	 * Limit the amount of budget that an idling task can accumulate
-	 * to one slice.
-	 */
-	if (time_before(vtime, basis_vtime - slice_ns))
-		vtime = basis_vtime - slice_ns;
 
-	scx_bpf_dsq_insert_vtime(p, tctx->dsq.raw, slice_ns, vtime, enq_flags);
+	basis_vtime = READ_ONCE(cell->llcs[(u32)llc].vtime_now);
+
+	if (insert_task_with_bounded_vtime(p, tctx, basis_vtime, enq_flags))
+		return;
 
 	/*
 	 * Account after insertion: cell reconfiguration can orphan the selected
 	 * LLC between LLC selection and enqueue, so this is where we interlock
 	 * with refresh_cell_llc_draining() and enable draining if needed.
 	 */
-	if (tctx->all_cell_cpus_allowed) {
-		if (account_cell_llc_enqueue(tctx->cell, (u32)tctx->llc))
-			return;
-	}
-
-	/* Shrink the running task's slice for this pinned waiter.
-	 * We know this task is pinned (!all_cell_cpus_allowed). */
-	if (!tctx->all_cell_cpus_allowed) {
-		struct task_struct *curr = __COMPAT_scx_bpf_cpu_curr(cpu);
-		/* Likely overly defensive bc no other should read */
-		if (curr && !(curr->flags & PF_IDLE))
-			slice_shrink_on_enqueue(curr, tctx, tctx->cell, cctx);
-	}
+	if (account_cell_llc_enqueue(tctx->cell, (u32)tctx->llc))
+		return;
 
 	/* Kick the CPU if needed */
 	if (!__COMPAT_is_enq_cpu_selected(enq_flags) && cpu >= 0)
 		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+}
+
+static __always_inline void enqueue_restricted_task(struct task_struct *p, u64 enq_flags,
+						    struct cpu_ctx *local_cctx,
+						    struct task_ctx *tctx)
+{
+	struct cpu_ctx *cctx;
+	s32 cpu;
+	u64 basis_vtime;
+
+	cpu = enqueue_pinned_cpu(p, tctx);
+	/* Kick target CPU — select_cpu may have returned a different one */
+	if (cpu >= 0)
+		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+
+	if (cpu < 0)
+		return;
+
+	cstat_inc(CSTAT_CPU_DSQ, tctx->cell, local_cctx);
+
+	/*
+	 * local_cctx is the local core cpu (where enqueue is running), not the core
+	 * the task belongs to. Fetch the right cctx
+	 */
+	if (!(cctx = lookup_cpu_ctx(cpu)))
+		return;
+	/* Task is pinned to specific CPUs, use per-CPU DSQ */
+	basis_vtime = READ_ONCE(cctx->vtime_now);
+
+	if (insert_task_with_bounded_vtime(p, tctx, basis_vtime, enq_flags))
+		return;
+
+	/* Shrink the running task's slice for this pinned waiter.
+	 * We know this task is pinned (!all_cell_cpus_allowed). */
+	struct task_struct *curr = __COMPAT_scx_bpf_cpu_curr(cpu);
+	/* Likely overly defensive bc no other should read */
+	if (curr && !(curr->flags & PF_IDLE))
+		slice_shrink_on_enqueue(curr, tctx, tctx->cell, cctx);
+
+	/* Kick the CPU if needed */
+	if (!__COMPAT_is_enq_cpu_selected(enq_flags) && cpu >= 0)
+		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+}
+
+void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
+{
+	struct cpu_ctx *cctx;
+	struct task_ctx *tctx;
+	s32 task_cpu = scx_bpf_task_cpu(p);
+
+	if (!(tctx = lookup_task_ctx(p)) || !(cctx = lookup_cpu_ctx(-1)))
+		return;
+
+	if (maybe_refresh_cell(p, tctx) < 0)
+		return;
+
+	/*
+	 * CPU -> cell mappings can change between enqueue() and stopping().
+	 * If that happens, the task's dsq_vtime may no longer belong to the
+	 * CPU-local or shared cell vtime domains visible at stopping(), and
+	 * advancing either one would charge the wrong domain.
+	 * Direct local insert paths snapshot the same state before inserting.
+	 *
+	 * Snapshot the cell whose vtime domain this placement expects to
+	 * charge. stopping() only advances local and cell vtime if the task
+	 * is not borrowed and the CPU it stops on is still in this same cell.
+	 */
+	tctx->vtime_charge_cell = tctx->cell;
+
+	if (tctx->all_cell_cpus_allowed)
+		enqueue_cell_task(p, enq_flags, cctx, tctx, task_cpu);
+	else
+		enqueue_restricted_task(p, enq_flags, cctx, tctx);
 }
 
 void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
