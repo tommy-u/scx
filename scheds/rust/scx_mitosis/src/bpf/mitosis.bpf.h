@@ -25,8 +25,6 @@
 
 extern const volatile u32 nr_llc;
 
-extern struct cell_map cells;
-
 enum mitosis_constants {
 
 	/* Root cell index */
@@ -43,19 +41,6 @@ enum mitosis_constants {
  * Variables populated by userspace
  */
 const volatile u32 nr_llc = 1;
-
-static inline struct cell *lookup_cell(int idx)
-{
-	struct cell *cell;
-
-	cell = bpf_map_lookup_elem(&cells, &idx);
-
-	if (!cell) {
-		scx_bpf_error("Invalid cell %d", idx);
-		return NULL;
-	}
-	return cell;
-}
 
 /*
  * task_ctx is the per-task information kept by scx_mitosis
@@ -95,6 +80,56 @@ struct task_ctx {
 
 	u64 avg_runtime_ns; /* EWMA of per-wake runtimes (ns), init to 0 */
 };
+
+struct debug_events_map {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, DEBUG_EVENTS_BUF_SIZE);
+	__type(key, u32);
+	__type(value, struct debug_event);
+};
+
+struct cell_map {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__type(key, u32);
+	__type(value, struct cell);
+	__uint(max_entries, MAX_CELLS);
+};
+
+struct cgrp_ctx_map {
+	__uint(type, BPF_MAP_TYPE_CGRP_STORAGE);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
+	__type(key, int);
+	__type(value, struct cgrp_ctx);
+};
+
+struct task_ctx_map {
+	__uint(type, BPF_MAP_TYPE_TASK_STORAGE);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
+	__type(key, int);
+	__type(value, struct task_ctx);
+};
+
+struct cpu_ctx_map {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__type(key, u32);
+	__type(value, struct cpu_ctx);
+	__uint(max_entries, 1);
+};
+
+extern struct cell_map cells;
+
+static inline struct cell *lookup_cell(int idx)
+{
+	struct cell *cell;
+
+	cell = bpf_map_lookup_elem(&cells, &idx);
+
+	if (!cell) {
+		scx_bpf_error("Invalid cell %d", idx);
+		return NULL;
+	}
+	return cell;
+}
 
 static inline struct task_ctx *lookup_task_ctx(struct task_struct *p);
 
@@ -145,12 +180,5 @@ static inline void cstat_inc(enum cell_stat_idx idx, u32 cell, struct cpu_ctx *c
 {
 	cstat_add(idx, cell, cctx, 1);
 }
-
-struct cell_map {
-	__uint(type, BPF_MAP_TYPE_ARRAY);
-	__type(key, u32);
-	__type(value, struct cell);
-	__uint(max_entries, MAX_CELLS);
-};
 
 static inline int update_task_cpumask(struct task_struct *p, struct task_ctx *tctx);
