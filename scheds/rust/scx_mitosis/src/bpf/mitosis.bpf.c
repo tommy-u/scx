@@ -52,13 +52,6 @@ u32 cpuset_seq;
  */
 u32 debug_event_pos;
 
-struct {
-	__uint(type, BPF_MAP_TYPE_ARRAY);
-	__uint(max_entries, DEBUG_EVENTS_BUF_SIZE);
-	__type(key, u32);
-	__type(value, struct debug_event);
-} debug_events SEC(".maps");
-
 /* Configuration struct for apply_cell_config, populated by userspace */
 struct cell_config cell_config;
 
@@ -67,7 +60,13 @@ private(root_cgrp) struct cgroup __kptr *root_cgrp;
 
 UEI_DEFINE(uei);
 
+/* BPF maps */
+struct debug_events_map debug_events SEC(".maps");
 struct cell_map cells SEC(".maps");
+struct cgrp_ctx_map cgrp_ctxs SEC(".maps");
+struct task_ctx_map task_ctxs SEC(".maps");
+struct cpu_ctx_map cpu_ctxs SEC(".maps");
+struct cell_cpumask_map cell_cpumasks SEC(".maps");
 
 /* Forward declaration for init_cgrp_ctx_with_ancestors (defined later) */
 static int init_cgrp_ctx_with_ancestors(struct cgroup *cgrp);
@@ -89,13 +88,6 @@ static inline struct cgroup *lookup_cgrp_ancestor(struct cgroup *cgrp, u32 ances
 
 	return cg;
 }
-
-struct {
-	__uint(type, BPF_MAP_TYPE_CGRP_STORAGE);
-	__uint(map_flags, BPF_F_NO_PREALLOC);
-	__type(key, int);
-	__type(value, struct cgrp_ctx);
-} cgrp_ctxs SEC(".maps");
 
 static inline struct cgrp_ctx *lookup_cgrp_ctx_fallible(struct cgroup *cgrp)
 {
@@ -134,13 +126,6 @@ static inline struct cgroup *task_cgroup(struct task_struct *p)
 	return cgrp;
 }
 
-struct {
-	__uint(type, BPF_MAP_TYPE_TASK_STORAGE);
-	__uint(map_flags, BPF_F_NO_PREALLOC);
-	__type(key, int);
-	__type(value, struct task_ctx);
-} task_ctxs SEC(".maps");
-
 static inline struct task_ctx *lookup_task_ctx(struct task_struct *p)
 {
 	struct task_ctx *tctx;
@@ -152,13 +137,6 @@ static inline struct task_ctx *lookup_task_ctx(struct task_struct *p)
 	scx_bpf_error("task_ctx lookup failed");
 	return NULL;
 }
-
-struct {
-	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
-	__type(key, u32);
-	__type(value, struct cpu_ctx);
-	__uint(max_entries, 1);
-} cpu_ctxs SEC(".maps");
 
 static inline struct cpu_ctx *lookup_cpu_ctx(int cpu)
 {
@@ -241,8 +219,6 @@ static inline void record_cgroup_exit(u64 cgid)
 	event->event_type = DEBUG_EVENT_CGROUP_EXIT;
 	event->cgroup_exit.cgid = cgid;
 }
-
-struct cell_cpumask_map cell_cpumasks SEC(".maps");
 
 static inline int update_task_cpumask(struct task_struct *p, struct task_ctx *tctx)
 {
