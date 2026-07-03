@@ -562,6 +562,54 @@ static __always_inline s32 select_pinned_cpu(struct task_struct *p, s32 prev_cpu
 	return cpu;
 }
 
+static __always_inline s32 select_restricted_affinity_cpu(struct task_struct *p, s32 prev_cpu,
+							  struct cpu_ctx *cctx,
+							  struct task_ctx *tctx)
+{
+	s32 cpu;
+	bool idle_cpu_cleared = false;
+
+	cstat_inc(CSTAT_AFFN_VIOL, tctx->cell, cctx);
+
+	if (bpf_cpumask_weight(p->cpus_ptr) == 1) {
+		/* If we're pinned to a single CPU, just use that */
+		cpu = get_cpu_from_dsq(tctx->dsq);
+	} else {
+		/* Multicpu pinning, try to find an idle CPU */
+		cpu = select_pinned_cpu(p, prev_cpu, tctx, &idle_cpu_cleared);
+	}
+
+	if (cpu < 0)
+		return prev_cpu;
+
+	if (idle_cpu_cleared || scx_bpf_test_and_clear_cpu_idle(cpu)) {
+		tctx->vtime_charge_cell = tctx->cell;
+		scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_ns, 0);
+	}
+	return cpu;
+}
+
+static __always_inline s32 select_fallback_cell_cpu(struct task_ctx *tctx, s32 prev_cpu)
+{
+	s32 cpu;
+
+	if (!tctx->cpumask) {
+		scx_bpf_error("tctx->cpumask should never be NULL");
+		return prev_cpu;
+	}
+	/*
+	 * All else failed, send it to the prev cpu (if that's valid), otherwise any
+	 * valid cpu.
+	 */
+	/* The trailing cpumask check looks redundant but keeps the verifier happy. */
+	if (!bpf_cpumask_test_cpu(prev_cpu, cast_mask(tctx->cpumask)) && tctx->cpumask)
+		cpu = bpf_cpumask_any_distribute(cast_mask(tctx->cpumask));
+	else
+		cpu = prev_cpu;
+
+	return cpu;
+}
+
 /*
  * select_cpu is where we update each task's cell assignment and then try to
  * dispatch to an idle core in the cell if possible
@@ -578,45 +626,13 @@ s32 BPF_STRUCT_OPS(mitosis_select_cpu, struct task_struct *p, s32 prev_cpu, u64 
 	if (maybe_refresh_cell(p, tctx) < 0)
 		return prev_cpu;
 
-	if (!tctx->all_cell_cpus_allowed) {
-		cstat_inc(CSTAT_AFFN_VIOL, tctx->cell, cctx);
-		bool idle_cpu_cleared = false;
-
-		if (bpf_cpumask_weight(p->cpus_ptr) == 1) {
-			/* If we're pinned to a single CPU, just use that */
-			cpu = get_cpu_from_dsq(tctx->dsq);
-		} else {
-			/* Multicpu pinning, try to find an idle CPU */
-			cpu = select_pinned_cpu(p, prev_cpu, tctx, &idle_cpu_cleared);
-		}
-
-		if (cpu < 0)
-			return prev_cpu;
-
-		if (idle_cpu_cleared || scx_bpf_test_and_clear_cpu_idle(cpu)) {
-			tctx->vtime_charge_cell = tctx->cell;
-			scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice_ns, 0);
-		}
-		return cpu;
-	}
+	if (!tctx->all_cell_cpus_allowed)
+		return select_restricted_affinity_cpu(p, prev_cpu, cctx, tctx);
 
 	if ((cpu = try_pick_idle_cpu(p, prev_cpu, cctx, tctx, false)) >= 0)
 		return cpu;
 
-	if (!tctx->cpumask) {
-		scx_bpf_error("tctx->cpumask should never be NULL");
-		return prev_cpu;
-	}
-	/*
-	 * All else failed, send it to the prev cpu (if that's valid), otherwise any
-	 * valid cpu.
-	 */
-	if (!bpf_cpumask_test_cpu(prev_cpu, cast_mask(tctx->cpumask)) && tctx->cpumask)
-		cpu = bpf_cpumask_any_distribute(cast_mask(tctx->cpumask));
-	else
-		cpu = prev_cpu;
-
-	return cpu;
+	return select_fallback_cell_cpu(tctx, prev_cpu);
 }
 
 static __always_inline s32 enqueue_pinned_cpu(struct task_struct *p, struct task_ctx *tctx)
