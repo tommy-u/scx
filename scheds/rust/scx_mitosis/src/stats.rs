@@ -41,8 +41,6 @@ pub struct CellMetrics {
     pub steal_pct: f64,
     #[stat(desc = "Orphaned LLC DSQ drain events")]
     pub drain_cnt: u64,
-    #[stat(desc = "Pin reject skipped %")]
-    pub pin_skip_pct: f64,
     #[stat(desc = "Slice shrink events")]
     pub slice_shrink: u64,
     #[stat(desc = "Slice shrink at max")]
@@ -73,7 +71,6 @@ impl CellMetrics {
         self.borrowed_pct = ds.borrowed_pct;
         self.affn_violations_pct = ds.affn_viol_pct;
         self.steal_pct = ds.steal_pct;
-        self.pin_skip_pct = ds.pin_skip_pct;
         self.share_of_decisions_pct = ds.share_of_decisions_pct;
         self.total_decisions = ds.total_decisions;
     }
@@ -105,8 +102,6 @@ pub struct Metrics {
     pub steal_pct: f64,
     #[stat(desc = "Orphaned LLC DSQ drain events")]
     pub drain_cnt: u64,
-    #[stat(desc = "Pin reject skipped %")]
-    pub pin_skip_pct: f64,
     #[stat(desc = "Slice shrink events")]
     pub slice_shrink: u64,
     #[stat(desc = "Slice shrink at max")]
@@ -143,7 +138,6 @@ impl Metrics {
         self.borrowed_pct = ds.borrowed_pct;
         self.affn_violations_pct = ds.affn_viol_pct;
         self.steal_pct = ds.steal_pct;
-        self.pin_skip_pct = ds.pin_skip_pct;
         self.share_of_decisions_pct = ds.share_of_decisions_pct;
         self.total_decisions = ds.total_decisions;
     }
