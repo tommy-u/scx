@@ -1553,47 +1553,13 @@ void BPF_STRUCT_OPS(mitosis_exit, struct scx_exit_info *ei)
 	UEI_RECORD(uei, ei);
 }
 
-/*
- * Apply a complete cell configuration.
- *
- * Configuration data is read from the cell_config global struct,
- * which is populated by userspace before invoking this program.
- *
- * The function operates in five phases:
- * 1. Mark all cells (except cell 0) as not in use
- * 2. Apply cell assignments for owner cgroups
- * 3. Walk cgroup hierarchy to propagate cells to children
- * 4. Apply cell cpumasks and CPU-to-cell mappings
- * 5. Bump applied_configuration_seq to signal completion
- *
- * Note: This is not atomic - tasks may observe intermediate states during
- * execution. On error, the scheduler may be left in a partially-configured
- * state. This is acceptable because userspace treats errors as fatal and
- * exits, causing the scheduler to be unloaded.
- */
-SEC("syscall")
-int apply_cell_config(void *ctx)
+static __always_inline int reset_non_root_cells(void)
 {
-	struct cgrp_ctx *cgc;
-	struct cell *cell;
-	struct cpu_ctx *cctx;
-	struct cell_cpumask_wrapper *cpumaskw;
-	struct cgroup_subsys_state *root_css, *pos;
-	struct cgroup *cur_cgrp;
-	u32 i, cell_id;
-	int ret;
+	u32 i;
 
-	/* Read configuration from global struct (populated by userspace) */
-	struct cell_config *config = &cell_config;
-
-	/*
-	 * Phase 1: Mark all cells (except cell 0) as not in use.
-	 * This handles cell destruction - cells not in the new config
-	 * will remain marked as not in use.
-	 */
 	bpf_for(i, 1, MAX_CELLS)
 	{
-		cell = lookup_cell(i);
+		struct cell *cell = lookup_cell(i);
 		if (!cell)
 			return -EINVAL;
 
@@ -1601,130 +1567,157 @@ int apply_cell_config(void *ctx)
 		cell->owner_cgid = 0;
 	}
 
-	/*
-	 * Phase 2: Apply cell cpumasks and derive CPU-to-cell mappings.
-	 * For each cell, we update the cell's cpumask and set each CPU's
-	 * cell assignment based on which cell's cpumask contains it.
-	 *
-	 * This is done before cgroup assignments so that any task
-	 * initialized mid-operation that reads a new cell ID will find
-	 * correct cpumasks already in place.
-	 */
+	return 0;
+}
+
+static __always_inline int advance_cell_llc_vtime_for_cpu_move(u32 cell_id,
+							       const struct cpu_ctx *cctx)
+{
+	struct cell *cell;
+	u32 llc_idx;
+
+	cell = lookup_cell(cell_id);
+	if (!cell)
+		return -ENOENT;
+
+	if (!llc_is_valid(cctx->llc) || cctx->llc >= nr_llc) {
+		scx_bpf_error("invalid CPU LLC in apply_cell_config: %u", cctx->llc);
+		return -EINVAL;
+	}
+
+	llc_idx = cctx->llc;
+	if (time_before(READ_ONCE(cell->llcs[llc_idx].vtime_now), cctx->vtime_now))
+		WRITE_ONCE(cell->llcs[llc_idx].vtime_now, cctx->vtime_now);
+
+	return 0;
+}
+
+static __always_inline int apply_one_cell_cpumasks(const struct cell_config *config, u32 cell_id)
+{
+	struct cell_cpumask_wrapper *cpumaskw;
+	const struct cell_cpumask_data *cpumask_data;
+	const struct cell_cpumask_data *borrowable_data;
+	u32 cpu;
+	int ret;
+
+	cpumaskw = lookup_cell_cpumask_wrapper(cell_id);
+	if (!cpumaskw)
+		return -EINVAL;
+
+	cpumask_data = MEMBER_VPTR(config->cpumasks, [cell_id]);
+	if (!cpumask_data) {
+		scx_bpf_error("cell_id %d out of bounds", cell_id);
+		return -EINVAL;
+	}
+
+	struct bpf_cpumask *new_cpumask __free(bpf_cpumask) = get_tmp_cpumask(&cpumaskw->primary);
+	if (!new_cpumask) {
+		scx_bpf_error("tmp cpumask is NULL for cell_id %d", cell_id);
+		return -EINVAL;
+	}
+
+	bpf_cpumask_clear(new_cpumask);
+
+	bpf_for(cpu, 0, nr_possible_cpus)
+	{
+		struct cpu_ctx *cctx;
+		bool cpu_in_cell;
+
+		if (cell_cpumask_data_test_cpu(cpumask_data, cpu, &cpu_in_cell)) {
+			scx_bpf_error("failed to decode cpumask for cell_id %d", cell_id);
+			return -EINVAL;
+		}
+
+		if (!cpu_in_cell)
+			continue;
+
+		bpf_cpumask_set_cpu(cpu, new_cpumask);
+
+		cctx = bpf_map_lookup_percpu_elem(&cpu_ctxs, &(u32){ 0 }, cpu);
+		if (!cctx)
+			return -ENOENT;
+
+		/*
+		 * If the CPU is changing cells, advance the new cell's vtime
+		 * to at least match this CPU's per-CPU vtime. Otherwise the
+		 * per-CPU DSQ and cell DSQ are in different vtime domains and
+		 * dispatch will starve the per-CPU DSQ tasks.
+		 */
+		if (cctx->cell != cell_id) {
+			ret = advance_cell_llc_vtime_for_cpu_move(cell_id, cctx);
+			if (ret)
+				return ret;
+		}
+		cctx->cell = cell_id;
+	}
+
+	if (publish_prepared_cpumask(&cpumaskw->primary, &new_cpumask)) {
+		scx_bpf_error("failed to publish cpumask for cell_id %d", cell_id);
+		return -EINVAL;
+	}
+
+	scoped_guard(rcu)
+	{
+		ret = refresh_cell_llc_draining(cell_id);
+		if (ret)
+			return ret;
+	}
+
+	borrowable_data = MEMBER_VPTR(config->borrowable_cpumasks, [cell_id]);
+	if (!borrowable_data) {
+		scx_bpf_error("cell_id %d out of bounds for borrowable", cell_id);
+		return -EINVAL;
+	}
+
+	if (set_cpumask_from_data(&cpumaskw->borrowable, borrowable_data)) {
+		scx_bpf_error("failed to set borrowable cpumask for cell_id %d", cell_id);
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
+static __always_inline int apply_cell_cpumasks(const struct cell_config *config)
+{
+	u32 cell_id;
+	int ret;
+
 	if (config->num_cells > MAX_CELLS)
 		return -EINVAL;
 
 	bpf_for(cell_id, 0, MAX_CELLS)
 	{
-		struct cell_cpumask_data *cpumask_data;
-
 		if (cell_id >= config->num_cells)
 			break;
 
-		cpumaskw = lookup_cell_cpumask_wrapper(cell_id);
-		if (!cpumaskw)
-			return -EINVAL;
-
-		cpumask_data = MEMBER_VPTR(config->cpumasks, [cell_id]);
-		if (!cpumask_data) {
-			scx_bpf_error("cell_id %d out of bounds", cell_id);
-			return -EINVAL;
-		}
-
-		/* Get the tmp_cpumask to build the new mask */
-		struct bpf_cpumask *new_cpumask __free(bpf_cpumask) =
-			get_tmp_cpumask(&cpumaskw->primary);
-		if (!new_cpumask) {
-			scx_bpf_error("tmp cpumask is NULL for cell_id %d", cell_id);
-			return -EINVAL;
-		}
-
-		bpf_cpumask_clear(new_cpumask);
-
-		/* Build the mask and update CPU-to-cell mappings in one pass. */
-		u32 cpu;
-		bpf_for(cpu, 0, nr_possible_cpus)
-		{
-			bool cpu_in_cell;
-
-			if (cell_cpumask_data_test_cpu(cpumask_data, cpu, &cpu_in_cell)) {
-				scx_bpf_error("failed to decode cpumask for cell_id %d", cell_id);
-				return -EINVAL;
-			}
-
-			if (!cpu_in_cell)
-				continue;
-
-			bpf_cpumask_set_cpu(cpu, new_cpumask);
-
-			cctx = bpf_map_lookup_percpu_elem(&cpu_ctxs, &(u32){ 0 }, cpu);
-			if (!cctx)
-				return -ENOENT;
-			/*
-			 * If the CPU is changing cells, advance the
-			 * new cell's vtime to at least match this
-			 * CPU's per-CPU vtime. Otherwise the per-CPU
-			 * DSQ and cell DSQ are in different vtime
-			 * domains and dispatch will starve the
-			 * per-CPU DSQ tasks.
-			 */
-			if (cctx->cell != cell_id) {
-				cell = lookup_cell(cell_id);
-				if (!cell)
-					return -ENOENT;
-				if (!llc_is_valid(cctx->llc) || cctx->llc >= nr_llc) {
-					scx_bpf_error("invalid CPU LLC in apply_cell_config: %u",
-						      cctx->llc);
-					return -EINVAL;
-				}
-				u32 llc_idx = cctx->llc;
-				if (time_before(READ_ONCE(cell->llcs[llc_idx].vtime_now),
-						cctx->vtime_now))
-					WRITE_ONCE(cell->llcs[llc_idx].vtime_now, cctx->vtime_now);
-			}
-			cctx->cell = cell_id;
-		}
-
-		/* Swap the new cpumask into place */
-		if (publish_prepared_cpumask(&cpumaskw->primary, &new_cpumask)) {
-			scx_bpf_error("failed to publish cpumask for cell_id %d", cell_id);
-			return -EINVAL;
-		}
-		scoped_guard(rcu)
-		{
-			ret = refresh_cell_llc_draining(cell_id);
-			if (ret)
-				return ret;
-		}
-
-		/* Apply borrowable cpumask for this cell */
-		struct cell_cpumask_data *borrowable_data;
-
-		borrowable_data = MEMBER_VPTR(config->borrowable_cpumasks, [cell_id]);
-		if (!borrowable_data) {
-			scx_bpf_error("cell_id %d out of bounds for borrowable", cell_id);
-			return -EINVAL;
-		}
-
-		if (set_cpumask_from_data(&cpumaskw->borrowable, borrowable_data)) {
-			scx_bpf_error("failed to set borrowable cpumask for cell_id %d", cell_id);
-			return -EINVAL;
-		}
+		ret = apply_one_cell_cpumasks(config, cell_id);
+		if (ret)
+			return ret;
 	}
 
-	/* Phase 3: Apply cell-to-cgroup assignments for owner cgroups */
+	return 0;
+}
+
+static __always_inline int apply_cell_owner_assignments(const struct cell_config *config)
+{
+	u32 i;
+
 	if (config->num_cell_assignments > MAX_CELLS)
 		return -EINVAL;
 
 	bpf_for(i, 0, MAX_CELLS)
 	{
-		struct cell_assignment *assignment;
+		const struct cell_assignment *assignment;
+		struct cgrp_ctx *cgc;
+		struct cell *cell;
+		u32 cell_id;
+		u64 cgid;
 
 		if (i >= config->num_cell_assignments)
 			break;
 
 		assignment = &config->assignments[i];
-
-		u64 cgid = assignment->cgid;
+		cgid = assignment->cgid;
 		cell_id = assignment->cell_id;
 
 		if (cell_id >= MAX_CELLS)
@@ -1755,10 +1748,14 @@ int apply_cell_config(void *ctx)
 		cgc->cell_owner = true;
 	}
 
-	/*
-	 * Phase 4: Walk the cgroup hierarchy to propagate cell assignments
-	 * to children. Non-owner cgroups inherit their parent's cell.
-	 */
+	return 0;
+}
+
+static __always_inline int propagate_cgroup_cell_assignments(void)
+{
+	struct cgroup_subsys_state *root_css, *pos;
+	struct cgroup *cur_cgrp;
+
 	scoped_guard(rcu)
 	{
 		if (!root_cgrp) {
@@ -1773,15 +1770,12 @@ int apply_cell_config(void *ctx)
 		}
 		root_css = &root_cgrp_ref->self;
 
-		/* Initialize level_cells[0] to cell 0 (root cell) */
-		level_cells[0] = 0;
+		level_cells[0] = ROOT_CELL_ID;
 
-		/*
-		 * Walk all cgroups in pre-order traversal. For each cgroup:
-		 * - If it's a cell owner, record its cell in level_cells
-		 * - If not, inherit the parent's cell from level_cells[level-1]
-		 */
 		bpf_for_each(css, pos, root_css, BPF_CGROUP_ITER_DESCENDANTS_PRE) {
+			struct cgrp_ctx *cgrp_ctx;
+			u32 level;
+
 			cur_cgrp = pos->cgroup;
 
 			/*
@@ -1789,18 +1783,19 @@ int apply_cell_config(void *ctx)
 			 * or those without storage, this may fail - that's OK
 			 * since they can't have tasks anyway.
 			 */
-			struct cgrp_ctx *cgrp_ctx;
 			cgrp_ctx = lookup_cgrp_ctx_fallible(cur_cgrp);
 			if (!cgrp_ctx)
 				continue;
 
-			u32 level = cur_cgrp->level;
+			level = cur_cgrp->level;
 			if (level >= MAX_CG_DEPTH) {
 				scx_bpf_error("Cgroup hierarchy too deep: %d", level);
 				return -EINVAL;
 			}
 
 			if (cgrp_ctx->cell_owner) {
+				const struct cell *cell;
+
 				/*
 				 * Check if this cell is still in use and owned
 				 * by this cgroup. If not, this cgroup was a
@@ -1813,27 +1808,73 @@ int apply_cell_config(void *ctx)
 				if (!cell)
 					return -EINVAL;
 				if (cell->in_use && cell->owner_cgid == cur_cgrp->kn->id) {
-					/* Cell owner with active cell - record in level_cells */
 					level_cells[level] = cgrp_ctx->cell;
 					continue;
 				}
-				/* Former owner, cell no longer in use - clear flag and fall through */
 				cgrp_ctx->cell_owner = false;
 			}
 
-			/* Not a cell owner (or was, but cell no longer active) - inherit from parent */
+			/* Non-owners inherit from their parent. */
 			u32 parent_cell;
 			if (level > 0)
 				parent_cell = level_cells[level - 1];
 			else
-				parent_cell = 0;
+				parent_cell = ROOT_CELL_ID;
 
 			WRITE_ONCE(cgrp_ctx->cell, parent_cell);
 			level_cells[level] = parent_cell;
 		}
 	}
 
-	/* Phase 5: Bump configuration sequence to make changes visible */
+	return 0;
+}
+
+/*
+ * Apply a complete cell configuration.
+ *
+ * Configuration data is read from the cell_config global struct,
+ * which is populated by userspace before invoking this program.
+ *
+ * The function operates in five phases:
+ * 1. Mark all cells (except cell 0) as not in use
+ * 2. Apply cell cpumasks and CPU-to-cell mappings
+ * 3. Apply cell assignments for owner cgroups
+ * 4. Walk cgroup hierarchy to propagate cells to children
+ * 5. Bump applied_configuration_seq to signal completion
+ *
+ * Note: This is not atomic - tasks may observe intermediate states during
+ * execution. On error, the scheduler may be left in a partially-configured
+ * state. This is acceptable because userspace treats errors as fatal and
+ * exits, causing the scheduler to be unloaded.
+ */
+SEC("syscall")
+int apply_cell_config(void *ctx)
+{
+	int ret;
+
+	/* Read configuration from global struct (populated by userspace) */
+	const struct cell_config *config = &cell_config;
+
+	/* Reset non-root cells. */
+	ret = reset_non_root_cells();
+	if (ret)
+		return ret;
+
+	/* Publish cell CPU masks before owner assignment so new cell IDs have masks. */
+	ret = apply_cell_cpumasks(config);
+	if (ret)
+		return ret;
+
+	/* Mark configured cgroups as cell owners. */
+	ret = apply_cell_owner_assignments(config);
+	if (ret)
+		return ret;
+
+	/* Propagate owner cell assignments to descendant cgroups. */
+	ret = propagate_cgroup_cell_assignments();
+	if (ret)
+		return ret;
+
 	__atomic_add_fetch(&applied_configuration_seq, 1, __ATOMIC_RELEASE);
 
 	return 0;
