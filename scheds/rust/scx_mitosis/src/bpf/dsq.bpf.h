@@ -10,6 +10,13 @@
  */
 #pragma once
 
+#ifdef LSP
+#define __bpf__
+#include "../../../../include/scx/common.bpf.h"
+#else
+#include <scx/common.bpf.h>
+#endif
+
 #include "intf.h"
 
 /*
@@ -196,4 +203,23 @@ static inline dsq_id_t get_cell_llc_dsq_id(u32 cell, u32 llc)
 
 	return (dsq_id_t){ .cell_llc_dsq = {
 				   .llc = llc, .cell = cell, .type = DSQ_TYPE_CELL_LLC } };
+}
+
+/* DSQ queue operations */
+extern const volatile bool use_lockless_peek;
+
+/*
+ * Peek at the head of a DSQ. Uses lockless kfunc when available,
+ * otherwise falls back to bpf_for_each iterator.
+ */
+static inline struct task_struct *dsq_peek(u64 dsq_id)
+{
+	struct task_struct *p;
+
+	if (use_lockless_peek)
+		return __COMPAT_scx_bpf_dsq_peek(dsq_id);
+
+	bpf_for_each(scx_dsq, p, dsq_id, 0)
+		return p;
+	return NULL;
 }

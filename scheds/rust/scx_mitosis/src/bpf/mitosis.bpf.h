@@ -3,9 +3,11 @@
  * This software may be used and distributed according to the terms of the
  * GNU General Public License version 2.
  *
- * This defines the core data structures, types, and constants
- * for the scx_mitosis scheduler, primarily containing `struct cell`
- * and `struct task_ctx`.
+ * Core scheduler contracts for scx_mitosis.
+ *
+ * This header contains scheduler-wide constants, task context state, map
+ * templates, and cross-module declarations. Domain-specific helpers live in
+ * their own headers.
  */
 
 #pragma once
@@ -13,17 +15,12 @@
 #ifdef LSP
 #define __bpf__
 #include "../../../../include/scx/common.bpf.h"
-#include "../../../../include/scx/ravg_impl.bpf.h"
 #else
 #include <scx/common.bpf.h>
 #endif
 
 #include "intf.h"
-#include "cell_cpumask.bpf.h"
 #include "dsq.bpf.h"
-#include <lib/cleanup.bpf.h>
-
-extern const volatile u32 nr_llc;
 
 enum mitosis_constants {
 
@@ -36,11 +33,6 @@ enum mitosis_constants {
 	/* No NUMA constraint for DSQ creation */
 	ANY_NUMA = -1,
 };
-
-/*
- * Variables populated by userspace
- */
-const volatile u32 nr_llc = 1;
 
 /*
  * task_ctx is the per-task information kept by scx_mitosis
@@ -146,39 +138,6 @@ static inline void update_task_runtime_ewma(struct task_ctx *tctx, u64 used)
 		tctx->avg_runtime_ns = used;
 	else
 		tctx->avg_runtime_ns = (tctx->avg_runtime_ns * 7 + used) / 8;
-}
-
-extern const volatile bool use_lockless_peek;
-
-/*
- * Peek at the head of a DSQ. Uses lockless kfunc when available,
- * otherwise falls back to bpf_for_each iterator.
- */
-static inline struct task_struct *dsq_peek(u64 dsq_id)
-{
-	struct task_struct *p;
-
-	if (use_lockless_peek)
-		return __COMPAT_scx_bpf_dsq_peek(dsq_id);
-
-	bpf_for_each(scx_dsq, p, dsq_id, 0)
-		return p;
-	return NULL;
-}
-
-static inline void cstat_add(enum cell_stat_idx idx, u32 cell, struct cpu_ctx *cctx, s64 delta)
-{
-	u64 *vptr;
-
-	if ((vptr = MEMBER_VPTR(*cctx, .cstats[cell][idx])))
-		(*vptr) += delta;
-	else
-		scx_bpf_error("invalid cell or stat idxs: %d, %d", idx, cell);
-}
-
-static inline void cstat_inc(enum cell_stat_idx idx, u32 cell, struct cpu_ctx *cctx)
-{
-	cstat_add(idx, cell, cctx, 1);
 }
 
 static inline int update_task_cpumask(struct task_struct *p, struct task_ctx *tctx);
