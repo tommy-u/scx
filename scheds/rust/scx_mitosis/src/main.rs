@@ -753,7 +753,7 @@ impl<'a> Scheduler<'a> {
             config.assignments[i].cell_id = *cell_id;
         }
 
-        // Set cell cpumasks and borrowable cpumasks
+        // Set cell cpumasks, borrowable cpumasks, and select CPU ladder order
         let mut max_cell_id: u32 = 0;
         for a in cpu_assignments {
             if a.cell_id >= bpf_intf::consts_MAX_CELLS {
@@ -763,14 +763,17 @@ impl<'a> Scheduler<'a> {
                     bpf_intf::consts_MAX_CELLS
                 );
             }
+            let cell_id = a.cell_id as usize;
             max_cell_id = max_cell_id.max(a.cell_id + 1);
 
-            write_cpumask_to_config(&a.primary, &mut config.cpumasks[a.cell_id as usize].mask);
+            write_cpumask_to_config(&a.primary, &mut config.cpumasks[cell_id].mask);
 
-            write_cpumask_to_config(
-                &a.borrowable,
-                &mut config.borrowable_cpumasks[a.cell_id as usize].mask,
-            );
+            write_cpumask_to_config(&a.borrowable, &mut config.borrowable_cpumasks[cell_id].mask);
+
+            write_default_select_ladder_to_config(
+                &mut config.select_rung_counts[cell_id],
+                &mut config.select_rungs[cell_id],
+            )?;
         }
         config.num_cells = max_cell_id;
 
@@ -1336,6 +1339,195 @@ fn write_cpumask_to_config(cpumask: &Cpumask, dest: &mut [u8]) {
     }
 }
 
+fn select_cpu_flag_borrowed() -> u32 {
+    bpf_intf::select_cpu_rung_flags_SELECT_CPU_F_BORROWED as u32
+}
+
+fn select_cpu_flag_refresh_idle() -> u32 {
+    bpf_intf::select_cpu_rung_flags_SELECT_CPU_F_REFRESH_IDLE as u32
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SelectCpuRung {
+    mask_source: u32,
+    stat_idx: u32,
+    flags: u32,
+}
+
+fn select_cpu_rung_source_shift() -> u32 {
+    bpf_intf::consts_SELECT_CPU_RUNG_SOURCE_SHIFT as u32
+}
+
+fn select_cpu_rung_source_mask() -> u32 {
+    bpf_intf::consts_SELECT_CPU_RUNG_SOURCE_MASK as u32
+}
+
+fn select_cpu_rung_stat_shift() -> u32 {
+    bpf_intf::consts_SELECT_CPU_RUNG_STAT_SHIFT as u32
+}
+
+fn select_cpu_rung_stat_mask() -> u32 {
+    bpf_intf::consts_SELECT_CPU_RUNG_STAT_MASK as u32
+}
+
+fn select_cpu_rung_flags_shift() -> u32 {
+    bpf_intf::consts_SELECT_CPU_RUNG_FLAGS_SHIFT as u32
+}
+
+fn select_cpu_rung_flags_mask() -> u32 {
+    bpf_intf::consts_SELECT_CPU_RUNG_FLAGS_MASK as u32
+}
+
+fn select_cpu_rung_valid_bits() -> u32 {
+    (select_cpu_rung_source_mask() << select_cpu_rung_source_shift())
+        | (select_cpu_rung_stat_mask() << select_cpu_rung_stat_shift())
+        | (select_cpu_rung_flags_mask() << select_cpu_rung_flags_shift())
+}
+
+#[cfg(test)]
+fn decode_select_cpu_rung(packed_rung: u32) -> SelectCpuRung {
+    SelectCpuRung {
+        mask_source: (packed_rung >> select_cpu_rung_source_shift())
+            & select_cpu_rung_source_mask(),
+        stat_idx: (packed_rung >> select_cpu_rung_stat_shift()) & select_cpu_rung_stat_mask(),
+        flags: (packed_rung >> select_cpu_rung_flags_shift()) & select_cpu_rung_flags_mask(),
+    }
+}
+
+fn validate_select_rung(rung: &SelectCpuRung) -> Result<()> {
+    let disabled = bpf_intf::select_cpu_mask_source_SELECT_CPU_MASK_DISABLED as u32;
+    let llc_local = bpf_intf::select_cpu_mask_source_SELECT_CPU_MASK_LLC_LOCAL as u32;
+    let primary = bpf_intf::select_cpu_mask_source_SELECT_CPU_MASK_PRIMARY as u32;
+    let borrowable = bpf_intf::select_cpu_mask_source_SELECT_CPU_MASK_BORROWABLE as u32;
+    let cstat_local = bpf_intf::cell_stat_idx_CSTAT_LOCAL as u32;
+    let cstat_borrowed = bpf_intf::cell_stat_idx_CSTAT_BORROWED as u32;
+    let borrowed = select_cpu_flag_borrowed();
+    let refresh_idle = select_cpu_flag_refresh_idle();
+    let supported_flags = borrowed | refresh_idle;
+
+    if rung.flags & !supported_flags != 0 {
+        bail!(
+            "unsupported select CPU rung flags: source={} stat={} flags={:#x}",
+            rung.mask_source,
+            rung.stat_idx,
+            rung.flags
+        );
+    }
+
+    if rung.mask_source == disabled {
+        if rung.flags != 0 {
+            bail!("disabled select CPU rung has flags {:#x}", rung.flags);
+        }
+        return Ok(());
+    }
+
+    match rung.mask_source {
+        source if source == llc_local || source == primary => {
+            if rung.stat_idx != cstat_local || rung.flags != 0 {
+                bail!(
+                    "local select CPU rung must use CSTAT_LOCAL and no flags: source={} stat={} flags={:#x}",
+                    rung.mask_source,
+                    rung.stat_idx,
+                    rung.flags
+                );
+            }
+        }
+        source if source == borrowable => {
+            if rung.stat_idx != cstat_borrowed || rung.flags & borrowed == 0 {
+                bail!(
+                    "borrowable select CPU rung must use CSTAT_BORROWED and BORROWED flag: stat={} flags={:#x}",
+                    rung.stat_idx,
+                    rung.flags
+                );
+            }
+        }
+        _ => bail!("unknown select CPU mask source {}", rung.mask_source),
+    }
+
+    if rung.flags & refresh_idle != 0 && rung.mask_source != borrowable {
+        bail!(
+            "REFRESH_IDLE is only supported for borrowable select CPU rungs: source={}",
+            rung.mask_source
+        );
+    }
+
+    Ok(())
+}
+
+fn encode_select_cpu_rung(rung: &SelectCpuRung) -> Result<u32> {
+    validate_select_rung(rung)?;
+
+    if rung.mask_source & !select_cpu_rung_source_mask() != 0 {
+        bail!(
+            "select CPU mask source does not fit in packed rung: {}",
+            rung.mask_source
+        );
+    }
+    if rung.stat_idx & !select_cpu_rung_stat_mask() != 0 {
+        bail!(
+            "select CPU stat index does not fit in packed rung: {}",
+            rung.stat_idx
+        );
+    }
+    if rung.flags & !select_cpu_rung_flags_mask() != 0 {
+        bail!(
+            "select CPU flags do not fit in packed rung: {:#x}",
+            rung.flags
+        );
+    }
+
+    let packed_rung = (rung.mask_source << select_cpu_rung_source_shift())
+        | (rung.stat_idx << select_cpu_rung_stat_shift())
+        | (rung.flags << select_cpu_rung_flags_shift());
+
+    if packed_rung & !select_cpu_rung_valid_bits() != 0 {
+        bail!(
+            "select CPU rung encoded outside valid bit range: {:#x}",
+            packed_rung
+        );
+    }
+
+    Ok(packed_rung)
+}
+
+fn write_default_select_ladder_to_config(
+    select_rung_count: &mut u32,
+    select_rungs: &mut [u32],
+) -> Result<()> {
+    let default_select_rungs = [
+        SelectCpuRung {
+            mask_source: bpf_intf::select_cpu_mask_source_SELECT_CPU_MASK_LLC_LOCAL as u32,
+            stat_idx: bpf_intf::cell_stat_idx_CSTAT_LOCAL as u32,
+            flags: 0,
+        },
+        SelectCpuRung {
+            mask_source: bpf_intf::select_cpu_mask_source_SELECT_CPU_MASK_PRIMARY as u32,
+            stat_idx: bpf_intf::cell_stat_idx_CSTAT_LOCAL as u32,
+            flags: 0,
+        },
+        SelectCpuRung {
+            mask_source: bpf_intf::select_cpu_mask_source_SELECT_CPU_MASK_BORROWABLE as u32,
+            stat_idx: bpf_intf::cell_stat_idx_CSTAT_BORROWED as u32,
+            flags: select_cpu_flag_borrowed() | select_cpu_flag_refresh_idle(),
+        },
+    ];
+
+    if default_select_rungs.len() > select_rungs.len() {
+        bail!(
+            "default select CPU ladder exceeds config capacity: {} > {}",
+            default_select_rungs.len(),
+            select_rungs.len()
+        );
+    }
+
+    *select_rung_count = default_select_rungs.len() as u32;
+    for (i, rung) in default_select_rungs.iter().enumerate() {
+        select_rungs[i] = encode_select_cpu_rung(rung)?;
+    }
+
+    Ok(())
+}
+
 fn read_cpu_ctxs(skel: &BpfSkel) -> Result<Vec<bpf_intf::cpu_ctx>> {
     let mut cpu_ctxs = vec![];
     let cpu_ctxs_vec = skel
@@ -1446,7 +1638,10 @@ fn main(opts: Opts) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::Opts;
+    use super::{
+        bpf_intf, decode_select_cpu_rung, validate_select_rung,
+        write_default_select_ladder_to_config, Opts, SelectCpuRung,
+    };
     use clap::Parser;
 
     #[test]
@@ -1462,5 +1657,65 @@ mod tests {
     #[test]
     fn allows_version_without_cell_parent_cgroup() {
         assert!(Opts::try_parse_from(["scx_mitosis", "--version"]).is_ok());
+    }
+
+    #[test]
+    fn default_select_rungs_match_current_policy() {
+        let mut count = 0;
+        let mut rungs = [0; bpf_intf::consts_MAX_SELECT_CPU_RUNGS as usize];
+
+        write_default_select_ladder_to_config(&mut count, &mut rungs).unwrap();
+
+        assert_eq!(count, 3);
+        let llc_rung = decode_select_cpu_rung(rungs[0]);
+        assert_eq!(
+            llc_rung.mask_source,
+            bpf_intf::select_cpu_mask_source_SELECT_CPU_MASK_LLC_LOCAL as u32
+        );
+        assert_eq!(
+            llc_rung.stat_idx,
+            bpf_intf::cell_stat_idx_CSTAT_LOCAL as u32
+        );
+        assert_eq!(llc_rung.flags, 0);
+
+        let primary_rung = decode_select_cpu_rung(rungs[1]);
+        assert_eq!(
+            primary_rung.mask_source,
+            bpf_intf::select_cpu_mask_source_SELECT_CPU_MASK_PRIMARY as u32
+        );
+        assert_eq!(
+            primary_rung.stat_idx,
+            bpf_intf::cell_stat_idx_CSTAT_LOCAL as u32
+        );
+        assert_eq!(primary_rung.flags, 0);
+
+        let borrow_rung = decode_select_cpu_rung(rungs[2]);
+        assert_eq!(
+            borrow_rung.mask_source,
+            bpf_intf::select_cpu_mask_source_SELECT_CPU_MASK_BORROWABLE as u32
+        );
+        assert_eq!(
+            borrow_rung.stat_idx,
+            bpf_intf::cell_stat_idx_CSTAT_BORROWED as u32
+        );
+        assert_ne!(
+            borrow_rung.flags & bpf_intf::select_cpu_rung_flags_SELECT_CPU_F_BORROWED as u32,
+            0
+        );
+        assert_ne!(
+            borrow_rung.flags & bpf_intf::select_cpu_rung_flags_SELECT_CPU_F_REFRESH_IDLE as u32,
+            0
+        );
+    }
+
+    #[test]
+    fn select_rung_validation_rejects_borrowed_local_rung() {
+        let rung = SelectCpuRung {
+            mask_source: bpf_intf::select_cpu_mask_source_SELECT_CPU_MASK_PRIMARY as u32,
+            stat_idx: bpf_intf::cell_stat_idx_CSTAT_BORROWED as u32,
+            flags: bpf_intf::select_cpu_rung_flags_SELECT_CPU_F_BORROWED as u32,
+        };
+
+        assert!(validate_select_rung(&rung).is_err());
     }
 }
