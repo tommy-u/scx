@@ -510,6 +510,261 @@ static __always_inline s32 try_pick_idle_cpu(struct task_struct *p, s32 prev_cpu
 	return -EBUSY;
 }
 
+static __always_inline bool select_cpu_mask_source_is_valid(u32 mask_source)
+{
+	return mask_source == SELECT_CPU_MASK_DISABLED ||
+	       mask_source == SELECT_CPU_MASK_LLC_LOCAL || mask_source == SELECT_CPU_MASK_PRIMARY ||
+	       mask_source == SELECT_CPU_MASK_BORROWABLE;
+}
+
+struct decoded_select_cpu_rung {
+	u32 mask_source;
+	u32 stat_idx;
+	u32 flags;
+};
+
+static __always_inline u32 select_cpu_rung_valid_bits(void)
+{
+	return (SELECT_CPU_RUNG_SOURCE_MASK << SELECT_CPU_RUNG_SOURCE_SHIFT) |
+	       (SELECT_CPU_RUNG_STAT_MASK << SELECT_CPU_RUNG_STAT_SHIFT) |
+	       (SELECT_CPU_RUNG_FLAGS_MASK << SELECT_CPU_RUNG_FLAGS_SHIFT);
+}
+
+static __always_inline void select_cpu_rung_decode(u32 packed_rung,
+						   struct decoded_select_cpu_rung *rung)
+{
+	rung->mask_source = (packed_rung >> SELECT_CPU_RUNG_SOURCE_SHIFT) &
+			    SELECT_CPU_RUNG_SOURCE_MASK;
+	rung->stat_idx = (packed_rung >> SELECT_CPU_RUNG_STAT_SHIFT) & SELECT_CPU_RUNG_STAT_MASK;
+	rung->flags = (packed_rung >> SELECT_CPU_RUNG_FLAGS_SHIFT) & SELECT_CPU_RUNG_FLAGS_MASK;
+}
+
+static __always_inline bool select_cpu_rung_metadata_is_valid(struct decoded_select_cpu_rung *rung)
+{
+	u32 supported_flags = SELECT_CPU_F_BORROWED | SELECT_CPU_F_REFRESH_IDLE;
+
+	if (!select_cpu_mask_source_is_valid(rung->mask_source))
+		return false;
+	if (rung->flags & ~supported_flags)
+		return false;
+
+	if (rung->mask_source == SELECT_CPU_MASK_DISABLED)
+		return rung->flags == 0;
+
+	if (rung->mask_source == SELECT_CPU_MASK_BORROWABLE) {
+		if (rung->stat_idx != CSTAT_BORROWED)
+			return false;
+		if (!(rung->flags & SELECT_CPU_F_BORROWED))
+			return false;
+		return true;
+	}
+
+	if (rung->stat_idx != CSTAT_LOCAL)
+		return false;
+	if (rung->flags)
+		return false;
+
+	return true;
+}
+
+static __always_inline bool select_cpu_packed_rung_is_valid(u32 packed_rung,
+							    struct decoded_select_cpu_rung *rung)
+{
+	select_cpu_rung_decode(packed_rung, rung);
+
+	if (packed_rung & ~select_cpu_rung_valid_bits())
+		return false;
+
+	return select_cpu_rung_metadata_is_valid(rung);
+}
+
+static __always_inline s32 resolve_select_llc_mask(s32 prev_cpu, struct task_ctx *tctx,
+						   const struct cpumask **maskp)
+{
+	struct bpf_cpumask *llc_cpumask;
+	const struct cpumask *llc_mask;
+	s32 llc;
+	int ret;
+
+	llc = choose_task_llc(tctx, prev_cpu);
+	if (!llc_is_valid(llc))
+		return -1;
+
+	ret = refresh_task_llc_cpumask(tctx, (u32)llc);
+	if (ret)
+		return ret == -ENOENT ? -EBUSY : -1;
+
+	llc_cpumask = tctx->llc_cpumask;
+	llc_mask = cast_mask(llc_cpumask);
+	if (!llc_mask)
+		return -1;
+	if (bpf_cpumask_empty(llc_mask))
+		return -EBUSY;
+
+	*maskp = llc_mask;
+	return 0;
+}
+
+static __always_inline s32 resolve_select_rung_mask(s32 prev_cpu, struct task_ctx *tctx,
+						    struct decoded_select_cpu_rung *rung,
+						    const struct cpumask **maskp)
+{
+	if (rung->mask_source == SELECT_CPU_MASK_LLC_LOCAL)
+		return resolve_select_llc_mask(prev_cpu, tctx, maskp);
+
+	if (rung->mask_source == SELECT_CPU_MASK_PRIMARY) {
+		*maskp = cast_mask(tctx->cpumask);
+		if (!*maskp) {
+			scx_bpf_error("Failed to get task cpumask");
+			return -1;
+		}
+		return 0;
+	}
+
+	if (rung->mask_source == SELECT_CPU_MASK_BORROWABLE) {
+		*maskp = lookup_cell_borrowable_cpumask(tctx->cell);
+		if (!*maskp)
+			return -1;
+		return 0;
+	}
+
+	scx_bpf_error("invalid select CPU mask source %d for cell %d", rung->mask_source,
+		      tctx->cell);
+	return -1;
+}
+
+static __always_inline s32 pick_idle_cpu_from_select_rung(struct task_struct *p, s32 prev_cpu,
+							  const struct cpumask *idle_smtmask,
+							  struct task_ctx *tctx,
+							  struct decoded_select_cpu_rung *rung)
+{
+	const struct cpumask *candidate_mask = NULL;
+	s32 ret;
+
+	ret = resolve_select_rung_mask(prev_cpu, tctx, rung, &candidate_mask);
+	if (ret)
+		return ret;
+	if (!candidate_mask) {
+		scx_bpf_error("select CPU rung resolved NULL mask for cell %d", tctx->cell);
+		return -1;
+	}
+	if (bpf_cpumask_empty(candidate_mask))
+		return -EBUSY;
+
+	if (rung->flags & SELECT_CPU_F_REFRESH_IDLE) {
+		const struct cpumask *fresh_idle_smtmask __free(idle_cpumask) =
+			scx_bpf_get_idle_smtmask();
+
+		/* Match the old local-then-borrow path by taking a fresh idle snapshot. */
+		if (!fresh_idle_smtmask) {
+			scx_bpf_error("Failed to get idle smtmask");
+			return -1;
+		}
+
+		return pick_idle_cpu_from(p, candidate_mask, prev_cpu, fresh_idle_smtmask);
+	}
+
+	return pick_idle_cpu_from(p, candidate_mask, prev_cpu, idle_smtmask);
+}
+
+static __always_inline void insert_select_rung_cpu(struct task_struct *p, s32 cpu,
+						   struct cpu_ctx *cctx, struct task_ctx *tctx,
+						   struct decoded_select_cpu_rung *rung, bool kick)
+{
+	if (rung->flags & SELECT_CPU_F_BORROWED)
+		tctx->borrowed = true;
+	cstat_inc(rung->stat_idx, tctx->cell, cctx);
+
+	tctx->vtime_charge_cell = tctx->cell;
+	scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu, slice_ns, 0);
+	if (kick)
+		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+}
+
+/*
+ * Apply a userspace-provided select_cpu ladder. This is only affinity-safe
+ * on the all-cell path: update_task_cpumask() has already proved the cell
+ * primary and borrowable masks are both subsets of p->cpus_ptr.
+ */
+static __always_inline s32 try_pick_idle_cpu_from_select_ladder(struct task_struct *p, s32 prev_cpu,
+								struct cpu_ctx *cctx,
+								struct task_ctx *tctx, bool kick)
+{
+	struct cell_cpumask_wrapper *cpumaskw;
+	const struct cpumask *idle_smtmask __free(idle_cpumask) = NULL;
+	const struct cpumask *task_cpumask;
+	u32 count;
+	u32 i;
+
+	if (!tctx->all_cell_cpus_allowed) {
+		scx_bpf_error("select CPU ladder requires all-cell affinity");
+		return -1;
+	}
+
+	task_cpumask = cast_mask(tctx->cpumask);
+	if (!task_cpumask) {
+		scx_bpf_error("Failed to get task cpumask");
+		return -1;
+	}
+
+	/*
+	 * No overlap between cell cpus and task cpus. Preserve the existing
+	 * affinity-violation escape, including its stats and borrow fallback.
+	 */
+	if (bpf_cpumask_empty(task_cpumask))
+		return try_pick_idle_cpu(p, prev_cpu, cctx, tctx, kick);
+
+	cpumaskw = lookup_cell_cpumask_wrapper(tctx->cell);
+	if (!cpumaskw)
+		return -1;
+
+	/*
+	 * apply_cell_config is intentionally non-atomic. A racing reader can see
+	 * a transient mix of old and new rungs, but each rung is a single packed
+	 * word, count is bounded, and each published rung is validated before
+	 * WRITE_ONCE().
+	 */
+	count = READ_ONCE(cpumaskw->nr_select_rungs);
+	if (count == 0)
+		return try_pick_idle_cpu(p, prev_cpu, cctx, tctx, kick);
+	if (count > MAX_SELECT_CPU_RUNGS) {
+		scx_bpf_error("invalid select CPU rung count for cell %d: %d", tctx->cell, count);
+		return -1;
+	}
+
+	idle_smtmask = scx_bpf_get_idle_smtmask();
+	if (!idle_smtmask) {
+		scx_bpf_error("Failed to get idle smtmask");
+		return -1;
+	}
+
+	bpf_for(i, 0, MAX_SELECT_CPU_RUNGS)
+	{
+		struct decoded_select_cpu_rung rung = { 0 };
+		u32 packed_rung;
+		s32 cpu;
+
+		if (i >= count)
+			break;
+
+		packed_rung = READ_ONCE(cpumaskw->select_rungs[i]);
+		if (!select_cpu_packed_rung_is_valid(packed_rung, &rung))
+			continue;
+		if (rung.mask_source == SELECT_CPU_MASK_DISABLED)
+			continue;
+
+		cpu = pick_idle_cpu_from_select_rung(p, prev_cpu, idle_smtmask, tctx, &rung);
+		if (cpu >= 0) {
+			insert_select_rung_cpu(p, cpu, cctx, tctx, &rung, kick);
+			return cpu;
+		}
+		if (cpu == -1)
+			return -1;
+	}
+
+	return -EBUSY;
+}
+
 /*
  * Switch task to a new CPU's per-CPU DSQ with vtime reset.
  * Returns new_cpu on success, -1 on failure (tctx unchanged).
@@ -629,8 +884,12 @@ s32 BPF_STRUCT_OPS(mitosis_select_cpu, struct task_struct *p, s32 prev_cpu, u64 
 	if (!tctx->all_cell_cpus_allowed)
 		return select_restricted_affinity_cpu(p, prev_cpu, cctx, tctx);
 
-	if ((cpu = try_pick_idle_cpu(p, prev_cpu, cctx, tctx, false)) >= 0)
+	cpu = try_pick_idle_cpu_from_select_ladder(p, prev_cpu, cctx, tctx, false);
+	if (cpu >= 0)
 		return cpu;
+	/* -1 is an error path, often after scx_bpf_error(); don't do fallback work. */
+	if (cpu == -1)
+		return prev_cpu;
 
 	return select_fallback_cell_cpu(tctx, prev_cpu);
 }
@@ -1641,6 +1900,56 @@ static __always_inline int advance_cell_llc_vtime_for_cpu_move(u32 cell_id,
 	return 0;
 }
 
+static __always_inline int apply_one_cell_select_ladder(const struct cell_config *config,
+							struct cell_cpumask_wrapper *cpumaskw,
+							u32 cell_id)
+{
+	const u32 *countp;
+	u32 count;
+	u32 i;
+
+	countp = MEMBER_VPTR(config->select_rung_counts, [cell_id]);
+	if (!countp) {
+		scx_bpf_error("cell_id %d out of bounds for select rung count", cell_id);
+		return -EINVAL;
+	}
+
+	count = *countp;
+	if (count > MAX_SELECT_CPU_RUNGS) {
+		scx_bpf_error("too many select CPU rungs for cell_id %d: %d", cell_id, count);
+		return -EINVAL;
+	}
+
+	bpf_for(i, 0, MAX_SELECT_CPU_RUNGS)
+	{
+		const u32 *rungp;
+		struct decoded_select_cpu_rung rung = { 0 };
+		u32 packed_rung = 0;
+
+		if (i < count) {
+			rungp = MEMBER_VPTR(config->select_rungs, [cell_id][i]);
+			if (!rungp) {
+				scx_bpf_error("cell_id %d select rung %d out of bounds", cell_id,
+					      i);
+				return -EINVAL;
+			}
+
+			packed_rung = *rungp;
+			if (!select_cpu_packed_rung_is_valid(packed_rung, &rung)) {
+				scx_bpf_error(
+					"invalid select CPU rung for cell_id %d rung %d: source=%d stat=%d flags=%x",
+					cell_id, i, rung.mask_source, rung.stat_idx, rung.flags);
+				return -EINVAL;
+			}
+		}
+
+		WRITE_ONCE(cpumaskw->select_rungs[i], packed_rung);
+	}
+
+	WRITE_ONCE(cpumaskw->nr_select_rungs, count);
+	return 0;
+}
+
 static __always_inline int apply_one_cell_cpumasks(const struct cell_config *config, u32 cell_id)
 {
 	struct cell_cpumask_wrapper *cpumaskw;
@@ -1722,6 +2031,10 @@ static __always_inline int apply_one_cell_cpumasks(const struct cell_config *con
 		scx_bpf_error("failed to set borrowable cpumask for cell_id %d", cell_id);
 		return -EINVAL;
 	}
+
+	ret = apply_one_cell_select_ladder(config, cpumaskw, cell_id);
+	if (ret)
+		return ret;
 
 	return 0;
 }
@@ -1886,7 +2199,7 @@ static __always_inline int propagate_cgroup_cell_assignments(void)
  *
  * The function operates in five phases:
  * 1. Mark all cells (except cell 0) as not in use
- * 2. Apply cell cpumasks and CPU-to-cell mappings
+ * 2. Apply cell cpumasks, select CPU ladder, and CPU-to-cell mappings
  * 3. Apply cell assignments for owner cgroups
  * 4. Walk cgroup hierarchy to propagate cells to children
  * 5. Bump applied_configuration_seq to signal completion

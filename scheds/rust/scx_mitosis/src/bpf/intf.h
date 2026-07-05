@@ -22,6 +22,13 @@ enum consts {
 
 	MAX_CG_DEPTH = 256,
 	MAX_LLCS = 16,
+	MAX_SELECT_CPU_RUNGS = 3,
+	SELECT_CPU_RUNG_SOURCE_SHIFT = 0,
+	SELECT_CPU_RUNG_SOURCE_MASK = 0xf,
+	SELECT_CPU_RUNG_STAT_SHIFT = 4,
+	SELECT_CPU_RUNG_STAT_MASK = 0xf,
+	SELECT_CPU_RUNG_FLAGS_SHIFT = 8,
+	SELECT_CPU_RUNG_FLAGS_MASK = 0xff,
 
 	DEBUG_EVENTS_BUF_SIZE = 4096,
 
@@ -77,6 +84,18 @@ enum cell_stat_idx {
 	CSTAT_SLICE_SHRINK_PROPORTIONAL,
 	CSTAT_SLICE_SHRINK_MIN,
 	NR_CSTATS,
+};
+
+enum select_cpu_mask_source {
+	SELECT_CPU_MASK_DISABLED = 0,
+	SELECT_CPU_MASK_LLC_LOCAL = 1,
+	SELECT_CPU_MASK_PRIMARY = 2,
+	SELECT_CPU_MASK_BORROWABLE = 3,
+};
+
+enum select_cpu_rung_flags {
+	SELECT_CPU_F_BORROWED = 1U << 0,
+	SELECT_CPU_F_REFRESH_IDLE = 1U << 1,
 };
 
 struct cpu_ctx {
@@ -176,6 +195,7 @@ struct cell_cpumask_data {
  * BPF program invocation:
  * - Cell-to-cgroup assignments (which cgroups own which cells)
  * - Cell cpumasks (which CPUs belong to each cell)
+ * - Select CPU ladder (which candidate masks select_cpu tries first)
  */
 struct cell_config {
 	u32 num_cell_assignments;
@@ -183,6 +203,8 @@ struct cell_config {
 	struct cell_assignment assignments[MAX_CELLS];
 	struct cell_cpumask_data cpumasks[MAX_CELLS];
 	struct cell_cpumask_data borrowable_cpumasks[MAX_CELLS];
+	u32 select_rung_counts[MAX_CELLS];
+	u32 select_rungs[MAX_CELLS][MAX_SELECT_CPU_RUNGS];
 };
 
 #endif /* __INTF_H */
