@@ -133,6 +133,11 @@ struct Opts {
     #[clap(long, action = clap::ArgAction::SetTrue)]
     reject_multicpu_pinning: bool,
 
+    /// Use the owning cell/LLC's shared vtime for per-CPU DSQs. This is a
+    /// startup-only setting; by default each per-CPU DSQ keeps its own vtime.
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    flatten_cpu_vtime: bool,
+
     /// Enable LLC-awareness. This will populate the scheduler's LLC maps and cause it
     /// to use LLC-aware scheduling.
     #[clap(long, action = clap::ArgAction::SetTrue)]
@@ -363,6 +368,15 @@ impl<'a> Scheduler<'a> {
         rodata.exiting_task_workaround_enabled = opts.exiting_task_workaround;
         rodata.cpu_controller_disabled = opts.cpu_controller_disabled;
         rodata.dynamic_affinity_cpu_selection = opts.dynamic_affinity_cpu_selection;
+        rodata.flatten_cpu_vtime = opts.flatten_cpu_vtime;
+        info!(
+            "CPU DSQ vtime mode: {}",
+            if opts.flatten_cpu_vtime {
+                "cell/LLC-shared"
+            } else {
+                "per-CPU"
+            }
+        );
 
         // Slice shrinking configuration
         if opts.slice_shrink_min_us >= opts.slice_shrink_max_us {
@@ -1576,5 +1590,26 @@ mod tests {
     #[test]
     fn allows_version_without_cell_parent_cgroup() {
         assert!(Opts::try_parse_from(["scx_mitosis", "--version"]).is_ok());
+    }
+
+    #[test]
+    fn defaults_to_per_cpu_vtime() {
+        let opts =
+            Opts::try_parse_from(["scx_mitosis", "--cell-parent-cgroup", "/workloads"]).unwrap();
+
+        assert!(!opts.flatten_cpu_vtime);
+    }
+
+    #[test]
+    fn enables_flattened_cpu_vtime() {
+        let opts = Opts::try_parse_from([
+            "scx_mitosis",
+            "--cell-parent-cgroup",
+            "/workloads",
+            "--flatten-cpu-vtime",
+        ])
+        .unwrap();
+
+        assert!(opts.flatten_cpu_vtime);
     }
 }

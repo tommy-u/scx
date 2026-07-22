@@ -81,7 +81,7 @@ struct task_ctx {
 	bool all_cell_cpus_allowed;
 	/* Set when task is dispatched to a borrowed CPU from another cell.
 	 * Consumed and cleared in mitosis_stopping to avoid advancing the
-	 * lending cell's per-CPU DSQ vtime with this task's execution.
+	 * lending vtime domain with this task's execution.
 	 */
 	bool borrowed;
 	/* Last known cgroup ID for detecting cgroup moves (used when cpu_controller_disabled) */
