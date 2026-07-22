@@ -73,6 +73,7 @@ enum cell_stat_idx {
 	CSTAT_STEAL,
 	CSTAT_DRAIN_CNT,
 	CSTAT_CLAMP_USED,
+	CSTAT_VTIME_CLAMP,
 	CSTAT_PIN_SKIP,
 	CSTAT_SLICE_SHRINK_MAX,
 	CSTAT_SLICE_SHRINK_PROPORTIONAL,
@@ -96,7 +97,9 @@ struct cgrp_ctx {
 
 /*
  * Per-LLC data is cacheline-aligned to prevent false sharing when
- * CPUs on different LLCs update their vtime concurrently.
+ * CPUs on different LLCs update their vtime concurrently. vtime_now is the
+ * authoritative frontier unless cell vtime flattening is enabled, in which
+ * case it is only a local-frontier shadow.
  */
 struct cell_llc {
 	u64 vtime_now;
@@ -106,6 +109,14 @@ struct cell_llc {
 // Ensure we don't have multiple of these on the same cacheline.
 _Static_assert(sizeof(struct cell_llc) >= CACHELINE_SIZE,
 	       "cell_llc must be at least one cache line");
+
+/* Keep the authoritative cell clock isolated from other cell state. */
+struct cell_vtime {
+	u64 vtime_now;
+} __attribute__((aligned(CACHELINE_SIZE)));
+
+_Static_assert(sizeof(struct cell_vtime) == CACHELINE_SIZE,
+	       "cell_vtime must occupy one cache line");
 
 // CELL_LOCK_T is a lock for kernel and padding for user.
 #if !defined(__BINDGEN_RUNNING__)
@@ -140,6 +151,9 @@ struct cell {
 	// Bitmap of LLCs that contain CPUs assigned to this cell
 	u64 llcs_with_cpus;
 
+	// Authoritative clock when cell vtime flattening is enabled
+	struct cell_vtime vtime;
+
 	// Per-LLC data (cacheline-aligned)
 	struct cell_llc llcs[MAX_LLCS];
 };
@@ -155,8 +169,14 @@ _Static_assert(sizeof(((struct cell *)0)->lock) == 4, "lock/padding must be 4 by
 
 _Static_assert(_Alignof(CELL_LOCK_T) == 4, "lock/padding must be 4-byte aligned");
 
+_Static_assert(offsetof(struct cell, vtime) == CACHELINE_SIZE,
+	       "cell vtime must start on its own cache line");
+
+_Static_assert(offsetof(struct cell, llcs) == 2 * CACHELINE_SIZE,
+	       "cell LLC data must follow the cell vtime cache line");
+
 // Verify these are the same size in both BPF and Rust.
-_Static_assert(sizeof(struct cell) == (CACHELINE_SIZE + (CACHELINE_SIZE * MAX_LLCS)),
+_Static_assert(sizeof(struct cell) == (2 * CACHELINE_SIZE + (CACHELINE_SIZE * MAX_LLCS)),
 	       "struct cell size must be stable for Rust bindings");
 
 /* Cell assignment entry: maps a cgroup to a cell */

@@ -17,6 +17,12 @@ by the CPU's owning cell and LLC. The per-CPU dispatch queues remain separate;
 only their vtime domain changes. Without LLC awareness, they share the cell's
 flat vtime frontier.
 
+The startup-only `--flatten-cell-vtime` option additionally combines every LLC
+frontier in a cell into one cell-wide vtime domain. It implies
+`--flatten-cpu-vtime`, so every per-CPU and cell/LLC queue in the cell competes
+against the same frontier. LLC-specific dispatch queues remain separate for
+cache locality; only their vtime accounting is flattened.
+
 On multi-LLC systems, LLC-awareness keeps tasks on cache-sharing CPUs. In this case, the single cell queue is split into multiple queues, one per LLC.
 
 ## Usage
@@ -30,4 +36,7 @@ scx_mitosis --cell-parent-cgroup /workloads --enable-llc-awareness
 
 # Use the owning cell/LLC vtime for per-CPU queues
 scx_mitosis --cell-parent-cgroup /workloads --flatten-cpu-vtime
+
+# Use one vtime domain for every queue in each cell
+scx_mitosis --cell-parent-cgroup /workloads --flatten-cell-vtime
 ```

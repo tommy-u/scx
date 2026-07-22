@@ -138,6 +138,11 @@ struct Opts {
     #[clap(long, action = clap::ArgAction::SetTrue)]
     flatten_cpu_vtime: bool,
 
+    /// Use one cell-wide vtime frontier for all CPU and cell/LLC DSQs. This
+    /// startup-only setting implies --flatten-cpu-vtime.
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    flatten_cell_vtime: bool,
+
     /// Enable LLC-awareness. This will populate the scheduler's LLC maps and cause it
     /// to use LLC-aware scheduling.
     #[clap(long, action = clap::ArgAction::SetTrue)]
@@ -220,6 +225,39 @@ struct Opts {
     pub libbpf: LibbpfOpts,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum VtimeMode {
+    PerCpu,
+    CellLlc,
+    Cell,
+}
+
+impl Opts {
+    fn vtime_mode(&self) -> VtimeMode {
+        if self.flatten_cell_vtime {
+            VtimeMode::Cell
+        } else if self.flatten_cpu_vtime {
+            VtimeMode::CellLlc
+        } else {
+            VtimeMode::PerCpu
+        }
+    }
+}
+
+impl VtimeMode {
+    fn flattens_cpu(self) -> bool {
+        !matches!(self, Self::PerCpu)
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::PerCpu => "per-CPU and per-cell/LLC",
+            Self::CellLlc => "cell/LLC-shared CPU",
+            Self::Cell => "cell-wide",
+        }
+    }
+}
+
 // The subset of cstats we care about.
 // Local + Default + Hi + Lo = Total Decisions
 // Affinity violations are not queue decisions, but
@@ -287,6 +325,7 @@ struct DistributionStats {
     affn_viol_pct: f64,
     steal_pct: f64,
     pin_skip_pct: f64,
+    vtime_clamp_pct: f64,
 
     // for formatting
     global_queue_decisions: u64,
@@ -308,7 +347,7 @@ impl Display for DistributionStats {
         };
         write!(
             f,
-            "{:width$} {:5.1}% | Local:{:4.1}% From: CPU:{:4.1}% Cell:{:4.1}% Borrow:{:4.1}% | V:{:4.1}% S:{:4.1}% PS:{:4.1}%",
+            "{:width$} {:5.1}% | Local:{:4.1}% From: CPU:{:4.1}% Cell:{:4.1}% Borrow:{:4.1}% | V:{:4.1}% S:{:4.1}% PS:{:4.1}% VC:{:4.1}%",
             self.total_decisions,
             self.share_of_decisions_pct,
             self.local_q_pct,
@@ -318,8 +357,22 @@ impl Display for DistributionStats {
             self.affn_viol_pct,
             self.steal_pct,
             self.pin_skip_pct,
+            self.vtime_clamp_pct,
             width = descisions_width,
         )
+    }
+}
+
+fn calculate_vtime_clamp_pct(
+    queue_counts: &[u64; QUEUE_STATS_IDX.len()],
+    vtime_clamps: u64,
+) -> f64 {
+    let clamp_eligible_enqueues = queue_counts[1] + queue_counts[2];
+
+    if clamp_eligible_enqueues == 0 {
+        0.0
+    } else {
+        100.0 * (vtime_clamps as f64) / (clamp_eligible_enqueues as f64)
     }
 }
 
@@ -368,15 +421,10 @@ impl<'a> Scheduler<'a> {
         rodata.exiting_task_workaround_enabled = opts.exiting_task_workaround;
         rodata.cpu_controller_disabled = opts.cpu_controller_disabled;
         rodata.dynamic_affinity_cpu_selection = opts.dynamic_affinity_cpu_selection;
-        rodata.flatten_cpu_vtime = opts.flatten_cpu_vtime;
-        info!(
-            "CPU DSQ vtime mode: {}",
-            if opts.flatten_cpu_vtime {
-                "cell/LLC-shared"
-            } else {
-                "per-CPU"
-            }
-        );
+        let vtime_mode = opts.vtime_mode();
+        rodata.flatten_cpu_vtime = vtime_mode.flattens_cpu();
+        rodata.flatten_cell_vtime = opts.flatten_cell_vtime;
+        info!("DSQ vtime mode: {}", vtime_mode.label());
 
         // Slice shrinking configuration
         if opts.slice_shrink_min_us >= opts.slice_shrink_max_us {
@@ -887,6 +935,7 @@ impl<'a> Scheduler<'a> {
         scope_affn_viols: u64,
         scope_steals: u64,
         scope_pin_skips: u64,
+        scope_vtime_clamps: u64,
     ) -> Result<DistributionStats> {
         // First % on the line: share of global work
         // We know global_queue_decisions is non-zero.
@@ -923,6 +972,8 @@ impl<'a> Scheduler<'a> {
             100.0 * (scope_pin_skips as f64) / (scope_queue_decisions as f64)
         };
 
+        let vtime_clamp_pct = calculate_vtime_clamp_pct(queue_counts, scope_vtime_clamps);
+
         const EXPECTED_QUEUES: usize = 4;
         if queue_pct.len() != EXPECTED_QUEUES {
             bail!(
@@ -942,6 +993,7 @@ impl<'a> Scheduler<'a> {
             affn_viol_pct: affinity_violations_percent,
             steal_pct,
             pin_skip_pct,
+            vtime_clamp_pct,
             global_queue_decisions,
         });
     }
@@ -980,6 +1032,11 @@ impl<'a> Scheduler<'a> {
             .map(|&cell| cell[bpf_intf::cell_stat_idx_CSTAT_PIN_SKIP as usize])
             .sum::<u64>();
 
+        let scope_vtime_clamps: u64 = cell_stats_delta
+            .iter()
+            .map(|&cell| cell[bpf_intf::cell_stat_idx_CSTAT_VTIME_CLAMP as usize])
+            .sum::<u64>();
+
         // Special case where the number of scope decisions == number global decisions
         let stats = self
             .calculate_distribution_stats(
@@ -989,6 +1046,7 @@ impl<'a> Scheduler<'a> {
                 scope_affn_viols,
                 scope_steals,
                 scope_pin_skips,
+                scope_vtime_clamps,
             )
             .context("calculating global queue distribution stats")?;
 
@@ -1051,6 +1109,9 @@ impl<'a> Scheduler<'a> {
             let scope_pin_skips: u64 =
                 cell_stats_delta[cell][bpf_intf::cell_stat_idx_CSTAT_PIN_SKIP as usize];
 
+            let scope_vtime_clamps: u64 =
+                cell_stats_delta[cell][bpf_intf::cell_stat_idx_CSTAT_VTIME_CLAMP as usize];
+
             let stats = self
                 .calculate_distribution_stats(
                     &queue_counts,
@@ -1059,6 +1120,7 @@ impl<'a> Scheduler<'a> {
                     scope_affn_viols,
                     scope_steals,
                     scope_pin_skips,
+                    scope_vtime_clamps,
                 )
                 .with_context(|| {
                     format!("calculating queue distribution stats for cell {}", cell)
@@ -1574,7 +1636,10 @@ fn main(opts: Opts) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use super::calculate_vtime_clamp_pct;
+    use super::DistributionStats;
     use super::Opts;
+    use super::VtimeMode;
     use clap::Parser;
 
     #[test]
@@ -1598,6 +1663,8 @@ mod tests {
             Opts::try_parse_from(["scx_mitosis", "--cell-parent-cgroup", "/workloads"]).unwrap();
 
         assert!(!opts.flatten_cpu_vtime);
+        assert!(!opts.flatten_cell_vtime);
+        assert_eq!(opts.vtime_mode(), VtimeMode::PerCpu);
     }
 
     #[test]
@@ -1611,5 +1678,57 @@ mod tests {
         .unwrap();
 
         assert!(opts.flatten_cpu_vtime);
+        assert!(!opts.flatten_cell_vtime);
+        assert_eq!(opts.vtime_mode(), VtimeMode::CellLlc);
+        assert!(opts.vtime_mode().flattens_cpu());
+    }
+
+    #[test]
+    fn accepts_flattened_cell_vtime_without_cpu_flag() {
+        let opts = Opts::try_parse_from([
+            "scx_mitosis",
+            "--cell-parent-cgroup",
+            "/workloads",
+            "--flatten-cell-vtime",
+        ])
+        .unwrap();
+
+        assert!(!opts.flatten_cpu_vtime);
+        assert!(opts.flatten_cell_vtime);
+        assert_eq!(opts.vtime_mode(), VtimeMode::Cell);
+        assert!(opts.vtime_mode().flattens_cpu());
+    }
+
+    #[test]
+    fn distribution_stats_formats_vtime_clamp_rate() {
+        let stats = DistributionStats {
+            total_decisions: 10,
+            share_of_decisions_pct: 100.0,
+            local_q_pct: 10.0,
+            cpu_q_pct: 20.0,
+            cell_q_pct: 30.0,
+            borrowed_pct: 40.0,
+            affn_viol_pct: 0.0,
+            steal_pct: 0.0,
+            pin_skip_pct: 0.0,
+            vtime_clamp_pct: 20.0,
+            global_queue_decisions: 10,
+        };
+
+        assert!(format!("{stats}").contains("VC:20.0%"));
+    }
+
+    #[test]
+    fn vtime_clamp_rate_uses_only_clamp_eligible_enqueues() {
+        let queue_counts = [100, 4, 6, 100];
+
+        assert_eq!(calculate_vtime_clamp_pct(&queue_counts, 2), 20.0);
+    }
+
+    #[test]
+    fn vtime_clamp_rate_is_zero_without_clamp_eligible_enqueues() {
+        let queue_counts = [100, 0, 0, 100];
+
+        assert_eq!(calculate_vtime_clamp_pct(&queue_counts, 0), 0.0);
     }
 }

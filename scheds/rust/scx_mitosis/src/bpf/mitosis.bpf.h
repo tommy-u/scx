@@ -24,6 +24,8 @@
 #include <lib/cleanup.bpf.h>
 
 extern const volatile u32 nr_llc;
+extern const volatile bool flatten_cpu_vtime;
+extern const volatile bool flatten_cell_vtime;
 
 extern struct cell_map cells;
 
@@ -53,6 +55,18 @@ static inline struct cell *lookup_cell(int idx)
 		return NULL;
 	}
 	return cell;
+}
+
+static __always_inline bool cpu_vtime_is_flat(void)
+{
+	return flatten_cpu_vtime || flatten_cell_vtime;
+}
+
+static __always_inline u64 read_cell_dsq_vtime(struct cell *cell, u32 llc)
+{
+	if (flatten_cell_vtime)
+		return READ_ONCE(cell->vtime.vtime_now);
+	return READ_ONCE(cell->llcs[llc].vtime_now);
 }
 
 /*
