@@ -39,7 +39,7 @@ struct snake_rung {
 /* Fixed map-key layout for global and per-rung scheduler counters. */
 enum snake_stat {
 	SNAKE_STAT_SELECT_CALLS = 0,
-	SNAKE_STAT_IDLE_HINTS,
+	SNAKE_STAT_DIRECT_DISPATCHES,
 	SNAKE_STAT_LADDER_EXHAUSTIONS,
 	SNAKE_STAT_FALLBACK_PREV,
 	SNAKE_STAT_FALLBACK_ANY,

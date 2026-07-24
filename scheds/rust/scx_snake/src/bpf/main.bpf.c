@@ -22,6 +22,14 @@ s32 BPF_STRUCT_OPS(snake_select_cpu, struct task_struct *p, s32 prev_cpu,
 
 	cpu = walk_policy_ladder(p, prev_cpu);
 	if (cpu >= 0) {
+		if (!scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, SCX_SLICE_DFL, 0)) {
+			stat_inc(SNAKE_STAT_INVALID_ERRORS);
+			scx_bpf_error(
+				"snake failed to dispatch pid %d to idle CPU %d",
+				p->pid, cpu);
+			return -1;
+		}
+		stat_inc(SNAKE_STAT_DIRECT_DISPATCHES);
 		finish_select(started_at);
 		return cpu;
 	}

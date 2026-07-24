@@ -247,7 +247,7 @@ fn aggregate_raw_stats(raw: &[Vec<Vec<u8>>], policy: &CompiledPolicy) -> Result<
 
     Ok(Metrics {
         select_calls: value(bpf_intf::snake_stat_SNAKE_STAT_SELECT_CALLS),
-        idle_hints: value(bpf_intf::snake_stat_SNAKE_STAT_IDLE_HINTS),
+        direct_dispatches: value(bpf_intf::snake_stat_SNAKE_STAT_DIRECT_DISPATCHES),
         ladder_exhaustions: value(bpf_intf::snake_stat_SNAKE_STAT_LADDER_EXHAUSTIONS),
         fallback_prev: value(bpf_intf::snake_stat_SNAKE_STAT_FALLBACK_PREV),
         fallback_any: value(bpf_intf::snake_stat_SNAKE_STAT_FALLBACK_ANY),

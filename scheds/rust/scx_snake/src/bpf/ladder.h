@@ -16,7 +16,7 @@ static __always_inline bool rung_is_valid(const struct snake_rung *rung)
 		rung->input == SNAKE_INPUT_MASK_TASK_ALLOWED);
 }
 
-/* Execute one validated rung and return an idle CPU hint or a miss. */
+/* Execute one validated rung and return an idle CPU or a miss. */
 static __always_inline s32 execute_rung(const struct task_struct *p,
 					const struct snake_rung	 *rung,
 					s32			  prev_cpu)
@@ -68,7 +68,6 @@ static __always_inline s32 walk_policy_ladder(const struct task_struct *p,
 		if (cpu >= 0 && cpu < nr_cpu_ids &&
 		    bpf_cpumask_test_cpu(cpu, p->cpus_ptr)) {
 			stat_inc(SNAKE_STAT_RUNG_HIT_BASE + i);
-			stat_inc(SNAKE_STAT_IDLE_HINTS);
 			return cpu;
 		}
 

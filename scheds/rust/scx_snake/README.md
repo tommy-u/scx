@@ -48,10 +48,10 @@ policy.
 
 ## Scheduling behavior
 
-All tasks are enqueued on the global FIFO dispatch queue. A successful
-idle-selection rung only returns a CPU hint from `select_cpu`; it does not
-dispatch directly to that CPU's local queue. The global FIFO therefore remains
-the authority for where the task eventually runs.
+Successful idle-selection rungs dispatch directly to the selected CPU's local
+DSQ from `select_cpu`. This preserves the placement selected by the policy and
+skips `enqueue` for that task. Tasks that exhaust the ladder are enqueued on the
+global FIFO dispatch queue after choosing an affinity-safe fallback CPU.
 
 If every rung misses, the interpreter returns an affinity-safe non-idle CPU and
 records ladder exhaustion. There is no implicit default idle search after the
@@ -121,7 +121,8 @@ when the scheduler stops.
 - Policies are startup-only and cannot be replaced while the scheduler runs.
 - Only previous-CPU claiming and allowed-mask idle selection are implemented.
 - The ABI is generic in shape but remains experimental and may change.
-- Selection only provides a CPU hint; there is no direct local-DSQ dispatch.
-- Task ordering is a global FIFO with no scheduler-specific fairness policy.
+- Ladder hits bypass global FIFO ordering through direct local dispatch.
+- Exhaustion fallbacks use a global FIFO with no scheduler-specific fairness
+  policy.
 - The scheduler does not yet express topology-aware search, stealing, or
   draining policies.

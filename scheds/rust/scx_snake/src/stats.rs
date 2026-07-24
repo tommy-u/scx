@@ -23,7 +23,7 @@ pub struct RungMetrics {
     pub scope: String,
     #[stat(desc = "Number of times BPF evaluated this rung")]
     pub attempts: u64,
-    #[stat(desc = "Number of times this rung supplied an idle CPU hint")]
+    #[stat(desc = "Number of times this rung selected an idle CPU")]
     pub hits: u64,
     #[stat(desc = "Number of times this rung advanced to the next rung")]
     pub misses: u64,
@@ -52,8 +52,8 @@ impl RungMetrics {
 pub struct Metrics {
     #[stat(desc = "Number of select_cpu callback invocations")]
     pub select_calls: u64,
-    #[stat(desc = "Number of idle CPU hints returned by the policy ladder")]
-    pub idle_hints: u64,
+    #[stat(desc = "Number of successful direct dispatches to selected idle CPUs")]
+    pub direct_dispatches: u64,
     #[stat(desc = "Number of times all policy rungs missed")]
     pub ladder_exhaustions: u64,
     #[stat(desc = "Number of exhaustion fallbacks that kept the previous CPU")]
@@ -82,7 +82,9 @@ impl Metrics {
     pub fn delta(&self, previous: &Self) -> Self {
         Self {
             select_calls: self.select_calls.saturating_sub(previous.select_calls),
-            idle_hints: self.idle_hints.saturating_sub(previous.idle_hints),
+            direct_dispatches: self
+                .direct_dispatches
+                .saturating_sub(previous.direct_dispatches),
             ladder_exhaustions: self
                 .ladder_exhaustions
                 .saturating_sub(previous.ladder_exhaustions),
@@ -113,14 +115,14 @@ impl Metrics {
         let mut output = format!(
             concat!(
                 "scx_snake policy stats\n",
-                "  select calls: {} | idle hints: {} | ladder exhausted: {}\n",
+                "  select calls: {} | direct dispatches: {} | ladder exhausted: {}\n",
                 "  fallback previous CPU: {} | fallback any allowed CPU: {} | invalid/errors: {}\n",
                 "  callbacks enqueue: {} | running: {} | stopping: {} | quiescent: {}\n",
                 "  select latency ns total: {} | average: {} | cumulative max: {}\n",
                 "  rungs:\n"
             ),
             self.select_calls,
-            self.idle_hints,
+            self.direct_dispatches,
             self.ladder_exhaustions,
             self.fallback_prev,
             self.fallback_any,
@@ -223,7 +225,7 @@ mod tests {
     fn delta_saturates_counters_after_a_reset() {
         let previous = Metrics {
             select_calls: 20,
-            idle_hints: 18,
+            direct_dispatches: 18,
             ladder_exhaustions: 7,
             fallback_prev: 6,
             fallback_any: 5,
@@ -237,7 +239,7 @@ mod tests {
         };
         let current = Metrics {
             select_calls: 2,
-            idle_hints: 1,
+            direct_dispatches: 1,
             ladder_exhaustions: 0,
             fallback_prev: 0,
             fallback_any: 0,
@@ -253,7 +255,7 @@ mod tests {
         let delta = current.delta(&previous);
 
         assert_eq!(delta.select_calls, 0);
-        assert_eq!(delta.idle_hints, 0);
+        assert_eq!(delta.direct_dispatches, 0);
         assert_eq!(delta.ladder_exhaustions, 0);
         assert_eq!(delta.fallback_prev, 0);
         assert_eq!(delta.fallback_any, 0);
@@ -309,26 +311,25 @@ mod tests {
     }
 
     #[test]
-    fn text_report_calls_successful_selection_an_idle_hint() {
+    fn text_report_calls_successful_selection_a_direct_dispatch() {
         let metrics = Metrics {
             select_calls: 12,
-            idle_hints: 9,
+            direct_dispatches: 9,
             rungs: BTreeMap::from([(0, rung(0, "claim_idle", "previous_cpu", 12, 9, 3, 0))]),
             ..Default::default()
         };
 
         let report = metrics.format_text();
 
-        assert!(report.contains("idle hints: 9"));
+        assert!(report.contains("direct dispatches: 9"));
         assert!(report.contains("rung 0 claim_idle(previous_cpu)"));
-        assert!(!report.to_ascii_lowercase().contains("dispatch"));
     }
 
     #[test]
     fn ndjson_is_one_parseable_json_record() {
         let metrics = Metrics {
             select_calls: 7,
-            idle_hints: 4,
+            direct_dispatches: 4,
             select_latency_max_ns: 123,
             rungs: BTreeMap::from([(0, rung(0, "claim_idle", "previous_cpu", 7, 4, 3, 0))]),
             ..Default::default()
@@ -341,7 +342,7 @@ mod tests {
         assert_eq!(encoded.lines().count(), 1);
         assert!(encoded.ends_with('\n'));
         assert_eq!(parsed["select_calls"], 7);
-        assert_eq!(parsed["idle_hints"], 4);
+        assert_eq!(parsed["direct_dispatches"], 4);
         assert_eq!(parsed["select_latency_max_ns"], 123);
         assert_eq!(parsed["rungs"]["0"]["operation"], "claim_idle");
     }
