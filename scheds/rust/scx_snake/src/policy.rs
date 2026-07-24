@@ -5,12 +5,15 @@ use std::fmt;
 use serde::Deserialize;
 
 pub const MAX_RUNGS: usize = 8;
+pub const RUNG_FLAG_INTERSECT_TASK_ALLOWED: u32 = 1;
+pub const PREVIOUS_LLC_TABLE_ID: u32 = 0;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u32)]
 pub enum Opcode {
     ClaimIdle = 1,
     PickIdle = 2,
+    PickIdleMaskTable = 3,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -32,6 +35,18 @@ pub struct CompiledRung {
 #[derive(Debug, Eq, PartialEq)]
 pub struct CompiledPolicy {
     pub rungs: Vec<CompiledRung>,
+    pub mask_tables: Vec<MaskTableSpec>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MaskTableSource {
+    PreviousLlcByCpu,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MaskTableSpec {
+    pub id: u32,
+    pub source: MaskTableSource,
 }
 
 impl CompiledPolicy {
@@ -57,6 +72,7 @@ impl Opcode {
         match self {
             Self::ClaimIdle => "claim_idle",
             Self::PickIdle => "pick_idle",
+            Self::PickIdleMaskTable => "pick_idle_mask_table",
         }
     }
 }
@@ -108,17 +124,25 @@ pub fn compile_policy(source: &str) -> Result<CompiledPolicy, PolicyError> {
         )));
     }
 
-    let rungs = policy
-        .rung
-        .iter()
-        .enumerate()
-        .map(|(index, rung)| compile_rung(index, rung))
-        .collect::<Result<_, _>>()?;
+    let mut rungs = Vec::with_capacity(policy.rung.len());
+    let mut mask_tables = Vec::new();
+    for (index, rung) in policy.rung.iter().enumerate() {
+        let (compiled, mask_table) = compile_rung(index, rung)?;
+        rungs.push(compiled);
+        if let Some(mask_table) = mask_table {
+            if !mask_tables.contains(&mask_table) {
+                mask_tables.push(mask_table);
+            }
+        }
+    }
 
-    Ok(CompiledPolicy { rungs })
+    Ok(CompiledPolicy { rungs, mask_tables })
 }
 
-fn compile_rung(index: usize, rung: &SemanticRung) -> Result<CompiledRung, PolicyError> {
+fn compile_rung(
+    index: usize,
+    rung: &SemanticRung,
+) -> Result<(CompiledRung, Option<MaskTableSpec>), PolicyError> {
     let opcode = match rung.operation.as_str() {
         "claim_idle" => Opcode::ClaimIdle,
         "pick_idle" => Opcode::PickIdle,
@@ -132,6 +156,7 @@ fn compile_rung(index: usize, rung: &SemanticRung) -> Result<CompiledRung, Polic
     let input = match rung.scope.as_str() {
         "previous_cpu" => InputSource::CpuPrev,
         "task_allowed" => InputSource::MaskTaskAllowed,
+        "previous_llc" => InputSource::CpuPrev,
         scope => {
             return Err(PolicyError(format!(
                 "rung {index}: unknown scope `{scope}`"
@@ -139,23 +164,42 @@ fn compile_rung(index: usize, rung: &SemanticRung) -> Result<CompiledRung, Polic
         }
     };
 
-    if !matches!(
-        (opcode, input),
-        (Opcode::ClaimIdle, InputSource::CpuPrev)
-            | (Opcode::PickIdle, InputSource::MaskTaskAllowed)
-    ) {
+    let compatible = matches!(
+        (rung.operation.as_str(), rung.scope.as_str()),
+        ("claim_idle", "previous_cpu")
+            | ("pick_idle", "task_allowed")
+            | ("pick_idle", "previous_llc")
+    );
+    if !compatible {
         return Err(PolicyError(format!(
             "rung {index}: operation `{}` is incompatible with scope `{}`",
             rung.operation, rung.scope
         )));
     }
 
-    Ok(CompiledRung {
-        opcode,
-        input,
-        flags: 0,
-        data: 0,
-    })
+    let (opcode, flags, data, mask_table) = if rung.scope == "previous_llc" {
+        (
+            Opcode::PickIdleMaskTable,
+            RUNG_FLAG_INTERSECT_TASK_ALLOWED,
+            PREVIOUS_LLC_TABLE_ID as u64,
+            Some(MaskTableSpec {
+                id: PREVIOUS_LLC_TABLE_ID,
+                source: MaskTableSource::PreviousLlcByCpu,
+            }),
+        )
+    } else {
+        (opcode, 0, 0, None)
+    };
+
+    Ok((
+        CompiledRung {
+            opcode,
+            input,
+            flags,
+            data,
+        },
+        mask_table,
+    ))
 }
 
 #[cfg(test)]
@@ -170,6 +214,12 @@ scope = "previous_cpu"
 [[rung]]
 operation = "pick_idle"
 scope = "task_allowed"
+"#;
+
+    const PREVIOUS_LLC_POLICY: &str = r#"
+[[rung]]
+operation = "pick_idle"
+scope = "previous_llc"
 "#;
 
     fn error_for(source: &str) -> String {
@@ -202,6 +252,28 @@ scope = "task_allowed"
     }
 
     #[test]
+    fn lowers_previous_llc_to_a_topology_blind_mask_table_lookup() {
+        let policy = compile_policy(PREVIOUS_LLC_POLICY).expect("policy should compile");
+
+        assert_eq!(
+            policy.rungs,
+            vec![CompiledRung {
+                opcode: Opcode::PickIdleMaskTable,
+                input: InputSource::CpuPrev,
+                flags: RUNG_FLAG_INTERSECT_TASK_ALLOWED,
+                data: PREVIOUS_LLC_TABLE_ID as u64,
+            }]
+        );
+        assert_eq!(
+            policy.mask_tables,
+            vec![MaskTableSpec {
+                id: PREVIOUS_LLC_TABLE_ID,
+                source: MaskTableSource::PreviousLlcByCpu,
+            }]
+        );
+    }
+
+    #[test]
     fn rejects_an_empty_ladder() {
         assert!(error_for("").contains("at least one rung"));
     }
@@ -224,10 +296,10 @@ scope = "previous_cpu"
             r#"
 [[rung]]
 operation = "claim_idle"
-scope = "previous_llc"
+scope = "previous_node"
 "#,
         );
-        assert!(error.contains("unknown scope `previous_llc`"));
+        assert!(error.contains("unknown scope `previous_node`"));
     }
 
     #[test]
@@ -242,6 +314,17 @@ scope = "task_allowed"
         assert!(claim_error.contains("claim_idle"));
         assert!(claim_error.contains("task_allowed"));
         assert!(claim_error.contains("incompatible"));
+
+        let llc_claim_error = error_for(
+            r#"
+[[rung]]
+operation = "claim_idle"
+scope = "previous_llc"
+"#,
+        );
+        assert!(llc_claim_error.contains("claim_idle"));
+        assert!(llc_claim_error.contains("previous_llc"));
+        assert!(llc_claim_error.contains("incompatible"));
 
         let pick_error = error_for(
             r#"

@@ -3,18 +3,24 @@
 #define __SCX_SNAKE_INTF_H
 
 #ifndef __VMLINUX_H__
+typedef unsigned char	   u8;
 typedef unsigned int	   u32;
 typedef unsigned long long u64;
 #endif
 
-#define SNAKE_ABI_VERSION 1
+#define SNAKE_ABI_VERSION 2
 #define SNAKE_MAX_RUNGS 8
+#define SNAKE_MAX_CPUS 1024
+#define SNAKE_MASK_BYTES (SNAKE_MAX_CPUS / 8)
+#define SNAKE_MAX_MASK_TABLES 4
+#define SNAKE_RUNG_F_INTERSECT_TASK_ALLOWED (1U << 0)
 
 /* Stable operation codes shared by the userspace compiler and BPF. */
 enum snake_opcode {
-	SNAKE_OP_INVALID    = 0,
-	SNAKE_OP_CLAIM_IDLE = 1,
-	SNAKE_OP_PICK_IDLE  = 2,
+	SNAKE_OP_INVALID	      = 0,
+	SNAKE_OP_CLAIM_IDLE	      = 1,
+	SNAKE_OP_PICK_IDLE	      = 2,
+	SNAKE_OP_PICK_IDLE_MASK_TABLE = 3,
 };
 
 /* Topology-blind operand sources consumed by mechanical rung operations. */
@@ -25,8 +31,8 @@ enum snake_input_source {
 };
 
 /*
- * Mechanical instruction consumed by BPF. Semantic concepts such as LLCs or
- * NUMA nodes must be lowered by userspace into operand sources and data tables.
+ * Mechanical instruction consumed by BPF. Semantic topology concepts must be
+ * lowered by userspace into operand sources and data tables.
  */
 struct snake_rung {
 	u32 opcode;
@@ -34,6 +40,12 @@ struct snake_rung {
 	u32 flags;
 	u32 reserved;
 	u64 data;
+};
+
+/* Serialized userspace mask entry consumed when BPF initializes a table. */
+struct snake_mask_data {
+	u32 valid;
+	u8  bits[SNAKE_MASK_BYTES];
 };
 
 /* Fixed map-key layout for global and per-rung scheduler counters. */

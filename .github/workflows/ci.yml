@@ -242,7 +242,7 @@ jobs:
           flags[lavd]="--log-level info"
           flags[layered]="--log-level info --stats 15 --run-example"
           flags[mitosis]="--cell-parent-cgroup /ci.slice -v"
-          flags[snake]="--policy scheds/rust/scx_snake/examples/previous-only.toml --stats 1 --stats-format json"
+          flags[snake]="--policy scheds/rust/scx_snake/examples/llc.toml --stats 1 --stats-format json"
           for sched in ${{ matrix.scheds }}; do
             echo "=== Testing ${sched} ==="
             stress_seconds=31
@@ -277,9 +277,9 @@ jobs:
                 echo "scx_snake never became the active scheduler"
                 rc=1
               fi
-              if ! jq -s -e 'any(.[]; .ladder_exhaustions > 0 and .rungs["0"].attempts > 0)' \
+              if ! jq -s -e 'any(.[]; .direct_dispatches > 0 and .rungs["1"].attempts > 0 and .rungs["1"].hits > 0)' \
                 "$stats_file" >/dev/null; then
-                echo "scx_snake did not report rung attempts and ladder exhaustion"
+                echo "scx_snake did not report direct dispatches and LLC rung hits"
                 cat "$stats_file"
                 rc=1
               fi

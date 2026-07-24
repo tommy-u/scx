@@ -2,6 +2,7 @@
 
 mod bpf_intf;
 mod bpf_skel;
+mod mask_tables;
 mod policy;
 mod stats;
 
@@ -18,8 +19,9 @@ use anyhow::{anyhow, bail, Context, Result};
 use bpf_skel::*;
 use clap::{Parser, ValueEnum};
 use crossbeam::channel::RecvTimeoutError;
-use libbpf_rs::{MapCore as _, OpenObject};
+use libbpf_rs::{MapCore as _, MapFlags, OpenObject};
 use log::{debug, info, warn};
+use mask_tables::{dump_mask_tables, resolve_mask_tables, ResolvedMaskTable};
 use policy::{CompiledPolicy, CompiledRung, InputSource, Opcode};
 use scx_stats::prelude::*;
 use scx_utils::build_id;
@@ -150,6 +152,11 @@ fn install_policy(rodata: &mut bpf_skel::types::rodata, policy: &CompiledPolicy)
         .len()
         .try_into()
         .context("policy rung count does not fit the BPF ABI")?;
+    rodata.nr_mask_tables = policy
+        .mask_tables
+        .len()
+        .try_into()
+        .context("mask table count does not fit the BPF ABI")?;
 
     for (destination, rung) in rodata.rungs.iter_mut().zip(&policy.rungs) {
         let encoded = encode_rung(*rung);
@@ -162,17 +169,43 @@ fn install_policy(rodata: &mut bpf_skel::types::rodata, policy: &CompiledPolicy)
     Ok(())
 }
 
+fn bytes_of<T>(value: &T) -> &[u8] {
+    // SAFETY: map updates copy exactly size_of::<T>() bytes before this borrow ends.
+    unsafe { std::slice::from_raw_parts(value as *const T as *const u8, std::mem::size_of::<T>()) }
+}
+
+fn install_mask_tables(skel: &mut BpfSkel<'_>, tables: &[ResolvedMaskTable]) -> Result<()> {
+    for table in tables {
+        if table.id >= bpf_intf::SNAKE_MAX_MASK_TABLES {
+            bail!("mask table {} exceeds the BPF table capacity", table.id);
+        }
+        for (&cpu, cpus) in &table.entries {
+            if cpu >= bpf_intf::SNAKE_MAX_CPUS {
+                bail!("CPU {cpu} exceeds the BPF table capacity");
+            }
+            let key = table.id * bpf_intf::SNAKE_MAX_CPUS + cpu;
+            let data = mask_tables::serialize_entry(cpus)?;
+            skel.maps
+                .mask_data
+                .update(&key.to_ne_bytes(), bytes_of(&data), MapFlags::ANY)
+                .with_context(|| format!("installing mask table {} key CPU {cpu}", table.id))?;
+        }
+    }
+    Ok(())
+}
+
 fn operation_label(operation: Opcode) -> &'static str {
     match operation {
         Opcode::ClaimIdle => "claim_idle",
-        Opcode::PickIdle => "pick_idle",
+        Opcode::PickIdle | Opcode::PickIdleMaskTable => "pick_idle",
     }
 }
 
-fn scope_label(input: InputSource) -> &'static str {
-    match input {
-        InputSource::CpuPrev => "previous_cpu",
-        InputSource::MaskTaskAllowed => "task_allowed",
+fn scope_label(rung: &CompiledRung) -> &'static str {
+    match (rung.opcode, rung.input) {
+        (Opcode::PickIdleMaskTable, InputSource::CpuPrev) => "previous_llc",
+        (_, InputSource::CpuPrev) => "previous_cpu",
+        (_, InputSource::MaskTaskAllowed) => "task_allowed",
     }
 }
 
@@ -235,7 +268,7 @@ fn aggregate_raw_stats(raw: &[Vec<Vec<u8>>], policy: &CompiledPolicy) -> Result<
                 RungMetrics {
                     index: index_u32,
                     operation: operation_label(rung.opcode).into(),
-                    scope: scope_label(rung.input).into(),
+                    scope: scope_label(rung).into(),
                     attempts: value(bpf_intf::snake_stat_SNAKE_STAT_RUNG_ATTEMPT_BASE + index_u32),
                     hits: value(bpf_intf::snake_stat_SNAKE_STAT_RUNG_HIT_BASE + index_u32),
                     misses: value(bpf_intf::snake_stat_SNAKE_STAT_RUNG_MISS_BASE + index_u32),
@@ -285,6 +318,7 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
     fn init(
         opts: &Opts,
         policy: &'policy CompiledPolicy,
+        mask_tables: &[ResolvedMaskTable],
         open_object: &'object mut MaybeUninit<OpenObject>,
     ) -> Result<Self> {
         try_set_rlimit_infinity();
@@ -302,6 +336,7 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
         install_policy(rodata, policy)?;
 
         let mut skel = scx_ops_load!(skel, snake_ops, uei)?;
+        install_mask_tables(&mut skel, mask_tables)?;
         let struct_ops = Some(scx_ops_attach!(skel, snake_ops)?);
         let stats_server = StatsServer::new(stats::server_data()).launch()?;
         info!(
@@ -409,7 +444,8 @@ fn main() -> Result<()> {
         }
         RunMode::Dump(path) => {
             let policy = load_policy(&path)?;
-            print!("{}", policy.dump());
+            let mask_tables = resolve_mask_tables(&policy.mask_tables)?;
+            print!("{}{}", policy.dump(), dump_mask_tables(&mask_tables));
             return Ok(());
         }
         RunMode::Launch(path) => {
@@ -438,7 +474,9 @@ fn main() -> Result<()> {
 
             let mut open_object = MaybeUninit::uninit();
             loop {
-                let mut scheduler = Scheduler::init(&opts, &policy, &mut open_object)?;
+                let mask_tables = resolve_mask_tables(&policy.mask_tables)?;
+                let mut scheduler =
+                    Scheduler::init(&opts, &policy, &mask_tables, &mut open_object)?;
                 if !scheduler.run(shutdown.clone())?.should_restart() {
                     break;
                 }
@@ -504,6 +542,30 @@ scope = "task_allowed"
         assert_eq!(encoded.flags, 0x1234);
         assert_eq!(encoded.reserved, 0);
         assert_eq!(encoded.data, 0x0102_0304_0506_0708);
+    }
+
+    #[test]
+    fn rust_mask_table_instruction_matches_the_bpf_abi() {
+        let compiled = policy::compile_policy(
+            r#"
+[[rung]]
+operation = "pick_idle"
+scope = "previous_llc"
+"#,
+        )
+        .expect("policy should compile");
+        let encoded = encode_rung(compiled.rungs[0]);
+
+        assert_eq!(
+            encoded.opcode,
+            bpf_intf::snake_opcode_SNAKE_OP_PICK_IDLE_MASK_TABLE
+        );
+        assert_eq!(
+            encoded.input,
+            bpf_intf::snake_input_source_SNAKE_INPUT_CPU_PREV
+        );
+        assert_eq!(encoded.flags, bpf_intf::SNAKE_RUNG_F_INTERSECT_TASK_ALLOWED);
+        assert_eq!(encoded.data, 0);
     }
 
     #[test]

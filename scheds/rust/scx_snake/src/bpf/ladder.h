@@ -2,18 +2,22 @@
 #ifndef __SCX_SNAKE_LADDER_H
 #define __SCX_SNAKE_LADDER_H
 
-#include "main.h"
+#include "mask_table.h"
 
 /* Validate that a rung uses the supported mechanical ABI. */
 static __always_inline bool rung_is_valid(const struct snake_rung *rung)
 {
-	if (rung->flags || rung->reserved || rung->data)
+	if (rung->reserved)
 		return false;
 
-	return (rung->opcode == SNAKE_OP_CLAIM_IDLE &&
-		rung->input == SNAKE_INPUT_CPU_PREV) ||
-	       (rung->opcode == SNAKE_OP_PICK_IDLE &&
-		rung->input == SNAKE_INPUT_MASK_TASK_ALLOWED);
+	return (rung->opcode == SNAKE_OP_CLAIM_IDLE && !rung->flags &&
+		rung->input == SNAKE_INPUT_CPU_PREV && !rung->data) ||
+	       (rung->opcode == SNAKE_OP_PICK_IDLE && !rung->flags &&
+		rung->input == SNAKE_INPUT_MASK_TASK_ALLOWED && !rung->data) ||
+	       (rung->opcode == SNAKE_OP_PICK_IDLE_MASK_TABLE &&
+		rung->input == SNAKE_INPUT_CPU_PREV &&
+		rung->flags == SNAKE_RUNG_F_INTERSECT_TASK_ALLOWED &&
+		rung->data < nr_mask_tables);
 }
 
 /* Execute one validated rung and return an idle CPU or a miss. */
@@ -30,7 +34,10 @@ static __always_inline s32 execute_rung(const struct task_struct *p,
 			return prev_cpu;
 		break;
 	case SNAKE_OP_PICK_IDLE:
-		return scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
+		prev_cpu = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
+		return prev_cpu < 0 ? -ENOENT : prev_cpu;
+	case SNAKE_OP_PICK_IDLE_MASK_TABLE:
+		return pick_idle_from_mask_table(p, rung->data, prev_cpu);
 	default:
 		break;
 	}
@@ -65,6 +72,13 @@ static __always_inline s32 walk_policy_ladder(const struct task_struct *p,
 		}
 
 		cpu = execute_rung(p, &rung, prev_cpu);
+		if (cpu < 0 && cpu != -ENOENT) {
+			stat_inc(SNAKE_STAT_RUNG_ERROR_BASE + i);
+			stat_inc(SNAKE_STAT_INVALID_ERRORS);
+			scx_bpf_error("snake rung %u execution failed: %d", i,
+				      cpu);
+			return cpu;
+		}
 		if (cpu >= 0 && cpu < nr_cpu_ids &&
 		    bpf_cpumask_test_cpu(cpu, p->cpus_ptr)) {
 			stat_inc(SNAKE_STAT_RUNG_HIT_BASE + i);

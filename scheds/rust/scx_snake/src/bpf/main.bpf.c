@@ -8,6 +8,7 @@ UEI_DEFINE(uei);
 
 const volatile u32		 policy_abi_version;
 const volatile u32		 nr_rungs;
+const volatile u32		 nr_mask_tables;
 const volatile struct snake_rung rungs[SNAKE_MAX_RUNGS];
 
 /* Run the policy ladder, then use its affinity-safe exhaustion fallback. */
@@ -85,6 +86,12 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(snake_init)
 	if (!nr_rungs || nr_rungs > SNAKE_MAX_RUNGS) {
 		stat_inc(SNAKE_STAT_INVALID_ERRORS);
 		scx_bpf_error("snake invalid rung count %u", nr_rungs);
+		return -EINVAL;
+	}
+	if (init_mask_tables()) {
+		stat_inc(SNAKE_STAT_INVALID_ERRORS);
+		scx_bpf_error("snake failed to initialize %u mask tables",
+			      nr_mask_tables);
 		return -EINVAL;
 	}
 

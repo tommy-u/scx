@@ -8,6 +8,7 @@
 
 extern const volatile u32		policy_abi_version;
 extern const volatile u32		nr_rungs;
+extern const volatile u32		nr_mask_tables;
 extern const volatile struct snake_rung rungs[SNAKE_MAX_RUNGS];
 
 static u32				nr_cpu_ids;

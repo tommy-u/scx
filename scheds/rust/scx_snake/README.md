@@ -25,6 +25,10 @@ The initial semantic vocabulary has two rungs:
   allowed and idle.
 - `pick_idle(task_allowed)` searches the task's allowed CPU mask for an idle
   CPU.
+- `pick_idle(previous_llc)` searches the intersection of the task's allowed
+  CPUs and the previous CPU's LLC mask. Userspace discovers LLC topology and
+  lowers this semantic scope to a generic CPU-keyed mask-table lookup; BPF does
+  not contain an LLC-specific operation or topology identifier.
 
 The corresponding TOML is:
 
@@ -44,7 +48,7 @@ and eight rungs; unsupported operation/scope pairs are rejected before BPF is
 attached.
 
 See [`examples/basic.toml`](examples/basic.toml) for the complete initial
-policy.
+policy and [`examples/llc.toml`](examples/llc.toml) for the LLC-aware ladder.
 
 ## Scheduling behavior
 
@@ -75,12 +79,20 @@ sudo ./target/release/scx_snake \
 ```
 
 The policy is compiled once at startup. Inspect the exact mechanical ladder
-without attaching the scheduler:
+and any resolved mask-table entries without attaching the scheduler:
 
 ```bash
 ./target/release/scx_snake \
   --policy scheds/rust/scx_snake/examples/basic.toml \
   --dump-compiled-policy
+```
+
+For the LLC-aware example:
+
+```bash
+sudo ./target/release/scx_snake \
+  --policy scheds/rust/scx_snake/examples/llc.toml \
+  --stats 1
 ```
 
 ## Statistics
@@ -119,7 +131,9 @@ when the scheduler stops.
 ## Prototype limitations
 
 - Policies are startup-only and cannot be replaced while the scheduler runs.
-- Only previous-CPU claiming and allowed-mask idle selection are implemented.
+- The only topology-aware semantic scope is `previous_llc`.
+- LLC topology and mask tables are snapshotted for each attach and rebuilt when
+  the scheduler restarts after CPU hotplug.
 - The ABI is generic in shape but remains experimental and may change.
 - Ladder hits bypass global FIFO ordering through direct local dispatch.
 - Exhaustion fallbacks use a global FIFO with no scheduler-specific fairness
