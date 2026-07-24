@@ -1,0 +1,127 @@
+# scx_snake
+
+`scx_snake` is a minimal Rust `sched_ext` scheduler for experimenting with
+declarative scheduling policy. It intentionally keeps task scheduling simple so
+that the userspace-to-BPF policy interface is the part under study.
+
+This is an experimental mechanism, not a general-purpose scheduler. Do not use
+it for production workloads.
+
+## Policy model
+
+An idle-CPU policy is an ordered *ladder* of *rungs*. Userspace reads a required
+TOML policy, validates its semantic names, and lowers each rung into the generic
+mechanical ABI consumed by BPF. The BPF interpreter applies the compiled rungs
+in order until one succeeds or the ladder is exhausted.
+
+This split is deliberate. Userspace can eventually understand concepts such as
+an LLC or NUMA node and materialize the masks and tables needed to express
+them. BPF does not need topology-specific operations: it only interprets
+operations, operand sources, flags, and data.
+
+The initial semantic vocabulary has two rungs:
+
+- `claim_idle(previous_cpu)` tries to claim the task's previous CPU when it is
+  allowed and idle.
+- `pick_idle(task_allowed)` searches the task's allowed CPU mask for an idle
+  CPU.
+
+The corresponding TOML is:
+
+```toml
+[[rung]]
+operation = "claim_idle"
+scope = "previous_cpu"
+
+[[rung]]
+operation = "pick_idle"
+scope = "task_allowed"
+```
+
+Userspace lowers these semantic pairs to fixed-size
+`{ opcode, input, flags, data }` instructions. A policy must contain between one
+and eight rungs; unsupported operation/scope pairs are rejected before BPF is
+attached.
+
+See [`examples/basic.toml`](examples/basic.toml) for the complete initial
+policy.
+
+## Scheduling behavior
+
+All tasks are enqueued on the global FIFO dispatch queue. A successful
+idle-selection rung only returns a CPU hint from `select_cpu`; it does not
+dispatch directly to that CPU's local queue. The global FIFO therefore remains
+the authority for where the task eventually runs.
+
+If every rung misses, the interpreter returns an affinity-safe non-idle CPU and
+records ladder exhaustion. There is no implicit default idle search after the
+last rung, so the configured ladder describes every idle search the scheduler
+performs.
+
+## Build and run
+
+Build the scheduler from the repository root:
+
+```bash
+cargo build --release -p scx_snake
+```
+
+A policy is required when launching the scheduler:
+
+```bash
+sudo ./target/release/scx_snake \
+  --policy scheds/rust/scx_snake/examples/basic.toml \
+  --stats 1
+```
+
+The policy is compiled once at startup. Inspect the exact mechanical ladder
+without attaching the scheduler:
+
+```bash
+./target/release/scx_snake \
+  --policy scheds/rust/scx_snake/examples/basic.toml \
+  --dump-compiled-policy
+```
+
+## Statistics
+
+`--stats SECONDS` prints in-process periodic statistics. The default text table
+is intended for interactive experiments:
+
+```bash
+sudo ./target/release/scx_snake \
+  --policy scheds/rust/scx_snake/examples/basic.toml \
+  --stats 1
+```
+
+Use NDJSON when feeding samples to another tool:
+
+```bash
+sudo ./target/release/scx_snake \
+  --policy scheds/rust/scx_snake/examples/basic.toml \
+  --stats 1 \
+  --stats-format json
+```
+
+An external client can monitor an already running instance without supplying a
+policy:
+
+```bash
+sudo ./target/release/scx_snake --monitor 1
+```
+
+Run `scx_snake --help-stats` for the current counter definitions. The output
+includes scheduler lifecycle activity, ladder execution, per-rung outcomes,
+exhaustion, and fallback selection so policy behavior is visible from
+userspace. `--exit-dump-len` controls the amount of BPF exit diagnostics shown
+when the scheduler stops.
+
+## Prototype limitations
+
+- Policies are startup-only and cannot be replaced while the scheduler runs.
+- Only previous-CPU claiming and allowed-mask idle selection are implemented.
+- The ABI is generic in shape but remains experimental and may change.
+- Selection only provides a CPU hint; there is no direct local-DSQ dispatch.
+- Task ordering is a global FIFO with no scheduler-specific fairness policy.
+- The scheduler does not yet express topology-aware search, stealing, or
+  draining policies.

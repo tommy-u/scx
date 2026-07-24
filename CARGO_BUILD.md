@@ -93,6 +93,7 @@ cargo build --profile=release-tiny -p scx_flash
 | `scx_rlfifo`   | `cargo build --release -p scx_rlfifo` |
 | `scx_rustland` | `cargo build --release -p scx_rustland` |
 | `scx_rusty`    | `cargo build --release -p scx_rusty` |
+| `scx_snake`    | `cargo build --release -p scx_snake` |
 | `scx_tickless` | `cargo build --release -p scx_tickless` |
 
 ---

@@ -42,6 +42,7 @@ jobs:
       - name: Format C
         run: |
           find tools/scxtop scheds/rust/scx_chaos scheds/rust/scx_mitosis \
+            scheds/rust/scx_snake \
             -name '*.c' -o -name '*.h' | xargs clang-format --dry-run -Werror
       - name: Clippy
         run: |
@@ -216,7 +217,7 @@ jobs:
         scheds:
           - flash beerland bpfland cosmos
           - layered p2dq lavd mitosis
-          - rlfifo rustland tickless
+          - rlfifo rustland snake tickless
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -241,17 +242,58 @@ jobs:
           flags[lavd]="--log-level info"
           flags[layered]="--log-level info --stats 15 --run-example"
           flags[mitosis]="--cell-parent-cgroup /ci.slice -v"
+          flags[snake]="--policy scheds/rust/scx_snake/examples/previous-only.toml --stats 1 --stats-format json"
           for sched in ${{ matrix.scheds }}; do
             echo "=== Testing ${sched} ==="
-            stress-ng -t 31 --aggressive -M -c $(nproc) -f $(nproc) \
+            stress_seconds=31
+            if [ "$sched" = "snake" ]; then
+              stress_seconds=45
+            fi
+            stress-ng -t $stress_seconds --aggressive -M -c $(nproc) -f $(nproc) \
               --affinity 1 --affinity-delay 1 --affinity-pin &
             stress_pid=$!
             if [ "$sched" = "mitosis" ]; then
               sudo mkdir -p /sys/fs/cgroup/ci.slice
             fi
-            sudo timeout --foreground --preserve-status 45 \
-              target/ci/scx_${sched} ${flags[$sched]:-"-v"}
-            rc=$?
+            if [ "$sched" = "snake" ]; then
+              stats_file=$(mktemp)
+              dmesg_lines=$(sudo dmesg | wc -l)
+              sudo timeout --foreground --preserve-status 45 \
+                target/ci/scx_${sched} ${flags[$sched]} >"$stats_file" &
+              sched_pid=$!
+              active=false
+              for _ in $(seq 1 50); do
+                case "$(cat /sys/kernel/sched_ext/root/ops 2>/dev/null)" in
+                  snake_*)
+                    active=true
+                    break
+                    ;;
+                esac
+                sleep 0.1
+              done
+              wait $sched_pid
+              rc=$?
+              if [ "$active" != "true" ]; then
+                echo "scx_snake never became the active scheduler"
+                rc=1
+              fi
+              if ! jq -s -e 'any(.[]; .ladder_exhaustions > 0 and .rungs["0"].attempts > 0)' \
+                "$stats_file" >/dev/null; then
+                echo "scx_snake did not report rung attempts and ladder exhaustion"
+                cat "$stats_file"
+                rc=1
+              fi
+              if sudo dmesg | tail -n +$((dmesg_lines + 1)) | \
+                grep -Eiq 'scx_bpf_error|sched_ext:.*(error|stall)|snake.*(error|stall)'; then
+                echo "scx_snake emitted a kernel scheduler error"
+                rc=1
+              fi
+              rm -f "$stats_file"
+            else
+              sudo timeout --foreground --preserve-status 45 \
+                target/ci/scx_${sched} ${flags[$sched]:-"-v"}
+              rc=$?
+            fi
             if [ "$sched" = "mitosis" ]; then
               sudo rmdir /sys/fs/cgroup/ci.slice 2>/dev/null || true
             fi

@@ -26,4 +26,5 @@ main.rs or \*.bpf.c files.
 - [scx_p2dq](scx_p2dq/README.md)
 - [scx_rustland](scx_rustland/README.md)
 - [scx_rusty](scx_rusty/README.md)
+- [scx_snake](scx_snake/README.md)
 - [scx_tickless](scx_tickless/README.md)

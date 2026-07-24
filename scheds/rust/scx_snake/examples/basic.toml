@@ -1,0 +1,7 @@
+[[rung]]
+operation = "claim_idle"
+scope = "previous_cpu"
+
+[[rung]]
+operation = "pick_idle"
+scope = "task_allowed"
