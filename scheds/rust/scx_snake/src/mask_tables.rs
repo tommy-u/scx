@@ -15,6 +15,13 @@ pub struct ResolvedMaskTable {
     pub entries: BTreeMap<u32, BTreeSet<u32>>,
 }
 
+/// Minimal topology identity needed by core-preserving partition providers.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CpuLocation {
+    llc: u32,
+    core: u32,
+}
+
 pub fn resolve_mask_tables(specs: &[MaskTableSpec]) -> Result<Vec<ResolvedMaskTable>> {
     if specs.is_empty() {
         return Ok(Vec::new());
@@ -42,11 +49,27 @@ pub fn resolve_mask_tables(specs: &[MaskTableSpec]) -> Result<Vec<ResolvedMaskTa
             ))
         })
         .collect::<Result<BTreeMap<_, _>>>()?;
+    let cpu_locations = topology
+        .all_cpus
+        .values()
+        .map(|cpu| {
+            Ok((
+                cpu.id.try_into().context("CPU ID does not fit u32")?,
+                CpuLocation {
+                    llc: cpu.llc_id.try_into().context("LLC ID does not fit u32")?,
+                    core: cpu.core_id.try_into().context("core ID does not fit u32")?,
+                },
+            ))
+        })
+        .collect::<Result<BTreeMap<_, _>>>()?;
 
     specs
         .iter()
         .map(|spec| match spec.source {
             MaskTableSource::PreviousLlcByCpu => build_previous_llc_table(spec.id, &cpu_to_llc),
+            MaskTableSource::SplitLlcByCore { parts } => {
+                build_split_llc_table(spec.id, &cpu_locations, parts)
+            }
         })
         .collect()
 }
@@ -75,6 +98,64 @@ fn build_previous_llc_table(id: u32, cpu_to_llc: &BTreeMap<u32, u32>) -> Result<
     Ok(ResolvedMaskTable {
         id,
         source: MaskTableSource::PreviousLlcByCpu,
+        entries,
+    })
+}
+
+fn build_split_llc_table(
+    id: u32,
+    cpu_locations: &BTreeMap<u32, CpuLocation>,
+    parts: u32,
+) -> Result<ResolvedMaskTable> {
+    if cpu_locations.is_empty() {
+        bail!("CPU topology contains no CPUs");
+    }
+    if parts < 2 {
+        bail!("LLC split requires at least two parts");
+    }
+    let parts = parts as usize;
+    let mut llcs: BTreeMap<u32, BTreeMap<u32, BTreeSet<u32>>> = BTreeMap::new();
+    for (&cpu, location) in cpu_locations {
+        llcs.entry(location.llc)
+            .or_default()
+            .entry(location.core)
+            .or_default()
+            .insert(cpu);
+    }
+
+    let mut entries = BTreeMap::new();
+    for (llc, cores) in llcs {
+        if cores.len() < parts {
+            bail!(
+                "LLC {llc} has {} cores and cannot be split into {parts} non-empty parts",
+                cores.len()
+            );
+        }
+
+        let cores_per_part = cores.len() / parts;
+        let larger_parts = cores.len() % parts;
+        let mut core_iter = cores.into_values();
+        for part in 0..parts {
+            let mut cpus = BTreeSet::new();
+            let part_cores = cores_per_part + usize::from(part < larger_parts);
+            for _ in 0..part_cores {
+                cpus.extend(
+                    core_iter
+                        .next()
+                        .expect("part sizes account for every LLC core"),
+                );
+            }
+            for &cpu in &cpus {
+                entries.insert(cpu, cpus.clone());
+            }
+        }
+    }
+
+    Ok(ResolvedMaskTable {
+        id,
+        source: MaskTableSource::SplitLlcByCore {
+            parts: parts as u32,
+        },
         entries,
     })
 }
@@ -121,6 +202,10 @@ pub fn serialize_entry(cpus: &BTreeSet<u32>) -> Result<bpf_intf::snake_mask_data
 mod tests {
     use super::*;
 
+    fn cpu(llc: u32, core: u32) -> CpuLocation {
+        CpuLocation { llc, core }
+    }
+
     #[test]
     fn builds_a_cpu_keyed_table_from_llc_membership() {
         let cpu_to_llc = BTreeMap::from([(0, 10), (1, 10), (2, 20), (3, 20)]);
@@ -132,6 +217,71 @@ mod tests {
         assert_eq!(table.entries[&1], BTreeSet::from([0, 1]));
         assert_eq!(table.entries[&2], BTreeSet::from([2, 3]));
         assert_eq!(table.entries[&3], BTreeSet::from([2, 3]));
+    }
+
+    #[test]
+    fn splits_each_llc_in_half_without_splitting_cores() {
+        let topology = BTreeMap::from([
+            (0, cpu(10, 100)),
+            (8, cpu(10, 100)),
+            (1, cpu(10, 101)),
+            (9, cpu(10, 101)),
+            (2, cpu(10, 102)),
+            (10, cpu(10, 102)),
+            (3, cpu(10, 103)),
+            (11, cpu(10, 103)),
+            (4, cpu(20, 200)),
+            (12, cpu(20, 200)),
+            (5, cpu(20, 201)),
+            (13, cpu(20, 201)),
+            (6, cpu(20, 202)),
+            (14, cpu(20, 202)),
+            (7, cpu(20, 203)),
+            (15, cpu(20, 203)),
+        ]);
+
+        let table = build_split_llc_table(0, &topology, 2).expect("table should build");
+
+        assert_eq!(table.entries[&0], BTreeSet::from([0, 1, 8, 9]));
+        assert_eq!(table.entries[&8], BTreeSet::from([0, 1, 8, 9]));
+        assert_eq!(table.entries[&2], BTreeSet::from([2, 3, 10, 11]));
+        assert_eq!(table.entries[&4], BTreeSet::from([4, 5, 12, 13]));
+        assert_eq!(table.entries[&6], BTreeSet::from([6, 7, 14, 15]));
+    }
+
+    #[test]
+    fn supports_more_than_two_balanced_parts() {
+        let topology = BTreeMap::from([
+            (0, cpu(10, 100)),
+            (1, cpu(10, 101)),
+            (2, cpu(10, 102)),
+            (3, cpu(10, 103)),
+            (4, cpu(10, 104)),
+        ]);
+
+        let table = build_split_llc_table(0, &topology, 3).expect("table should build");
+
+        assert_eq!(table.entries[&0], BTreeSet::from([0, 1]));
+        assert_eq!(table.entries[&2], BTreeSet::from([2, 3]));
+        assert_eq!(table.entries[&4], BTreeSet::from([4]));
+    }
+
+    #[test]
+    fn rejects_more_parts_than_an_llc_has_cores() {
+        let topology = BTreeMap::from([
+            (0, cpu(10, 100)),
+            (1, cpu(10, 101)),
+            (2, cpu(20, 200)),
+            (3, cpu(20, 201)),
+            (4, cpu(20, 202)),
+        ]);
+
+        let error = build_split_llc_table(0, &topology, 3)
+            .expect_err("undersized LLC should be rejected")
+            .to_string();
+
+        assert!(error.contains("LLC 10 has 2 cores"));
+        assert!(error.contains("3 non-empty parts"));
     }
 
     #[test]

@@ -201,11 +201,22 @@ fn operation_label(operation: Opcode) -> &'static str {
     }
 }
 
-fn scope_label(rung: &CompiledRung) -> &'static str {
+fn scope_label<'policy>(
+    policy: &'policy CompiledPolicy,
+    rung: &CompiledRung,
+) -> Result<&'policy str> {
     match (rung.opcode, rung.input) {
-        (Opcode::PickIdleMaskTable, InputSource::CpuPrev) => "previous_llc",
-        (_, InputSource::CpuPrev) => "previous_cpu",
-        (_, InputSource::MaskTaskAllowed) => "task_allowed",
+        (Opcode::PickIdleMaskTable, InputSource::CpuPrev) => {
+            let table_id = u32::try_from(rung.data).context("mask table ID does not fit u32")?;
+            policy
+                .mask_tables
+                .iter()
+                .find(|table| table.id == table_id)
+                .map(|table| table.name.as_str())
+                .with_context(|| format!("compiled rung references missing mask table {table_id}"))
+        }
+        (_, InputSource::CpuPrev) => Ok("previous_cpu"),
+        (_, InputSource::MaskTaskAllowed) => Ok("task_allowed"),
     }
 }
 
@@ -261,22 +272,22 @@ fn aggregate_raw_stats(raw: &[Vec<Vec<u8>>], policy: &CompiledPolicy) -> Result<
         .rungs
         .iter()
         .enumerate()
-        .map(|(index, rung)| {
+        .map(|(index, rung)| -> Result<_> {
             let index_u32 = index as u32;
-            (
+            Ok((
                 index_u32,
                 RungMetrics {
                     index: index_u32,
                     operation: operation_label(rung.opcode).into(),
-                    scope: scope_label(rung).into(),
+                    scope: scope_label(policy, rung)?.into(),
                     attempts: value(bpf_intf::snake_stat_SNAKE_STAT_RUNG_ATTEMPT_BASE + index_u32),
                     hits: value(bpf_intf::snake_stat_SNAKE_STAT_RUNG_HIT_BASE + index_u32),
                     misses: value(bpf_intf::snake_stat_SNAKE_STAT_RUNG_MISS_BASE + index_u32),
                     errors: value(bpf_intf::snake_stat_SNAKE_STAT_RUNG_ERROR_BASE + index_u32),
                 },
-            )
+            ))
         })
-        .collect::<BTreeMap<_, _>>();
+        .collect::<Result<BTreeMap<_, _>>>()?;
 
     Ok(Metrics {
         select_calls: value(bpf_intf::snake_stat_SNAKE_STAT_SELECT_CALLS),
@@ -566,6 +577,10 @@ scope = "previous_llc"
         );
         assert_eq!(encoded.flags, bpf_intf::SNAKE_RUNG_F_INTERSECT_TASK_ALLOWED);
         assert_eq!(encoded.data, 0);
+        assert_eq!(
+            policy::MAX_MASK_TABLES as u32,
+            bpf_intf::SNAKE_MAX_MASK_TABLES
+        );
     }
 
     #[test]
@@ -665,5 +680,32 @@ scope = "previous_llc"
         assert_eq!(metrics.rungs[&1].hits, 5);
         assert_eq!(metrics.rungs[&1].operation, "pick_idle");
         assert_eq!(metrics.rungs[&1].scope, "task_allowed");
+    }
+
+    #[test]
+    fn labels_partition_and_parent_llc_placement_stats_separately() {
+        let policy = policy::compile_policy(
+            r#"
+[[partition]]
+name = "previous_llc_half"
+provider = "split_llcs"
+parts = 2
+
+[[rung]]
+operation = "pick_idle"
+scope = "previous_llc_half"
+
+[[rung]]
+operation = "pick_idle"
+scope = "previous_llc"
+"#,
+        )
+        .expect("policy should compile");
+
+        let metrics =
+            aggregate_raw_stats(&raw_percpu_stats(), &policy).expect("stats should aggregate");
+
+        assert_eq!(metrics.rungs[&0].scope, "previous_llc_half");
+        assert_eq!(metrics.rungs[&1].scope, "previous_llc");
     }
 }

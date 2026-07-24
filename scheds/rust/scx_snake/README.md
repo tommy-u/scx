@@ -19,7 +19,7 @@ an LLC or NUMA node and materialize the masks and tables needed to express
 them. BPF does not need topology-specific operations: it only interprets
 operations, operand sources, flags, and data.
 
-The initial semantic vocabulary has two rungs:
+The semantic vocabulary includes:
 
 - `claim_idle(previous_cpu)` tries to claim the task's previous CPU when it is
   allowed and idle.
@@ -29,6 +29,11 @@ The initial semantic vocabulary has two rungs:
   CPUs and the previous CPU's LLC mask. Userspace discovers LLC topology and
   lowers this semantic scope to a generic CPU-keyed mask-table lookup; BPF does
   not contain an LLC-specific operation or topology identifier.
+- Named partitions can add narrower topology scopes. The `split_llcs` provider
+  divides every LLC into a requested number of balanced, deterministic groups
+  without separating a physical core's sibling CPUs. A task uses the group
+  containing its previous CPU. Partition providers only emit generic mask
+  tables, so other partitioning strategies can be added without changing BPF.
 
 The corresponding TOML is:
 
@@ -42,6 +47,23 @@ operation = "pick_idle"
 scope = "task_allowed"
 ```
 
+Named partitions are declared separately and then referenced as rung scopes:
+
+```toml
+[[partition]]
+name = "previous_llc_half"
+provider = "split_llcs"
+parts = 2
+
+[[rung]]
+operation = "pick_idle"
+scope = "previous_llc_half"
+
+[[rung]]
+operation = "pick_idle"
+scope = "previous_llc"
+```
+
 Userspace lowers these semantic pairs to fixed-size
 `{ opcode, input, flags, data }` instructions. A policy must contain between one
 and eight rungs; unsupported operation/scope pairs are rejected before BPF is
@@ -49,6 +71,8 @@ attached.
 
 See [`examples/basic.toml`](examples/basic.toml) for the complete initial
 policy and [`examples/llc.toml`](examples/llc.toml) for the LLC-aware ladder.
+The latter declares `previous_llc_half` with `split_llcs` and tries that scope
+before the complete previous-LLC scope.
 
 ## Scheduling behavior
 
@@ -131,7 +155,8 @@ when the scheduler stops.
 ## Prototype limitations
 
 - Policies are startup-only and cannot be replaced while the scheduler runs.
-- The only topology-aware semantic scope is `previous_llc`.
+- Topology scopes are limited to `previous_llc` and named `split_llcs`
+  partitions.
 - LLC topology and mask tables are snapshotted for each attach and rebuilt when
   the scheduler restarts after CPU hotplug.
 - The ABI is generic in shape but remains experimental and may change.

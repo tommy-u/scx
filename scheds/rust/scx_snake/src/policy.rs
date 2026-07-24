@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0-only
 
+use std::collections::BTreeMap;
 use std::fmt;
 
 use serde::Deserialize;
 
 pub const MAX_RUNGS: usize = 8;
+pub const MAX_MASK_TABLES: usize = 4;
 pub const RUNG_FLAG_INTERSECT_TASK_ALLOWED: u32 = 1;
-pub const PREVIOUS_LLC_TABLE_ID: u32 = 0;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u32)]
@@ -38,14 +39,18 @@ pub struct CompiledPolicy {
     pub mask_tables: Vec<MaskTableSpec>,
 }
 
+/// Userspace source that materializes a topology-blind mask table for BPF.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MaskTableSource {
     PreviousLlcByCpu,
+    SplitLlcByCore { parts: u32 },
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// Named mask table allocated to a dense mechanical table ID.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MaskTableSpec {
     pub id: u32,
+    pub name: String,
     pub source: MaskTableSource,
 }
 
@@ -101,7 +106,17 @@ impl std::error::Error for PolicyError {}
 #[serde(deny_unknown_fields)]
 struct SemanticPolicy {
     #[serde(default)]
+    partition: Vec<SemanticPartition>,
+    #[serde(default)]
     rung: Vec<SemanticRung>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SemanticPartition {
+    name: String,
+    provider: String,
+    parts: usize,
 }
 
 #[derive(Deserialize)]
@@ -124,82 +139,140 @@ pub fn compile_policy(source: &str) -> Result<CompiledPolicy, PolicyError> {
         )));
     }
 
-    let mut rungs = Vec::with_capacity(policy.rung.len());
+    let partitions = compile_partitions(&policy.partition)?;
     let mut mask_tables = Vec::new();
+    let mut rungs = Vec::with_capacity(policy.rung.len());
     for (index, rung) in policy.rung.iter().enumerate() {
-        let (compiled, mask_table) = compile_rung(index, rung)?;
-        rungs.push(compiled);
-        if let Some(mask_table) = mask_table {
-            if !mask_tables.contains(&mask_table) {
-                mask_tables.push(mask_table);
-            }
-        }
+        rungs.push(compile_rung(index, rung, &partitions, &mut mask_tables)?);
     }
 
     Ok(CompiledPolicy { rungs, mask_tables })
 }
 
+fn compile_partitions(
+    partitions: &[SemanticPartition],
+) -> Result<BTreeMap<String, MaskTableSource>, PolicyError> {
+    let mut compiled = BTreeMap::new();
+
+    for (index, partition) in partitions.iter().enumerate() {
+        if matches!(
+            partition.name.as_str(),
+            "previous_cpu" | "previous_llc" | "task_allowed"
+        ) {
+            return Err(PolicyError(format!(
+                "partition {index}: name `{}` is reserved",
+                partition.name
+            )));
+        }
+        if compiled.contains_key(&partition.name) {
+            return Err(PolicyError(format!(
+                "partition {index}: duplicate name `{}`",
+                partition.name
+            )));
+        }
+
+        let source = match partition.provider.as_str() {
+            "split_llcs" => {
+                if partition.parts < 2 {
+                    return Err(PolicyError(format!(
+                        "partition {index}: split_llcs requires at least two parts"
+                    )));
+                }
+                let parts = partition.parts.try_into().map_err(|_| {
+                    PolicyError(format!(
+                        "partition {index}: part count {} is too large",
+                        partition.parts
+                    ))
+                })?;
+                MaskTableSource::SplitLlcByCore { parts }
+            }
+            provider => {
+                return Err(PolicyError(format!(
+                    "partition {index}: unknown provider `{provider}`"
+                )))
+            }
+        };
+        compiled.insert(partition.name.clone(), source);
+    }
+
+    Ok(compiled)
+}
+
 fn compile_rung(
     index: usize,
     rung: &SemanticRung,
-) -> Result<(CompiledRung, Option<MaskTableSpec>), PolicyError> {
-    let opcode = match rung.operation.as_str() {
-        "claim_idle" => Opcode::ClaimIdle,
-        "pick_idle" => Opcode::PickIdle,
-        operation => {
-            return Err(PolicyError(format!(
-                "rung {index}: unknown operation `{operation}`"
-            )))
-        }
-    };
-
-    let input = match rung.scope.as_str() {
-        "previous_cpu" => InputSource::CpuPrev,
-        "task_allowed" => InputSource::MaskTaskAllowed,
-        "previous_llc" => InputSource::CpuPrev,
-        scope => {
-            return Err(PolicyError(format!(
-                "rung {index}: unknown scope `{scope}`"
-            )))
-        }
-    };
-
-    let compatible = matches!(
-        (rung.operation.as_str(), rung.scope.as_str()),
-        ("claim_idle", "previous_cpu")
-            | ("pick_idle", "task_allowed")
-            | ("pick_idle", "previous_llc")
-    );
-    if !compatible {
+    partitions: &BTreeMap<String, MaskTableSource>,
+    mask_tables: &mut Vec<MaskTableSpec>,
+) -> Result<CompiledRung, PolicyError> {
+    if !matches!(
+        rung.scope.as_str(),
+        "previous_cpu" | "previous_llc" | "task_allowed"
+    ) && !partitions.contains_key(&rung.scope)
+    {
         return Err(PolicyError(format!(
-            "rung {index}: operation `{}` is incompatible with scope `{}`",
-            rung.operation, rung.scope
+            "rung {index}: unknown scope `{}`",
+            rung.scope
         )));
     }
 
-    let (opcode, flags, data, mask_table) = if rung.scope == "previous_llc" {
-        (
-            Opcode::PickIdleMaskTable,
-            RUNG_FLAG_INTERSECT_TASK_ALLOWED,
-            PREVIOUS_LLC_TABLE_ID as u64,
-            Some(MaskTableSpec {
-                id: PREVIOUS_LLC_TABLE_ID,
-                source: MaskTableSource::PreviousLlcByCpu,
-            }),
-        )
-    } else {
-        (opcode, 0, 0, None)
-    };
+    match rung.operation.as_str() {
+        "claim_idle" if rung.scope == "previous_cpu" => Ok(CompiledRung {
+            opcode: Opcode::ClaimIdle,
+            input: InputSource::CpuPrev,
+            flags: 0,
+            data: 0,
+        }),
+        "claim_idle" => Err(PolicyError(format!(
+            "rung {index}: operation `{}` is incompatible with scope `{}`",
+            rung.operation, rung.scope
+        ))),
+        "pick_idle" if rung.scope == "task_allowed" => Ok(CompiledRung {
+            opcode: Opcode::PickIdle,
+            input: InputSource::MaskTaskAllowed,
+            flags: 0,
+            data: 0,
+        }),
+        "pick_idle" if rung.scope == "previous_cpu" => Err(PolicyError(format!(
+            "rung {index}: operation `{}` is incompatible with scope `{}`",
+            rung.operation, rung.scope
+        ))),
+        "pick_idle" => {
+            let source = if rung.scope == "previous_llc" {
+                MaskTableSource::PreviousLlcByCpu
+            } else {
+                *partitions
+                    .get(&rung.scope)
+                    .expect("scope existence was validated above")
+            };
+            let table_id =
+                if let Some(table) = mask_tables.iter().find(|table| table.name == rung.scope) {
+                    table.id
+                } else {
+                    if mask_tables.len() >= MAX_MASK_TABLES {
+                        return Err(PolicyError(format!(
+                            "rung {index}: policy requires more than {MAX_MASK_TABLES} mask tables"
+                        )));
+                    }
+                    let id = mask_tables.len() as u32;
+                    mask_tables.push(MaskTableSpec {
+                        id,
+                        name: rung.scope.clone(),
+                        source,
+                    });
+                    id
+                };
 
-    Ok((
-        CompiledRung {
-            opcode,
-            input,
-            flags,
-            data,
-        },
-        mask_table,
-    ))
+            Ok(CompiledRung {
+                opcode: Opcode::PickIdleMaskTable,
+                input: InputSource::CpuPrev,
+                flags: RUNG_FLAG_INTERSECT_TASK_ALLOWED,
+                data: table_id.into(),
+            })
+        }
+        operation => Err(PolicyError(format!(
+            "rung {index}: unknown operation `{operation}`"
+        ))),
+    }
 }
 
 #[cfg(test)]
@@ -217,6 +290,21 @@ scope = "task_allowed"
 "#;
 
     const PREVIOUS_LLC_POLICY: &str = r#"
+[[rung]]
+operation = "pick_idle"
+scope = "previous_llc"
+"#;
+
+    const SUB_LLC_POLICY: &str = r#"
+[[partition]]
+name = "previous_llc_half"
+provider = "split_llcs"
+parts = 2
+
+[[rung]]
+operation = "pick_idle"
+scope = "previous_llc_half"
+
 [[rung]]
 operation = "pick_idle"
 scope = "previous_llc"
@@ -261,15 +349,54 @@ scope = "previous_llc"
                 opcode: Opcode::PickIdleMaskTable,
                 input: InputSource::CpuPrev,
                 flags: RUNG_FLAG_INTERSECT_TASK_ALLOWED,
-                data: PREVIOUS_LLC_TABLE_ID as u64,
+                data: 0,
             }]
         );
         assert_eq!(
             policy.mask_tables,
             vec![MaskTableSpec {
-                id: PREVIOUS_LLC_TABLE_ID,
+                id: 0,
+                name: "previous_llc".into(),
                 source: MaskTableSource::PreviousLlcByCpu,
             }]
+        );
+    }
+
+    #[test]
+    fn lowers_named_partition_before_its_parent_llc() {
+        let policy = compile_policy(SUB_LLC_POLICY).expect("policy should compile");
+
+        assert_eq!(
+            policy.rungs,
+            vec![
+                CompiledRung {
+                    opcode: Opcode::PickIdleMaskTable,
+                    input: InputSource::CpuPrev,
+                    flags: RUNG_FLAG_INTERSECT_TASK_ALLOWED,
+                    data: 0,
+                },
+                CompiledRung {
+                    opcode: Opcode::PickIdleMaskTable,
+                    input: InputSource::CpuPrev,
+                    flags: RUNG_FLAG_INTERSECT_TASK_ALLOWED,
+                    data: 1,
+                },
+            ]
+        );
+        assert_eq!(
+            policy.mask_tables,
+            vec![
+                MaskTableSpec {
+                    id: 0,
+                    name: "previous_llc_half".into(),
+                    source: MaskTableSource::SplitLlcByCore { parts: 2 },
+                },
+                MaskTableSpec {
+                    id: 1,
+                    name: "previous_llc".into(),
+                    source: MaskTableSource::PreviousLlcByCpu,
+                },
+            ]
         );
     }
 
@@ -372,6 +499,70 @@ operation = "claim_idle"
 "#,
         );
         assert!(missing_scope.contains("scope"));
+    }
+
+    #[test]
+    fn rejects_invalid_partition_declarations() {
+        let one_part = error_for(
+            r#"
+[[partition]]
+name = "too_small"
+provider = "split_llcs"
+parts = 1
+
+[[rung]]
+operation = "pick_idle"
+scope = "too_small"
+"#,
+        );
+        assert!(one_part.contains("at least two parts"));
+
+        let unknown_provider = error_for(
+            r#"
+[[partition]]
+name = "custom"
+provider = "unknown"
+parts = 2
+
+[[rung]]
+operation = "pick_idle"
+scope = "custom"
+"#,
+        );
+        assert!(unknown_provider.contains("unknown provider `unknown`"));
+
+        let reserved_name = error_for(
+            r#"
+[[partition]]
+name = "previous_llc"
+provider = "split_llcs"
+parts = 2
+
+[[rung]]
+operation = "pick_idle"
+scope = "previous_llc"
+"#,
+        );
+        assert!(reserved_name.contains("name `previous_llc` is reserved"));
+
+        let duplicate_name = error_for(
+            r#"
+[[partition]]
+name = "duplicate"
+provider = "split_llcs"
+parts = 2
+
+[[partition]]
+name = "duplicate"
+provider = "split_llcs"
+parts = 3
+
+[[rung]]
+operation = "pick_idle"
+scope = "duplicate"
+"#,
+        );
+        assert!(duplicate_name.contains("duplicate name `duplicate`"));
     }
 
     #[test]

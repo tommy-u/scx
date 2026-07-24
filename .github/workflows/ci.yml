@@ -277,9 +277,9 @@ jobs:
                 echo "scx_snake never became the active scheduler"
                 rc=1
               fi
-              if ! jq -s -e 'any(.[]; .direct_dispatches > 0 and .rungs["1"].attempts > 0 and .rungs["1"].hits > 0)' \
+              if ! jq -s -e 'any(.[]; .direct_dispatches > 0 and .rungs["1"].scope == "previous_llc_half" and .rungs["1"].hits > 0 and .rungs["2"].scope == "previous_llc" and .rungs["2"].attempts > 0)' \
                 "$stats_file" >/dev/null; then
-                echo "scx_snake did not report direct dispatches and LLC rung hits"
+                echo "scx_snake did not report ordered sub-LLC and LLC placement activity"
                 cat "$stats_file"
                 rc=1
               fi
