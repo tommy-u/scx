@@ -195,8 +195,12 @@ fn install_mask_tables(skel: &mut BpfSkel<'_>, tables: &[ResolvedMaskTable]) -> 
     Ok(())
 }
 
-fn operation_label(operation: Opcode) -> &'static str {
-    match operation {
+fn operation_label(rung: &CompiledRung) -> &'static str {
+    if rung.flags & policy::RUNG_FLAG_PICK_IDLE_CORE != 0 {
+        return "pick_idle_core";
+    }
+
+    match rung.opcode {
         Opcode::ClaimIdle => "claim_idle",
         Opcode::PickIdle | Opcode::PickIdleMaskTable => "pick_idle",
         Opcode::PickRandomIdle => "pick_random_idle",
@@ -280,7 +284,7 @@ fn aggregate_raw_stats(raw: &[Vec<Vec<u8>>], policy: &CompiledPolicy) -> Result<
                 index_u32,
                 RungMetrics {
                     index: index_u32,
-                    operation: operation_label(rung.opcode).into(),
+                    operation: operation_label(rung).into(),
                     scope: scope_label(policy, rung)?.into(),
                     attempts: value(bpf_intf::snake_stat_SNAKE_STAT_RUNG_ATTEMPT_BASE + index_u32),
                     hits: value(bpf_intf::snake_stat_SNAKE_STAT_RUNG_HIT_BASE + index_u32),
@@ -586,6 +590,28 @@ scope = "previous_llc"
     }
 
     #[test]
+    fn rust_whole_core_instruction_matches_the_bpf_abi() {
+        let compiled = policy::compile_policy(
+            r#"
+[[rung]]
+operation = "pick_idle_core"
+scope = "previous_llc"
+"#,
+        )
+        .expect("policy should compile");
+        let encoded = encode_rung(compiled.rungs[0]);
+
+        assert_eq!(
+            encoded.opcode,
+            bpf_intf::snake_opcode_SNAKE_OP_PICK_IDLE_MASK_TABLE
+        );
+        assert_eq!(
+            encoded.flags,
+            bpf_intf::SNAKE_RUNG_F_INTERSECT_TASK_ALLOWED | bpf_intf::SNAKE_RUNG_F_PICK_IDLE_CORE
+        );
+    }
+
+    #[test]
     fn rust_random_idle_policy_matches_the_bpf_abi() {
         let compiled = policy::compile_policy(
             r#"
@@ -739,5 +765,23 @@ scope = "previous_llc"
 
         assert_eq!(metrics.rungs[&0].scope, "previous_llc_half");
         assert_eq!(metrics.rungs[&1].scope, "previous_llc");
+    }
+
+    #[test]
+    fn labels_whole_core_idle_stats_separately() {
+        let policy = policy::compile_policy(
+            r#"
+[[rung]]
+operation = "pick_idle_core"
+scope = "previous_llc"
+"#,
+        )
+        .expect("policy should compile");
+
+        let metrics =
+            aggregate_raw_stats(&raw_percpu_stats(), &policy).expect("stats should aggregate");
+
+        assert_eq!(metrics.rungs[&0].operation, "pick_idle_core");
+        assert_eq!(metrics.rungs[&0].scope, "previous_llc");
     }
 }

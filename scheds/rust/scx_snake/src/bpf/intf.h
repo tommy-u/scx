@@ -8,12 +8,13 @@ typedef unsigned int	   u32;
 typedef unsigned long long u64;
 #endif
 
-#define SNAKE_ABI_VERSION 3
+#define SNAKE_ABI_VERSION 4
 #define SNAKE_MAX_RUNGS 8
 #define SNAKE_MAX_CPUS 1024
 #define SNAKE_MASK_BYTES (SNAKE_MAX_CPUS / 8)
 #define SNAKE_MAX_MASK_TABLES 4
 #define SNAKE_RUNG_F_INTERSECT_TASK_ALLOWED (1U << 0)
+#define SNAKE_RUNG_F_PICK_IDLE_CORE (1U << 1)
 
 /* Stable operation codes shared by the userspace compiler and BPF. */
 enum snake_opcode {

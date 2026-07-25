@@ -25,6 +25,9 @@ The semantic vocabulary includes:
   allowed and idle.
 - `pick_idle(task_allowed)` searches the task's allowed CPU mask for an idle
   CPU.
+- `pick_idle_core(scope)` searches the selected scope for a CPU whose entire
+  physical core is idle, including all SMT siblings. It supports
+  `task_allowed`, `previous_llc`, and named partition scopes.
 - `pick_random_idle(task_allowed)` uniformly chooses from the task's allowed
   idle CPUs. If none are idle, the rung misses without direct dispatch.
 - `pick_idle(previous_llc)` searches the intersection of the task's allowed
@@ -72,9 +75,11 @@ and eight rungs; unsupported operation/scope pairs are rejected before BPF is
 attached.
 
 See [`examples/basic.toml`](examples/basic.toml) for the complete initial
-policy and [`examples/llc.toml`](examples/llc.toml) for the LLC-aware ladder.
-The latter declares `previous_llc_half` with `split_llcs` and tries that scope
-before the complete previous-LLC scope.
+policy, [`examples/llc.toml`](examples/llc.toml) for the LLC-aware ladder, and
+[`examples/llc-whole-core.toml`](examples/llc-whole-core.toml) for preferring a
+wholly idle core before any idle CPU in the previous LLC. The sub-LLC example
+declares `previous_llc_half` with `split_llcs` and tries that scope before the
+complete previous-LLC scope.
 
 The exhaustion fallback defaults to `previous_cpu`. Policies can instead set
 `fallback = "any_allowed"` to return a distributed affinity-safe CPU hint and

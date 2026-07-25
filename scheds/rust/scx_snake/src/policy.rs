@@ -8,6 +8,7 @@ use serde::Deserialize;
 pub const MAX_RUNGS: usize = 8;
 pub const MAX_MASK_TABLES: usize = 4;
 pub const RUNG_FLAG_INTERSECT_TASK_ALLOWED: u32 = 1;
+pub const RUNG_FLAG_PICK_IDLE_CORE: u32 = 1 << 1;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u32)]
@@ -265,17 +266,25 @@ fn compile_rung(
             "rung {index}: operation `{}` is incompatible with scope `{}`",
             rung.operation, rung.scope
         ))),
-        "pick_idle" if rung.scope == "task_allowed" => Ok(CompiledRung {
-            opcode: Opcode::PickIdle,
-            input: InputSource::MaskTaskAllowed,
-            flags: 0,
-            data: 0,
-        }),
-        "pick_idle" if rung.scope == "previous_cpu" => Err(PolicyError(format!(
-            "rung {index}: operation `{}` is incompatible with scope `{}`",
-            rung.operation, rung.scope
-        ))),
-        "pick_idle" => {
+        operation @ ("pick_idle" | "pick_idle_core") if rung.scope == "task_allowed" => {
+            Ok(CompiledRung {
+                opcode: Opcode::PickIdle,
+                input: InputSource::MaskTaskAllowed,
+                flags: if operation == "pick_idle_core" {
+                    RUNG_FLAG_PICK_IDLE_CORE
+                } else {
+                    0
+                },
+                data: 0,
+            })
+        }
+        "pick_idle" | "pick_idle_core" if rung.scope == "previous_cpu" => {
+            Err(PolicyError(format!(
+                "rung {index}: operation `{}` is incompatible with scope `{}`",
+                rung.operation, rung.scope
+            )))
+        }
+        operation @ ("pick_idle" | "pick_idle_core") => {
             let source = if rung.scope == "previous_llc" {
                 MaskTableSource::PreviousLlcByCpu
             } else {
@@ -304,7 +313,12 @@ fn compile_rung(
             Ok(CompiledRung {
                 opcode: Opcode::PickIdleMaskTable,
                 input: InputSource::CpuPrev,
-                flags: RUNG_FLAG_INTERSECT_TASK_ALLOWED,
+                flags: RUNG_FLAG_INTERSECT_TASK_ALLOWED
+                    | if operation == "pick_idle_core" {
+                        RUNG_FLAG_PICK_IDLE_CORE
+                    } else {
+                        0
+                    },
                 data: table_id.into(),
             })
         }
@@ -339,6 +353,16 @@ scope = "task_allowed"
 "#;
 
     const PREVIOUS_LLC_POLICY: &str = r#"
+[[rung]]
+operation = "pick_idle"
+scope = "previous_llc"
+"#;
+
+    const WHOLE_CORE_LLC_POLICY: &str = r#"
+[[rung]]
+operation = "pick_idle_core"
+scope = "previous_llc"
+
 [[rung]]
 operation = "pick_idle"
 scope = "previous_llc"
@@ -417,6 +441,31 @@ scope = "task_allowed"
                 source: MaskTableSource::PreviousLlcByCpu,
             }]
         );
+    }
+
+    #[test]
+    fn lowers_whole_core_idle_before_any_idle_in_previous_llc() {
+        let policy = compile_policy(WHOLE_CORE_LLC_POLICY).expect("policy should compile");
+
+        assert_eq!(
+            policy.rungs,
+            vec![
+                CompiledRung {
+                    opcode: Opcode::PickIdleMaskTable,
+                    input: InputSource::CpuPrev,
+                    flags: RUNG_FLAG_INTERSECT_TASK_ALLOWED | RUNG_FLAG_PICK_IDLE_CORE,
+                    data: 0,
+                },
+                CompiledRung {
+                    opcode: Opcode::PickIdleMaskTable,
+                    input: InputSource::CpuPrev,
+                    flags: RUNG_FLAG_INTERSECT_TASK_ALLOWED,
+                    data: 0,
+                },
+            ]
+        );
+        assert_eq!(policy.mask_tables.len(), 1);
+        assert_eq!(policy.mask_tables[0].name, "previous_llc");
     }
 
     #[test]

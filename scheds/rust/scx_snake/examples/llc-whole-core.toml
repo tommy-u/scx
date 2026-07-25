@@ -1,0 +1,15 @@
+[[rung]]
+operation = "claim_idle"
+scope = "previous_cpu"
+
+[[rung]]
+operation = "pick_idle_core"
+scope = "previous_llc"
+
+[[rung]]
+operation = "pick_idle"
+scope = "previous_llc"
+
+[[rung]]
+operation = "pick_idle"
+scope = "task_allowed"

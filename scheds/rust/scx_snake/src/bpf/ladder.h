@@ -45,13 +45,17 @@ static __always_inline bool rung_is_valid(const struct snake_rung *rung)
 
 	return (rung->opcode == SNAKE_OP_CLAIM_IDLE && !rung->flags &&
 		rung->input == SNAKE_INPUT_CPU_PREV && !rung->data) ||
-	       (rung->opcode == SNAKE_OP_PICK_IDLE && !rung->flags &&
+	       (rung->opcode == SNAKE_OP_PICK_IDLE &&
+		(rung->flags == 0 ||
+		 rung->flags == SNAKE_RUNG_F_PICK_IDLE_CORE) &&
 		rung->input == SNAKE_INPUT_MASK_TASK_ALLOWED && !rung->data) ||
 	       (rung->opcode == SNAKE_OP_PICK_RANDOM_IDLE && !rung->flags &&
 		rung->input == SNAKE_INPUT_MASK_TASK_ALLOWED && !rung->data) ||
 	       (rung->opcode == SNAKE_OP_PICK_IDLE_MASK_TABLE &&
 		rung->input == SNAKE_INPUT_CPU_PREV &&
-		rung->flags == SNAKE_RUNG_F_INTERSECT_TASK_ALLOWED &&
+		(rung->flags == SNAKE_RUNG_F_INTERSECT_TASK_ALLOWED ||
+		 rung->flags == (SNAKE_RUNG_F_INTERSECT_TASK_ALLOWED |
+				 SNAKE_RUNG_F_PICK_IDLE_CORE)) &&
 		rung->data < nr_mask_tables);
 }
 
@@ -69,12 +73,19 @@ static __always_inline s32 execute_rung(const struct task_struct *p,
 			return prev_cpu;
 		break;
 	case SNAKE_OP_PICK_IDLE:
-		prev_cpu = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
+		prev_cpu = scx_bpf_pick_idle_cpu(
+			p->cpus_ptr, rung->flags & SNAKE_RUNG_F_PICK_IDLE_CORE ?
+					     SCX_PICK_IDLE_CORE :
+					     0);
 		return prev_cpu < 0 ? -ENOENT : prev_cpu;
 	case SNAKE_OP_PICK_RANDOM_IDLE:
 		return pick_random_idle(p);
 	case SNAKE_OP_PICK_IDLE_MASK_TABLE:
-		return pick_idle_from_mask_table(p, rung->data, prev_cpu);
+		if (rung->flags & SNAKE_RUNG_F_PICK_IDLE_CORE)
+			return pick_idle_core_from_mask_table(p, rung->data,
+							      prev_cpu);
+		return pick_idle_from_mask_table(p, rung->data, prev_cpu,
+						 p->cpus_ptr);
 	default:
 		break;
 	}

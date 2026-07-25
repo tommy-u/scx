@@ -130,7 +130,8 @@ static __always_inline int init_mask_tables(void)
 
 /* Pick from a table mask intersected with the task's dynamic affinity mask. */
 static __always_inline s32
-pick_idle_from_mask_table(const struct task_struct *p, u32 table_id, s32 key)
+pick_idle_from_mask_table(const struct task_struct *p, u32 table_id, s32 key,
+			  const struct cpumask *eligible)
 {
 	struct bpf_cpumask     *table_mask;
 	struct snake_mask_slot *slot;
@@ -160,13 +161,30 @@ pick_idle_from_mask_table(const struct task_struct *p, u32 table_id, s32 key)
 			cpu -= nr_cpu_ids;
 		if (!bpf_cpumask_test_cpu(cpu,
 					  (const struct cpumask *)table_mask) ||
-		    !bpf_cpumask_test_cpu(cpu, p->cpus_ptr))
+		    !bpf_cpumask_test_cpu(cpu, p->cpus_ptr) ||
+		    !bpf_cpumask_test_cpu(cpu, eligible))
 			continue;
 		if (scx_bpf_test_and_clear_cpu_idle(cpu))
 			return cpu;
 	}
 
 	return -ENOENT;
+}
+
+/* Pick from a table only when every SMT sibling of the CPU is idle. */
+static __always_inline s32 pick_idle_core_from_mask_table(
+	const struct task_struct *p, u32 table_id, s32 key)
+{
+	const struct cpumask *idle_smt;
+	s32		      cpu;
+
+	idle_smt = scx_bpf_get_idle_smtmask();
+	if (!idle_smt)
+		return -EINVAL;
+
+	cpu = pick_idle_from_mask_table(p, table_id, key, idle_smt);
+	scx_bpf_put_idle_cpumask(idle_smt);
+	return cpu;
 }
 
 #endif /* __SCX_SNAKE_MASK_TABLE_H */
