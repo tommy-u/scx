@@ -410,6 +410,8 @@ fn intern_mask_table(
 mod tests {
     use super::*;
 
+    const KERNEL_DEFAULT_SIM_POLICY: &str = include_str!("../examples/kernel-default-sim.toml");
+
     const TWO_RUNG_POLICY: &str = r#"
 [[rung]]
 operation = "claim_idle"
@@ -677,6 +679,82 @@ scope = "task_allowed"
             vec![
                 (0, "previous_llc", MaskTableSource::PreviousLlcByCpu),
                 (1, "previous_node", MaskTableSource::PreviousNodeByCpu),
+            ]
+        );
+    }
+
+    #[test]
+    fn golden_kernel_default_simulation_uses_eight_rungs_and_two_tables() {
+        let policy =
+            compile_policy(KERNEL_DEFAULT_SIM_POLICY).expect("simulation policy should compile");
+
+        assert_eq!(policy.fallback, Fallback::PreviousCpu);
+        assert_eq!(
+            policy.rungs,
+            vec![
+                CompiledRung {
+                    opcode: Opcode::SyncWakeAffine,
+                    input: InputSource::MaskTaskAllowed,
+                    flags: 0,
+                    data: 1_u64 << 32,
+                },
+                CompiledRung {
+                    opcode: Opcode::PickIdleMaskTable,
+                    input: InputSource::CpuPrev,
+                    flags: RUNG_FLAG_INTERSECT_TASK_ALLOWED | RUNG_FLAG_PICK_IDLE_CORE,
+                    data: 0,
+                },
+                CompiledRung {
+                    opcode: Opcode::PickIdleMaskTable,
+                    input: InputSource::CpuPrev,
+                    flags: RUNG_FLAG_INTERSECT_TASK_ALLOWED | RUNG_FLAG_PICK_IDLE_CORE,
+                    data: 1,
+                },
+                CompiledRung {
+                    opcode: Opcode::PickIdle,
+                    input: InputSource::MaskTaskAllowed,
+                    flags: RUNG_FLAG_PICK_IDLE_CORE,
+                    data: 0,
+                },
+                CompiledRung {
+                    opcode: Opcode::ClaimIdle,
+                    input: InputSource::CpuPrev,
+                    flags: 0,
+                    data: 0,
+                },
+                CompiledRung {
+                    opcode: Opcode::PickIdleMaskTable,
+                    input: InputSource::CpuPrev,
+                    flags: RUNG_FLAG_INTERSECT_TASK_ALLOWED,
+                    data: 0,
+                },
+                CompiledRung {
+                    opcode: Opcode::PickIdleMaskTable,
+                    input: InputSource::CpuPrev,
+                    flags: RUNG_FLAG_INTERSECT_TASK_ALLOWED,
+                    data: 1,
+                },
+                CompiledRung {
+                    opcode: Opcode::PickIdle,
+                    input: InputSource::MaskTaskAllowed,
+                    flags: 0,
+                    data: 0,
+                },
+            ]
+        );
+        assert_eq!(
+            policy.mask_tables,
+            vec![
+                MaskTableSpec {
+                    id: 0,
+                    name: "previous_llc".into(),
+                    source: MaskTableSource::PreviousLlcByCpu,
+                },
+                MaskTableSpec {
+                    id: 1,
+                    name: "previous_node".into(),
+                    source: MaskTableSource::PreviousNodeByCpu,
+                },
             ]
         );
     }

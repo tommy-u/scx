@@ -99,6 +99,14 @@ control policy using the kernel-default terminal rung. Its behavior can vary
 with the running kernel, and Snake reports only aggregate rung hits and misses;
 the kernel's internal topology decision is opaque.
 
+[`examples/kernel-default-sim.toml`](examples/kernel-default-sim.toml)
+approximates that placement policy with eight explicit rungs. Unlike the
+kernel-default control, it exposes separate sync-wake, LLC, NUMA-node,
+whole-core, previous-CPU, and global-idle hit rates. The remaining known gap is
+distance-ordered remote NUMA traversal: after the previous-node rungs miss, the
+simulation searches all task-allowed CPUs instead of visiting other nodes by
+increasing NUMA distance.
+
 The exhaustion fallback defaults to `previous_cpu`. Policies can instead set
 `fallback = "any_allowed"` to return a distributed affinity-safe CPU hint and
 leave actual queue placement to `enqueue`. See

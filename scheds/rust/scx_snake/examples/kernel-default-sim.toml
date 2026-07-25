@@ -1,0 +1,33 @@
+fallback = "previous_cpu"
+
+[[rung]]
+operation = "sync_wake_affine"
+scope = "task_allowed"
+
+[[rung]]
+operation = "pick_idle_core"
+scope = "previous_llc"
+
+[[rung]]
+operation = "pick_idle_core"
+scope = "previous_node"
+
+[[rung]]
+operation = "pick_idle_core"
+scope = "task_allowed"
+
+[[rung]]
+operation = "claim_idle"
+scope = "previous_cpu"
+
+[[rung]]
+operation = "pick_idle"
+scope = "previous_llc"
+
+[[rung]]
+operation = "pick_idle"
+scope = "previous_node"
+
+[[rung]]
+operation = "pick_idle"
+scope = "task_allowed"
