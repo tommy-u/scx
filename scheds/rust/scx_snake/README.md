@@ -1,5 +1,7 @@
 # scx_snake
 
+[![Snakes and Ladders board](https://commons.wikimedia.org/wiki/Special:Redirect/file/Snakes_and_Ladders.jpg?width=720)](https://en.wikipedia.org/wiki/File:Snakes_and_Ladders.jpg)
+
 `scx_snake` is a minimal Rust `sched_ext` scheduler for experimenting with
 declarative scheduling policy. It intentionally keeps task scheduling simple so
 that the userspace-to-BPF policy interface is the part under study.
@@ -93,6 +95,28 @@ targets a non-idle CPU, using a preemptive handoff.
 Userspace owns policy and topology. It converts LLCs, NUMA nodes, and optional
 `split_llcs` partitions into generic CPU-keyed mask tables. The BPF side knows
 only how to walk instructions and operate on those masks.
+
+### Userspace lowering
+
+The TOML ladder is a userspace language, not the BPF ABI. Before attach or
+update, Rust validates each operation/scope pair, assigns reusable mask-table
+IDs, resolves topology into CPU masks, and lowers every rung to a fixed record:
+
+```text
+{ opcode, input, flags, data }
+```
+
+For example, `pick_idle_core(previous_llc)` becomes
+`pick_idle_mask_table(cpu_prev, intersect_task_allowed | pick_idle_core,
+previous_llc_table_id)`. The words LLC and NUMA never reach BPF; they have
+already become table IDs and masks.
+
+The backend command set is deliberately small: `claim_idle`, `pick_idle`,
+`pick_idle_mask_table`, `pick_random_idle`, `kernel_default`, and
+`sync_wake_affine`. Inputs select either `cpu_prev` or the task's allowed mask;
+flags refine the operation, and `data` carries mask-table IDs. Userspace writes
+the compiled ladder and masks into an inactive BPF map slot, asks BPF to
+validate it, then atomically makes that slot active.
 
 A successful rung dispatches directly to the selected CPU's local DSQ and
 skips `enqueue`. If all rungs miss, Snake returns an affinity-safe fallback CPU
