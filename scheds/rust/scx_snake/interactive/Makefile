@@ -1,0 +1,89 @@
+SHELL := /usr/bin/env bash
+.DEFAULT_GOAL := help
+
+SNAKE_DIR := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))/..)
+REPO_ROOT := $(abspath $(SNAKE_DIR)/../../..)
+POLICY_DIR := $(SNAKE_DIR)/examples
+SNAKE_BIN := $(REPO_ROOT)/target/release/scx_snake
+HEATMAP_MANIFEST := $(REPO_ROOT)/tools/scx_snake_heatmap/Cargo.toml
+HEATMAP_BIN := $(REPO_ROOT)/tools/scx_snake_heatmap/target/release/scx_snake_heatmap
+
+SUDO ?= sudo
+POLICY ?= kernel-default-sim
+STATS ?= 1
+LISTEN ?= 127.0.0.1:8787
+WINDOW ?= 10s
+MAX_WINDOW ?= 5m
+
+POLICIES := basic kernel-default-sim kernel-default llc llc-whole-core previous-only random-idle
+SWITCH_TARGETS := $(addprefix switch-,$(POLICIES))
+
+GREEN := \033[0;32m
+BOLD_GREEN := \033[1;32m
+YELLOW := \033[0;33m
+BLUE := \033[0;34m
+CYAN := \033[0;36m
+WHITE := \033[1;37m
+NC := \033[0m
+
+.PHONY: help build-snake start stop build-heatmap heatmap $(SWITCH_TARGETS)
+
+help:
+	@printf "\n"
+	@printf "                $(CYAN)+-------------------------------+$(NC)\n"
+	@printf "                $(CYAN)|$(WHITE)%-31s$(CYAN)|$(NC)\n" "           scx_snake"
+	@printf "                $(CYAN)|$(GREEN)%-21s$(YELLOW)%-4s$(CYAN)%-6s|$(NC)\n" '      ______' '|--|' ''
+	@printf "                $(CYAN)|$(GREEN)%-21s$(YELLOW)%-4s$(CYAN)%-6s|$(NC)\n" '    /  o   \__>~' '|  |' ''
+	@printf "                $(CYAN)|$(GREEN)%-21s$(YELLOW)%-4s$(CYAN)%-6s|$(NC)\n" "   /           \\" '|--|' ''
+	@printf "                $(CYAN)|$(GREEN)%-21s$(YELLOW)%-4s$(CYAN)%-6s|$(NC)\n" '   \           /' '|  |' ''
+	@printf "                $(CYAN)|$(GREEN)%-21s$(YELLOW)%-4s$(CYAN)%-6s|$(NC)\n" "    \_____     \\" '|--|' ''
+	@printf "                $(CYAN)|$(GREEN)%-21s$(YELLOW)%-4s$(CYAN)%-6s|$(NC)\n" "          \     \\" '|  |' ''
+	@printf "                $(CYAN)|$(GREEN)%-21s$(YELLOW)%-4s$(CYAN)%-6s|$(NC)\n" '    ______/     /' '|--|' ''
+	@printf "                $(CYAN)|$(GREEN)%-21s$(YELLOW)%-4s$(CYAN)%-6s|$(NC)\n" '   /___________/' '|  |' ''
+	@printf "                $(CYAN)+-------------------------------+$(NC)\n"
+	@printf "              $(WHITE)declarative sched_ext policy playground$(NC)\n\n"
+	@printf "$(BLUE)Scheduler$(NC)\n"
+	@printf "  $(YELLOW)*$(NC) $(GREEN)%-31s$(NC) %s\n" "start" "Start Snake (POLICY=kernel-default-sim)"
+	@printf "  $(YELLOW)*$(NC) $(GREEN)%-31s$(NC) %s\n" "stop" "Stop Snake gracefully"
+	@printf "\n$(BLUE)Live policy switches$(NC)\n"
+	@printf "    $(GREEN)%-31s$(NC) %s\n" "switch-basic" "Minimal previous-CPU policy"
+	@printf "    $(GREEN)%-31s$(NC) %s\n" "switch-kernel-default-sim" "Eight-rung userspace simulation"
+	@printf "    $(GREEN)%-31s$(NC) %s\n" "switch-kernel-default" "Kernel default selector"
+	@printf "    $(GREEN)%-31s$(NC) %s\n" "switch-llc" "Sub-LLC then whole-LLC placement"
+	@printf "    $(GREEN)%-31s$(NC) %s\n" "switch-llc-whole-core" "Whole-core LLC placement"
+	@printf "    $(GREEN)%-31s$(NC) %s\n" "switch-previous-only" "Previous CPU only"
+	@printf "    $(GREEN)%-31s$(NC) %s\n" "switch-random-idle" "Random allowed idle CPU"
+	@printf "\n$(BLUE)Visualization$(NC)\n"
+	@printf "  $(YELLOW)*$(NC) $(GREEN)%-31s$(NC) %s\n" "heatmap" "Start http://$(LISTEN)"
+	@printf "\n$(BLUE)Configuration$(NC)\n"
+	@printf "  $(YELLOW)POLICY$(NC), $(YELLOW)STATS$(NC), $(YELLOW)LISTEN$(NC), $(YELLOW)WINDOW$(NC), $(YELLOW)MAX_WINDOW$(NC), $(YELLOW)SUDO$(NC)\n\n"
+
+build-snake:
+	cargo build --release -p scx_snake --manifest-path "$(REPO_ROOT)/Cargo.toml"
+
+$(SNAKE_BIN):
+	$(MAKE) build-snake
+
+start: build-snake
+	@test -f "$(POLICY_DIR)/$(POLICY).toml" || { \
+	  echo "unknown policy: $(POLICY)" >&2; \
+	  exit 1; \
+	}
+	$(SUDO) "$(SNAKE_BIN)" --policy "$(POLICY_DIR)/$(POLICY).toml" --stats "$(STATS)"
+
+stop:
+	@if $(SUDO) pkill -INT -x scx_snake; then \
+	  printf "$(GREEN)Snake stopped$(NC)\n"; \
+	else \
+	  printf "$(YELLOW)Snake is not running$(NC)\n"; \
+	fi
+
+$(SWITCH_TARGETS): switch-%: $(SNAKE_BIN)
+	@printf "Activating policy: $(BOLD_GREEN)%s$(NC)\n" "$*"
+	@$(SUDO) "$(SNAKE_BIN)" --update-policy "$(POLICY_DIR)/$*.toml"
+
+build-heatmap:
+	cargo build --release --manifest-path "$(HEATMAP_MANIFEST)"
+
+heatmap: build-heatmap
+	$(SUDO) "$(HEATMAP_BIN)" --listen "$(LISTEN)" --window "$(WINDOW)" --max-window "$(MAX_WINDOW)"
