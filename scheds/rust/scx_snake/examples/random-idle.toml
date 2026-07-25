@@ -1,0 +1,5 @@
+fallback = "any_allowed"
+
+[[rung]]
+operation = "pick_random_idle"
+scope = "task_allowed"

@@ -15,6 +15,7 @@ pub enum Opcode {
     ClaimIdle = 1,
     PickIdle = 2,
     PickIdleMaskTable = 3,
+    PickRandomIdle = 4,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -35,8 +36,16 @@ pub struct CompiledRung {
 
 #[derive(Debug, Eq, PartialEq)]
 pub struct CompiledPolicy {
+    pub fallback: Fallback,
     pub rungs: Vec<CompiledRung>,
     pub mask_tables: Vec<MaskTableSpec>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum Fallback {
+    PreviousCpu = 1,
+    AnyAllowed = 2,
 }
 
 /// Userspace source that materializes a topology-blind mask table for BPF.
@@ -56,19 +65,33 @@ pub struct MaskTableSpec {
 
 impl CompiledPolicy {
     pub fn dump(&self) -> String {
-        self.rungs
-            .iter()
-            .enumerate()
-            .map(|(index, rung)| {
-                format!(
-                    "rung {index}: opcode={} input={} flags={:#010x} data={:#018x}\n",
-                    rung.opcode.as_str(),
-                    rung.input.as_str(),
-                    rung.flags,
-                    rung.data,
-                )
-            })
-            .collect()
+        let mut output = format!("fallback: {}\n", self.fallback.as_str());
+        output.push_str(
+            &self
+                .rungs
+                .iter()
+                .enumerate()
+                .map(|(index, rung)| {
+                    format!(
+                        "rung {index}: opcode={} input={} flags={:#010x} data={:#018x}\n",
+                        rung.opcode.as_str(),
+                        rung.input.as_str(),
+                        rung.flags,
+                        rung.data,
+                    )
+                })
+                .collect::<String>(),
+        );
+        output
+    }
+}
+
+impl Fallback {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::PreviousCpu => "previous_cpu",
+            Self::AnyAllowed => "any_allowed",
+        }
     }
 }
 
@@ -78,6 +101,7 @@ impl Opcode {
             Self::ClaimIdle => "claim_idle",
             Self::PickIdle => "pick_idle",
             Self::PickIdleMaskTable => "pick_idle_mask_table",
+            Self::PickRandomIdle => "pick_random_idle",
         }
     }
 }
@@ -105,6 +129,7 @@ impl std::error::Error for PolicyError {}
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SemanticPolicy {
+    fallback: Option<String>,
     #[serde(default)]
     partition: Vec<SemanticPartition>,
     #[serde(default)]
@@ -139,6 +164,16 @@ pub fn compile_policy(source: &str) -> Result<CompiledPolicy, PolicyError> {
         )));
     }
 
+    let fallback = match policy.fallback.as_deref() {
+        None | Some("previous_cpu") => Fallback::PreviousCpu,
+        Some("any_allowed") => Fallback::AnyAllowed,
+        Some(fallback) => {
+            return Err(PolicyError(format!(
+                "unknown fallback `{fallback}`; expected `previous_cpu` or `any_allowed`"
+            )))
+        }
+    };
+
     let partitions = compile_partitions(&policy.partition)?;
     let mut mask_tables = Vec::new();
     let mut rungs = Vec::with_capacity(policy.rung.len());
@@ -146,7 +181,11 @@ pub fn compile_policy(source: &str) -> Result<CompiledPolicy, PolicyError> {
         rungs.push(compile_rung(index, rung, &partitions, &mut mask_tables)?);
     }
 
-    Ok(CompiledPolicy { rungs, mask_tables })
+    Ok(CompiledPolicy {
+        fallback,
+        rungs,
+        mask_tables,
+    })
 }
 
 fn compile_partitions(
@@ -269,6 +308,16 @@ fn compile_rung(
                 data: table_id.into(),
             })
         }
+        "pick_random_idle" if rung.scope == "task_allowed" => Ok(CompiledRung {
+            opcode: Opcode::PickRandomIdle,
+            input: InputSource::MaskTaskAllowed,
+            flags: 0,
+            data: 0,
+        }),
+        "pick_random_idle" => Err(PolicyError(format!(
+            "rung {index}: operation `{}` is incompatible with scope `{}`",
+            rung.operation, rung.scope
+        ))),
         operation => Err(PolicyError(format!(
             "rung {index}: unknown operation `{operation}`"
         ))),
@@ -308,6 +357,14 @@ scope = "previous_llc_half"
 [[rung]]
 operation = "pick_idle"
 scope = "previous_llc"
+"#;
+
+    const RANDOM_IDLE_POLICY: &str = r#"
+fallback = "any_allowed"
+
+[[rung]]
+operation = "pick_random_idle"
+scope = "task_allowed"
 "#;
 
     fn error_for(source: &str) -> String {
@@ -398,6 +455,30 @@ scope = "previous_llc"
                 },
             ]
         );
+    }
+
+    #[test]
+    fn lowers_random_idle_with_a_neutral_fallback() {
+        let policy = compile_policy(RANDOM_IDLE_POLICY).expect("policy should compile");
+
+        assert_eq!(policy.fallback, Fallback::AnyAllowed);
+        assert_eq!(
+            policy.rungs,
+            vec![CompiledRung {
+                opcode: Opcode::PickRandomIdle,
+                input: InputSource::MaskTaskAllowed,
+                flags: 0,
+                data: 0,
+            }]
+        );
+        assert!(policy.mask_tables.is_empty());
+    }
+
+    #[test]
+    fn defaults_existing_policies_to_previous_cpu_fallback() {
+        let policy = compile_policy(TWO_RUNG_POLICY).expect("policy should compile");
+
+        assert_eq!(policy.fallback, Fallback::PreviousCpu);
     }
 
     #[test]
@@ -566,12 +647,28 @@ scope = "duplicate"
     }
 
     #[test]
+    fn rejects_unknown_fallbacks() {
+        let error = error_for(
+            r#"
+fallback = "nearest_moon"
+
+[[rung]]
+operation = "pick_idle"
+scope = "task_allowed"
+"#,
+        );
+
+        assert!(error.contains("unknown fallback `nearest_moon`"));
+    }
+
+    #[test]
     fn dumps_compiled_instructions() {
         let policy = compile_policy(TWO_RUNG_POLICY).expect("policy should compile");
 
         assert_eq!(
             policy.dump(),
             concat!(
+                "fallback: previous_cpu\n",
                 "rung 0: opcode=claim_idle input=cpu_prev flags=0x00000000 data=0x0000000000000000\n",
                 "rung 1: opcode=pick_idle input=mask_task_allowed flags=0x00000000 data=0x0000000000000000\n",
             )

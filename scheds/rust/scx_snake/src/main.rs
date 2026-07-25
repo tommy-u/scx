@@ -157,6 +157,7 @@ fn install_policy(rodata: &mut bpf_skel::types::rodata, policy: &CompiledPolicy)
         .len()
         .try_into()
         .context("mask table count does not fit the BPF ABI")?;
+    rodata.fallback_mode = policy.fallback as u32;
 
     for (destination, rung) in rodata.rungs.iter_mut().zip(&policy.rungs) {
         let encoded = encode_rung(*rung);
@@ -198,6 +199,7 @@ fn operation_label(operation: Opcode) -> &'static str {
     match operation {
         Opcode::ClaimIdle => "claim_idle",
         Opcode::PickIdle | Opcode::PickIdleMaskTable => "pick_idle",
+        Opcode::PickRandomIdle => "pick_random_idle",
     }
 }
 
@@ -580,6 +582,36 @@ scope = "previous_llc"
         assert_eq!(
             policy::MAX_MASK_TABLES as u32,
             bpf_intf::SNAKE_MAX_MASK_TABLES
+        );
+    }
+
+    #[test]
+    fn rust_random_idle_policy_matches_the_bpf_abi() {
+        let compiled = policy::compile_policy(
+            r#"
+fallback = "any_allowed"
+
+[[rung]]
+operation = "pick_random_idle"
+scope = "task_allowed"
+"#,
+        )
+        .expect("policy should compile");
+        let encoded = encode_rung(compiled.rungs[0]);
+
+        assert_eq!(
+            encoded.opcode,
+            bpf_intf::snake_opcode_SNAKE_OP_PICK_RANDOM_IDLE
+        );
+        assert_eq!(
+            encoded.input,
+            bpf_intf::snake_input_source_SNAKE_INPUT_MASK_TASK_ALLOWED
+        );
+        assert_eq!(encoded.flags, 0);
+        assert_eq!(encoded.data, 0);
+        assert_eq!(
+            compiled.fallback as u32,
+            bpf_intf::snake_fallback_SNAKE_FALLBACK_ANY_ALLOWED
         );
     }
 

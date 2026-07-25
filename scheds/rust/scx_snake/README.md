@@ -25,6 +25,8 @@ The semantic vocabulary includes:
   allowed and idle.
 - `pick_idle(task_allowed)` searches the task's allowed CPU mask for an idle
   CPU.
+- `pick_random_idle(task_allowed)` uniformly chooses from the task's allowed
+  idle CPUs. If none are idle, the rung misses without direct dispatch.
 - `pick_idle(previous_llc)` searches the intersection of the task's allowed
   CPUs and the previous CPU's LLC mask. Userspace discovers LLC topology and
   lowers this semantic scope to a generic CPU-keyed mask-table lookup; BPF does
@@ -73,6 +75,11 @@ See [`examples/basic.toml`](examples/basic.toml) for the complete initial
 policy and [`examples/llc.toml`](examples/llc.toml) for the LLC-aware ladder.
 The latter declares `previous_llc_half` with `split_llcs` and tries that scope
 before the complete previous-LLC scope.
+
+The exhaustion fallback defaults to `previous_cpu`. Policies can instead set
+`fallback = "any_allowed"` to return a distributed affinity-safe CPU hint and
+leave actual queue placement to `enqueue`. See
+[`examples/random-idle.toml`](examples/random-idle.toml).
 
 ## Scheduling behavior
 

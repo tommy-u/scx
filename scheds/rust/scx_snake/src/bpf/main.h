@@ -9,6 +9,7 @@
 extern const volatile u32		policy_abi_version;
 extern const volatile u32		nr_rungs;
 extern const volatile u32		nr_mask_tables;
+extern const volatile u32		fallback_mode;
 extern const volatile struct snake_rung rungs[SNAKE_MAX_RUNGS];
 
 static u32				nr_cpu_ids;
@@ -59,7 +60,8 @@ static __always_inline s32 fallback_cpu(const struct task_struct *p,
 {
 	s32 cpu;
 
-	if (prev_cpu >= 0 && prev_cpu < nr_cpu_ids &&
+	if (fallback_mode == SNAKE_FALLBACK_PREVIOUS_CPU && prev_cpu >= 0 &&
+	    prev_cpu < nr_cpu_ids &&
 	    bpf_cpumask_test_cpu(prev_cpu, p->cpus_ptr)) {
 		stat_inc(SNAKE_STAT_FALLBACK_PREV);
 		return prev_cpu;
