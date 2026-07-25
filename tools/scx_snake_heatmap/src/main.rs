@@ -1,0 +1,184 @@
+// Copyright (c) Meta Platforms, Inc. and affiliates.
+//
+// This software may be used and distributed according to the terms of the
+// GNU General Public License version 2.
+
+use std::io::IsTerminal;
+use std::net::{IpAddr, SocketAddr};
+use std::sync::mpsc;
+use std::thread;
+
+use anyhow::{Context, Result};
+use clap::Parser;
+use scx_snake_heatmap::api::{router, ApiContext};
+use scx_snake_heatmap::cli::Args;
+use scx_snake_heatmap::collector::{run_collector, CollectorCommand, CollectorOptions};
+use scx_snake_heatmap::dashboard::Dashboard;
+use scx_snake_heatmap::topology::TopologyView;
+use tokio::net::TcpListener;
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let args = Args::parse();
+    args.validate().map_err(anyhow::Error::msg)?;
+    let initial_window_ms = args.window_ms().map_err(anyhow::Error::msg)?;
+    let max_window_ms = args.max_window_ms().map_err(anyhow::Error::msg)?;
+
+    let topology = TopologyView::discover()?;
+    let dashboard = Dashboard::new(topology, max_window_ms);
+    let token = session_token()?;
+    let (command_tx, command_rx) = mpsc::channel();
+
+    let collector_dashboard = dashboard.clone();
+    let collector = thread::Builder::new()
+        .name("snake-migration-collector".into())
+        .spawn(move || {
+            let result = run_collector(
+                collector_dashboard.clone(),
+                command_rx,
+                CollectorOptions::default(),
+            );
+            if let Err(error) = &result {
+                collector_dashboard.set_collector_health(Some(format!("{error:#}")), 0, 0);
+            }
+            result
+        })
+        .context("failed to start collector thread")?;
+
+    let context = ApiContext::new(
+        dashboard,
+        command_tx.clone(),
+        token,
+        "/sys/fs/cgroup".into(),
+    )
+    .with_initial_window_ms(initial_window_ms);
+    let listener = TcpListener::bind(args.listen)
+        .await
+        .with_context(|| format!("failed to bind dashboard to {}", args.listen))?;
+    let address = listener.local_addr()?;
+    println!(
+        "{}",
+        startup_message(
+            address,
+            &ssh_destination_from_environment(),
+            std::io::stdout().is_terminal(),
+        )
+    );
+
+    let server_result = axum::serve(listener, router(context))
+        .with_graceful_shutdown(shutdown_signal())
+        .await;
+    let _ = command_tx.send(CollectorCommand::Shutdown);
+    let collector_result = collector
+        .join()
+        .map_err(|_| anyhow::anyhow!("collector thread panicked"))?;
+
+    server_result.context("dashboard server failed")?;
+    collector_result
+}
+
+async fn shutdown_signal() {
+    let _ = tokio::signal::ctrl_c().await;
+}
+
+fn session_token() -> Result<String> {
+    let mut bytes = [0_u8; 16];
+    getrandom::fill(&mut bytes).context("failed to generate session token")?;
+    let mut token = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        use std::fmt::Write;
+        write!(&mut token, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    Ok(token)
+}
+
+fn startup_message(address: SocketAddr, destination: &str, color: bool) -> String {
+    let (heatmap_heading, forwarding_heading) = if color {
+        (
+            "\x1b[1;32mSnake migration heatmap:\x1b[0m",
+            "\x1b[1;36mSSH port forwarding:\x1b[0m",
+        )
+    } else {
+        ("Snake migration heatmap:", "SSH port forwarding:")
+    };
+    format!(
+        "{heatmap_heading}\nhttp://{address}\n\n{forwarding_heading}\n{}",
+        ssh_forwarding_command(address, destination)
+    )
+}
+
+fn ssh_forwarding_command(address: SocketAddr, destination: &str) -> String {
+    let forwarding_host = match address.ip() {
+        IpAddr::V4(address) => address.to_string(),
+        IpAddr::V6(address) => format!("[{address}]"),
+    };
+    format!(
+        "ssh -N -L {port}:{forwarding_host}:{port} {destination}",
+        port = address.port()
+    )
+}
+
+fn ssh_destination_from_environment() -> String {
+    let sudo_user = std::env::var("SUDO_USER").ok();
+    let user = std::env::var("USER").ok();
+    let hostname = std::env::var("HOSTNAME").ok();
+    ssh_destination(sudo_user.as_deref(), user.as_deref(), hostname.as_deref())
+}
+
+fn ssh_destination(sudo_user: Option<&str>, user: Option<&str>, hostname: Option<&str>) -> String {
+    let user = sudo_user
+        .filter(|user| !user.is_empty())
+        .or_else(|| user.filter(|user| !user.is_empty()))
+        .unwrap_or("<user>");
+    let hostname = hostname
+        .filter(|hostname| !hostname.is_empty())
+        .unwrap_or("<host>");
+    format!("{user}@{hostname}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn startup_message_colors_headings_and_isolates_copyable_text() {
+        let address = "127.0.0.1:43210".parse().unwrap();
+
+        assert_eq!(
+            startup_message(address, "alice@compute.example.com", true),
+            concat!(
+                "\x1b[1;32mSnake migration heatmap:\x1b[0m\n",
+                "http://127.0.0.1:43210\n\n",
+                "\x1b[1;36mSSH port forwarding:\x1b[0m\n",
+                "ssh -N -L 43210:127.0.0.1:43210 alice@compute.example.com"
+            )
+        );
+    }
+
+    #[test]
+    fn startup_message_omits_color_when_output_is_redirected() {
+        let address = "127.0.0.1:43210".parse().unwrap();
+
+        assert_eq!(
+            startup_message(address, "alice@example.com", false),
+            concat!(
+                "Snake migration heatmap:\n",
+                "http://127.0.0.1:43210\n\n",
+                "SSH port forwarding:\n",
+                "ssh -N -L 43210:127.0.0.1:43210 alice@example.com"
+            )
+        );
+    }
+
+    #[test]
+    fn ssh_destination_prefers_the_user_who_invoked_sudo() {
+        assert_eq!(
+            ssh_destination(
+                Some("alice"),
+                Some("root"),
+                Some("compute.example.com")
+            ),
+            "alice@compute.example.com"
+        );
+    }
+}
