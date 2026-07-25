@@ -204,6 +204,7 @@ fn operation_label(rung: &CompiledRung) -> &'static str {
         Opcode::ClaimIdle => "claim_idle",
         Opcode::PickIdle | Opcode::PickIdleMaskTable => "pick_idle",
         Opcode::PickRandomIdle => "pick_random_idle",
+        Opcode::KernelDefault => "kernel_default",
     }
 }
 
@@ -639,6 +640,30 @@ scope = "task_allowed"
             compiled.fallback as u32,
             bpf_intf::snake_fallback_SNAKE_FALLBACK_ANY_ALLOWED
         );
+    }
+
+    #[test]
+    fn rust_kernel_default_instruction_matches_the_bpf_abi() {
+        let compiled = policy::compile_policy(
+            r#"
+[[rung]]
+operation = "kernel_default"
+scope = "task_allowed"
+"#,
+        )
+        .expect("policy should compile");
+        let encoded = encode_rung(compiled.rungs[0]);
+
+        assert_eq!(
+            encoded.opcode,
+            bpf_intf::snake_opcode_SNAKE_OP_KERNEL_DEFAULT
+        );
+        assert_eq!(
+            encoded.input,
+            bpf_intf::snake_input_source_SNAKE_INPUT_MASK_TASK_ALLOWED
+        );
+        assert_eq!(encoded.flags, 0);
+        assert_eq!(encoded.data, 0);
     }
 
     #[test]

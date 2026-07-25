@@ -19,10 +19,9 @@ s32 BPF_STRUCT_OPS(snake_select_cpu, struct task_struct *p, s32 prev_cpu,
 	u64 started_at = bpf_ktime_get_ns();
 	s32 cpu;
 
-	(void)wake_flags;
 	stat_inc(SNAKE_STAT_SELECT_CALLS);
 
-	cpu = walk_policy_ladder(p, prev_cpu);
+	cpu = walk_policy_ladder(p, prev_cpu, wake_flags);
 	if (cpu >= 0) {
 		if (!scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, SCX_SLICE_DFL, 0)) {
 			stat_inc(SNAKE_STAT_INVALID_ERRORS);

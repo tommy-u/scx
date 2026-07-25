@@ -51,6 +51,8 @@ static __always_inline bool rung_is_valid(const struct snake_rung *rung)
 		rung->input == SNAKE_INPUT_MASK_TASK_ALLOWED && !rung->data) ||
 	       (rung->opcode == SNAKE_OP_PICK_RANDOM_IDLE && !rung->flags &&
 		rung->input == SNAKE_INPUT_MASK_TASK_ALLOWED && !rung->data) ||
+	       (rung->opcode == SNAKE_OP_KERNEL_DEFAULT && !rung->flags &&
+		rung->input == SNAKE_INPUT_MASK_TASK_ALLOWED && !rung->data) ||
 	       (rung->opcode == SNAKE_OP_PICK_IDLE_MASK_TABLE &&
 		rung->input == SNAKE_INPUT_CPU_PREV &&
 		(rung->flags == SNAKE_RUNG_F_INTERSECT_TASK_ALLOWED ||
@@ -60,9 +62,9 @@ static __always_inline bool rung_is_valid(const struct snake_rung *rung)
 }
 
 /* Execute one validated rung and return an idle CPU or a miss. */
-static __always_inline s32 execute_rung(const struct task_struct *p,
-					const struct snake_rung	 *rung,
-					s32			  prev_cpu)
+static __always_inline s32 execute_rung(struct task_struct	*p,
+					const struct snake_rung *rung,
+					s32 prev_cpu, u64 wake_flags)
 {
 	switch (rung->opcode) {
 	case SNAKE_OP_CLAIM_IDLE:
@@ -80,6 +82,13 @@ static __always_inline s32 execute_rung(const struct task_struct *p,
 		return prev_cpu < 0 ? -ENOENT : prev_cpu;
 	case SNAKE_OP_PICK_RANDOM_IDLE:
 		return pick_random_idle(p);
+	case SNAKE_OP_KERNEL_DEFAULT: {
+		bool is_idle = false;
+		s32  cpu;
+
+		cpu = scx_bpf_select_cpu_dfl(p, prev_cpu, wake_flags, &is_idle);
+		return is_idle ? cpu : -ENOENT;
+	}
 	case SNAKE_OP_PICK_IDLE_MASK_TABLE:
 		if (rung->flags & SNAKE_RUNG_F_PICK_IDLE_CORE)
 			return pick_idle_core_from_mask_table(p, rung->data,
@@ -94,8 +103,8 @@ static __always_inline s32 execute_rung(const struct task_struct *p,
 }
 
 /* Evaluate the configured rungs in order until one returns a valid hint. */
-static __always_inline s32 walk_policy_ladder(const struct task_struct *p,
-					      s32 prev_cpu)
+static __always_inline s32 walk_policy_ladder(struct task_struct *p,
+					      s32 prev_cpu, u64 wake_flags)
 {
 	u32 i;
 
@@ -119,7 +128,7 @@ static __always_inline s32 walk_policy_ladder(const struct task_struct *p,
 			return -1;
 		}
 
-		cpu = execute_rung(p, &rung, prev_cpu);
+		cpu = execute_rung(p, &rung, prev_cpu, wake_flags);
 		if (cpu < 0 && cpu != -ENOENT) {
 			stat_inc(SNAKE_STAT_RUNG_ERROR_BASE + i);
 			stat_inc(SNAKE_STAT_INVALID_ERRORS);

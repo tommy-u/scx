@@ -17,6 +17,7 @@ pub enum Opcode {
     PickIdle = 2,
     PickIdleMaskTable = 3,
     PickRandomIdle = 4,
+    KernelDefault = 5,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -103,6 +104,7 @@ impl Opcode {
             Self::PickIdle => "pick_idle",
             Self::PickIdleMaskTable => "pick_idle_mask_table",
             Self::PickRandomIdle => "pick_random_idle",
+            Self::KernelDefault => "kernel_default",
         }
     }
 }
@@ -174,6 +176,19 @@ pub fn compile_policy(source: &str) -> Result<CompiledPolicy, PolicyError> {
             )))
         }
     };
+
+    if let Some((index, _)) = policy
+        .rung
+        .iter()
+        .enumerate()
+        .find(|(_, rung)| rung.operation == "kernel_default")
+    {
+        if index + 1 != policy.rung.len() {
+            return Err(PolicyError(format!(
+                "rung {index}: operation `kernel_default` must be the last rung"
+            )));
+        }
+    }
 
     let partitions = compile_partitions(&policy.partition)?;
     let mut mask_tables = Vec::new();
@@ -332,6 +347,16 @@ fn compile_rung(
             "rung {index}: operation `{}` is incompatible with scope `{}`",
             rung.operation, rung.scope
         ))),
+        "kernel_default" if rung.scope == "task_allowed" => Ok(CompiledRung {
+            opcode: Opcode::KernelDefault,
+            input: InputSource::MaskTaskAllowed,
+            flags: 0,
+            data: 0,
+        }),
+        "kernel_default" => Err(PolicyError(format!(
+            "rung {index}: operation `{}` is incompatible with scope `{}`",
+            rung.operation, rung.scope
+        ))),
         operation => Err(PolicyError(format!(
             "rung {index}: unknown operation `{operation}`"
         ))),
@@ -388,6 +413,12 @@ fallback = "any_allowed"
 
 [[rung]]
 operation = "pick_random_idle"
+scope = "task_allowed"
+"#;
+
+    const KERNEL_DEFAULT_POLICY: &str = r#"
+[[rung]]
+operation = "kernel_default"
 scope = "task_allowed"
 "#;
 
@@ -515,6 +546,22 @@ scope = "task_allowed"
             policy.rungs,
             vec![CompiledRung {
                 opcode: Opcode::PickRandomIdle,
+                input: InputSource::MaskTaskAllowed,
+                flags: 0,
+                data: 0,
+            }]
+        );
+        assert!(policy.mask_tables.is_empty());
+    }
+
+    #[test]
+    fn lowers_kernel_default_for_the_task_allowed_scope() {
+        let policy = compile_policy(KERNEL_DEFAULT_POLICY).expect("policy should compile");
+
+        assert_eq!(
+            policy.rungs,
+            vec![CompiledRung {
+                opcode: Opcode::KernelDefault,
                 input: InputSource::MaskTaskAllowed,
                 flags: 0,
                 data: 0,
@@ -708,6 +755,24 @@ scope = "task_allowed"
         );
 
         assert!(error.contains("unknown fallback `nearest_moon`"));
+    }
+
+    #[test]
+    fn rejects_a_nonterminal_kernel_default_rung() {
+        let error = error_for(
+            r#"
+[[rung]]
+operation = "kernel_default"
+scope = "task_allowed"
+
+[[rung]]
+operation = "pick_idle"
+scope = "task_allowed"
+"#,
+        );
+
+        assert!(error.contains("kernel_default"));
+        assert!(error.contains("last rung"));
     }
 
     #[test]

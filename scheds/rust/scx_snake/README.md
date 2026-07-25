@@ -30,6 +30,10 @@ The semantic vocabulary includes:
   `task_allowed`, `previous_llc`, and named partition scopes.
 - `pick_random_idle(task_allowed)` uniformly chooses from the task's allowed
   idle CPUs. If none are idle, the rung misses without direct dispatch.
+- `kernel_default(task_allowed)` delegates to the running kernel's default
+  `select_cpu` implementation. An idle result is a hit; a non-idle result is a
+  miss, leaving Snake's configured fallback authoritative. This operation must
+  be the final rung.
 - `pick_idle(previous_llc)` searches the intersection of the task's allowed
   CPUs and the previous CPU's LLC mask. Userspace discovers LLC topology and
   lowers this semantic scope to a generic CPU-keyed mask-table lookup; BPF does
@@ -80,6 +84,11 @@ policy, [`examples/llc.toml`](examples/llc.toml) for the LLC-aware ladder, and
 wholly idle core before any idle CPU in the previous LLC. The sub-LLC example
 declares `previous_llc_half` with `split_llcs` and tries that scope before the
 complete previous-LLC scope.
+
+[`examples/kernel-default.toml`](examples/kernel-default.toml) provides a
+control policy using the kernel-default terminal rung. Its behavior can vary
+with the running kernel, and Snake reports only aggregate rung hits and misses;
+the kernel's internal topology decision is opaque.
 
 The exhaustion fallback defaults to `previous_cpu`. Policies can instead set
 `fallback = "any_allowed"` to return a distributed affinity-safe CPU hint and

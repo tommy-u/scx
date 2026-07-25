@@ -8,7 +8,7 @@ typedef unsigned int	   u32;
 typedef unsigned long long u64;
 #endif
 
-#define SNAKE_ABI_VERSION 4
+#define SNAKE_ABI_VERSION 5
 #define SNAKE_MAX_RUNGS 8
 #define SNAKE_MAX_CPUS 1024
 #define SNAKE_MASK_BYTES (SNAKE_MAX_CPUS / 8)
@@ -23,6 +23,7 @@ enum snake_opcode {
 	SNAKE_OP_PICK_IDLE	      = 2,
 	SNAKE_OP_PICK_IDLE_MASK_TABLE = 3,
 	SNAKE_OP_PICK_RANDOM_IDLE     = 4,
+	SNAKE_OP_KERNEL_DEFAULT	      = 5,
 };
 
 /* Exhaustion behavior applied when every select rung misses. */
