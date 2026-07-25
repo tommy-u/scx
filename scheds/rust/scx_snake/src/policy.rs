@@ -54,6 +54,7 @@ pub enum Fallback {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MaskTableSource {
     PreviousLlcByCpu,
+    PreviousNodeByCpu,
     SplitLlcByCore { parts: u32 },
 }
 
@@ -212,7 +213,7 @@ fn compile_partitions(
     for (index, partition) in partitions.iter().enumerate() {
         if matches!(
             partition.name.as_str(),
-            "previous_cpu" | "previous_llc" | "task_allowed"
+            "previous_cpu" | "previous_llc" | "previous_node" | "task_allowed"
         ) {
             return Err(PolicyError(format!(
                 "partition {index}: name `{}` is reserved",
@@ -261,7 +262,7 @@ fn compile_rung(
 ) -> Result<CompiledRung, PolicyError> {
     if !matches!(
         rung.scope.as_str(),
-        "previous_cpu" | "previous_llc" | "task_allowed"
+        "previous_cpu" | "previous_llc" | "previous_node" | "task_allowed"
     ) && !partitions.contains_key(&rung.scope)
     {
         return Err(PolicyError(format!(
@@ -300,12 +301,12 @@ fn compile_rung(
             )))
         }
         operation @ ("pick_idle" | "pick_idle_core") => {
-            let source = if rung.scope == "previous_llc" {
-                MaskTableSource::PreviousLlcByCpu
-            } else {
-                *partitions
+            let source = match rung.scope.as_str() {
+                "previous_llc" => MaskTableSource::PreviousLlcByCpu,
+                "previous_node" => MaskTableSource::PreviousNodeByCpu,
+                _ => *partitions
                     .get(&rung.scope)
-                    .expect("scope existence was validated above")
+                    .expect("scope existence was validated above"),
             };
             let table_id =
                 if let Some(table) = mask_tables.iter().find(|table| table.name == rung.scope) {
@@ -391,6 +392,16 @@ scope = "previous_llc"
 [[rung]]
 operation = "pick_idle"
 scope = "previous_llc"
+"#;
+
+    const PREVIOUS_NODE_POLICY: &str = r#"
+[[rung]]
+operation = "pick_idle_core"
+scope = "previous_node"
+
+[[rung]]
+operation = "pick_idle"
+scope = "previous_node"
 "#;
 
     const SUB_LLC_POLICY: &str = r#"
@@ -500,6 +511,28 @@ scope = "task_allowed"
     }
 
     #[test]
+    fn lowers_previous_node_rungs_to_one_shared_mask_table() {
+        let policy = compile_policy(PREVIOUS_NODE_POLICY).expect("policy should compile");
+
+        assert_eq!(policy.rungs.len(), 2);
+        assert_eq!(
+            policy.rungs[0].flags,
+            RUNG_FLAG_INTERSECT_TASK_ALLOWED | RUNG_FLAG_PICK_IDLE_CORE
+        );
+        assert_eq!(policy.rungs[0].data, 0);
+        assert_eq!(policy.rungs[1].flags, RUNG_FLAG_INTERSECT_TASK_ALLOWED);
+        assert_eq!(policy.rungs[1].data, 0);
+        assert_eq!(
+            policy.mask_tables,
+            vec![MaskTableSpec {
+                id: 0,
+                name: "previous_node".into(),
+                source: MaskTableSource::PreviousNodeByCpu,
+            }]
+        );
+    }
+
+    #[test]
     fn lowers_named_partition_before_its_parent_llc() {
         let policy = compile_policy(SUB_LLC_POLICY).expect("policy should compile");
 
@@ -600,10 +633,10 @@ scope = "previous_cpu"
             r#"
 [[rung]]
 operation = "claim_idle"
-scope = "previous_node"
+scope = "previous_socket"
 "#,
         );
-        assert!(error.contains("unknown scope `previous_node`"));
+        assert!(error.contains("unknown scope `previous_socket`"));
     }
 
     #[test]

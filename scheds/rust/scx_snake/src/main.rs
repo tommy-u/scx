@@ -809,4 +809,22 @@ scope = "previous_llc"
         assert_eq!(metrics.rungs[&0].operation, "pick_idle_core");
         assert_eq!(metrics.rungs[&0].scope, "previous_llc");
     }
+
+    #[test]
+    fn labels_previous_node_placement_stats() {
+        let policy = policy::compile_policy(
+            r#"
+[[rung]]
+operation = "pick_idle"
+scope = "previous_node"
+"#,
+        )
+        .expect("policy should compile");
+
+        let metrics =
+            aggregate_raw_stats(&raw_percpu_stats(), &policy).expect("stats should aggregate");
+
+        assert_eq!(metrics.rungs[&0].operation, "pick_idle");
+        assert_eq!(metrics.rungs[&0].scope, "previous_node");
+    }
 }

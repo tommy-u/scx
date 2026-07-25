@@ -28,45 +28,74 @@ pub fn resolve_mask_tables(specs: &[MaskTableSpec]) -> Result<Vec<ResolvedMaskTa
     }
 
     let topology = Topology::new().context("discovering CPU cache topology")?;
-    if topology.all_llcs.is_empty() {
+    let needs_llc = specs.iter().any(|spec| {
+        matches!(
+            spec.source,
+            MaskTableSource::PreviousLlcByCpu | MaskTableSource::SplitLlcByCore { .. }
+        )
+    });
+    if needs_llc && topology.all_llcs.is_empty() {
         bail!("CPU topology contains no LLCs");
     }
-    if let Some(cpu) = topology
-        .all_cpus
-        .values()
-        .find(|cpu| cpu.l2_id == usize::MAX && cpu.l3_id == usize::MAX)
-    {
-        bail!("CPU {} has no discoverable last-level cache", cpu.id);
+    if needs_llc {
+        if let Some(cpu) = topology
+            .all_cpus
+            .values()
+            .find(|cpu| cpu.l2_id == usize::MAX && cpu.l3_id == usize::MAX)
+        {
+            bail!("CPU {} has no discoverable last-level cache", cpu.id);
+        }
     }
 
-    let cpu_to_llc = topology
+    let cpu_to_llc = if needs_llc {
+        topology
+            .all_cpus
+            .values()
+            .map(|cpu| {
+                Ok((
+                    cpu.id.try_into().context("CPU ID does not fit u32")?,
+                    cpu.llc_id.try_into().context("LLC ID does not fit u32")?,
+                ))
+            })
+            .collect::<Result<BTreeMap<_, _>>>()?
+    } else {
+        BTreeMap::new()
+    };
+    let cpu_to_node = topology
         .all_cpus
         .values()
         .map(|cpu| {
             Ok((
                 cpu.id.try_into().context("CPU ID does not fit u32")?,
-                cpu.llc_id.try_into().context("LLC ID does not fit u32")?,
+                cpu.node_id
+                    .try_into()
+                    .context("NUMA node ID does not fit u32")?,
             ))
         })
         .collect::<Result<BTreeMap<_, _>>>()?;
-    let cpu_locations = topology
-        .all_cpus
-        .values()
-        .map(|cpu| {
-            Ok((
-                cpu.id.try_into().context("CPU ID does not fit u32")?,
-                CpuLocation {
-                    llc: cpu.llc_id.try_into().context("LLC ID does not fit u32")?,
-                    core: cpu.core_id.try_into().context("core ID does not fit u32")?,
-                },
-            ))
-        })
-        .collect::<Result<BTreeMap<_, _>>>()?;
+    let cpu_locations = if needs_llc {
+        topology
+            .all_cpus
+            .values()
+            .map(|cpu| {
+                Ok((
+                    cpu.id.try_into().context("CPU ID does not fit u32")?,
+                    CpuLocation {
+                        llc: cpu.llc_id.try_into().context("LLC ID does not fit u32")?,
+                        core: cpu.core_id.try_into().context("core ID does not fit u32")?,
+                    },
+                ))
+            })
+            .collect::<Result<BTreeMap<_, _>>>()?
+    } else {
+        BTreeMap::new()
+    };
 
     specs
         .iter()
         .map(|spec| match spec.source {
             MaskTableSource::PreviousLlcByCpu => build_previous_llc_table(spec.id, &cpu_to_llc),
+            MaskTableSource::PreviousNodeByCpu => build_previous_node_table(spec.id, &cpu_to_node),
             MaskTableSource::SplitLlcByCore { parts } => {
                 build_split_llc_table(spec.id, &cpu_locations, parts)
             }
@@ -75,29 +104,50 @@ pub fn resolve_mask_tables(specs: &[MaskTableSpec]) -> Result<Vec<ResolvedMaskTa
 }
 
 fn build_previous_llc_table(id: u32, cpu_to_llc: &BTreeMap<u32, u32>) -> Result<ResolvedMaskTable> {
-    if cpu_to_llc.is_empty() {
+    build_cpu_keyed_group_table(id, cpu_to_llc, MaskTableSource::PreviousLlcByCpu, "LLC")
+}
+
+fn build_previous_node_table(
+    id: u32,
+    cpu_to_node: &BTreeMap<u32, u32>,
+) -> Result<ResolvedMaskTable> {
+    build_cpu_keyed_group_table(
+        id,
+        cpu_to_node,
+        MaskTableSource::PreviousNodeByCpu,
+        "NUMA node",
+    )
+}
+
+fn build_cpu_keyed_group_table(
+    id: u32,
+    cpu_to_group: &BTreeMap<u32, u32>,
+    source: MaskTableSource,
+    group_name: &str,
+) -> Result<ResolvedMaskTable> {
+    if cpu_to_group.is_empty() {
         bail!("CPU topology contains no CPUs");
     }
 
-    let mut llc_to_cpus: BTreeMap<u32, BTreeSet<u32>> = BTreeMap::new();
-    for (&cpu, &llc) in cpu_to_llc {
-        llc_to_cpus.entry(llc).or_default().insert(cpu);
+    let mut group_to_cpus: BTreeMap<u32, BTreeSet<u32>> = BTreeMap::new();
+    for (&cpu, &group) in cpu_to_group {
+        group_to_cpus.entry(group).or_default().insert(cpu);
     }
 
-    let entries = cpu_to_llc
+    let entries = cpu_to_group
         .iter()
-        .map(|(&cpu, llc)| {
-            let cpus = llc_to_cpus
-                .get(llc)
+        .map(|(&cpu, group)| {
+            let cpus = group_to_cpus
+                .get(group)
                 .cloned()
-                .with_context(|| format!("CPU {cpu} references missing LLC {llc}"))?;
+                .with_context(|| format!("CPU {cpu} references missing {group_name} {group}"))?;
             Ok((cpu, cpus))
         })
         .collect::<Result<_>>()?;
 
     Ok(ResolvedMaskTable {
         id,
-        source: MaskTableSource::PreviousLlcByCpu,
+        source,
         entries,
     })
 }
@@ -217,6 +267,21 @@ mod tests {
         assert_eq!(table.entries[&1], BTreeSet::from([0, 1]));
         assert_eq!(table.entries[&2], BTreeSet::from([2, 3]));
         assert_eq!(table.entries[&3], BTreeSet::from([2, 3]));
+    }
+
+    #[test]
+    fn builds_a_cpu_keyed_table_from_node_membership() {
+        let cpu_to_node = BTreeMap::from([(0, 0), (1, 1), (2, 0), (3, 1)]);
+
+        let table = build_previous_node_table(1, &cpu_to_node).expect("table should build");
+
+        assert_eq!(table.id, 1);
+        assert_eq!(table.source, MaskTableSource::PreviousNodeByCpu);
+        assert_eq!(table.entries[&0], BTreeSet::from([0, 2]));
+        assert_eq!(table.entries[&1], BTreeSet::from([1, 3]));
+        assert_eq!(table.entries[&2], BTreeSet::from([0, 2]));
+        assert_eq!(table.entries[&3], BTreeSet::from([1, 3]));
+        assert!(dump_mask_tables(&[table]).contains("mask table 1 PreviousNodeByCpu"));
     }
 
     #[test]

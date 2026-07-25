@@ -38,6 +38,9 @@ The semantic vocabulary includes:
   CPUs and the previous CPU's LLC mask. Userspace discovers LLC topology and
   lowers this semantic scope to a generic CPU-keyed mask-table lookup; BPF does
   not contain an LLC-specific operation or topology identifier.
+- `pick_idle(previous_node)` and `pick_idle_core(previous_node)` search within
+  the previous CPU's NUMA node. Userspace lowers node topology to the same
+  generic CPU-keyed mask-table mechanism used for LLC scopes.
 - Named partitions can add narrower topology scopes. The `split_llcs` provider
   divides every LLC into a requested number of balanced, deterministic groups
   without separating a physical core's sibling CPUs. A task uses the group
