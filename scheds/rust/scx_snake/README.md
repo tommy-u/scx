@@ -112,6 +112,17 @@ sudo ./target/release/scx_snake \
   --stats 1
 ```
 
+Replace the complete ladder without restarting the scheduler:
+
+```bash
+sudo ./target/release/scx_snake \
+  --update-policy scheds/rust/scx_snake/examples/random-idle.toml
+```
+
+The running process compiles and resolves the new file, prepares it in an
+inactive ladder slot, then publishes it with one atomic switch. A rejected
+update leaves the current ladder running.
+
 Inspect the compiled ladder and resolved mask tables without attaching BPF:
 
 ```bash
@@ -122,10 +133,11 @@ Inspect the compiled ladder and resolved mask tables without attaching BPF:
 
 ## Statistics
 
-The text output from `--stats 1` shows attempts, hits, misses, and errors for
-each rung. This is the quickest way to see which locality level placed work.
-Also watch `direct_dispatches`, `ladder_exhaustions`, `enqueues`, and
-`invalid_errors`; the last should remain zero.
+The text output from `--stats 1` shows the active policy generation plus
+attempts, hits, misses, and errors for each rung. A successful update advances
+the generation and starts fresh counters with the new rung labels. Also watch
+`direct_dispatches`, `ladder_exhaustions`, `enqueues`, and `invalid_errors`; the
+last should remain zero.
 
 Use `--stats-format json` for NDJSON, `--help-stats` for counter definitions, or
 monitor an already running scheduler without a policy:
@@ -142,7 +154,7 @@ stress-ng --pipe 4 --futex 4 --timeout 30s --metrics-brief
 
 ## Limits
 
-Policies are fixed at startup, and topology is snapshotted for each attach. The
-kernel-default simulation does not implement distance-ordered remote NUMA
-search. Exhausted ladders use a simple global FIFO with no topology-aware
-enqueue, stealing, or draining policy. The ABI remains experimental.
+Topology is resolved when a policy is attached or updated. The kernel-default
+simulation does not implement distance-ordered remote NUMA search. Exhausted
+ladders use a simple global FIFO with no topology-aware enqueue, stealing, or
+draining policy. The ABI remains experimental.

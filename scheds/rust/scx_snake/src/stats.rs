@@ -6,10 +6,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{bail, Context, Result};
 use scx_stats::prelude::*;
 use scx_stats_derive::{stat_doc, Stats};
 use serde::{Deserialize, Serialize};
+
+use crate::control::{SchedulerRequest, SchedulerResponse};
 
 #[stat_doc]
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize, Stats)]
@@ -50,6 +52,8 @@ impl RungMetrics {
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize, Stats)]
 #[stat(top)]
 pub struct Metrics {
+    #[stat(desc = "Active userspace policy generation")]
+    pub policy_generation: u64,
     #[stat(desc = "Number of select_cpu callback invocations")]
     pub select_calls: u64,
     #[stat(desc = "Number of successful direct dispatches to selected idle CPUs")]
@@ -72,7 +76,7 @@ pub struct Metrics {
     pub quiescent: u64,
     #[stat(desc = "Total nanoseconds spent in select_cpu")]
     pub select_latency_ns: u64,
-    #[stat(desc = "Maximum select_cpu latency in nanoseconds since scheduler start")]
+    #[stat(desc = "Maximum select_cpu latency in nanoseconds for this policy generation")]
     pub select_latency_max_ns: u64,
     #[stat(desc = "Per-rung policy evaluation metrics")]
     pub rungs: BTreeMap<u32, RungMetrics>,
@@ -80,7 +84,12 @@ pub struct Metrics {
 
 impl Metrics {
     pub fn delta(&self, previous: &Self) -> Self {
+        if self.policy_generation != previous.policy_generation {
+            return self.clone();
+        }
+
         Self {
+            policy_generation: self.policy_generation,
             select_calls: self.select_calls.saturating_sub(previous.select_calls),
             direct_dispatches: self
                 .direct_dispatches
@@ -114,13 +123,14 @@ impl Metrics {
             .unwrap_or_default();
         let mut output = format!(
             concat!(
-                "scx_snake policy stats\n",
+                "scx_snake policy generation {} stats\n",
                 "  select calls: {} | direct dispatches: {} | ladder exhausted: {}\n",
                 "  fallback previous CPU: {} | fallback any allowed CPU: {} | invalid/errors: {}\n",
                 "  callbacks enqueue: {} | running: {} | stopping: {} | quiescent: {}\n",
                 "  select latency ns total: {} | average: {} | cumulative max: {}\n",
                 "  rungs:\n"
             ),
+            self.policy_generation,
             self.select_calls,
             self.direct_dispatches,
             self.ladder_exhaustions,
@@ -164,19 +174,50 @@ impl Metrics {
     }
 }
 
-pub fn server_data() -> StatsServerData<(), Metrics> {
-    let open: Box<dyn StatsOpener<(), Metrics>> = Box::new(move |(req_ch, res_ch)| {
-        req_ch.send(())?;
-        let mut previous = res_ch.recv()?;
+pub fn server_data() -> StatsServerData<SchedulerRequest, SchedulerResponse> {
+    let open: Box<dyn StatsOpener<SchedulerRequest, SchedulerResponse>> =
+        Box::new(move |(req_ch, res_ch)| {
+            req_ch.send(SchedulerRequest::Metrics)?;
+            let mut previous = match res_ch.recv()? {
+                SchedulerResponse::Metrics(metrics) => metrics,
+                response => bail!("unexpected response to metrics request: {response:?}"),
+            };
 
-        let read: Box<dyn StatsReader<(), Metrics>> = Box::new(move |_args, (req_ch, res_ch)| {
-            req_ch.send(())?;
-            let current = res_ch.recv()?;
-            let delta = current.delta(&previous);
-            previous = current;
-            delta.to_json()
+            let read: Box<dyn StatsReader<SchedulerRequest, SchedulerResponse>> =
+                Box::new(move |_args, (req_ch, res_ch)| {
+                    req_ch.send(SchedulerRequest::Metrics)?;
+                    let current = match res_ch.recv()? {
+                        SchedulerResponse::Metrics(metrics) => metrics,
+                        response => {
+                            bail!("unexpected response to metrics request: {response:?}")
+                        }
+                    };
+                    let delta = current.delta(&previous);
+                    previous = current;
+                    delta.to_json()
+                });
+
+            Ok(read)
         });
 
+    let update: Box<dyn StatsOpener<SchedulerRequest, SchedulerResponse>> = Box::new(move |_| {
+        let read: Box<dyn StatsReader<SchedulerRequest, SchedulerResponse>> =
+            Box::new(move |args, (req_ch, res_ch)| {
+                let source = args
+                    .get("source")
+                    .context("policy_update requires a source argument")?
+                    .clone();
+                req_ch.send(SchedulerRequest::ReplacePolicy { source })?;
+                match res_ch.recv()? {
+                    SchedulerResponse::ReplacePolicy(Ok(response)) => {
+                        Ok(serde_json::to_value(response)?)
+                    }
+                    SchedulerResponse::ReplacePolicy(Err(error)) => bail!(error),
+                    response => {
+                        bail!("unexpected response to policy update request: {response:?}")
+                    }
+                }
+            });
         Ok(read)
     });
 
@@ -184,6 +225,13 @@ pub fn server_data() -> StatsServerData<(), Metrics> {
         .add_meta(Metrics::meta())
         .add_meta(RungMetrics::meta())
         .add_ops("top", StatsOps { open, close: None })
+        .add_ops(
+            "policy_update",
+            StatsOps {
+                open: update,
+                close: None,
+            },
+        )
 }
 
 pub fn monitor(interval: Duration, shutdown: Arc<AtomicBool>) -> Result<()> {
@@ -308,6 +356,24 @@ mod tests {
             delta.rungs[&1],
             rung(1, "pick_idle", "task_allowed", 5, 4, 1, 0)
         );
+    }
+
+    #[test]
+    fn generation_change_uses_the_new_generation_as_a_fresh_baseline() {
+        let previous = Metrics {
+            policy_generation: 7,
+            select_calls: 100,
+            rungs: BTreeMap::from([(0, rung(0, "claim_idle", "previous_cpu", 100, 80, 20, 0))]),
+            ..Default::default()
+        };
+        let current = Metrics {
+            policy_generation: 8,
+            select_calls: 3,
+            rungs: BTreeMap::from([(0, rung(0, "pick_random_idle", "task_allowed", 3, 2, 1, 0))]),
+            ..Default::default()
+        };
+
+        assert_eq!(current.delta(&previous), current);
     }
 
     #[test]

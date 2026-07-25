@@ -12,19 +12,20 @@ struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
 	__type(key, u32);
 	__type(value, struct snake_mask_data);
-	__uint(max_entries, SNAKE_MAX_MASK_TABLES *SNAKE_MAX_CPUS);
+	__uint(max_entries, SNAKE_LADDER_SLOTS *SNAKE_MAX_MASK_TABLES *SNAKE_MAX_CPUS);
 } mask_data SEC(".maps");
 
 struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
 	__type(key, u32);
 	__type(value, struct snake_mask_slot);
-	__uint(max_entries, SNAKE_MAX_MASK_TABLES *SNAKE_MAX_CPUS);
+	__uint(max_entries, SNAKE_LADDER_SLOTS *SNAKE_MAX_MASK_TABLES *SNAKE_MAX_CPUS);
 } mask_slots		   SEC(".maps");
 
-static __always_inline u32 mask_table_index(u32 table_id, u32 key)
+static __always_inline u32 mask_table_index(u32 slot, u32 table_id, u32 key)
 {
-	return table_id * SNAKE_MAX_CPUS + key;
+	return slot * SNAKE_MAX_MASK_TABLES * SNAKE_MAX_CPUS +
+	       table_id * SNAKE_MAX_CPUS + key;
 }
 
 static __always_inline int
@@ -65,81 +66,90 @@ build_mask_from_data(struct bpf_cpumask		  *mask,
 	return bpf_cpumask_empty((const struct cpumask *)mask) ? -EINVAL : 0;
 }
 
-/* Convert userspace mask data into immutable cpumasks before attach completes. */
-static __always_inline int init_mask_tables(void)
+/* Keep the borrowed online mask out of the owned-mask replacement loop. */
+static __noinline s32 cpu_is_online(u32 cpu)
 {
 	const struct cpumask *online;
-	u32		      table_id, cpu;
-
-	if (nr_mask_tables > SNAKE_MAX_MASK_TABLES ||
-	    nr_cpu_ids > SNAKE_MAX_CPUS)
-		return -EINVAL;
+	s32		      is_online;
 
 	online = scx_bpf_get_online_cpumask();
 	if (!online)
 		return -EINVAL;
+	is_online = bpf_cpumask_test_cpu(cpu, online);
+	scx_bpf_put_cpumask(online);
+	return is_online;
+}
+
+/* Build every immutable cpumask needed by one fully staged ladder slot. */
+static __always_inline int
+prepare_mask_tables(u32 slot, const struct snake_compiled_ladder *ladder)
+{
+	u32 table_id, cpu;
+
+	if (slot >= SNAKE_LADDER_SLOTS ||
+	    ladder->nr_mask_tables > SNAKE_MAX_MASK_TABLES ||
+	    nr_cpu_ids > SNAKE_MAX_CPUS)
+		return -EINVAL;
 
 	bpf_for(table_id, 0, SNAKE_MAX_MASK_TABLES)
 	{
-		if (table_id >= nr_mask_tables)
+		if (table_id >= ladder->nr_mask_tables)
 			break;
 
 		bpf_for(cpu, 0, SNAKE_MAX_CPUS)
 		{
 			struct bpf_cpumask     *mask, *stale;
 			struct snake_mask_data *data;
-			struct snake_mask_slot *slot;
+			struct snake_mask_slot *mask_slot;
+			s32			 is_online;
 			u32			index;
 
 			if (cpu >= nr_cpu_ids)
 				break;
-			if (!bpf_cpumask_test_cpu(cpu, online))
+			is_online = cpu_is_online(cpu);
+			if (is_online < 0)
+				return is_online;
+			if (!is_online)
 				continue;
 
-			index = mask_table_index(table_id, cpu);
-			data  = bpf_map_lookup_elem(&mask_data, &index);
-			slot  = bpf_map_lookup_elem(&mask_slots, &index);
-			if (!data || data->valid != 1 || !slot) {
-				scx_bpf_put_cpumask(online);
+			index = mask_table_index(slot, table_id, cpu);
+			data = bpf_map_lookup_elem(&mask_data, &index);
+			mask_slot = bpf_map_lookup_elem(&mask_slots, &index);
+			if (!data || data->valid != 1 || !mask_slot)
 				return -EINVAL;
-			}
 
 			mask = bpf_cpumask_create();
-			if (!mask) {
-				scx_bpf_put_cpumask(online);
+			if (!mask)
 				return -ENOMEM;
-			}
 			if (build_mask_from_data(mask, data)) {
 				bpf_cpumask_release(mask);
-				scx_bpf_put_cpumask(online);
 				return -EINVAL;
 			}
 
-			stale = bpf_kptr_xchg(&slot->mask, mask);
-			if (stale) {
+			stale = bpf_kptr_xchg(&mask_slot->mask, mask);
+			if (stale)
 				bpf_cpumask_release(stale);
-				scx_bpf_put_cpumask(online);
-				return -EINVAL;
-			}
 		}
 	}
 
-	scx_bpf_put_cpumask(online);
 	return 0;
 }
 
 /* Test whether one CPU belongs to a CPU-keyed policy mask. */
-static __always_inline s32 mask_table_contains(u32 table_id, s32 key, s32 cpu)
+static __always_inline s32
+mask_table_contains(const struct snake_ladder_ctx *ctx, u32 table_id, s32 key,
+		    s32 cpu)
 {
 	struct bpf_cpumask     *table_mask;
 	struct snake_mask_slot *slot;
 	u32			index;
 
-	if (table_id >= nr_mask_tables || key < 0 || key >= nr_cpu_ids ||
+	if (table_id >= ctx->ladder->nr_mask_tables || key < 0 ||
+	    key >= nr_cpu_ids ||
 	    cpu < 0 || cpu >= nr_cpu_ids)
 		return -EINVAL;
 
-	index = mask_table_index(table_id, key);
+	index = mask_table_index(ctx->slot, table_id, key);
 	slot  = bpf_map_lookup_elem(&mask_slots, &index);
 	if (!slot)
 		return -EINVAL;
@@ -152,17 +162,18 @@ static __always_inline s32 mask_table_contains(u32 table_id, s32 key, s32 cpu)
 
 /* Test whether a CPU-keyed policy mask intersects a live kernel mask. */
 static __always_inline s32
-mask_table_intersects(u32 table_id, s32 key, const struct cpumask *candidate)
+mask_table_intersects(const struct snake_ladder_ctx *ctx, u32 table_id, s32 key,
+		      const struct cpumask *candidate)
 {
 	struct bpf_cpumask     *table_mask;
 	struct snake_mask_slot *slot;
 	u32			index;
 
-	if (table_id >= nr_mask_tables || key < 0 || key >= nr_cpu_ids ||
-	    !candidate)
+	if (table_id >= ctx->ladder->nr_mask_tables || key < 0 ||
+	    key >= nr_cpu_ids || !candidate)
 		return -EINVAL;
 
-	index = mask_table_index(table_id, key);
+	index = mask_table_index(ctx->slot, table_id, key);
 	slot  = bpf_map_lookup_elem(&mask_slots, &index);
 	if (!slot)
 		return -EINVAL;
@@ -176,17 +187,19 @@ mask_table_intersects(u32 table_id, s32 key, const struct cpumask *candidate)
 
 /* Pick from a table mask intersected with the task's dynamic affinity mask. */
 static __always_inline s32
-pick_idle_from_mask_table(const struct task_struct *p, u32 table_id, s32 key,
+pick_idle_from_mask_table(const struct snake_ladder_ctx *ctx,
+			  const struct task_struct *p, u32 table_id, s32 key,
 			  const struct cpumask *eligible)
 {
 	struct bpf_cpumask     *table_mask;
 	struct snake_mask_slot *slot;
 	u32			index, offset;
 
-	if (table_id >= nr_mask_tables || key < 0 || key >= nr_cpu_ids)
+	if (table_id >= ctx->ladder->nr_mask_tables || key < 0 ||
+	    key >= nr_cpu_ids)
 		return -EINVAL;
 
-	index = mask_table_index(table_id, key);
+	index = mask_table_index(ctx->slot, table_id, key);
 	slot  = bpf_map_lookup_elem(&mask_slots, &index);
 	if (!slot)
 		return -EINVAL;
@@ -219,7 +232,8 @@ pick_idle_from_mask_table(const struct task_struct *p, u32 table_id, s32 key,
 
 /* Pick from a table only when every SMT sibling of the CPU is idle. */
 static __always_inline s32 pick_idle_core_from_mask_table(
-	const struct task_struct *p, u32 table_id, s32 key)
+	const struct snake_ladder_ctx *ctx, const struct task_struct *p, u32 table_id,
+	s32 key)
 {
 	const struct cpumask *idle_smt;
 	s32		      cpu;
@@ -228,7 +242,7 @@ static __always_inline s32 pick_idle_core_from_mask_table(
 	if (!idle_smt)
 		return -EINVAL;
 
-	cpu = pick_idle_from_mask_table(p, table_id, key, idle_smt);
+	cpu = pick_idle_from_mask_table(ctx, p, table_id, key, idle_smt);
 	scx_bpf_put_idle_cpumask(idle_smt);
 	return cpu;
 }

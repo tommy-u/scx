@@ -37,7 +37,7 @@ pub struct CompiledRung {
     pub data: u64,
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CompiledPolicy {
     pub fallback: Fallback,
     pub rungs: Vec<CompiledRung>,

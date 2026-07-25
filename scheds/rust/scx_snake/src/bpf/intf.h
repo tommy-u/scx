@@ -8,8 +8,10 @@ typedef unsigned int	   u32;
 typedef unsigned long long u64;
 #endif
 
-#define SNAKE_ABI_VERSION 6
+#define SNAKE_ABI_VERSION 7
 #define SNAKE_MAX_RUNGS 8
+#define SNAKE_LADDER_SLOTS 2
+#define SNAKE_LADDER_SLOT_INVALID SNAKE_LADDER_SLOTS
 #define SNAKE_MAX_CPUS 1024
 #define SNAKE_MASK_BYTES (SNAKE_MAX_CPUS / 8)
 #define SNAKE_MAX_MASK_TABLES 4
@@ -51,6 +53,16 @@ struct snake_rung {
 	u32 flags;
 	u32 reserved;
 	u64 data;
+};
+
+/* Complete userspace-compiled ladder installed as one runtime generation. */
+struct snake_compiled_ladder {
+	u64		  generation;
+	u32		  policy_abi_version;
+	u32		  nr_rungs;
+	u32		  nr_mask_tables;
+	u32		  fallback_mode;
+	struct snake_rung rungs[SNAKE_MAX_RUNGS];
 };
 
 /* Serialized userspace mask entry consumed when BPF initializes a table. */

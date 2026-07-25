@@ -2,8 +2,10 @@
 
 mod bpf_intf;
 mod bpf_skel;
+mod control;
 mod mask_tables;
 mod policy;
+mod runtime_policy;
 mod stats;
 
 use std::collections::BTreeMap;
@@ -13,16 +15,18 @@ use std::mem::{size_of, MaybeUninit};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
 use bpf_skel::*;
 use clap::{Parser, ValueEnum};
+use control::{SchedulerRequest, SchedulerResponse};
 use crossbeam::channel::RecvTimeoutError;
-use libbpf_rs::{MapCore as _, MapFlags, OpenObject};
+use libbpf_rs::{MapCore as _, MapFlags, OpenObject, ProgramInput};
 use log::{debug, info, warn};
 use mask_tables::{dump_mask_tables, resolve_mask_tables, ResolvedMaskTable};
 use policy::{CompiledPolicy, CompiledRung, InputSource, Opcode};
+use runtime_policy::RuntimePolicy;
 use scx_stats::prelude::*;
 use scx_utils::build_id;
 use scx_utils::libbpf_clap_opts::LibbpfOpts;
@@ -33,6 +37,8 @@ use scx_utils::{
 use stats::{Metrics, RungMetrics};
 
 const SCHEDULER_NAME: &str = "scx_snake";
+const SLOT_QUIESCENCE_TIMEOUT: Duration = Duration::from_secs(5);
+const SLOT_QUIESCENCE_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
 enum StatsFormat {
@@ -47,6 +53,14 @@ struct Opts {
     /// TOML policy to compile and install before attaching the scheduler.
     #[arg(long, value_name = "PATH")]
     policy: Option<PathBuf>,
+
+    /// Atomically replace the policy of the running scheduler.
+    #[arg(
+        long,
+        value_name = "PATH",
+        conflicts_with_all = ["policy", "dump_compiled_policy", "stats", "monitor", "help_stats"]
+    )]
+    update_policy: Option<PathBuf>,
 
     /// Print the lowered mechanical ladder and exit without loading BPF.
     #[arg(long)]
@@ -89,6 +103,7 @@ struct Opts {
 enum RunMode {
     HelpStats,
     Monitor(Duration),
+    Update(PathBuf),
     Dump(PathBuf),
     Launch(PathBuf),
 }
@@ -106,9 +121,12 @@ fn parse_positive_seconds(value: &str) -> std::result::Result<f64, String> {
 fn resolve_mode(opts: &Opts) -> Result<RunMode> {
     let special_modes = usize::from(opts.help_stats)
         + usize::from(opts.monitor.is_some())
+        + usize::from(opts.update_policy.is_some())
         + usize::from(opts.dump_compiled_policy);
     if special_modes > 1 {
-        bail!("--help-stats, --monitor, and --dump-compiled-policy are mutually exclusive");
+        bail!(
+            "--help-stats, --monitor, --update-policy, and --dump-compiled-policy are mutually exclusive"
+        );
     }
 
     if opts.help_stats {
@@ -116,6 +134,9 @@ fn resolve_mode(opts: &Opts) -> Result<RunMode> {
     }
     if let Some(seconds) = opts.monitor {
         return Ok(RunMode::Monitor(Duration::from_secs_f64(seconds)));
+    }
+    if let Some(path) = opts.update_policy.clone() {
+        return Ok(RunMode::Update(path));
     }
 
     let policy = opts
@@ -129,10 +150,12 @@ fn resolve_mode(opts: &Opts) -> Result<RunMode> {
     }
 }
 
-fn load_policy(path: &PathBuf) -> Result<CompiledPolicy> {
+fn load_policy(path: &PathBuf) -> Result<(String, CompiledPolicy)> {
     let source =
         fs::read_to_string(path).with_context(|| format!("reading policy {}", path.display()))?;
-    policy::compile_policy(&source).with_context(|| format!("compiling policy {}", path.display()))
+    let compiled = policy::compile_policy(&source)
+        .with_context(|| format!("compiling policy {}", path.display()))?;
+    Ok((source, compiled))
 }
 
 fn encode_rung(rung: CompiledRung) -> bpf_intf::snake_rung {
@@ -145,29 +168,37 @@ fn encode_rung(rung: CompiledRung) -> bpf_intf::snake_rung {
     }
 }
 
-fn install_policy(rodata: &mut bpf_skel::types::rodata, policy: &CompiledPolicy) -> Result<()> {
-    rodata.policy_abi_version = bpf_intf::SNAKE_ABI_VERSION;
-    rodata.nr_rungs = policy
-        .rungs
-        .len()
-        .try_into()
-        .context("policy rung count does not fit the BPF ABI")?;
-    rodata.nr_mask_tables = policy
-        .mask_tables
-        .len()
-        .try_into()
-        .context("mask table count does not fit the BPF ABI")?;
-    rodata.fallback_mode = policy.fallback as u32;
-
-    for (destination, rung) in rodata.rungs.iter_mut().zip(&policy.rungs) {
-        let encoded = encode_rung(*rung);
-        destination.opcode = encoded.opcode;
-        destination.input = encoded.input;
-        destination.flags = encoded.flags;
-        destination.reserved = encoded.reserved;
-        destination.data = encoded.data;
+fn encode_ladder(
+    policy: &CompiledPolicy,
+    generation: u64,
+) -> Result<bpf_intf::snake_compiled_ladder> {
+    let mut rungs = std::array::from_fn(|_| bpf_intf::snake_rung {
+        opcode: 0,
+        input: 0,
+        flags: 0,
+        reserved: 0,
+        data: 0,
+    });
+    for (destination, rung) in rungs.iter_mut().zip(&policy.rungs) {
+        *destination = encode_rung(*rung);
     }
-    Ok(())
+
+    Ok(bpf_intf::snake_compiled_ladder {
+        generation,
+        policy_abi_version: bpf_intf::SNAKE_ABI_VERSION,
+        nr_rungs: policy
+            .rungs
+            .len()
+            .try_into()
+            .context("policy rung count does not fit the BPF ABI")?,
+        nr_mask_tables: policy
+            .mask_tables
+            .len()
+            .try_into()
+            .context("mask table count does not fit the BPF ABI")?,
+        fallback_mode: policy.fallback as u32,
+        rungs,
+    })
 }
 
 fn bytes_of<T>(value: &T) -> &[u8] {
@@ -175,7 +206,11 @@ fn bytes_of<T>(value: &T) -> &[u8] {
     unsafe { std::slice::from_raw_parts(value as *const T as *const u8, std::mem::size_of::<T>()) }
 }
 
-fn install_mask_tables(skel: &mut BpfSkel<'_>, tables: &[ResolvedMaskTable]) -> Result<()> {
+fn install_mask_tables(
+    skel: &mut BpfSkel<'_>,
+    slot: u32,
+    tables: &[ResolvedMaskTable],
+) -> Result<()> {
     for table in tables {
         if table.id >= bpf_intf::SNAKE_MAX_MASK_TABLES {
             bail!("mask table {} exceeds the BPF table capacity", table.id);
@@ -184,7 +219,7 @@ fn install_mask_tables(skel: &mut BpfSkel<'_>, tables: &[ResolvedMaskTable]) -> 
             if cpu >= bpf_intf::SNAKE_MAX_CPUS {
                 bail!("CPU {cpu} exceeds the BPF table capacity");
             }
-            let key = table.id * bpf_intf::SNAKE_MAX_CPUS + cpu;
+            let key = runtime_policy::mask_data_index(slot, table.id, cpu)?;
             let data = mask_tables::serialize_entry(cpus)?;
             skel.maps
                 .mask_data
@@ -193,6 +228,150 @@ fn install_mask_tables(skel: &mut BpfSkel<'_>, tables: &[ResolvedMaskTable]) -> 
         }
     }
     Ok(())
+}
+
+fn clear_mask_table_data(skel: &mut BpfSkel<'_>, slot: u32, table_count: usize) -> Result<()> {
+    if table_count > bpf_intf::SNAKE_MAX_MASK_TABLES as usize {
+        bail!("mask table count {table_count} exceeds the BPF table capacity");
+    }
+
+    let empty = bpf_intf::snake_mask_data {
+        valid: 0,
+        bits: [0; bpf_intf::SNAKE_MASK_BYTES as usize],
+    };
+    for table_id in 0..table_count as u32 {
+        for cpu in 0..bpf_intf::SNAKE_MAX_CPUS {
+            let key = runtime_policy::mask_data_index(slot, table_id, cpu)?;
+            skel.maps
+                .mask_data
+                .update(&key.to_ne_bytes(), bytes_of(&empty), MapFlags::ANY)
+                .with_context(|| {
+                    format!("clearing ladder slot {slot} mask table {table_id} key CPU {cpu}")
+                })?;
+        }
+    }
+    Ok(())
+}
+
+fn set_active_ladder(skel: &mut BpfSkel<'_>, slot: u32) -> Result<()> {
+    let key = 0_u32;
+    skel.maps
+        .active_ladder
+        .update(&key.to_ne_bytes(), &slot.to_ne_bytes(), MapFlags::ANY)
+        .with_context(|| format!("publishing ladder slot {slot}"))
+}
+
+fn write_ladder_slot(
+    skel: &mut BpfSkel<'_>,
+    slot: u32,
+    generation: u64,
+    policy: &CompiledPolicy,
+) -> Result<()> {
+    let ladder = encode_ladder(policy, generation)?;
+    skel.maps
+        .compiled_ladders
+        .update(&slot.to_ne_bytes(), bytes_of(&ladder), MapFlags::ANY)
+        .with_context(|| format!("installing compiled ladder slot {slot}"))
+}
+
+fn prepare_ladder_slot(skel: &mut BpfSkel<'_>, slot: u32) -> Result<()> {
+    skel.maps
+        .bss_data
+        .as_mut()
+        .context("BPF bss map is not memory mapped")?
+        .staging_ladder_slot = slot;
+    let output = skel
+        .progs
+        .prepare_ladder
+        .test_run(ProgramInput::default())
+        .with_context(|| format!("preparing ladder slot {slot}"))?;
+    if output.return_value != 0 {
+        bail!(
+            "preparing ladder slot {slot} failed: {}",
+            output.return_value as i32
+        );
+    }
+    Ok(())
+}
+
+fn wait_for_slot_quiescent(skel: &BpfSkel<'_>, slot: u32, timeout: Duration) -> Result<()> {
+    if slot >= bpf_intf::SNAKE_LADDER_SLOTS {
+        bail!("invalid ladder slot {slot}");
+    }
+
+    let deadline = Instant::now() + timeout;
+    loop {
+        let raw = skel
+            .maps
+            .ladder_readers
+            .lookup_percpu(&slot.to_ne_bytes(), MapFlags::ANY)
+            .with_context(|| format!("reading ladder slot {slot} reader counts"))?
+            .ok_or_else(|| anyhow!("ladder reader map has no slot {slot}"))?;
+        let readers = runtime_policy::nonzero_reader_counts(&raw)?;
+        if readers.is_empty() {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            bail!("timed out waiting for ladder slot {slot} readers to drain: {readers:?}");
+        }
+        std::thread::sleep(SLOT_QUIESCENCE_POLL_INTERVAL);
+    }
+}
+
+fn clear_slot_stats(skel: &mut BpfSkel<'_>, slot: u32) -> Result<()> {
+    let zeroes = vec![0_u64.to_ne_bytes().to_vec(); libbpf_rs::num_possible_cpus()?];
+    for stat in 0..bpf_intf::snake_stat_SNAKE_NR_STATS {
+        let key = runtime_policy::stat_index(slot, stat)?;
+        skel.maps
+            .stats
+            .update_percpu(&key.to_ne_bytes(), &zeroes, MapFlags::ANY)
+            .with_context(|| format!("clearing ladder slot {slot} statistic {stat}"))?;
+    }
+    Ok(())
+}
+
+struct BpfPolicyBackend<'skel, 'object> {
+    skel: &'skel mut BpfSkel<'object>,
+}
+
+impl runtime_policy::PolicyBackend for BpfPolicyBackend<'_, '_> {
+    fn wait_for_slot_quiescent(&mut self, slot: u32) -> Result<()> {
+        wait_for_slot_quiescent(self.skel, slot, SLOT_QUIESCENCE_TIMEOUT)
+    }
+
+    fn write_ladder(&mut self, slot: u32, generation: u64, policy: &CompiledPolicy) -> Result<()> {
+        write_ladder_slot(self.skel, slot, generation, policy)
+    }
+
+    fn write_mask_tables(&mut self, slot: u32, tables: &[ResolvedMaskTable]) -> Result<()> {
+        clear_mask_table_data(self.skel, slot, tables.len())?;
+        install_mask_tables(self.skel, slot, tables)
+    }
+
+    fn prepare_ladder(&mut self, slot: u32) -> Result<()> {
+        prepare_ladder_slot(self.skel, slot)
+    }
+
+    fn clear_stats(&mut self, slot: u32) -> Result<()> {
+        clear_slot_stats(self.skel, slot)
+    }
+
+    fn publish_ladder(&mut self, slot: u32) -> Result<()> {
+        set_active_ladder(self.skel, slot)
+    }
+}
+
+fn install_ladder_slot(
+    skel: &mut BpfSkel<'_>,
+    slot: u32,
+    generation: u64,
+    policy: &CompiledPolicy,
+    tables: &[ResolvedMaskTable],
+) -> Result<()> {
+    write_ladder_slot(skel, slot, generation, policy)?;
+    clear_mask_table_data(skel, slot, tables.len())?;
+    install_mask_tables(skel, slot, tables)?;
+    prepare_ladder_slot(skel, slot)
 }
 
 fn operation_label(rung: &CompiledRung) -> &'static str {
@@ -255,7 +434,11 @@ fn decode_stat(raw: &[Vec<u8>], use_max: bool) -> Result<u64> {
     }
 }
 
-fn aggregate_raw_stats(raw: &[Vec<Vec<u8>>], policy: &CompiledPolicy) -> Result<Metrics> {
+fn aggregate_raw_stats(
+    raw: &[Vec<Vec<u8>>],
+    policy: &CompiledPolicy,
+    generation: u64,
+) -> Result<Metrics> {
     let expected = bpf_intf::snake_stat_SNAKE_NR_STATS as usize;
     if raw.len() != expected {
         bail!(
@@ -298,6 +481,7 @@ fn aggregate_raw_stats(raw: &[Vec<Vec<u8>>], policy: &CompiledPolicy) -> Result<
         .collect::<Result<BTreeMap<_, _>>>()?;
 
     Ok(Metrics {
+        policy_generation: generation,
         select_calls: value(bpf_intf::snake_stat_SNAKE_STAT_SELECT_CALLS),
         direct_dispatches: value(bpf_intf::snake_stat_SNAKE_STAT_DIRECT_DISPATCHES),
         ladder_exhaustions: value(bpf_intf::snake_stat_SNAKE_STAT_LADDER_EXHAUSTIONS),
@@ -314,13 +498,14 @@ fn aggregate_raw_stats(raw: &[Vec<Vec<u8>>], policy: &CompiledPolicy) -> Result<
     })
 }
 
-fn read_raw_stats(skel: &BpfSkel<'_>) -> Result<Vec<Vec<Vec<u8>>>> {
+fn read_raw_stats(skel: &BpfSkel<'_>, slot: u32) -> Result<Vec<Vec<Vec<u8>>>> {
     (0..bpf_intf::snake_stat_SNAKE_NR_STATS)
-        .map(|index| {
+        .map(|stat| {
+            let index = runtime_policy::stat_index(slot, stat)?;
             skel.maps
                 .stats
                 .lookup_percpu(&index.to_ne_bytes(), libbpf_rs::MapFlags::ANY)
-                .with_context(|| format!("looking up statistic {index}"))?
+                .with_context(|| format!("looking up ladder slot {slot} statistic {stat}"))?
                 .ok_or_else(|| anyhow!("statistics map has no entry {index}"))
         })
         .collect()
@@ -329,14 +514,14 @@ fn read_raw_stats(skel: &BpfSkel<'_>) -> Result<Vec<Vec<Vec<u8>>>> {
 struct Scheduler<'object, 'policy> {
     skel: BpfSkel<'object>,
     struct_ops: Option<libbpf_rs::Link>,
-    stats_server: StatsServer<(), Metrics>,
-    policy: &'policy CompiledPolicy,
+    stats_server: StatsServer<SchedulerRequest, SchedulerResponse>,
+    runtime: &'policy mut RuntimePolicy,
 }
 
 impl<'object, 'policy> Scheduler<'object, 'policy> {
     fn init(
         opts: &Opts,
-        policy: &'policy CompiledPolicy,
+        runtime: &'policy mut RuntimePolicy,
         mask_tables: &[ResolvedMaskTable],
         open_object: &'object mut MaybeUninit<OpenObject>,
     ) -> Result<Self> {
@@ -347,32 +532,56 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
         let open_opts = opts.libbpf.clone().into_bpf_open_opts();
         let mut skel = scx_ops_open!(builder, open_object, snake_ops, open_opts)?;
         skel.struct_ops.snake_ops_mut().exit_dump_len = opts.exit_dump_len;
-        let rodata = skel
-            .maps
-            .rodata_data
-            .as_mut()
-            .context("BPF rodata map is not memory mapped")?;
-        install_policy(rodata, policy)?;
-
         let mut skel = scx_ops_load!(skel, snake_ops, uei)?;
-        install_mask_tables(&mut skel, mask_tables)?;
+        set_active_ladder(&mut skel, bpf_intf::SNAKE_LADDER_SLOT_INVALID)?;
+        install_ladder_slot(
+            &mut skel,
+            0,
+            runtime.generation,
+            &runtime.compiled,
+            mask_tables,
+        )?;
+        set_active_ladder(&mut skel, 0)?;
+        runtime.active_slot = 0;
         let struct_ops = Some(scx_ops_attach!(skel, snake_ops)?);
         let stats_server = StatsServer::new(stats::server_data()).launch()?;
         info!(
-            "attached {SCHEDULER_NAME} with {} policy rungs",
-            policy.rungs.len()
+            "attached {SCHEDULER_NAME} policy generation {} with {} rungs",
+            runtime.generation,
+            runtime.compiled.rungs.len()
         );
 
         Ok(Self {
             skel,
             struct_ops,
             stats_server,
-            policy,
+            runtime,
         })
     }
 
     fn metrics(&self) -> Result<Metrics> {
-        aggregate_raw_stats(&read_raw_stats(&self.skel)?, self.policy)
+        aggregate_raw_stats(
+            &read_raw_stats(&self.skel, self.runtime.active_slot)?,
+            &self.runtime.compiled,
+            self.runtime.generation,
+        )
+    }
+
+    fn replace_policy(&mut self, source: String) -> Result<runtime_policy::PolicyUpdateResponse> {
+        let mut backend = BpfPolicyBackend {
+            skel: &mut self.skel,
+        };
+        let response = runtime_policy::replace_policy(
+            self.runtime,
+            source,
+            resolve_mask_tables,
+            &mut backend,
+        )?;
+        info!(
+            "activated policy generation {} ({})",
+            response.generation, response.summary
+        );
+        Ok(response)
     }
 
     fn exited(&self) -> bool {
@@ -383,7 +592,15 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
         let (response_channel, request_channel) = self.stats_server.channels();
         while !shutdown.load(Ordering::Relaxed) && !self.exited() {
             match request_channel.recv_timeout(Duration::from_secs(1)) {
-                Ok(()) => response_channel.send(self.metrics()?)?,
+                Ok(SchedulerRequest::Metrics) => {
+                    response_channel.send(SchedulerResponse::Metrics(self.metrics()?))?
+                }
+                Ok(SchedulerRequest::ReplacePolicy { source }) => {
+                    let response = self
+                        .replace_policy(source)
+                        .map_err(|error| format!("{error:#}"));
+                    response_channel.send(SchedulerResponse::ReplacePolicy(response))?;
+                }
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => {
                     bail!("statistics server request channel disconnected")
@@ -461,14 +678,24 @@ fn main() -> Result<()> {
             init_logging(opts.verbose)?;
             return monitor(interval, opts.stats_format, shutdown_flag()?);
         }
+        RunMode::Update(path) => {
+            init_logging(opts.verbose)?;
+            let response = control::update_policy_file(&path)?;
+            println!(
+                "activated policy generation {} ({})",
+                response.generation, response.summary
+            );
+            return Ok(());
+        }
         RunMode::Dump(path) => {
-            let policy = load_policy(&path)?;
+            let (_, policy) = load_policy(&path)?;
             let mask_tables = resolve_mask_tables(&policy.mask_tables)?;
             print!("{}{}", policy.dump(), dump_mask_tables(&mask_tables));
             return Ok(());
         }
         RunMode::Launch(path) => {
-            let policy = load_policy(&path)?;
+            let (source, policy) = load_policy(&path)?;
+            let mut runtime = RuntimePolicy::new(source, policy);
             init_logging(opts.verbose)?;
             info!(
                 "{} {}",
@@ -493,12 +720,16 @@ fn main() -> Result<()> {
 
             let mut open_object = MaybeUninit::uninit();
             loop {
-                let mask_tables = resolve_mask_tables(&policy.mask_tables)?;
-                let mut scheduler =
-                    Scheduler::init(&opts, &policy, &mask_tables, &mut open_object)?;
-                if !scheduler.run(shutdown.clone())?.should_restart() {
+                let mask_tables = resolve_mask_tables(&runtime.compiled.mask_tables)?;
+                let exit_info = {
+                    let mut scheduler =
+                        Scheduler::init(&opts, &mut runtime, &mask_tables, &mut open_object)?;
+                    scheduler.run(shutdown.clone())?
+                };
+                if !exit_info.should_restart() {
                     break;
                 }
+                runtime.advance_for_restart()?;
             }
         }
     }
@@ -561,6 +792,67 @@ scope = "task_allowed"
         assert_eq!(encoded.flags, 0x1234);
         assert_eq!(encoded.reserved, 0);
         assert_eq!(encoded.data, 0x0102_0304_0506_0708);
+    }
+
+    #[test]
+    fn encodes_complete_compiled_ladder() {
+        let policy = policy::compile_policy(policy_source()).expect("policy should compile");
+        let encoded = encode_ladder(&policy, 42).expect("ladder should encode");
+
+        assert_eq!(bpf_intf::SNAKE_ABI_VERSION, 7);
+        assert_eq!(size_of::<bpf_intf::snake_compiled_ladder>(), 216);
+        assert_eq!(offset_of!(bpf_intf::snake_compiled_ladder, generation), 0);
+        assert_eq!(
+            offset_of!(bpf_intf::snake_compiled_ladder, policy_abi_version),
+            8
+        );
+        assert_eq!(offset_of!(bpf_intf::snake_compiled_ladder, nr_rungs), 12);
+        assert_eq!(
+            offset_of!(bpf_intf::snake_compiled_ladder, nr_mask_tables),
+            16
+        );
+        assert_eq!(
+            offset_of!(bpf_intf::snake_compiled_ladder, fallback_mode),
+            20
+        );
+        assert_eq!(offset_of!(bpf_intf::snake_compiled_ladder, rungs), 24);
+        assert_eq!(encoded.generation, 42);
+        assert_eq!(encoded.policy_abi_version, bpf_intf::SNAKE_ABI_VERSION);
+        assert_eq!(encoded.nr_rungs, 2);
+        assert_eq!(encoded.nr_mask_tables, 0);
+        assert_eq!(
+            encoded.fallback_mode,
+            bpf_intf::snake_fallback_SNAKE_FALLBACK_PREVIOUS_CPU
+        );
+        assert_eq!(
+            encoded.rungs[0].opcode,
+            bpf_intf::snake_opcode_SNAKE_OP_CLAIM_IDLE
+        );
+        assert_eq!(
+            encoded.rungs[1].opcode,
+            bpf_intf::snake_opcode_SNAKE_OP_PICK_IDLE
+        );
+        assert_eq!(encoded.rungs[2].opcode, 0);
+        assert_eq!(encoded.rungs[2].reserved, 0);
+        assert_eq!(encoded.rungs[2].data, 0);
+    }
+
+    #[test]
+    fn runtime_ladder_slots_have_disjoint_storage() {
+        assert_eq!(runtime_policy::inactive_slot(0).unwrap(), 1);
+        assert_eq!(runtime_policy::inactive_slot(1).unwrap(), 0);
+        assert!(runtime_policy::inactive_slot(2).is_err());
+
+        let slot_zero_mask = runtime_policy::mask_data_index(0, 3, 1023).unwrap();
+        let slot_one_mask = runtime_policy::mask_data_index(1, 0, 0).unwrap();
+        assert!(slot_zero_mask < slot_one_mask);
+        assert_eq!(
+            runtime_policy::stat_index(1, 0).unwrap(),
+            bpf_intf::snake_stat_SNAKE_NR_STATS
+        );
+        assert!(runtime_policy::mask_data_index(2, 0, 0).is_err());
+        assert!(runtime_policy::mask_data_index(0, 4, 0).is_err());
+        assert!(runtime_policy::mask_data_index(0, 0, 1024).is_err());
     }
 
     #[test]
@@ -749,6 +1041,34 @@ scope = "task_allowed"
     }
 
     #[test]
+    fn update_policy_is_a_standalone_run_mode() {
+        let update =
+            Opts::try_parse_from(["scx_snake", "--update-policy", "/tmp/replacement.toml"])
+                .expect("update arguments should parse");
+        assert!(matches!(
+            resolve_mode(&update),
+            Ok(RunMode::Update(path)) if path == PathBuf::from("/tmp/replacement.toml")
+        ));
+
+        assert!(Opts::try_parse_from([
+            "scx_snake",
+            "--update-policy",
+            "/tmp/replacement.toml",
+            "--policy",
+            "/tmp/initial.toml",
+        ])
+        .is_err());
+        assert!(Opts::try_parse_from([
+            "scx_snake",
+            "--update-policy",
+            "/tmp/replacement.toml",
+            "--monitor",
+            "1",
+        ])
+        .is_err());
+    }
+
+    #[test]
     fn aggregates_raw_percpu_stats_with_max_gauge_and_semantic_rung_labels() {
         let policy = policy::compile_policy(policy_source()).expect("policy should compile");
         let mut raw = raw_percpu_stats();
@@ -778,8 +1098,9 @@ scope = "task_allowed"
             &[2, 3],
         );
 
-        let metrics = aggregate_raw_stats(&raw, &policy).expect("stats should aggregate");
+        let metrics = aggregate_raw_stats(&raw, &policy, 42).expect("stats should aggregate");
 
+        assert_eq!(metrics.policy_generation, 42);
         assert_eq!(metrics.select_calls, 18);
         assert_eq!(metrics.select_latency_ns, 350);
         assert_eq!(metrics.select_latency_max_ns, 900);
@@ -812,7 +1133,7 @@ scope = "previous_llc"
         .expect("policy should compile");
 
         let metrics =
-            aggregate_raw_stats(&raw_percpu_stats(), &policy).expect("stats should aggregate");
+            aggregate_raw_stats(&raw_percpu_stats(), &policy, 1).expect("stats should aggregate");
 
         assert_eq!(metrics.rungs[&0].scope, "previous_llc_half");
         assert_eq!(metrics.rungs[&1].scope, "previous_llc");
@@ -830,7 +1151,7 @@ scope = "previous_llc"
         .expect("policy should compile");
 
         let metrics =
-            aggregate_raw_stats(&raw_percpu_stats(), &policy).expect("stats should aggregate");
+            aggregate_raw_stats(&raw_percpu_stats(), &policy, 1).expect("stats should aggregate");
 
         assert_eq!(metrics.rungs[&0].operation, "pick_idle_core");
         assert_eq!(metrics.rungs[&0].scope, "previous_llc");
@@ -848,7 +1169,7 @@ scope = "previous_node"
         .expect("policy should compile");
 
         let metrics =
-            aggregate_raw_stats(&raw_percpu_stats(), &policy).expect("stats should aggregate");
+            aggregate_raw_stats(&raw_percpu_stats(), &policy, 1).expect("stats should aggregate");
 
         assert_eq!(metrics.rungs[&0].operation, "pick_idle");
         assert_eq!(metrics.rungs[&0].scope, "previous_node");
@@ -866,7 +1187,7 @@ scope = "task_allowed"
         .expect("policy should compile");
 
         let metrics =
-            aggregate_raw_stats(&raw_percpu_stats(), &policy).expect("stats should aggregate");
+            aggregate_raw_stats(&raw_percpu_stats(), &policy, 1).expect("stats should aggregate");
 
         assert_eq!(metrics.rungs[&0].operation, "sync_wake_affine");
         assert_eq!(metrics.rungs[&0].scope, "task_allowed");
