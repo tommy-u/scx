@@ -37,6 +37,49 @@ static __always_inline s32 pick_random_idle(const struct task_struct *p)
 	return claimed ? selected : -ENOENT;
 }
 
+/* Apply the kernel-style synchronous wake-affine placement checks. */
+static __always_inline s32 try_sync_wake_affine(struct task_struct *p,
+						s32 prev_cpu, u64 wake_flags,
+						u64 data, u64 *dispatch_flags)
+{
+	const struct cpumask *idle;
+	struct task_struct   *waker;
+	u32		      llc_table	 = data;
+	u32		      node_table = data >> 32;
+	s32		      waker_cpu, result;
+
+	if (!(wake_flags & SCX_WAKE_SYNC))
+		return -ENOENT;
+
+	waker_cpu = bpf_get_smp_processor_id();
+	result	  = mask_table_contains(llc_table, waker_cpu, prev_cpu);
+	if (result < 0)
+		return result;
+	if (result && bpf_cpumask_test_cpu(prev_cpu, p->cpus_ptr) &&
+	    scx_bpf_test_and_clear_cpu_idle(prev_cpu))
+		return prev_cpu;
+
+	waker = bpf_get_current_task_btf();
+	if (!waker || !bpf_cpumask_test_cpu(waker_cpu, p->cpus_ptr) ||
+	    (waker->flags & PF_EXITING) ||
+	    scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | waker_cpu) != 0)
+		return -ENOENT;
+
+	idle = scx_bpf_get_idle_cpumask();
+	if (!idle)
+		return -EINVAL;
+	result = mask_table_intersects(node_table, waker_cpu, idle);
+	scx_bpf_put_idle_cpumask(idle);
+	if (result < 0)
+		return result;
+
+	if (result) {
+		*dispatch_flags = SCX_ENQ_PREEMPT;
+		return waker_cpu;
+	}
+	return -ENOENT;
+}
+
 /* Validate that a rung uses the supported mechanical ABI. */
 static __always_inline bool rung_is_valid(const struct snake_rung *rung)
 {
@@ -53,6 +96,10 @@ static __always_inline bool rung_is_valid(const struct snake_rung *rung)
 		rung->input == SNAKE_INPUT_MASK_TASK_ALLOWED && !rung->data) ||
 	       (rung->opcode == SNAKE_OP_KERNEL_DEFAULT && !rung->flags &&
 		rung->input == SNAKE_INPUT_MASK_TASK_ALLOWED && !rung->data) ||
+	       (rung->opcode == SNAKE_OP_SYNC_WAKE_AFFINE && !rung->flags &&
+		rung->input == SNAKE_INPUT_MASK_TASK_ALLOWED &&
+		(u32)rung->data < nr_mask_tables &&
+		(u32)(rung->data >> 32) < nr_mask_tables) ||
 	       (rung->opcode == SNAKE_OP_PICK_IDLE_MASK_TABLE &&
 		rung->input == SNAKE_INPUT_CPU_PREV &&
 		(rung->flags == SNAKE_RUNG_F_INTERSECT_TASK_ALLOWED ||
@@ -64,7 +111,8 @@ static __always_inline bool rung_is_valid(const struct snake_rung *rung)
 /* Execute one validated rung and return an idle CPU or a miss. */
 static __always_inline s32 execute_rung(struct task_struct	*p,
 					const struct snake_rung *rung,
-					s32 prev_cpu, u64 wake_flags)
+					s32 prev_cpu, u64 wake_flags,
+					u64 *dispatch_flags)
 {
 	switch (rung->opcode) {
 	case SNAKE_OP_CLAIM_IDLE:
@@ -89,6 +137,9 @@ static __always_inline s32 execute_rung(struct task_struct	*p,
 		cpu = scx_bpf_select_cpu_dfl(p, prev_cpu, wake_flags, &is_idle);
 		return is_idle ? cpu : -ENOENT;
 	}
+	case SNAKE_OP_SYNC_WAKE_AFFINE:
+		return try_sync_wake_affine(p, prev_cpu, wake_flags, rung->data,
+					    dispatch_flags);
 	case SNAKE_OP_PICK_IDLE_MASK_TABLE:
 		if (rung->flags & SNAKE_RUNG_F_PICK_IDLE_CORE)
 			return pick_idle_core_from_mask_table(p, rung->data,
@@ -104,7 +155,8 @@ static __always_inline s32 execute_rung(struct task_struct	*p,
 
 /* Evaluate the configured rungs in order until one returns a valid hint. */
 static __always_inline s32 walk_policy_ladder(struct task_struct *p,
-					      s32 prev_cpu, u64 wake_flags)
+					      s32 prev_cpu, u64 wake_flags,
+					      u64 *dispatch_flags)
 {
 	u32 i;
 
@@ -128,7 +180,9 @@ static __always_inline s32 walk_policy_ladder(struct task_struct *p,
 			return -1;
 		}
 
-		cpu = execute_rung(p, &rung, prev_cpu, wake_flags);
+		*dispatch_flags = 0;
+		cpu		= execute_rung(p, &rung, prev_cpu, wake_flags,
+					       dispatch_flags);
 		if (cpu < 0 && cpu != -ENOENT) {
 			stat_inc(SNAKE_STAT_RUNG_ERROR_BASE + i);
 			stat_inc(SNAKE_STAT_INVALID_ERRORS);

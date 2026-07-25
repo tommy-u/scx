@@ -18,6 +18,7 @@ pub enum Opcode {
     PickIdleMaskTable = 3,
     PickRandomIdle = 4,
     KernelDefault = 5,
+    SyncWakeAffine = 6,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -106,6 +107,7 @@ impl Opcode {
             Self::PickIdleMaskTable => "pick_idle_mask_table",
             Self::PickRandomIdle => "pick_random_idle",
             Self::KernelDefault => "kernel_default",
+            Self::SyncWakeAffine => "sync_wake_affine",
         }
     }
 }
@@ -301,30 +303,8 @@ fn compile_rung(
             )))
         }
         operation @ ("pick_idle" | "pick_idle_core") => {
-            let source = match rung.scope.as_str() {
-                "previous_llc" => MaskTableSource::PreviousLlcByCpu,
-                "previous_node" => MaskTableSource::PreviousNodeByCpu,
-                _ => *partitions
-                    .get(&rung.scope)
-                    .expect("scope existence was validated above"),
-            };
-            let table_id =
-                if let Some(table) = mask_tables.iter().find(|table| table.name == rung.scope) {
-                    table.id
-                } else {
-                    if mask_tables.len() >= MAX_MASK_TABLES {
-                        return Err(PolicyError(format!(
-                            "rung {index}: policy requires more than {MAX_MASK_TABLES} mask tables"
-                        )));
-                    }
-                    let id = mask_tables.len() as u32;
-                    mask_tables.push(MaskTableSpec {
-                        id,
-                        name: rung.scope.clone(),
-                        source,
-                    });
-                    id
-                };
+            let source = mask_table_source(&rung.scope, partitions);
+            let table_id = intern_mask_table(index, &rung.scope, source, mask_tables)?;
 
             Ok(CompiledRung {
                 opcode: Opcode::PickIdleMaskTable,
@@ -358,10 +338,72 @@ fn compile_rung(
             "rung {index}: operation `{}` is incompatible with scope `{}`",
             rung.operation, rung.scope
         ))),
+        "sync_wake_affine" if rung.scope == "task_allowed" => {
+            let llc_table = intern_mask_table(
+                index,
+                "previous_llc",
+                MaskTableSource::PreviousLlcByCpu,
+                mask_tables,
+            )?;
+            let node_table = intern_mask_table(
+                index,
+                "previous_node",
+                MaskTableSource::PreviousNodeByCpu,
+                mask_tables,
+            )?;
+
+            Ok(CompiledRung {
+                opcode: Opcode::SyncWakeAffine,
+                input: InputSource::MaskTaskAllowed,
+                flags: 0,
+                data: u64::from(llc_table) | (u64::from(node_table) << 32),
+            })
+        }
+        "sync_wake_affine" => Err(PolicyError(format!(
+            "rung {index}: operation `{}` is incompatible with scope `{}`",
+            rung.operation, rung.scope
+        ))),
         operation => Err(PolicyError(format!(
             "rung {index}: unknown operation `{operation}`"
         ))),
     }
+}
+
+fn mask_table_source(
+    scope: &str,
+    partitions: &BTreeMap<String, MaskTableSource>,
+) -> MaskTableSource {
+    match scope {
+        "previous_llc" => MaskTableSource::PreviousLlcByCpu,
+        "previous_node" => MaskTableSource::PreviousNodeByCpu,
+        _ => *partitions
+            .get(scope)
+            .expect("scope existence was validated before table lowering"),
+    }
+}
+
+fn intern_mask_table(
+    rung_index: usize,
+    name: &str,
+    source: MaskTableSource,
+    mask_tables: &mut Vec<MaskTableSpec>,
+) -> Result<u32, PolicyError> {
+    if let Some(table) = mask_tables.iter().find(|table| table.name == name) {
+        return Ok(table.id);
+    }
+    if mask_tables.len() >= MAX_MASK_TABLES {
+        return Err(PolicyError(format!(
+            "rung {rung_index}: policy requires more than {MAX_MASK_TABLES} mask tables"
+        )));
+    }
+
+    let id = mask_tables.len() as u32;
+    mask_tables.push(MaskTableSpec {
+        id,
+        name: name.into(),
+        source,
+    });
+    Ok(id)
 }
 
 #[cfg(test)]
@@ -430,6 +472,20 @@ scope = "task_allowed"
     const KERNEL_DEFAULT_POLICY: &str = r#"
 [[rung]]
 operation = "kernel_default"
+scope = "task_allowed"
+"#;
+
+    const SYNC_WAKE_POLICY: &str = r#"
+[[rung]]
+operation = "pick_idle"
+scope = "previous_llc"
+
+[[rung]]
+operation = "pick_idle"
+scope = "previous_node"
+
+[[rung]]
+operation = "sync_wake_affine"
 scope = "task_allowed"
 "#;
 
@@ -604,6 +660,28 @@ scope = "task_allowed"
     }
 
     #[test]
+    fn lowers_sync_wake_affine_with_reused_llc_and_node_tables() {
+        let policy = compile_policy(SYNC_WAKE_POLICY).expect("policy should compile");
+
+        assert_eq!(policy.rungs.len(), 3);
+        assert_eq!(policy.rungs[2].data, (1_u64 << 32) | 0);
+        assert!(policy.dump().contains(
+            "rung 2: opcode=sync_wake_affine input=mask_task_allowed flags=0x00000000 data=0x0000000100000000"
+        ));
+        assert_eq!(
+            policy
+                .mask_tables
+                .iter()
+                .map(|table| (table.id, table.name.as_str(), table.source))
+                .collect::<Vec<_>>(),
+            vec![
+                (0, "previous_llc", MaskTableSource::PreviousLlcByCpu),
+                (1, "previous_node", MaskTableSource::PreviousNodeByCpu),
+            ]
+        );
+    }
+
+    #[test]
     fn defaults_existing_policies_to_previous_cpu_fallback() {
         let policy = compile_policy(TWO_RUNG_POLICY).expect("policy should compile");
 
@@ -673,6 +751,17 @@ scope = "previous_cpu"
         assert!(pick_error.contains("pick_idle"));
         assert!(pick_error.contains("previous_cpu"));
         assert!(pick_error.contains("incompatible"));
+
+        let sync_error = error_for(
+            r#"
+[[rung]]
+operation = "sync_wake_affine"
+scope = "previous_llc"
+"#,
+        );
+        assert!(sync_error.contains("sync_wake_affine"));
+        assert!(sync_error.contains("previous_llc"));
+        assert!(sync_error.contains("incompatible"));
     }
 
     #[test]

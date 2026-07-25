@@ -128,6 +128,52 @@ static __always_inline int init_mask_tables(void)
 	return 0;
 }
 
+/* Test whether one CPU belongs to a CPU-keyed policy mask. */
+static __always_inline s32 mask_table_contains(u32 table_id, s32 key, s32 cpu)
+{
+	struct bpf_cpumask     *table_mask;
+	struct snake_mask_slot *slot;
+	u32			index;
+
+	if (table_id >= nr_mask_tables || key < 0 || key >= nr_cpu_ids ||
+	    cpu < 0 || cpu >= nr_cpu_ids)
+		return -EINVAL;
+
+	index = mask_table_index(table_id, key);
+	slot  = bpf_map_lookup_elem(&mask_slots, &index);
+	if (!slot)
+		return -EINVAL;
+	table_mask = slot->mask;
+	if (!table_mask)
+		return -EINVAL;
+
+	return bpf_cpumask_test_cpu(cpu, (const struct cpumask *)table_mask);
+}
+
+/* Test whether a CPU-keyed policy mask intersects a live kernel mask. */
+static __always_inline s32
+mask_table_intersects(u32 table_id, s32 key, const struct cpumask *candidate)
+{
+	struct bpf_cpumask     *table_mask;
+	struct snake_mask_slot *slot;
+	u32			index;
+
+	if (table_id >= nr_mask_tables || key < 0 || key >= nr_cpu_ids ||
+	    !candidate)
+		return -EINVAL;
+
+	index = mask_table_index(table_id, key);
+	slot  = bpf_map_lookup_elem(&mask_slots, &index);
+	if (!slot)
+		return -EINVAL;
+	table_mask = slot->mask;
+	if (!table_mask)
+		return -EINVAL;
+
+	return bpf_cpumask_intersects((const struct cpumask *)table_mask,
+				      candidate);
+}
+
 /* Pick from a table mask intersected with the task's dynamic affinity mask. */
 static __always_inline s32
 pick_idle_from_mask_table(const struct task_struct *p, u32 table_id, s32 key,

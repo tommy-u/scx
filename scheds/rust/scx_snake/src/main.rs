@@ -205,6 +205,7 @@ fn operation_label(rung: &CompiledRung) -> &'static str {
         Opcode::PickIdle | Opcode::PickIdleMaskTable => "pick_idle",
         Opcode::PickRandomIdle => "pick_random_idle",
         Opcode::KernelDefault => "kernel_default",
+        Opcode::SyncWakeAffine => "sync_wake_affine",
     }
 }
 
@@ -667,6 +668,31 @@ scope = "task_allowed"
     }
 
     #[test]
+    fn rust_sync_wake_instruction_matches_the_bpf_abi() {
+        let compiled = policy::compile_policy(
+            r#"
+[[rung]]
+operation = "sync_wake_affine"
+scope = "task_allowed"
+"#,
+        )
+        .expect("policy should compile");
+        let encoded = encode_rung(compiled.rungs[0]);
+
+        assert_eq!(
+            encoded.opcode,
+            bpf_intf::snake_opcode_SNAKE_OP_SYNC_WAKE_AFFINE
+        );
+        assert_eq!(
+            encoded.input,
+            bpf_intf::snake_input_source_SNAKE_INPUT_MASK_TASK_ALLOWED
+        );
+        assert_eq!(encoded.flags, 0);
+        assert_eq!(encoded.data, 1_u64 << 32);
+        assert_eq!(compiled.mask_tables.len(), 2);
+    }
+
+    #[test]
     fn requires_policy_for_launch_and_dump_but_not_monitor_or_help() {
         let launch =
             Opts::try_parse_from(["scx_snake"]).expect("argument parsing itself should succeed");
@@ -826,5 +852,23 @@ scope = "previous_node"
 
         assert_eq!(metrics.rungs[&0].operation, "pick_idle");
         assert_eq!(metrics.rungs[&0].scope, "previous_node");
+    }
+
+    #[test]
+    fn labels_sync_wake_affine_stats() {
+        let policy = policy::compile_policy(
+            r#"
+[[rung]]
+operation = "sync_wake_affine"
+scope = "task_allowed"
+"#,
+        )
+        .expect("policy should compile");
+
+        let metrics =
+            aggregate_raw_stats(&raw_percpu_stats(), &policy).expect("stats should aggregate");
+
+        assert_eq!(metrics.rungs[&0].operation, "sync_wake_affine");
+        assert_eq!(metrics.rungs[&0].scope, "task_allowed");
     }
 }

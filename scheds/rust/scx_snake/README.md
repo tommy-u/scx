@@ -34,6 +34,12 @@ The semantic vocabulary includes:
   `select_cpu` implementation. An idle result is a hit; a non-idle result is a
   miss, leaving Snake's configured fallback authoritative. This operation must
   be the final rung.
+- `sync_wake_affine(task_allowed)` applies only to synchronous wakes. It first
+  claims an allowed idle previous CPU when it shares the waker's LLC. Otherwise
+  it selects the allowed waker CPU when the waker is not exiting, its local DSQ
+  is empty, and its NUMA node contains an idle CPU. The latter path may
+  intentionally direct-dispatch to a non-idle CPU and uses a preemptive handoff
+  to avoid starving existing local work under repeated synchronous wakes.
 - `pick_idle(previous_llc)` searches the intersection of the task's allowed
   CPUs and the previous CPU's LLC mask. Userspace discovers LLC topology and
   lowers this semantic scope to a generic CPU-keyed mask-table lookup; BPF does
@@ -100,10 +106,12 @@ leave actual queue placement to `enqueue`. See
 
 ## Scheduling behavior
 
-Successful idle-selection rungs dispatch directly to the selected CPU's local
-DSQ from `select_cpu`. This preserves the placement selected by the policy and
-skips `enqueue` for that task. Tasks that exhaust the ladder are enqueued on the
-global FIFO dispatch queue after choosing an affinity-safe fallback CPU.
+Successful selection rungs dispatch directly to the selected CPU's local DSQ
+from `select_cpu`. This preserves the placement selected by the policy and
+skips `enqueue` for that task. Most rungs claim an idle CPU; sync wake-affine
+placement may instead select its non-idle waker. Tasks that exhaust the ladder
+are enqueued on the global FIFO dispatch queue after choosing an affinity-safe
+fallback CPU.
 
 If every rung misses, the interpreter returns an affinity-safe non-idle CPU and
 records ladder exhaustion. There is no implicit default idle search after the

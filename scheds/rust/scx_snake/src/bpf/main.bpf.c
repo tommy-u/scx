@@ -16,17 +16,19 @@ const volatile struct snake_rung rungs[SNAKE_MAX_RUNGS];
 s32 BPF_STRUCT_OPS(snake_select_cpu, struct task_struct *p, s32 prev_cpu,
 		   u64 wake_flags)
 {
-	u64 started_at = bpf_ktime_get_ns();
+	u64 dispatch_flags = 0;
+	u64 started_at	   = bpf_ktime_get_ns();
 	s32 cpu;
 
 	stat_inc(SNAKE_STAT_SELECT_CALLS);
 
-	cpu = walk_policy_ladder(p, prev_cpu, wake_flags);
+	cpu = walk_policy_ladder(p, prev_cpu, wake_flags, &dispatch_flags);
 	if (cpu >= 0) {
-		if (!scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, SCX_SLICE_DFL, 0)) {
+		if (!scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, SCX_SLICE_DFL,
+					dispatch_flags)) {
 			stat_inc(SNAKE_STAT_INVALID_ERRORS);
 			scx_bpf_error(
-				"snake failed to dispatch pid %d to idle CPU %d",
+				"snake failed to dispatch pid %d to CPU %d",
 				p->pid, cpu);
 			return -1;
 		}
