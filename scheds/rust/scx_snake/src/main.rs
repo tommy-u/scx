@@ -376,7 +376,10 @@ fn install_ladder_slot(
 
 fn operation_label(rung: &CompiledRung) -> &'static str {
     if rung.flags & policy::RUNG_FLAG_PICK_IDLE_CORE != 0 {
-        return "pick_idle_core";
+        return match rung.opcode {
+            Opcode::PickRandomIdle => "pick_random_idle_core",
+            _ => "pick_idle_core",
+        };
     }
 
     match rung.opcode {
@@ -393,7 +396,7 @@ fn scope_label<'policy>(
     rung: &CompiledRung,
 ) -> Result<&'policy str> {
     match (rung.opcode, rung.input) {
-        (Opcode::PickIdleMaskTable, InputSource::CpuPrev) => {
+        (Opcode::PickIdleMaskTable | Opcode::PickRandomIdle, InputSource::CpuPrev) => {
             let table_id = u32::try_from(rung.data).context("mask table ID does not fit u32")?;
             policy
                 .mask_tables
@@ -799,7 +802,7 @@ scope = "task_allowed"
         let policy = policy::compile_policy(policy_source()).expect("policy should compile");
         let encoded = encode_ladder(&policy, 42).expect("ladder should encode");
 
-        assert_eq!(bpf_intf::SNAKE_ABI_VERSION, 7);
+        assert_eq!(bpf_intf::SNAKE_ABI_VERSION, 8);
         assert_eq!(size_of::<bpf_intf::snake_compiled_ladder>(), 216);
         assert_eq!(offset_of!(bpf_intf::snake_compiled_ladder, generation), 0);
         assert_eq!(
@@ -932,6 +935,53 @@ scope = "task_allowed"
         assert_eq!(
             compiled.fallback as u32,
             bpf_intf::snake_fallback_SNAKE_FALLBACK_ANY_ALLOWED
+        );
+    }
+
+    #[test]
+    fn rust_random_llc_instruction_matches_the_bpf_abi() {
+        let compiled = policy::compile_policy(
+            r#"
+[[rung]]
+operation = "pick_random_idle"
+scope = "previous_llc"
+"#,
+        )
+        .expect("policy should compile");
+        let encoded = encode_rung(compiled.rungs[0]);
+
+        assert_eq!(
+            encoded.opcode,
+            bpf_intf::snake_opcode_SNAKE_OP_PICK_RANDOM_IDLE
+        );
+        assert_eq!(
+            encoded.input,
+            bpf_intf::snake_input_source_SNAKE_INPUT_CPU_PREV
+        );
+        assert_eq!(encoded.flags, bpf_intf::SNAKE_RUNG_F_INTERSECT_TASK_ALLOWED);
+        assert_eq!(encoded.data, 0);
+        assert_eq!(compiled.mask_tables.len(), 1);
+    }
+
+    #[test]
+    fn rust_random_whole_core_instruction_matches_the_bpf_abi() {
+        let compiled = policy::compile_policy(
+            r#"
+[[rung]]
+operation = "pick_random_idle_core"
+scope = "previous_llc"
+"#,
+        )
+        .expect("policy should compile");
+        let encoded = encode_rung(compiled.rungs[0]);
+
+        assert_eq!(
+            encoded.opcode,
+            bpf_intf::snake_opcode_SNAKE_OP_PICK_RANDOM_IDLE
+        );
+        assert_eq!(
+            encoded.flags,
+            bpf_intf::SNAKE_RUNG_F_INTERSECT_TASK_ALLOWED | bpf_intf::SNAKE_RUNG_F_PICK_IDLE_CORE
         );
     }
 
@@ -1173,6 +1223,42 @@ scope = "previous_node"
 
         assert_eq!(metrics.rungs[&0].operation, "pick_idle");
         assert_eq!(metrics.rungs[&0].scope, "previous_node");
+    }
+
+    #[test]
+    fn labels_random_llc_placement_stats() {
+        let policy = policy::compile_policy(
+            r#"
+[[rung]]
+operation = "pick_random_idle"
+scope = "previous_llc"
+"#,
+        )
+        .expect("policy should compile");
+
+        let metrics =
+            aggregate_raw_stats(&raw_percpu_stats(), &policy, 1).expect("stats should aggregate");
+
+        assert_eq!(metrics.rungs[&0].operation, "pick_random_idle");
+        assert_eq!(metrics.rungs[&0].scope, "previous_llc");
+    }
+
+    #[test]
+    fn labels_random_whole_core_placement_stats() {
+        let policy = policy::compile_policy(
+            r#"
+[[rung]]
+operation = "pick_random_idle_core"
+scope = "previous_llc"
+"#,
+        )
+        .expect("policy should compile");
+
+        let metrics =
+            aggregate_raw_stats(&raw_percpu_stats(), &policy, 1).expect("stats should aggregate");
+
+        assert_eq!(metrics.rungs[&0].operation, "pick_random_idle_core");
+        assert_eq!(metrics.rungs[&0].scope, "previous_llc");
     }
 
     #[test]

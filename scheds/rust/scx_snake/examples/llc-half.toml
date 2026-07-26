@@ -1,6 +1,15 @@
+[[partition]]
+name = "previous_llc_half"
+provider = "split_llcs"
+parts = 2
+
 [[rung]]
 operation = "claim_idle"
 scope = "previous_cpu"
+
+[[rung]]
+operation = "pick_idle"
+scope = "previous_llc_half"
 
 [[rung]]
 operation = "pick_idle"

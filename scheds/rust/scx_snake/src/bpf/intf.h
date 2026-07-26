@@ -8,7 +8,7 @@ typedef unsigned int	   u32;
 typedef unsigned long long u64;
 #endif
 
-#define SNAKE_ABI_VERSION 7
+#define SNAKE_ABI_VERSION 8
 #define SNAKE_MAX_RUNGS 8
 #define SNAKE_LADDER_SLOTS 2
 #define SNAKE_LADDER_SLOT_INVALID SNAKE_LADDER_SLOTS

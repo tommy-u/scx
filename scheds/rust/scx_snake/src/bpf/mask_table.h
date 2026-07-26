@@ -230,6 +230,59 @@ pick_idle_from_mask_table(const struct snake_ladder_ctx *ctx,
 	return -ENOENT;
 }
 
+/* Uniformly choose and claim an allowed idle CPU from a CPU-keyed table mask. */
+static __always_inline s32
+pick_random_idle_from_mask_table(const struct snake_ladder_ctx *ctx,
+				 const struct task_struct *p, u32 table_id, s32 key,
+				 bool whole_core)
+{
+	const struct cpumask   *idle;
+	struct bpf_cpumask     *table_mask;
+	struct snake_mask_slot *slot;
+	u32			    candidates = 0, cpu, index;
+	s32			    selected = -1;
+	bool			    claimed;
+
+	if (table_id >= ctx->ladder->nr_mask_tables || key < 0 ||
+	    key >= nr_cpu_ids)
+		return -EINVAL;
+
+	index = mask_table_index(ctx->slot, table_id, key);
+	slot  = bpf_map_lookup_elem(&mask_slots, &index);
+	if (!slot)
+		return -EINVAL;
+	table_mask = slot->mask;
+	if (!table_mask)
+		return -EINVAL;
+
+	idle = whole_core ? scx_bpf_get_idle_smtmask() :
+			    scx_bpf_get_idle_cpumask();
+	if (!idle)
+		return -EINVAL;
+
+	bpf_for(cpu, 0, SNAKE_MAX_CPUS)
+	{
+		if (cpu >= nr_cpu_ids)
+			break;
+		if (bpf_cpumask_test_cpu(cpu,
+					  (const struct cpumask *)table_mask) &&
+		    bpf_cpumask_test_cpu(cpu, p->cpus_ptr) &&
+		    bpf_cpumask_test_cpu(cpu, idle)) {
+			candidates++;
+			if (bpf_get_prandom_u32() % candidates == 0)
+				selected = cpu;
+		}
+	}
+	if (selected < 0) {
+		scx_bpf_put_idle_cpumask(idle);
+		return -ENOENT;
+	}
+
+	claimed = scx_bpf_test_and_clear_cpu_idle(selected);
+	scx_bpf_put_idle_cpumask(idle);
+	return claimed ? selected : -ENOENT;
+}
+
 /* Pick from a table only when every SMT sibling of the CPU is idle. */
 static __always_inline s32 pick_idle_core_from_mask_table(
 	const struct snake_ladder_ctx *ctx, const struct task_struct *p, u32 table_id,

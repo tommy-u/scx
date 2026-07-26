@@ -318,16 +318,42 @@ fn compile_rung(
                 data: table_id.into(),
             })
         }
-        "pick_random_idle" if rung.scope == "task_allowed" => Ok(CompiledRung {
-            opcode: Opcode::PickRandomIdle,
-            input: InputSource::MaskTaskAllowed,
-            flags: 0,
-            data: 0,
-        }),
-        "pick_random_idle" => Err(PolicyError(format!(
-            "rung {index}: operation `{}` is incompatible with scope `{}`",
-            rung.operation, rung.scope
-        ))),
+        operation @ ("pick_random_idle" | "pick_random_idle_core")
+            if rung.scope == "task_allowed" =>
+        {
+            Ok(CompiledRung {
+                opcode: Opcode::PickRandomIdle,
+                input: InputSource::MaskTaskAllowed,
+                flags: if operation == "pick_random_idle_core" {
+                    RUNG_FLAG_PICK_IDLE_CORE
+                } else {
+                    0
+                },
+                data: 0,
+            })
+        }
+        "pick_random_idle" | "pick_random_idle_core" if rung.scope == "previous_cpu" => {
+            Err(PolicyError(format!(
+                "rung {index}: operation `{}` is incompatible with scope `{}`",
+                rung.operation, rung.scope
+            )))
+        }
+        operation @ ("pick_random_idle" | "pick_random_idle_core") => {
+            let source = mask_table_source(&rung.scope, partitions);
+            let table_id = intern_mask_table(index, &rung.scope, source, mask_tables)?;
+
+            Ok(CompiledRung {
+                opcode: Opcode::PickRandomIdle,
+                input: InputSource::CpuPrev,
+                flags: RUNG_FLAG_INTERSECT_TASK_ALLOWED
+                    | if operation == "pick_random_idle_core" {
+                        RUNG_FLAG_PICK_IDLE_CORE
+                    } else {
+                        0
+                    },
+                data: table_id.into(),
+            })
+        }
         "kernel_default" if rung.scope == "task_allowed" => Ok(CompiledRung {
             opcode: Opcode::KernelDefault,
             input: InputSource::MaskTaskAllowed,
@@ -470,6 +496,12 @@ fallback = "any_allowed"
 operation = "pick_random_idle"
 scope = "task_allowed"
 "#;
+
+    const RANDOM_LLC_POLICY: &str = include_str!("../examples/llc-random.toml");
+
+    const RANDOM_HALF_LLC_POLICY: &str = include_str!("../examples/llc-half-random.toml");
+
+    const RANDOM_WHOLE_CORE_POLICY: &str = include_str!("../examples/llc-whole-core-random.toml");
 
     const KERNEL_DEFAULT_POLICY: &str = r#"
 [[rung]]
@@ -643,6 +675,76 @@ scope = "task_allowed"
             }]
         );
         assert!(policy.mask_tables.is_empty());
+    }
+
+    #[test]
+    fn lowers_random_llc_idle_to_a_topology_blind_mask_table_lookup() {
+        let policy = compile_policy(RANDOM_LLC_POLICY).expect("policy should compile");
+
+        assert_eq!(policy.fallback, Fallback::AnyAllowed);
+        assert_eq!(
+            policy.rungs,
+            vec![
+                CompiledRung {
+                    opcode: Opcode::PickRandomIdle,
+                    input: InputSource::CpuPrev,
+                    flags: RUNG_FLAG_INTERSECT_TASK_ALLOWED,
+                    data: 0,
+                },
+                CompiledRung {
+                    opcode: Opcode::PickRandomIdle,
+                    input: InputSource::MaskTaskAllowed,
+                    flags: 0,
+                    data: 0,
+                },
+            ]
+        );
+        assert_eq!(
+            policy.mask_tables,
+            vec![MaskTableSpec {
+                id: 0,
+                name: "previous_llc".into(),
+                source: MaskTableSource::PreviousLlcByCpu,
+            }]
+        );
+    }
+
+    #[test]
+    fn lowers_random_whole_core_idle_with_the_core_flag() {
+        let policy = compile_policy(RANDOM_WHOLE_CORE_POLICY).expect("policy should compile");
+
+        assert_eq!(policy.rungs.len(), 3);
+        assert_eq!(policy.rungs[0].opcode, Opcode::PickRandomIdle);
+        assert_eq!(policy.rungs[0].input, InputSource::CpuPrev);
+        assert_eq!(
+            policy.rungs[0].flags,
+            RUNG_FLAG_INTERSECT_TASK_ALLOWED | RUNG_FLAG_PICK_IDLE_CORE
+        );
+        assert_eq!(policy.mask_tables.len(), 1);
+        assert_eq!(policy.mask_tables[0].name, "previous_llc");
+    }
+
+    #[test]
+    fn lowers_random_half_llc_before_random_whole_llc() {
+        let policy = compile_policy(RANDOM_HALF_LLC_POLICY).expect("policy should compile");
+
+        assert_eq!(policy.fallback, Fallback::AnyAllowed);
+        assert_eq!(policy.rungs.len(), 3);
+        assert!(policy
+            .rungs
+            .iter()
+            .all(|rung| rung.opcode == Opcode::PickRandomIdle));
+        assert_eq!(policy.rungs[0].data, 0);
+        assert_eq!(policy.rungs[1].data, 1);
+        assert_eq!(policy.rungs[2].input, InputSource::MaskTaskAllowed);
+        assert_eq!(
+            policy
+                .mask_tables
+                .iter()
+                .map(|table| table.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["previous_llc_half", "previous_llc"]
+        );
     }
 
     #[test]

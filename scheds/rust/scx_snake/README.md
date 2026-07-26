@@ -83,7 +83,8 @@ A policy contains one to eight rungs. Its fallback is `previous_cpu` by default;
 `any_allowed` instead distributes fallback hints across the affinity mask.
 Invalid operations and operation/scope combinations are rejected before BPF is
 loaded. See [`examples/`](examples/) for random placement, sub-LLC partitions,
-whole-core selection, and the opaque kernel-default control.
+whole-core selection, paired demo-only random variants, and the opaque
+kernel-default control.
 
 `sync_wake_affine` only handles synchronous wakes. It prefers an idle previous
 CPU in the waker's LLC, then the waker CPU when its local DSQ is empty and its

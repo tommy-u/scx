@@ -1,0 +1,19 @@
+# Demo only: spray uniformly within the previous half-LLC before broadening.
+fallback = "any_allowed"
+
+[[partition]]
+name = "previous_llc_half"
+provider = "split_llcs"
+parts = 2
+
+[[rung]]
+operation = "pick_random_idle"
+scope = "previous_llc_half"
+
+[[rung]]
+operation = "pick_random_idle"
+scope = "previous_llc"
+
+[[rung]]
+operation = "pick_random_idle"
+scope = "task_allowed"

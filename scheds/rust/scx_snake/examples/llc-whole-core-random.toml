@@ -1,0 +1,14 @@
+# Demo only: spray uniformly across wholly idle cores in the previous LLC.
+fallback = "any_allowed"
+
+[[rung]]
+operation = "pick_random_idle_core"
+scope = "previous_llc"
+
+[[rung]]
+operation = "pick_random_idle"
+scope = "previous_llc"
+
+[[rung]]
+operation = "pick_random_idle"
+scope = "task_allowed"

@@ -5,14 +5,16 @@
 #include "mask_table.h"
 
 /* Uniformly choose and claim one CPU from the task's allowed idle set. */
-static __always_inline s32 pick_random_idle(const struct task_struct *p)
+static __always_inline s32 pick_random_idle(const struct task_struct *p,
+					    bool whole_core)
 {
 	const struct cpumask *idle;
 	u32		      cpu, candidates = 0;
 	s32		      selected = -1;
 	bool		      claimed;
 
-	idle = scx_bpf_get_idle_cpumask();
+	idle = whole_core ? scx_bpf_get_idle_smtmask() :
+			    scx_bpf_get_idle_cpumask();
 	if (!idle)
 		return -EINVAL;
 
@@ -93,8 +95,15 @@ static __always_inline bool rung_is_valid(const struct snake_rung *rung,
 		(rung->flags == 0 ||
 		 rung->flags == SNAKE_RUNG_F_PICK_IDLE_CORE) &&
 		rung->input == SNAKE_INPUT_MASK_TASK_ALLOWED && !rung->data) ||
-	       (rung->opcode == SNAKE_OP_PICK_RANDOM_IDLE && !rung->flags &&
-		rung->input == SNAKE_INPUT_MASK_TASK_ALLOWED && !rung->data) ||
+	       (rung->opcode == SNAKE_OP_PICK_RANDOM_IDLE &&
+		(((rung->flags == 0 ||
+		   rung->flags == SNAKE_RUNG_F_PICK_IDLE_CORE) &&
+		  rung->input == SNAKE_INPUT_MASK_TASK_ALLOWED && !rung->data) ||
+		 ((rung->flags == SNAKE_RUNG_F_INTERSECT_TASK_ALLOWED ||
+		   rung->flags == (SNAKE_RUNG_F_INTERSECT_TASK_ALLOWED |
+				  SNAKE_RUNG_F_PICK_IDLE_CORE)) &&
+		  rung->input == SNAKE_INPUT_CPU_PREV &&
+		  rung->data < nr_mask_tables))) ||
 	       (rung->opcode == SNAKE_OP_KERNEL_DEFAULT && !rung->flags &&
 		rung->input == SNAKE_INPUT_MASK_TASK_ALLOWED && !rung->data) ||
 	       (rung->opcode == SNAKE_OP_SYNC_WAKE_AFFINE && !rung->flags &&
@@ -130,7 +139,12 @@ static __always_inline s32 execute_rung(const struct snake_ladder_ctx *ctx,
 					     0);
 		return prev_cpu < 0 ? -ENOENT : prev_cpu;
 	case SNAKE_OP_PICK_RANDOM_IDLE:
-		return pick_random_idle(p);
+		if (rung->input == SNAKE_INPUT_CPU_PREV)
+			return pick_random_idle_from_mask_table(
+				ctx, p, rung->data, prev_cpu,
+				rung->flags & SNAKE_RUNG_F_PICK_IDLE_CORE);
+		return pick_random_idle(
+			p, rung->flags & SNAKE_RUNG_F_PICK_IDLE_CORE);
 	case SNAKE_OP_KERNEL_DEFAULT: {
 		bool is_idle = false;
 		s32  cpu;
