@@ -22,12 +22,14 @@ use tokio_stream::StreamExt;
 
 use crate::collector::CollectorCommand;
 use crate::dashboard::Dashboard;
+use crate::policies::PolicyActivation;
 use crate::scope::{resolve_scope, ScopeRequest};
 
 pub const CSRF_HEADER: &str = "x-snake-token";
 const INDEX_HTML: &str = include_str!("web/index.html");
 const APP_JS: &str = include_str!("web/app.js");
 const HEATMAP_JS: &str = include_str!("web/heatmap.js");
+const INSPECTION_JS: &str = include_str!("web/inspection.js");
 const STYLE_CSS: &str = include_str!("web/style.css");
 
 #[derive(Clone)]
@@ -66,9 +68,13 @@ pub fn router(context: ApiContext) -> Router {
         .route("/", get(index))
         .route("/assets/app.js", get(app_script))
         .route("/assets/heatmap.js", get(heatmap_script))
+        .route("/assets/inspection.js", get(inspection_script))
         .route("/assets/style.css", get(stylesheet))
         .route("/api/topology", get(topology))
         .route("/api/snapshot", get(snapshot))
+        .route("/api/inspection", get(inspection))
+        .route("/api/policies", get(policies))
+        .route("/api/policies/activate", post(activate_policy))
         .route("/api/events", get(events))
         .route("/api/scope", post(set_scope))
         .layer(middleware::from_fn(require_loopback_host))
@@ -135,6 +141,13 @@ async fn heatmap_script() -> impl IntoResponse {
     )
 }
 
+async fn inspection_script() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        INSPECTION_JS,
+    )
+}
+
 async fn stylesheet() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
@@ -160,6 +173,42 @@ async fn snapshot(
         .snapshot(query.window_ms)
         .map(Json)
         .map_err(|error| ApiError::bad_request(error.to_string()))
+}
+
+async fn inspection(State(context): State<ApiContext>) -> impl IntoResponse {
+    Json(context.dashboard.inspection())
+}
+
+async fn policies(State(context): State<ApiContext>) -> impl IntoResponse {
+    Json(context.dashboard.policy_catalog())
+}
+
+#[derive(Deserialize)]
+struct ActivatePolicyRequest {
+    policy_id: String,
+}
+
+async fn activate_policy(
+    State(context): State<ApiContext>,
+    headers: HeaderMap,
+    Json(request): Json<ActivatePolicyRequest>,
+) -> Result<Json<PolicyActivation>, ApiError> {
+    require_session_token(&headers, &context.token)?;
+    let (response_tx, response_rx) = std::sync::mpsc::sync_channel(1);
+    context
+        .commands
+        .send(CollectorCommand::ActivatePolicy {
+            policy_id: request.policy_id,
+            response: response_tx,
+        })
+        .map_err(|_| ApiError::unavailable("collector is not running"))?;
+    let response =
+        tokio::task::spawn_blocking(move || response_rx.recv_timeout(Duration::from_secs(20)))
+            .await
+            .map_err(|_| ApiError::unavailable("policy activation worker failed"))?
+            .map_err(|_| ApiError::unavailable("policy activation timed out"))?
+            .map_err(ApiError::bad_request)?;
+    Ok(Json(response))
 }
 
 async fn events(
@@ -201,12 +250,7 @@ async fn set_scope(
     headers: HeaderMap,
     Json(request): Json<ScopeRequest>,
 ) -> Result<StatusCode, ApiError> {
-    let token = headers
-        .get(CSRF_HEADER)
-        .and_then(|value| value.to_str().ok());
-    if token != Some(context.token.as_ref()) {
-        return Err(ApiError::unauthorized("missing or invalid session token"));
-    }
+    require_session_token(&headers, &context.token)?;
 
     let scope = resolve_scope(request, &context.cgroup_root)
         .map_err(|error| ApiError::bad_request(error.to_string()))?;
@@ -215,6 +259,16 @@ async fn set_scope(
         .send(CollectorCommand::SetScope(scope))
         .map_err(|_| ApiError::unavailable("collector is not running"))?;
     Ok(StatusCode::ACCEPTED)
+}
+
+fn require_session_token(headers: &HeaderMap, token: &str) -> Result<(), ApiError> {
+    let supplied = headers
+        .get(CSRF_HEADER)
+        .and_then(|value| value.to_str().ok());
+    if supplied != Some(token) {
+        return Err(ApiError::unauthorized("missing or invalid session token"));
+    }
+    Ok(())
 }
 
 struct ApiError {

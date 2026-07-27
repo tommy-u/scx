@@ -10,6 +10,7 @@ use serde::Serialize;
 use tokio::sync::watch;
 
 use crate::model::{CpuPair, CpuUsageHistory, RollingHistory, WindowError};
+use crate::policies::PolicyCatalog;
 use crate::scope::TaskScope;
 use crate::topology::TopologyView;
 
@@ -32,6 +33,20 @@ pub struct CpuUsageView {
     pub cpu: u32,
     pub runtime_ns: u64,
     pub utilization_pct: f64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct InspectionSnapshotView {
+    pub sequence: u64,
+    pub error: Option<String>,
+    pub snapshot: Option<serde_json::Value>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct PolicyCatalogSnapshotView {
+    pub sequence: u64,
+    pub error: Option<String>,
+    pub catalog: Option<PolicyCatalog>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -66,6 +81,12 @@ struct LiveData {
     pair_map_failures: u64,
     task_storage_failures: u64,
     cpu_usage_error: Option<String>,
+    inspection_sequence: u64,
+    inspection_error: Option<String>,
+    inspection: Option<serde_json::Value>,
+    policy_catalog_sequence: u64,
+    policy_catalog_error: Option<String>,
+    policy_catalog: Option<PolicyCatalog>,
 }
 
 #[derive(Clone)]
@@ -97,6 +118,12 @@ impl Dashboard {
                 pair_map_failures: 0,
                 task_storage_failures: 0,
                 cpu_usage_error: None,
+                inspection_sequence: 0,
+                inspection_error: None,
+                inspection: None,
+                policy_catalog_sequence: 0,
+                policy_catalog_error: None,
+                policy_catalog: None,
             })),
             updates,
             max_window_ms,
@@ -217,6 +244,38 @@ impl Dashboard {
             live.sequence
         };
         self.updates.send_replace(sequence);
+    }
+
+    pub fn set_inspection(&self, snapshot: Option<serde_json::Value>, error: Option<String>) {
+        let mut live = self.live.write().expect("dashboard lock poisoned");
+        live.inspection = snapshot;
+        live.inspection_error = error;
+        live.inspection_sequence = live.inspection_sequence.wrapping_add(1);
+    }
+
+    pub fn inspection(&self) -> InspectionSnapshotView {
+        let live = self.live.read().expect("dashboard lock poisoned");
+        InspectionSnapshotView {
+            sequence: live.inspection_sequence,
+            error: live.inspection_error.clone(),
+            snapshot: live.inspection.clone(),
+        }
+    }
+
+    pub fn set_policy_catalog(&self, catalog: Option<PolicyCatalog>, error: Option<String>) {
+        let mut live = self.live.write().expect("dashboard lock poisoned");
+        live.policy_catalog = catalog;
+        live.policy_catalog_error = error;
+        live.policy_catalog_sequence = live.policy_catalog_sequence.wrapping_add(1);
+    }
+
+    pub fn policy_catalog(&self) -> PolicyCatalogSnapshotView {
+        let live = self.live.read().expect("dashboard lock poisoned");
+        PolicyCatalogSnapshotView {
+            sequence: live.policy_catalog_sequence,
+            error: live.policy_catalog_error.clone(),
+            catalog: live.policy_catalog.clone(),
+        }
     }
 
     pub fn snapshot(&self, window_ms: u64) -> Result<SnapshotView, WindowError> {

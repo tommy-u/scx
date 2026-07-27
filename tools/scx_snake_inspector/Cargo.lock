@@ -1050,7 +1050,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "scx_snake_heatmap"
+name = "scx_snake_inspector"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -1059,6 +1059,7 @@ dependencies = [
  "getrandom",
  "http-body-util",
  "libbpf-rs",
+ "libc",
  "scx_cargo",
  "scx_stats",
  "scx_utils",

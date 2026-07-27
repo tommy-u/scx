@@ -9,12 +9,13 @@ use std::sync::mpsc;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
-use scx_snake_heatmap::api::{router, ApiContext, CSRF_HEADER};
-use scx_snake_heatmap::collector::CollectorCommand;
-use scx_snake_heatmap::dashboard::Dashboard;
-use scx_snake_heatmap::model::CpuPair;
-use scx_snake_heatmap::scope::TaskScope;
-use scx_snake_heatmap::topology::{CpuInfo, TopologyView};
+use scx_snake_inspector::api::{router, ApiContext, CSRF_HEADER};
+use scx_snake_inspector::collector::CollectorCommand;
+use scx_snake_inspector::dashboard::Dashboard;
+use scx_snake_inspector::model::CpuPair;
+use scx_snake_inspector::policies::{PolicyCatalog, PolicyChoice};
+use scx_snake_inspector::scope::TaskScope;
+use scx_snake_inspector::topology::{CpuInfo, TopologyView};
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
@@ -147,6 +148,52 @@ async fn snapshot_endpoint_exposes_collector_health() {
 }
 
 #[tokio::test]
+async fn inspection_endpoint_returns_the_latest_scheduler_read_model() {
+    let dashboard = dashboard();
+    dashboard.set_inspection(
+        Some(json!({
+            "schema_version": 1,
+            "active_slot": 1,
+            "slots": [
+                {"slot": 0, "state": "inactive"},
+                {"slot": 1, "state": "active"}
+            ],
+            "cells": [{"id": 7, "cpus": [0, 1], "task_count": 1}],
+            "task_mappings": [{"tid": 4812, "cell_id": 7}]
+        })),
+        None,
+    );
+    let (tx, _rx) = mpsc::channel();
+    let root = tempfile::tempdir().unwrap();
+    let app = router(ApiContext::new(
+        dashboard,
+        tx,
+        "secret",
+        root.path().to_path_buf(),
+    ));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/inspection")
+                .header("host", "127.0.0.1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(json["sequence"], 1);
+    assert_eq!(json["error"], Value::Null);
+    assert_eq!(json["snapshot"]["active_slot"], 1);
+    assert_eq!(json["snapshot"]["cells"][0]["id"], 7);
+    assert_eq!(json["snapshot"]["task_mappings"][0]["tid"], 4812);
+}
+
+#[tokio::test]
 async fn scope_endpoint_requires_token_and_sends_validated_command() {
     let (tx, rx) = mpsc::channel();
     let root = tempfile::tempdir().unwrap();
@@ -185,6 +232,100 @@ async fn scope_endpoint_requires_token_and_sends_validated_command() {
         rx.try_recv().unwrap(),
         CollectorCommand::SetScope(TaskScope::Tgids(vec![8, 21]))
     );
+}
+
+#[tokio::test]
+async fn policy_catalog_is_readable_and_activation_requires_the_session_token() {
+    let dashboard = dashboard();
+    dashboard.set_policy_catalog(
+        Some(PolicyCatalog {
+            policies: vec![PolicyChoice {
+                id: "random-idle.toml".into(),
+                name: "random idle".into(),
+                source: "[[rung]]\noperation = \"pick_random_idle\"\nscope = \"task_allowed\"\n"
+                    .into(),
+                rung_count: 1,
+                mask_table_count: 0,
+                cell_count: 0,
+                summary: "1 rung, 0 mask tables, 0 cells".into(),
+            }],
+            invalid: Vec::new(),
+        }),
+        None,
+    );
+    let (tx, rx) = mpsc::channel();
+    let root = tempfile::tempdir().unwrap();
+    let context = ApiContext::new(dashboard, tx, "secret", root.path().to_path_buf());
+
+    let catalog = router(context.clone())
+        .oneshot(
+            Request::builder()
+                .uri("/api/policies")
+                .header("host", "127.0.0.1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(catalog.status(), StatusCode::OK);
+    let body = catalog.into_body().collect().await.unwrap().to_bytes();
+    let body: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(body["catalog"]["policies"][0]["id"], "random-idle.toml");
+
+    let request_body = Body::from(r#"{"policy_id":"random-idle.toml"}"#);
+    let unauthorized = router(context.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/policies/activate")
+                .header("host", "127.0.0.1")
+                .header("content-type", "application/json")
+                .body(request_body)
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+    let responder = std::thread::spawn(move || {
+        let command = rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("activation command should arrive");
+        let CollectorCommand::ActivatePolicy {
+            policy_id,
+            response,
+        } = command
+        else {
+            panic!("expected policy activation command");
+        };
+        assert_eq!(policy_id, "random-idle.toml");
+        response
+            .send(Ok(scx_snake_inspector::policies::PolicyActivation {
+                generation: 9,
+                rung_count: 1,
+                mask_table_count: 0,
+                summary: "1 rung, 0 mask tables".into(),
+            }))
+            .unwrap();
+    });
+    let accepted = router(context)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/policies/activate")
+                .header("host", "127.0.0.1")
+                .header("content-type", "application/json")
+                .header(CSRF_HEADER, "secret")
+                .body(Body::from(r#"{"policy_id":"random-idle.toml"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(accepted.status(), StatusCode::OK);
+    let body = accepted.into_body().collect().await.unwrap().to_bytes();
+    let body: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(body["generation"], 9);
+    responder.join().unwrap();
 }
 
 #[tokio::test]
@@ -255,6 +396,16 @@ async fn root_page_embeds_session_configuration_and_local_assets() {
     assert!(!page.contains("https://"));
     for control in [
         "id=\"liveStatus\"",
+        "id=\"primaryNav\"",
+        "href=\"#/activity\"",
+        "href=\"#/policy\"",
+        "href=\"#/cells\"",
+        "id=\"activityView\"",
+        "id=\"policyView\"",
+        "id=\"policyLibrary\"",
+        "id=\"policyDialog\"",
+        "id=\"cellsView\"",
+        "id=\"referencePopover\"",
         "id=\"windowSelect\"",
         "id=\"orderTopology\"",
         "id=\"scaleLog\"",

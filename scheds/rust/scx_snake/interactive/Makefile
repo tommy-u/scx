@@ -5,8 +5,8 @@ SNAKE_DIR := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))/..)
 REPO_ROOT := $(abspath $(SNAKE_DIR)/../../..)
 POLICY_DIR := $(SNAKE_DIR)/examples
 SNAKE_BIN := $(REPO_ROOT)/target/release/scx_snake
-HEATMAP_MANIFEST := $(REPO_ROOT)/tools/scx_snake_heatmap/Cargo.toml
-HEATMAP_BIN := $(REPO_ROOT)/tools/scx_snake_heatmap/target/release/scx_snake_heatmap
+INSPECTOR_MANIFEST := $(REPO_ROOT)/tools/scx_snake_inspector/Cargo.toml
+INSPECTOR_BIN := $(REPO_ROOT)/tools/scx_snake_inspector/target/release/scx_snake_inspector
 
 SUDO ?= sudo
 POLICY ?= kernel-default-sim
@@ -27,7 +27,7 @@ CYAN := \033[0;36m
 WHITE := \033[1;37m
 NC := \033[0m
 
-.PHONY: help build-snake start stop screensaver build-heatmap heatmap $(SWITCH_TARGETS)
+.PHONY: help build-snake start stop screensaver build-inspector inspector $(SWITCH_TARGETS)
 
 help:
 	@printf "\n"
@@ -62,13 +62,13 @@ help:
 	@printf "\n$(BLUE)Bonus$(NC)\n"
 	@printf "  $(YELLOW)*$(NC) $(GREEN)%-31s$(NC) %s\n" "screensaver" "Cycle every policy until Ctrl-C"
 	@printf "\n$(BLUE)Visualization$(NC)\n"
-	@printf "  $(YELLOW)*$(NC) $(GREEN)%-31s$(NC) %s\n" "heatmap" "Start http://$(LISTEN)"
+	@printf "  $(YELLOW)*$(NC) $(GREEN)%-31s$(NC) %s\n" "inspector" "Start http://$(LISTEN)"
 	@printf "\n$(BLUE)Arguments by target (defaults)$(NC)\n"
 	@printf "  $(GREEN)%-18s$(NC) $(YELLOW)%s$(NC)\n" "start" "POLICY=$(POLICY) STATS=$(STATS) SUDO=$(SUDO)"
 	@printf "  $(GREEN)%-18s$(NC) $(YELLOW)%s$(NC)\n" "stop" "SUDO=$(SUDO)"
 	@printf "  $(GREEN)%-18s$(NC) $(YELLOW)%s$(NC)\n" "switch-*" "SUDO=$(SUDO)"
 	@printf "  $(GREEN)%-18s$(NC) $(YELLOW)%s$(NC)\n" "screensaver" "SWITCH_INTERVAL=$(SWITCH_INTERVAL) SUDO=$(SUDO)"
-	@printf "  $(GREEN)%-18s$(NC) $(YELLOW)%s$(NC)\n\n" "heatmap" "LISTEN=$(LISTEN) WINDOW=$(WINDOW) MAX_WINDOW=$(MAX_WINDOW) SUDO=$(SUDO)"
+	@printf "  $(GREEN)%-18s$(NC) $(YELLOW)%s$(NC)\n\n" "inspector" "LISTEN=$(LISTEN) WINDOW=$(WINDOW) MAX_WINDOW=$(MAX_WINDOW) SUDO=$(SUDO)"
 
 build-snake:
 	cargo build --release -p scx_snake --manifest-path "$(REPO_ROOT)/Cargo.toml"
@@ -106,8 +106,8 @@ screensaver: $(SNAKE_BIN)
 	  done; \
 	done
 
-build-heatmap:
-	cargo build --release --manifest-path "$(HEATMAP_MANIFEST)"
+build-inspector:
+	cargo build --release --manifest-path "$(INSPECTOR_MANIFEST)"
 
-heatmap: build-heatmap
-	$(SUDO) "$(HEATMAP_BIN)" --listen "$(LISTEN)" --window "$(WINDOW)" --max-window "$(MAX_WINDOW)"
+inspector: build-inspector
+	$(SUDO) "$(INSPECTOR_BIN)" --listen "$(LISTEN)" --window "$(WINDOW)" --max-window "$(MAX_WINDOW)"

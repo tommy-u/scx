@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 
-use scx_snake_heatmap::model::{CpuPair, CpuUsageHistory, RollingHistory};
+use scx_snake_inspector::model::{CpuPair, CpuUsageHistory, RollingHistory};
 
 fn counters(entries: &[(CpuPair, u64)]) -> BTreeMap<CpuPair, u64> {
     entries.iter().copied().collect()

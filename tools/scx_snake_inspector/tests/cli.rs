@@ -5,7 +5,8 @@
 
 use std::time::Duration;
 
-use scx_snake_heatmap::cli::{parse_duration, parse_loopback_address};
+use clap::Parser;
+use scx_snake_inspector::cli::{parse_duration, parse_loopback_address, Args};
 
 #[test]
 fn durations_accept_milliseconds_seconds_minutes_and_hours() {
@@ -24,4 +25,15 @@ fn listen_address_must_be_loopback() {
     assert!(parse_loopback_address("[::1]:8787").is_ok());
     assert!(parse_loopback_address("0.0.0.0:8787").is_err());
     assert!(parse_loopback_address("192.168.1.5:8787").is_err());
+}
+
+#[test]
+fn policy_directory_can_be_overridden() {
+    let args = Args::try_parse_from(["scx_snake_inspector", "--policy-dir", "/tmp/snake-policies"])
+        .unwrap();
+
+    assert_eq!(
+        args.policy_dir,
+        std::path::PathBuf::from("/tmp/snake-policies")
+    );
 }

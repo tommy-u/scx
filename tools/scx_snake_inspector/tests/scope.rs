@@ -6,7 +6,7 @@
 use std::fs;
 use std::os::unix::fs::{symlink, MetadataExt};
 
-use scx_snake_heatmap::scope::{resolve_scope, ScopeRequest, TaskScope, MAX_TRACKED_TGIDS};
+use scx_snake_inspector::scope::{resolve_scope, ScopeRequest, TaskScope, MAX_TRACKED_TGIDS};
 
 #[test]
 fn tgid_scope_is_sorted_deduplicated_and_nonzero() {

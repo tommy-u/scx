@@ -5,11 +5,12 @@
 
 use std::path::PathBuf;
 
-use scx_snake_heatmap::collector::{
-    decode_counter_entry, decode_cpu_runtime_stats, find_symbol_address, CollectorConfig,
+use scx_snake_inspector::collector::{
+    decode_counter_entry, decode_cpu_runtime_stats, decode_inspection_stats, find_symbol_address,
+    CollectorConfig,
 };
-use scx_snake_heatmap::model::CpuPair;
-use scx_snake_heatmap::scope::TaskScope;
+use scx_snake_inspector::model::CpuPair;
+use scx_snake_inspector::scope::TaskScope;
 
 #[test]
 fn collector_config_matches_the_bpf_abi() {
@@ -77,4 +78,37 @@ fn snake_stats_decode_per_cpu_runtime_and_ignore_other_metrics() {
         std::collections::BTreeMap::from([(0, 1250), (7, 8750)])
     );
     assert!(decode_cpu_runtime_stats(serde_json::json!({"select_calls": 4})).is_err());
+}
+
+#[test]
+fn snake_inspection_requires_the_supported_schema_and_two_slots() {
+    let payload = serde_json::json!({
+        "schema_version": 1,
+        "active_slot": 0,
+        "slots": [
+            {"slot": 0, "state": "active"},
+            {"slot": 1, "state": "empty"}
+        ],
+        "cells": [],
+        "task_mappings": []
+    });
+
+    let decoded = decode_inspection_stats(payload.clone()).unwrap();
+    assert_eq!(decoded, payload);
+    assert!(decode_inspection_stats(serde_json::json!({
+        "schema_version": 2,
+        "active_slot": 0,
+        "slots": [],
+        "cells": [],
+        "task_mappings": []
+    }))
+    .is_err());
+    assert!(decode_inspection_stats(serde_json::json!({
+        "schema_version": 1,
+        "active_slot": 0,
+        "slots": [{"slot": 0}],
+        "cells": [],
+        "task_mappings": []
+    }))
+    .is_err());
 }

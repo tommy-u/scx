@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="snake-session-token" content="__SESSION_TOKEN__">
+    <title>Snake inspector</title>
+    <link rel="stylesheet" href="/assets/style.css">
+  </head>
+  <body data-initial-window-ms="__INITIAL_WINDOW_MS__" data-max-window-ms="__MAX_WINDOW_MS__">
+    <header class="topbar">
+      <div class="product-title">
+        <h1>Snake inspector</h1>
+        <p>Scheduler activity and installed policy state</p>
+      </div>
+      <div class="live-status waiting" id="liveStatus" role="status" aria-live="polite">
+        <span class="status-dot" aria-hidden="true"></span>
+        <span id="liveStatusText">Connecting</span>
+      </div>
+    </header>
+
+    <nav class="primary-nav" id="primaryNav" aria-label="Inspector views">
+      <a href="#/activity" data-route="activity" aria-current="page">Activity</a>
+      <a href="#/policy" data-route="policy">Policy</a>
+      <a href="#/cells" data-route="cells">Cells</a>
+    </nav>
+
+    <main id="app" aria-label="Snake scheduler inspector">
+      <section class="view-panel" id="activityView" data-view="activity">
+        <section class="control-band" aria-label="Heatmap controls">
+        <label class="control-field">
+          <span>Window</span>
+          <select id="windowSelect" aria-label="Rolling time window"></select>
+        </label>
+
+        <fieldset class="control-field segmented">
+          <legend>CPU order</legend>
+          <label><input id="orderTopology" type="radio" name="cpuOrder" value="topology" checked><span>Topology</span></label>
+          <label><input type="radio" name="cpuOrder" value="numeric"><span>Numeric</span></label>
+        </fieldset>
+
+        <fieldset class="control-field segmented">
+          <legend>Scale</legend>
+          <label><input id="scaleLog" type="radio" name="colorScale" value="log" checked><span>Log</span></label>
+          <label><input type="radio" name="colorScale" value="linear"><span>Linear</span></label>
+        </fieldset>
+
+        <label class="control-field zoom-field">
+          <span>Zoom</span>
+          <input id="zoomControl" type="range" min="0.25" max="3" step="0.25" value="1" aria-label="Heatmap zoom">
+        </label>
+
+        <label class="control-field scope-mode">
+          <span>Tasks</span>
+          <select id="scopeMode" aria-label="Task scope">
+            <option value="all">All Snake tasks</option>
+            <option value="tgids">TGIDs</option>
+            <option value="cgroup">Cgroup subtree</option>
+          </select>
+        </label>
+
+        <label class="control-field scope-input hidden" id="tgidField">
+          <span>TGIDs</span>
+          <input id="tgidInput" type="text" inputmode="numeric" placeholder="1204, 1881" autocomplete="off">
+        </label>
+
+        <label class="control-field scope-input hidden" id="cgroupField">
+          <span>Cgroup</span>
+          <input id="cgroupInput" type="text" placeholder="/workload.slice" autocomplete="off">
+        </label>
+
+        <button class="apply-button" id="applyScope" type="button">Apply scope</button>
+        </section>
+
+        <section class="summary-band" aria-label="Migration summary">
+        <dl>
+          <div><dt>Migrations</dt><dd id="totalMigrations">0</dd></div>
+          <div><dt>Rate</dt><dd id="migrationRate">0/s</dd></div>
+          <div><dt>Active pairs</dt><dd id="activePairs">0</dd></div>
+          <div><dt>Coverage</dt><dd id="windowCoverage">0 s</dd></div>
+        </dl>
+        <p id="scopeSummary">All Snake tasks</p>
+        </section>
+
+        <section class="matrix-section" aria-labelledby="matrixTitle">
+        <div class="matrix-heading">
+          <div>
+            <h2 id="matrixTitle">CPU migration matrix</h2>
+            <p id="matrixSubtitle">Source CPU by destination CPU</p>
+          </div>
+          <div class="legend" aria-label="Heat intensity legend">
+            <span>Low</span><span class="legend-ramp" aria-hidden="true"></span><span>High</span>
+          </div>
+        </div>
+
+        <p class="notice hidden" id="notice" role="alert"></p>
+        <div class="heatmap-viewport" id="heatmapViewport">
+          <canvas id="heatmapCanvas" width="800" height="800" role="img" aria-label="CPU migration heatmap"></canvas>
+          <div class="heatmap-tooltip hidden" id="heatmapTooltip" role="tooltip"></div>
+        </div>
+        </section>
+      </section>
+
+      <section class="view-panel hidden" id="policyView" data-view="policy" aria-labelledby="policyTitle">
+        <header class="view-heading">
+          <div>
+            <h2 id="policyTitle">Installed policy slots</h2>
+            <p>Active execution state and the frozen ladder retained in the inactive BPF slot</p>
+          </div>
+          <span class="view-freshness" id="policyFreshness">Waiting for Snake</span>
+        </header>
+        <section class="policy-library" id="policyLibrary" aria-labelledby="policyLibraryTitle">
+          <header>
+            <div>
+              <h3 id="policyLibraryTitle">Policy library</h3>
+              <p>Validated TOML policies available to this inspector</p>
+            </div>
+            <span id="policyLibraryStatus">Loading policies</span>
+          </header>
+          <p class="notice hidden" id="policyLibraryNotice" role="status"></p>
+          <div class="policy-choice-list" id="policyChoices"></div>
+          <details class="invalid-policy-list hidden" id="invalidPolicies">
+            <summary></summary>
+            <ul></ul>
+          </details>
+        </section>
+        <p class="notice hidden" id="policyNotice" role="status"></p>
+        <div class="slot-comparison" id="slotComparison"></div>
+      </section>
+
+      <section class="view-panel hidden" id="cellsView" data-view="cells" aria-labelledby="cellsTitle">
+        <header class="view-heading">
+          <div>
+            <h2 id="cellsTitle">Cells and task mappings</h2>
+            <p>Active policy CPU membership with current task annotations</p>
+          </div>
+          <span class="view-freshness" id="cellsFreshness">Waiting for Snake</span>
+        </header>
+        <p class="notice hidden" id="cellsNotice" role="status"></p>
+        <div class="cells-layout">
+          <section class="cell-browser" aria-label="Configured cells">
+            <div class="cell-list" id="cellList"></div>
+          </section>
+          <section class="cell-detail" id="cellDetail" aria-live="polite"></section>
+        </div>
+      </section>
+    </main>
+
+    <aside class="reference-popover hidden" id="referencePopover" role="dialog" aria-label="Field reference"></aside>
+    <dialog class="policy-dialog" id="policyDialog" aria-labelledby="policyDialogTitle">
+      <form method="dialog">
+        <header>
+          <span>Activate policy</span>
+          <h2 id="policyDialogTitle">Confirm policy change</h2>
+        </header>
+        <div class="policy-dialog-body">
+          <strong id="policyDialogName"></strong>
+          <p id="policyDialogSummary"></p>
+          <pre id="policyDialogSource"></pre>
+          <p class="notice hidden" id="policyActivationNotice" role="alert"></p>
+        </div>
+        <footer>
+          <button class="secondary-button" value="cancel">Cancel</button>
+          <button class="apply-button" id="confirmPolicyActivation" type="button">Activate policy</button>
+        </footer>
+      </form>
+    </dialog>
+    <script type="module" src="/assets/app.js"></script>
+  </body>
+</html>

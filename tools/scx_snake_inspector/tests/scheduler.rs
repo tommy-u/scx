@@ -3,7 +3,7 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 
-use scx_snake_heatmap::scheduler::{GateChange, SchedulerGate};
+use scx_snake_inspector::scheduler::{GateChange, SchedulerGate};
 
 #[test]
 fn gate_tracks_snake_start_restart_and_stop() {

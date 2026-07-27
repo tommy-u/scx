@@ -18,6 +18,10 @@ use serde::Deserialize;
 
 use crate::bpf_skel::BpfSkelBuilder;
 use crate::dashboard::Dashboard;
+use crate::policies::{
+    discover_policy_files, load_policy_source, validate_policy_files, PolicyActivation,
+    PolicyCatalog, PolicyFile, PolicyValidation,
+};
 use crate::scheduler::{GateChange, SchedulerGate};
 use crate::scope::TaskScope;
 use crate::{bpf_intf, model::CpuPair};
@@ -28,6 +32,8 @@ const DEFAULT_KALLSYMS_PATH: &str = "/proc/kallsyms";
 const DEFAULT_STATS_PATH: &str = "/var/run/scx/root/stats";
 const MAX_PAIR_MAP_ENTRIES: usize = 1_048_576;
 const STATS_TIMEOUT_MS: u64 = 1_000;
+const INSPECTION_POLL_INTERVAL: Duration = Duration::from_secs(1);
+const POLICY_SCAN_INTERVAL: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CollectorConfig {
@@ -108,6 +114,43 @@ pub fn decode_cpu_runtime_stats(value: serde_json::Value) -> anyhow::Result<BTre
         .collect()
 }
 
+pub fn decode_inspection_stats(value: serde_json::Value) -> anyhow::Result<serde_json::Value> {
+    let object = value
+        .as_object()
+        .context("Snake inspection payload is not an object")?;
+    if object
+        .get("schema_version")
+        .and_then(serde_json::Value::as_u64)
+        != Some(1)
+    {
+        anyhow::bail!("Snake inspection schema is unsupported");
+    }
+    if !matches!(
+        object
+            .get("active_slot")
+            .and_then(serde_json::Value::as_u64),
+        Some(0 | 1)
+    ) {
+        anyhow::bail!("Snake inspection has an invalid active slot");
+    }
+    let slots = object
+        .get("slots")
+        .and_then(serde_json::Value::as_array)
+        .context("Snake inspection has no slot list")?;
+    if slots.len() != 2 {
+        anyhow::bail!(
+            "Snake inspection returned {} slots, expected 2",
+            slots.len()
+        );
+    }
+    for field in ["cells", "task_mappings"] {
+        if !object.get(field).is_some_and(serde_json::Value::is_array) {
+            anyhow::bail!("Snake inspection field {field} is not an array");
+        }
+    }
+    Ok(value)
+}
+
 pub fn find_symbol_address(kallsyms: &str, symbol: &str) -> anyhow::Result<u64> {
     let address = kallsyms
         .lines()
@@ -128,11 +171,35 @@ pub fn find_symbol_address(kallsyms: &str, symbol: &str) -> anyhow::Result<u64> 
     Ok(address)
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug)]
 pub enum CollectorCommand {
     SetScope(TaskScope),
+    ActivatePolicy {
+        policy_id: String,
+        response: std::sync::mpsc::SyncSender<std::result::Result<PolicyActivation, String>>,
+    },
     Shutdown,
 }
+
+impl PartialEq for CollectorCommand {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::SetScope(left), Self::SetScope(right)) => left == right,
+            (
+                Self::ActivatePolicy {
+                    policy_id: left, ..
+                },
+                Self::ActivatePolicy {
+                    policy_id: right, ..
+                },
+            ) => left == right,
+            (Self::Shutdown, Self::Shutdown) => true,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for CollectorCommand {}
 
 #[derive(Clone, Debug)]
 pub struct CollectorOptions {
@@ -141,6 +208,7 @@ pub struct CollectorOptions {
     pub enable_seq_path: PathBuf,
     pub kallsyms_path: PathBuf,
     pub stats_path: PathBuf,
+    pub policy_dir: PathBuf,
 }
 
 impl Default for CollectorOptions {
@@ -151,6 +219,7 @@ impl Default for CollectorOptions {
             enable_seq_path: DEFAULT_ENABLE_SEQ_PATH.into(),
             kallsyms_path: DEFAULT_KALLSYMS_PATH.into(),
             stats_path: DEFAULT_STATS_PATH.into(),
+            policy_dir: "scheds/rust/scx_snake/examples".into(),
         }
     }
 }
@@ -207,6 +276,9 @@ pub fn run_collector(
     let mut last_health = (0_u64, 0_u64);
     let mut stats_client = None;
     let mut last_cpu_usage_error = None;
+    let mut next_inspection_at = started;
+    let mut next_policy_scan_at = started;
+    let mut last_policy_files = None;
     loop {
         match commands.recv_timeout(options.poll_interval) {
             Ok(CollectorCommand::SetScope(new_scope)) => {
@@ -224,6 +296,22 @@ pub fn run_collector(
                     generation,
                     &scope,
                 )?;
+                continue;
+            }
+            Ok(CollectorCommand::ActivatePolicy {
+                policy_id,
+                response,
+            }) => {
+                let result = activate_policy(
+                    &mut stats_client,
+                    &options.stats_path,
+                    &options.policy_dir,
+                    &policy_id,
+                )
+                .map_err(|error| format!("{error:#}"));
+                let _ = response.send(result);
+                next_inspection_at = Instant::now();
+                next_policy_scan_at = Instant::now();
                 continue;
             }
             Ok(CollectorCommand::Shutdown) => return Ok(()),
@@ -246,6 +334,11 @@ pub fn run_collector(
                 let baseline = read_counts(&skel.maps.migration_counts)?;
                 dashboard.reset(now_ms, &baseline);
                 stats_client = None;
+                next_inspection_at = Instant::now();
+                next_policy_scan_at = Instant::now();
+                last_policy_files = None;
+                dashboard.set_inspection(None, None);
+                dashboard.set_policy_catalog(None, None);
                 set_cpu_usage_error(&dashboard, &mut last_cpu_usage_error, None);
                 write_config(&skel.maps.collector_cfg, true, generation, &scope)?;
             }
@@ -254,6 +347,9 @@ pub fn run_collector(
                 let baseline = read_counts(&skel.maps.migration_counts)?;
                 dashboard.reset(now_ms, &baseline);
                 stats_client = None;
+                last_policy_files = None;
+                dashboard.set_inspection(None, None);
+                dashboard.set_policy_catalog(None, None);
                 set_cpu_usage_error(&dashboard, &mut last_cpu_usage_error, None);
             }
             GateChange::None => {}
@@ -290,8 +386,122 @@ pub fn run_collector(
                     );
                 }
             }
+            if Instant::now() >= next_inspection_at {
+                match read_inspection(&mut stats_client, &options.stats_path) {
+                    Ok(snapshot) => dashboard.set_inspection(Some(snapshot), None),
+                    Err(error) => dashboard.set_inspection(
+                        None,
+                        Some(format!("Snake inspection unavailable: {error:#}")),
+                    ),
+                }
+                next_inspection_at = Instant::now() + INSPECTION_POLL_INTERVAL;
+            }
+            if Instant::now() >= next_policy_scan_at {
+                match read_policy_catalog(
+                    &mut stats_client,
+                    &options.stats_path,
+                    &options.policy_dir,
+                    &mut last_policy_files,
+                ) {
+                    Ok(Some(catalog)) => dashboard.set_policy_catalog(Some(catalog), None),
+                    Ok(None) => {}
+                    Err(error) => dashboard.set_policy_catalog(
+                        None,
+                        Some(format!("Policy library unavailable: {error:#}")),
+                    ),
+                }
+                next_policy_scan_at = Instant::now() + POLICY_SCAN_INTERVAL;
+            }
         }
     }
+}
+
+fn read_policy_catalog(
+    client: &mut Option<StatsClient>,
+    stats_path: &Path,
+    policy_dir: &Path,
+    last_policy_files: &mut Option<Vec<PolicyFile>>,
+) -> Result<Option<PolicyCatalog>> {
+    let files = discover_policy_files(policy_dir)?;
+    if last_policy_files.as_ref() == Some(&files) {
+        return Ok(None);
+    }
+    let catalog = validate_policy_files(files.clone(), |source| {
+        validate_policy(client, stats_path, source)
+    });
+    *last_policy_files = Some(files);
+    Ok(Some(catalog))
+}
+
+fn validate_policy(
+    client: &mut Option<StatsClient>,
+    stats_path: &Path,
+    source: &str,
+) -> Result<PolicyValidation> {
+    if client.is_none() {
+        *client = Some(
+            StatsClient::new()
+                .set_path(stats_path)
+                .connect(Some(STATS_TIMEOUT_MS))
+                .with_context(|| format!("connecting to {}", stats_path.display()))?,
+        );
+    }
+    client
+        .as_mut()
+        .context("Snake stats client is unavailable")?
+        .request(
+            "stats",
+            vec![
+                ("target".into(), "policy_validate".into()),
+                ("source".into(), source.into()),
+            ],
+        )
+}
+
+fn activate_policy(
+    client: &mut Option<StatsClient>,
+    stats_path: &Path,
+    policy_dir: &Path,
+    policy_id: &str,
+) -> Result<PolicyActivation> {
+    let source = load_policy_source(policy_dir, policy_id)?;
+    if client.is_none() {
+        *client = Some(
+            StatsClient::new()
+                .set_path(stats_path)
+                .connect(Some(STATS_TIMEOUT_MS))
+                .with_context(|| format!("connecting to {}", stats_path.display()))?,
+        );
+    }
+    client
+        .as_mut()
+        .context("Snake stats client is unavailable")?
+        .request(
+            "stats",
+            vec![
+                ("target".into(), "policy_update".into()),
+                ("source".into(), source),
+            ],
+        )
+}
+
+fn read_inspection(
+    client: &mut Option<StatsClient>,
+    stats_path: &Path,
+) -> Result<serde_json::Value> {
+    if client.is_none() {
+        *client = Some(
+            StatsClient::new()
+                .set_path(stats_path)
+                .connect(Some(STATS_TIMEOUT_MS))
+                .with_context(|| format!("connecting to {}", stats_path.display()))?,
+        );
+    }
+    let payload = client
+        .as_mut()
+        .context("Snake stats client is unavailable")?
+        .request::<serde_json::Value>("stats", vec![("target".into(), "inspect".into())])?;
+    decode_inspection_stats(payload)
 }
 
 fn read_cpu_runtime(

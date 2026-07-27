@@ -4,12 +4,13 @@
 // GNU General Public License version 2.
 
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use clap::Parser;
 
 #[derive(Debug, Parser)]
-#[command(name = "scx_snake_heatmap", version, about)]
+#[command(name = "scx_snake_inspector", version, about)]
 pub struct Args {
     /// Initial rolling window shown in the page.
     #[arg(long, default_value = "10s", value_parser = parse_duration)]
@@ -22,6 +23,10 @@ pub struct Args {
     /// Loopback address for the local dashboard.
     #[arg(long, default_value = "127.0.0.1:8787", value_parser = parse_loopback_address)]
     pub listen: SocketAddr,
+
+    /// Directory containing selectable Snake TOML policies.
+    #[arg(long, default_value = "scheds/rust/scx_snake/examples")]
+    pub policy_dir: PathBuf,
 }
 
 impl Args {

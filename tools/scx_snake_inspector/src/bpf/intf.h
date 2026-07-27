@@ -3,8 +3,8 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 
-#ifndef __SCX_SNAKE_HEATMAP_INTF_H
-#define __SCX_SNAKE_HEATMAP_INTF_H
+#ifndef __SCX_SNAKE_INSPECTOR_INTF_H
+#define __SCX_SNAKE_INSPECTOR_INTF_H
 
 #ifndef __KERNEL__
 typedef unsigned char	   u8;
@@ -37,4 +37,4 @@ struct collector_config {
 	u64 cgroup_id;
 };
 
-#endif /* __SCX_SNAKE_HEATMAP_INTF_H */
+#endif /* __SCX_SNAKE_INSPECTOR_INTF_H */

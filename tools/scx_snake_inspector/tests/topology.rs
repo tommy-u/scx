@@ -3,7 +3,7 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 
-use scx_snake_heatmap::topology::{CpuInfo, TopologyView};
+use scx_snake_inspector::topology::{CpuInfo, TopologyView};
 
 fn cpu(cpu: u32, node: u32, package: u32, llc: u32, core: u32) -> CpuInfo {
     CpuInfo {
