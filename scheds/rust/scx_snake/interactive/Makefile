@@ -6,6 +6,7 @@ REPO_ROOT := $(abspath $(SNAKE_DIR)/../../..)
 POLICY_DIR := $(SNAKE_DIR)/examples
 SNAKE_BIN := $(REPO_ROOT)/target/release/scx_snake
 CELL_GALLERY_BIN := $(REPO_ROOT)/target/release/scx_snake_cell_gallery
+CELL_GALLERY_MANIFEST := $(SNAKE_DIR)/demos/cell_gallery/Cargo.toml
 INSPECTOR_MANIFEST := $(REPO_ROOT)/tools/scx_snake_inspector/Cargo.toml
 INSPECTOR_BIN := $(REPO_ROOT)/tools/scx_snake_inspector/target/release/scx_snake_inspector
 
@@ -37,7 +38,7 @@ CYAN := \033[0;36m
 WHITE := \033[1;37m
 NC := \033[0m
 
-.PHONY: help start stop screensaver build-inspector inspector cell-demo cell-demo-start cell-demo-move cell-demo-status cell-demo-stop cell-art-gallery fairness-demo $(POLICIES)
+.PHONY: help start stop screensaver build-inspector inspector build-cell-gallery cell-demo cell-demo-start cell-demo-move cell-demo-status cell-demo-stop cell-art-gallery fairness-demo $(POLICIES)
 
 help:
 	@printf "\n"
@@ -136,7 +137,10 @@ cell-demo-stop:
 fairness-demo:
 	@FAIRNESS_CPU="$(FAIRNESS_CPU)" FAIRNESS_DURATION="$(FAIRNESS_DURATION)" "$(FAIRNESS_DEMO)"
 
-cell-art-gallery:
+build-cell-gallery:
+	cargo build --release --manifest-path "$(CELL_GALLERY_MANIFEST)"
+
+cell-art-gallery: build-cell-gallery
 	@test -f "$(POLICY_DIR)/$(RESTORE_POLICY).toml" || { \
 	  echo "unknown restore policy: $(RESTORE_POLICY)" >&2; \
 	  exit 1; \

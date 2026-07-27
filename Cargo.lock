@@ -6481,6 +6481,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "scx_snake_cell_gallery"
+version = "1.1.1"
+dependencies = [
+ "anyhow",
+ "clap",
+ "ctrlc",
+ "libc",
+ "scx_stats",
+ "scx_utils",
+ "serde",
+]
+
+[[package]]
 name = "scx_stats"
 version = "1.1.1"
 dependencies = [

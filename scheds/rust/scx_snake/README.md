@@ -184,6 +184,39 @@ The running process compiles and resolves the new file, prepares it in an
 inactive ladder slot, then publishes it with one atomic switch. A rejected
 update leaves the current ladder running.
 
+The interactive cell demo generates three cells from the host's online CPUs,
+including one overlapping cell, and moves two bursty tasks between them. Run
+Snake in one terminal, then use another:
+
+```bash
+make -C scheds/rust/scx_snake/interactive cell-demo
+
+# Or drive each step manually.
+make -C scheds/rust/scx_snake/interactive cell-demo-start
+make -C scheds/rust/scx_snake/interactive cell-demo-move CELL=1
+make -C scheds/rust/scx_snake/interactive cell-demo-status
+make -C scheds/rust/scx_snake/interactive cell-demo-stop
+```
+
+The just-for-fun cell-art gallery is a separate crate under
+[`demos/cell_gallery`](demos/cell_gallery/). On a 316-CPU presentation host it
+defines 952 two-CPU cells once, maps one bursty worker thread to each cell once,
+and cycles flower, heart, cat, and snake outlines:
+
+```bash
+# Start Snake and the inspector in their own terminals first.
+make -C scheds/rust/scx_snake/interactive start
+make -C scheds/rust/scx_snake/interactive inspector
+
+# Then start the standalone gallery demo.
+make -C scheds/rust/scx_snake/interactive cell-art-gallery
+```
+
+In the inspector, select the printed gallery TGID, Numeric CPU order, and a 10
+second window. Each image runs for 10 seconds by default, so the rolling window
+crossfades naturally into the next image. `Ctrl-C` stops the workers and
+restores the configured policy.
+
 Inspect the compiled ladder and resolved mask tables without attaching BPF:
 
 ```bash
