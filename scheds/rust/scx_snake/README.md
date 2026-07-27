@@ -157,6 +157,9 @@ fallback CPU hint; `enqueue` then puts the task on the global FIFO DSQ. An
 annotated runnable task is the explicit placement exception: `enqueue`
 re-evaluates its configured task-cell rungs before using the FIFO queue.
 
+See [Policy Lowering and BPF Data Flow](docs/POLICY_LOWERING.md) for the complete
+TOML-to-opcode pipeline, runtime BPF inputs, map exchange, and update protocol.
+
 ## Build and run
 
 From the repository root:

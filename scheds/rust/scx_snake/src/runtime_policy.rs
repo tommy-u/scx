@@ -25,6 +25,37 @@ pub struct PolicyUpdateResponse {
     pub summary: String,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct PolicyValidationResponse {
+    pub rung_count: usize,
+    pub mask_table_count: usize,
+    pub cell_count: usize,
+    pub summary: String,
+}
+
+impl PolicyValidationResponse {
+    pub fn from_policy(policy: &CompiledPolicy) -> Self {
+        let rung_count = policy.rungs.len();
+        let mask_table_count = policy.mask_tables.len();
+        let cell_count = policy.cells.len();
+        Self {
+            rung_count,
+            mask_table_count,
+            cell_count,
+            summary: format!(
+                "{rung_count} {}, {mask_table_count} mask {}, {cell_count} {}",
+                if rung_count == 1 { "rung" } else { "rungs" },
+                if mask_table_count == 1 {
+                    "table"
+                } else {
+                    "tables"
+                },
+                if cell_count == 1 { "cell" } else { "cells" },
+            ),
+        }
+    }
+}
+
 /// Ordered inactive-slot operations with publication as the commit point.
 pub trait PolicyBackend {
     fn wait_for_slot_quiescent(&mut self, slot: u32) -> Result<()>;

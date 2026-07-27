@@ -261,6 +261,40 @@ pub fn server_data() -> StatsServerData<SchedulerRequest, SchedulerResponse> {
         Ok(read)
     });
 
+    let inspect: Box<dyn StatsOpener<SchedulerRequest, SchedulerResponse>> = Box::new(move |_| {
+        let read: Box<dyn StatsReader<SchedulerRequest, SchedulerResponse>> =
+            Box::new(move |_args, (req_ch, res_ch)| {
+                req_ch.send(SchedulerRequest::Inspect)?;
+                match res_ch.recv()? {
+                    SchedulerResponse::Inspection(snapshot) => Ok(serde_json::to_value(snapshot)?),
+                    response => bail!("unexpected response to inspection request: {response:?}"),
+                }
+            });
+        Ok(read)
+    });
+
+    let validate_policy: Box<dyn StatsOpener<SchedulerRequest, SchedulerResponse>> =
+        Box::new(move |_| {
+            let read: Box<dyn StatsReader<SchedulerRequest, SchedulerResponse>> =
+                Box::new(move |args, (req_ch, res_ch)| {
+                    let source = args
+                        .get("source")
+                        .context("policy_validate requires a source argument")?
+                        .clone();
+                    req_ch.send(SchedulerRequest::ValidatePolicy { source })?;
+                    match res_ch.recv()? {
+                        SchedulerResponse::PolicyValidation(Ok(response)) => {
+                            Ok(serde_json::to_value(response)?)
+                        }
+                        SchedulerResponse::PolicyValidation(Err(error)) => bail!(error),
+                        response => {
+                            bail!("unexpected response to policy validation request: {response:?}")
+                        }
+                    }
+                });
+            Ok(read)
+        });
+
     let set_cell: Box<dyn StatsOpener<SchedulerRequest, SchedulerResponse>> = Box::new(move |_| {
         let read: Box<dyn StatsReader<SchedulerRequest, SchedulerResponse>> =
             Box::new(move |args, (req_ch, res_ch)| {
@@ -291,6 +325,20 @@ pub fn server_data() -> StatsServerData<SchedulerRequest, SchedulerResponse> {
         .add_meta(CpuMetrics::meta())
         .add_meta(RungMetrics::meta())
         .add_ops("top", StatsOps { open, close: None })
+        .add_ops(
+            "inspect",
+            StatsOps {
+                open: inspect,
+                close: None,
+            },
+        )
+        .add_ops(
+            "policy_validate",
+            StatsOps {
+                open: validate_policy,
+                close: None,
+            },
+        )
         .add_ops(
             "policy_update",
             StatsOps {

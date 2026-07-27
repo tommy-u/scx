@@ -6,7 +6,8 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use scx_stats::StatsClient;
 
-use crate::runtime_policy::PolicyUpdateResponse;
+use crate::inspection::InspectionView;
+use crate::runtime_policy::{PolicyUpdateResponse, PolicyValidationResponse};
 use crate::stats::Metrics;
 use crate::task_cells::{ThreadCellAssignment, ThreadCellResponse};
 
@@ -16,6 +17,8 @@ const UPDATE_TIMEOUT_MS: u64 = 15_000;
 #[derive(Debug)]
 pub enum SchedulerRequest {
     Metrics,
+    Inspect,
+    ValidatePolicy { source: String },
     ReplacePolicy { source: String },
     SetThreadCell(ThreadCellAssignment),
     ClearThreadCell { tid: i32 },
@@ -25,6 +28,8 @@ pub enum SchedulerRequest {
 #[derive(Debug)]
 pub enum SchedulerResponse {
     Metrics(Metrics),
+    Inspection(InspectionView),
+    PolicyValidation(std::result::Result<PolicyValidationResponse, String>),
     ReplacePolicy(std::result::Result<PolicyUpdateResponse, String>),
     ThreadCell(std::result::Result<ThreadCellResponse, String>),
 }
@@ -227,6 +232,94 @@ scope = "task_allowed"
         assert_eq!(response.tid, 4812);
         assert_eq!(response.cell_id, Some(7));
         assert!(response.rehome_requested);
+        worker.join().expect("worker should finish");
+        drop(server);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn inspection_snapshot_round_trips_through_the_stats_socket() {
+        let path = socket_path("inspect");
+        let server = StatsServer::new(stats::server_data())
+            .set_path(&path)
+            .launch()
+            .expect("test server should launch");
+        let (responses, requests) = server.channels();
+        let worker = thread::spawn(move || {
+            let SchedulerRequest::Inspect = requests.recv().expect("request should arrive") else {
+                panic!("expected an inspection request");
+            };
+            responses
+                .send(SchedulerResponse::Inspection(
+                    crate::inspection::InspectionView {
+                        schema_version: 1,
+                        active_slot: 1,
+                        slots: Vec::new(),
+                        cells: Vec::new(),
+                        task_mappings: Vec::new(),
+                    },
+                ))
+                .expect("response should send");
+        });
+
+        let mut client = StatsClient::new()
+            .set_path(&path)
+            .connect(Some(1_000))
+            .expect("client should connect");
+        let response = client
+            .request::<serde_json::Value>("stats", vec![("target".into(), "inspect".into())])
+            .expect("inspection should be returned");
+
+        assert_eq!(response["active_slot"], 1);
+        assert_eq!(response["slots"], serde_json::json!([]));
+        worker.join().expect("worker should finish");
+        drop(server);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn policy_validation_round_trips_without_an_activation_request() {
+        let path = socket_path("policy-validate");
+        let server = StatsServer::new(stats::server_data())
+            .set_path(&path)
+            .launch()
+            .expect("test server should launch");
+        let (responses, requests) = server.channels();
+        let worker = thread::spawn(move || {
+            let SchedulerRequest::ValidatePolicy { source } =
+                requests.recv().expect("request should arrive")
+            else {
+                panic!("expected a policy validation request");
+            };
+            assert_eq!(source, SOURCE);
+            responses
+                .send(SchedulerResponse::PolicyValidation(Ok(
+                    crate::runtime_policy::PolicyValidationResponse {
+                        rung_count: 1,
+                        mask_table_count: 0,
+                        cell_count: 0,
+                        summary: "1 rung, 0 mask tables, 0 cells".into(),
+                    },
+                )))
+                .expect("response should send");
+        });
+
+        let mut client = StatsClient::new()
+            .set_path(&path)
+            .connect(Some(1_000))
+            .expect("client should connect");
+        let response = client
+            .request::<serde_json::Value>(
+                "stats",
+                vec![
+                    ("target".into(), "policy_validate".into()),
+                    ("source".into(), SOURCE.into()),
+                ],
+            )
+            .expect("validation should be returned");
+
+        assert_eq!(response["rung_count"], 1);
+        assert_eq!(response["cell_count"], 0);
         worker.join().expect("worker should finish");
         drop(server);
         let _ = fs::remove_file(path);

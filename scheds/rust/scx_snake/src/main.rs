@@ -3,6 +3,7 @@
 mod bpf_intf;
 mod bpf_skel;
 mod control;
+mod inspection;
 mod mask_tables;
 mod policy;
 mod runtime_policy;
@@ -16,13 +17,14 @@ use std::mem::{size_of, MaybeUninit};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context, Result};
 use bpf_skel::*;
 use clap::{Parser, ValueEnum};
 use control::{SchedulerRequest, SchedulerResponse};
 use crossbeam::channel::RecvTimeoutError;
+use inspection::{InspectionView, Inspector, SlotPolicy};
 use libbpf_rs::{MapCore as _, MapFlags, OpenObject, ProgramInput};
 use log::{debug, info, warn};
 use mask_tables::{dump_mask_tables, resolve_mask_tables, ResolvedMaskTable};
@@ -41,6 +43,16 @@ use task_cells::{ThreadCellAssignment, ThreadCellResponse};
 const SCHEDULER_NAME: &str = "scx_snake";
 const SLOT_QUIESCENCE_TIMEOUT: Duration = Duration::from_secs(5);
 const SLOT_QUIESCENCE_POLL_INTERVAL: Duration = Duration::from_millis(10);
+
+fn unix_time_ms() -> u64 {
+    u64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis(),
+    )
+    .unwrap_or(u64::MAX)
+}
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
 enum StatsFormat {
@@ -149,7 +161,6 @@ fn resolve_mode(opts: &Opts) -> Result<RunMode> {
     if special_modes > 1 {
         bail!("control, monitoring, update, and dump modes are mutually exclusive");
     }
-
     if opts.help_stats {
         return Ok(RunMode::HelpStats);
     }
@@ -563,6 +574,7 @@ struct Scheduler<'object, 'policy> {
     skel: BpfSkel<'object>,
     struct_ops: Option<libbpf_rs::Link>,
     stats_server: StatsServer<SchedulerRequest, SchedulerResponse>,
+    inspector: Inspector,
     runtime: &'policy mut RuntimePolicy,
 }
 
@@ -596,13 +608,22 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
         info!(
             "attached {SCHEDULER_NAME} policy generation {} with {} rungs",
             runtime.generation,
-            runtime.compiled.rungs.len()
+            runtime.compiled.rungs.len(),
         );
+        let inspector = Inspector::new(SlotPolicy::new(
+            runtime.active_slot,
+            runtime.generation,
+            runtime.source.clone(),
+            runtime.compiled.clone(),
+            mask_tables.to_vec(),
+            unix_time_ms(),
+        ));
 
         Ok(Self {
             skel,
             struct_ops,
             stats_server,
+            inspector,
             runtime,
         })
     }
@@ -616,20 +637,70 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
     }
 
     fn replace_policy(&mut self, source: String) -> Result<runtime_policy::PolicyUpdateResponse> {
+        let previous_slot = self.runtime.active_slot;
+        let previous_generation = self.runtime.generation;
+        let previous_policy = self.runtime.compiled.clone();
+        let fallback_frozen_metrics = self.metrics()?;
+        let mut activated_tables = None;
         let mut backend = BpfPolicyBackend {
             skel: &mut self.skel,
         };
         let response = runtime_policy::replace_policy(
             self.runtime,
             source,
-            resolve_mask_tables,
+            |policy| {
+                let tables = resolve_mask_tables(policy)?;
+                activated_tables = Some(tables.clone());
+                Ok(tables)
+            },
             &mut backend,
         )?;
+        drop(backend);
+        let frozen_metrics =
+            match wait_for_slot_quiescent(&self.skel, previous_slot, SLOT_QUIESCENCE_TIMEOUT)
+                .and_then(|_| {
+                    aggregate_raw_stats(
+                        &read_raw_stats(&self.skel, previous_slot)?,
+                        &previous_policy,
+                        previous_generation,
+                    )
+                }) {
+                Ok(metrics) => metrics,
+                Err(error) => {
+                    warn!(
+                    "could not capture final metrics for inactive slot {previous_slot}: {error:#}"
+                );
+                    fallback_frozen_metrics
+                }
+            };
+        let resolved_tables =
+            activated_tables.context("activated policy has no resolved tables")?;
+        let activated_at_ms = unix_time_ms();
+        self.inspector.activate(
+            SlotPolicy::new(
+                self.runtime.active_slot,
+                self.runtime.generation,
+                self.runtime.source.clone(),
+                self.runtime.compiled.clone(),
+                resolved_tables,
+                activated_at_ms,
+            ),
+            frozen_metrics,
+            activated_at_ms,
+        );
         info!(
             "activated policy generation {} ({})",
             response.generation, response.summary
         );
         Ok(response)
+    }
+
+    fn validate_policy(&self, source: &str) -> Result<runtime_policy::PolicyValidationResponse> {
+        let policy = policy::compile_policy(source).context("compiling candidate policy")?;
+        resolve_mask_tables(&policy).context("resolving candidate policy mask tables")?;
+        Ok(runtime_policy::PolicyValidationResponse::from_policy(
+            &policy,
+        ))
     }
 
     fn set_thread_cell(&mut self, assignment: ThreadCellAssignment) -> Result<ThreadCellResponse> {
@@ -646,6 +717,8 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
             );
         }
         task_cells::set_thread_cell(&self.skel.maps.task_cells, assignment)?;
+        self.inspector
+            .set_assignment(assignment.tid, assignment.cell_id);
         Ok(ThreadCellResponse {
             tid: assignment.tid,
             cell_id: Some(assignment.cell_id),
@@ -655,6 +728,7 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
 
     fn clear_thread_cell(&mut self, tid: i32) -> Result<ThreadCellResponse> {
         task_cells::clear_thread_cell(&self.skel.maps.task_cells, tid)?;
+        self.inspector.clear_assignment(tid);
         Ok(ThreadCellResponse {
             tid,
             cell_id: None,
@@ -666,12 +740,48 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
         uei_exited!(&self.skel, uei)
     }
 
+    fn inspection(&mut self) -> Result<InspectionView> {
+        let assignments = self.inspector.assignments().collect::<Vec<_>>();
+        let mut stale = Vec::new();
+        let mut task_mappings = Vec::new();
+        for (tid, _) in assignments {
+            match task_cells::inspect_thread_cell(&self.skel.maps.task_cells, tid)? {
+                Some(task) => task_mappings.push(inspection::TaskMappingInspectionView {
+                    tid: task.tid,
+                    tgid: task.tgid,
+                    name: task.name,
+                    state: task.state,
+                    current_cpu: task.current_cpu,
+                    cell_id: task.cell_id,
+                    cell_defined: self.runtime.compiled.cells.contains_key(&task.cell_id),
+                    allowed_cpus: task.allowed_cpus,
+                    cgroup: task.cgroup,
+                    needs_rehome: task.needs_rehome,
+                }),
+                None => stale.push(tid),
+            }
+        }
+        for tid in stale {
+            self.inspector.clear_assignment(tid);
+        }
+        Ok(self.inspector.snapshot(self.metrics()?, task_mappings))
+    }
+
     fn run(&mut self, shutdown: Arc<AtomicBool>) -> Result<UserExitInfo> {
         let (response_channel, request_channel) = self.stats_server.channels();
         while !shutdown.load(Ordering::Relaxed) && !self.exited() {
             match request_channel.recv_timeout(Duration::from_secs(1)) {
                 Ok(SchedulerRequest::Metrics) => {
                     response_channel.send(SchedulerResponse::Metrics(self.metrics()?))?
+                }
+                Ok(SchedulerRequest::Inspect) => {
+                    response_channel.send(SchedulerResponse::Inspection(self.inspection()?))?
+                }
+                Ok(SchedulerRequest::ValidatePolicy { source }) => {
+                    let response = self
+                        .validate_policy(&source)
+                        .map_err(|error| format!("{error:#}"));
+                    response_channel.send(SchedulerResponse::PolicyValidation(response))?;
                 }
                 Ok(SchedulerRequest::ReplacePolicy { source }) => {
                     let response = self
@@ -1336,8 +1446,8 @@ scope = "previous_llc"
         )
         .expect("policy should compile");
 
-        let metrics =
-            aggregate_raw_stats(&raw_percpu_stats(), &policy, 1).expect("stats should aggregate");
+        let metrics = aggregate_raw_stats(&raw_percpu_stats(), &policy, 1)
+            .expect("stats should aggregate");
 
         assert_eq!(metrics.rungs[&0].scope, "previous_llc_half");
         assert_eq!(metrics.rungs[&1].scope, "previous_llc");
@@ -1354,8 +1464,8 @@ scope = "previous_llc"
         )
         .expect("policy should compile");
 
-        let metrics =
-            aggregate_raw_stats(&raw_percpu_stats(), &policy, 1).expect("stats should aggregate");
+        let metrics = aggregate_raw_stats(&raw_percpu_stats(), &policy, 1)
+            .expect("stats should aggregate");
 
         assert_eq!(metrics.rungs[&0].operation, "pick_idle_core");
         assert_eq!(metrics.rungs[&0].scope, "previous_llc");
@@ -1372,8 +1482,8 @@ scope = "previous_node"
         )
         .expect("policy should compile");
 
-        let metrics =
-            aggregate_raw_stats(&raw_percpu_stats(), &policy, 1).expect("stats should aggregate");
+        let metrics = aggregate_raw_stats(&raw_percpu_stats(), &policy, 1)
+            .expect("stats should aggregate");
 
         assert_eq!(metrics.rungs[&0].operation, "pick_idle");
         assert_eq!(metrics.rungs[&0].scope, "previous_node");
@@ -1390,8 +1500,8 @@ scope = "previous_llc"
         )
         .expect("policy should compile");
 
-        let metrics =
-            aggregate_raw_stats(&raw_percpu_stats(), &policy, 1).expect("stats should aggregate");
+        let metrics = aggregate_raw_stats(&raw_percpu_stats(), &policy, 1)
+            .expect("stats should aggregate");
 
         assert_eq!(metrics.rungs[&0].operation, "pick_random_idle");
         assert_eq!(metrics.rungs[&0].scope, "previous_llc");
@@ -1408,8 +1518,8 @@ scope = "previous_llc"
         )
         .expect("policy should compile");
 
-        let metrics =
-            aggregate_raw_stats(&raw_percpu_stats(), &policy, 1).expect("stats should aggregate");
+        let metrics = aggregate_raw_stats(&raw_percpu_stats(), &policy, 1)
+            .expect("stats should aggregate");
 
         assert_eq!(metrics.rungs[&0].operation, "pick_random_idle_core");
         assert_eq!(metrics.rungs[&0].scope, "previous_llc");
@@ -1426,8 +1536,8 @@ scope = "task_allowed"
         )
         .expect("policy should compile");
 
-        let metrics =
-            aggregate_raw_stats(&raw_percpu_stats(), &policy, 1).expect("stats should aggregate");
+        let metrics = aggregate_raw_stats(&raw_percpu_stats(), &policy, 1)
+            .expect("stats should aggregate");
 
         assert_eq!(metrics.rungs[&0].operation, "sync_wake_affine");
         assert_eq!(metrics.rungs[&0].scope, "task_allowed");
