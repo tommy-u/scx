@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 #include "main.h"
+#include "fairness.h"
 #include "ladder.h"
 
 char _license[] SEC("license") = "GPL";
@@ -81,7 +82,15 @@ s32 BPF_STRUCT_OPS(snake_select_cpu, struct task_struct *p, s32 prev_cpu,
 	cpu = walk_policy_ladder(&ladder_ctx, p, prev_cpu, wake_flags,
 				 &dispatch_flags);
 	if (cpu >= 0) {
-		if (!scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, SCX_SLICE_DFL,
+		if (fairness_is_eevdf() && (dispatch_flags & SCX_ENQ_PREEMPT)) {
+			stat_inc(&ladder_ctx,
+				 SNAKE_STAT_EEVDF_STRICT_PREEMPT_QUEUES);
+			finish_select(&ladder_ctx, started_at);
+			release_active_ladder(&ladder_ctx);
+			return cpu;
+		}
+		if (!scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL,
+					fairness_dispatch_slice(&ladder_ctx, p, true),
 					dispatch_flags)) {
 			stat_inc(&ladder_ctx, SNAKE_STAT_INVALID_ERRORS);
 			scx_bpf_error(
@@ -114,7 +123,8 @@ s32 BPF_STRUCT_OPS(snake_select_cpu, struct task_struct *p, s32 prev_cpu,
 void BPF_STRUCT_OPS(snake_enqueue, struct task_struct *p, u64 enq_flags)
 {
 	struct snake_ladder_ctx ladder_ctx = {};
-	s32 cell_enqueued;
+	s32			 cell_enqueued;
+	u64			 slice;
 
 	if (acquire_active_ladder(&ladder_ctx)) {
 		scx_bpf_error("snake failed to acquire active ladder in enqueue");
@@ -122,40 +132,60 @@ void BPF_STRUCT_OPS(snake_enqueue, struct task_struct *p, u64 enq_flags)
 		return;
 	}
 	stat_inc(&ladder_ctx, SNAKE_STAT_ENQUEUES);
-	cell_enqueued = try_enqueue_task_cell(&ladder_ctx, p, enq_flags);
+	slice = fairness_dispatch_slice(&ladder_ctx, p, true);
+	cell_enqueued = try_enqueue_task_cell(&ladder_ctx, p, enq_flags, slice);
+	if (cell_enqueued)
+		goto out;
+	fairness_enqueue(&ladder_ctx, p, enq_flags);
+out:
 	release_active_ladder(&ladder_ctx);
 	if (cell_enqueued)
 		return;
-	scx_bpf_dsq_insert(p, SCX_DSQ_GLOBAL, SCX_SLICE_DFL, enq_flags);
+}
+
+void BPF_STRUCT_OPS(snake_dispatch, s32 cpu, struct task_struct *prev)
+{
+	struct snake_ladder_ctx ladder_ctx = {};
+
+	(void)prev;
+	if (acquire_active_ladder(&ladder_ctx)) {
+		scx_bpf_error("snake failed to acquire active ladder in dispatch");
+		return;
+	}
+	fairness_dispatch(&ladder_ctx, cpu);
+	release_active_ladder(&ladder_ctx);
+}
+
+void BPF_STRUCT_OPS(snake_runnable, struct task_struct *p, u64 enq_flags)
+{
+	struct snake_ladder_ctx ladder_ctx = {};
+
+	(void)enq_flags;
+	if (acquire_active_ladder(&ladder_ctx)) {
+		scx_bpf_error("snake failed to acquire active ladder in runnable");
+		return;
+	}
+	fairness_runnable(&ladder_ctx, p);
+	release_active_ladder(&ladder_ctx);
 }
 
 void BPF_STRUCT_OPS(snake_running, struct task_struct *p)
 {
 	struct snake_ladder_ctx ladder_ctx = {};
-	struct snake_task_runtime *runtime;
 
 	if (acquire_active_ladder(&ladder_ctx)) {
 		scx_bpf_error("snake failed to acquire active ladder in running");
 		return;
 	}
 	stat_inc(&ladder_ctx, SNAKE_STAT_RUNNING);
-	runtime = bpf_task_storage_get(&task_runtimes, p, 0,
-				       BPF_LOCAL_STORAGE_GET_F_CREATE);
-	if (!runtime) {
-		stat_inc(&ladder_ctx, SNAKE_STAT_INVALID_ERRORS);
-		release_active_ladder(&ladder_ctx);
-		return;
-	}
-	runtime->started_exec_runtime = p->se.sum_exec_runtime;
-	runtime->valid = 1;
+	fairness_running(&ladder_ctx, p);
 	release_active_ladder(&ladder_ctx);
 }
 
 void BPF_STRUCT_OPS(snake_stopping, struct task_struct *p, bool runnable)
 {
 	struct snake_ladder_ctx ladder_ctx = {};
-	struct snake_task_runtime *runtime;
-	u64 current_runtime;
+	u64 runtime_ns;
 
 	(void)runnable;
 	if (acquire_active_ladder(&ladder_ctx)) {
@@ -163,16 +193,8 @@ void BPF_STRUCT_OPS(snake_stopping, struct task_struct *p, bool runnable)
 		return;
 	}
 	stat_inc(&ladder_ctx, SNAKE_STAT_STOPPING);
-	runtime = bpf_task_storage_get(&task_runtimes, p, 0, 0);
-	if (runtime && runtime->valid) {
-		current_runtime = p->se.sum_exec_runtime;
-		if (current_runtime >= runtime->started_exec_runtime)
-			stat_add(&ladder_ctx, SNAKE_STAT_RUNTIME_NS,
-				 current_runtime - runtime->started_exec_runtime);
-		else
-			stat_inc(&ladder_ctx, SNAKE_STAT_INVALID_ERRORS);
-		runtime->valid = 0;
-	}
+	runtime_ns = fairness_stopping(&ladder_ctx, p);
+	stat_add(&ladder_ctx, SNAKE_STAT_RUNTIME_NS, runtime_ns);
 	release_active_ladder(&ladder_ctx);
 }
 
@@ -180,13 +202,24 @@ void BPF_STRUCT_OPS(snake_quiescent, struct task_struct *p, u64 deq_flags)
 {
 	struct snake_ladder_ctx ladder_ctx = {};
 
-	(void)p;
-	(void)deq_flags;
 	if (acquire_active_ladder(&ladder_ctx)) {
 		scx_bpf_error("snake failed to acquire active ladder in quiescent");
 		return;
 	}
 	stat_inc(&ladder_ctx, SNAKE_STAT_QUIESCENT);
+	fairness_quiescent(&ladder_ctx, p, deq_flags);
+	release_active_ladder(&ladder_ctx);
+}
+
+void BPF_STRUCT_OPS(snake_set_weight, struct task_struct *p, u32 weight)
+{
+	struct snake_ladder_ctx ladder_ctx = {};
+
+	if (acquire_active_ladder(&ladder_ctx)) {
+		scx_bpf_error("snake failed to acquire active ladder in set_weight");
+		return;
+	}
+	fairness_set_weight(&ladder_ctx, p, weight);
 	release_active_ladder(&ladder_ctx);
 }
 
@@ -197,6 +230,11 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(snake_init)
 	int			 ret;
 
 	nr_cpu_ids = scx_bpf_nr_cpu_ids();
+	ret = fairness_init();
+	if (ret) {
+		scx_bpf_error("snake fairness initialization failed: %d", ret);
+		return ret;
+	}
 	if (acquire_active_ladder(&ladder_ctx)) {
 		scx_bpf_error("snake has no prepared active ladder");
 		return -EINVAL;
@@ -220,7 +258,10 @@ void BPF_STRUCT_OPS(snake_exit, struct scx_exit_info *ei)
 
 SCX_OPS_DEFINE(snake_ops, .select_cpu = (void *)snake_select_cpu,
 	       .enqueue	  = (void *)snake_enqueue,
+	       .dispatch  = (void *)snake_dispatch,
+	       .runnable  = (void *)snake_runnable,
 	       .running	  = (void *)snake_running,
 	       .stopping  = (void *)snake_stopping,
-	       .quiescent = (void *)snake_quiescent, .init = (void *)snake_init,
+	       .quiescent = (void *)snake_quiescent,
+	       .set_weight = (void *)snake_set_weight, .init = (void *)snake_init,
 	       .exit = (void *)snake_exit, .timeout_ms = 5000, .name = "snake");

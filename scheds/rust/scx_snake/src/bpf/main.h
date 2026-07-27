@@ -14,18 +14,6 @@ struct snake_ladder_ctx {
 	const struct snake_compiled_ladder *ladder;
 };
 
-struct snake_task_runtime {
-	u64 started_exec_runtime;
-	u32 valid;
-};
-
-struct {
-	__uint(type, BPF_MAP_TYPE_TASK_STORAGE);
-	__uint(map_flags, BPF_F_NO_PREALLOC);
-	__type(key, int);
-	__type(value, struct snake_task_runtime);
-} task_runtimes SEC(".maps");
-
 /* Thread annotations are updated synchronously from the userspace control path. */
 struct {
 	__uint(type, BPF_MAP_TYPE_TASK_STORAGE);

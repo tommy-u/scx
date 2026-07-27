@@ -219,7 +219,7 @@ static __always_inline s32 execute_rung(const struct snake_ladder_ctx *ctx,
 /* Keep annotated runnable tasks on CPUs selected by their task-cell rungs. */
 static __always_inline s32 try_enqueue_task_cell(struct snake_ladder_ctx *ctx,
 						  struct task_struct *p,
-						  u64 enq_flags)
+						  u64 enq_flags, u64 slice)
 {
 	struct snake_task_cell *cell;
 	bool			 rehome_pending;
@@ -247,7 +247,7 @@ static __always_inline s32 try_enqueue_task_cell(struct snake_ladder_ctx *ctx,
 		if (cpu >= 0 && cpu < nr_cpu_ids) {
 			stat_inc(ctx, SNAKE_STAT_RUNG_HIT_BASE + i);
 			if (!scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu,
-					    SCX_SLICE_DFL, enq_flags)) {
+					    slice, enq_flags)) {
 				stat_inc(ctx, SNAKE_STAT_INVALID_ERRORS);
 				scx_bpf_error(
 					"snake failed to enqueue pid %d on cell CPU %d",

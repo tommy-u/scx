@@ -153,9 +153,11 @@ validate it, then atomically makes that slot active.
 
 A successful `select_cpu` rung dispatches directly to the selected CPU's local
 DSQ and skips `enqueue`. If all rungs miss, Snake returns an affinity-safe
-fallback CPU hint; `enqueue` then puts the task on the global FIFO DSQ. An
-annotated runnable task is the explicit placement exception: `enqueue`
-re-evaluates its configured task-cell rungs before using the FIFO queue.
+fallback CPU hint; `enqueue` then uses the selected fairness discipline. FIFO
+uses the built-in global DSQ. EEVDF uses global future and eligible ordered DSQs
+with an aggregate virtual clock. An annotated runnable task is the explicit
+placement exception: `enqueue` re-evaluates its configured task-cell rungs
+before using the fairness queue.
 
 See [Policy Lowering and BPF Data Flow](docs/POLICY_LOWERING.md) for the complete
 TOML-to-opcode pipeline, runtime BPF inputs, map exchange, and update protocol.
@@ -170,8 +172,16 @@ cargo build --release -p scx_snake
 
 sudo ./target/release/scx_snake \
   --policy scheds/rust/scx_snake/examples/kernel-default-sim.toml \
+  --fairness fifo \
   --stats 1
 ```
+
+FIFO is the default. The `--fairness eevdf` mode is experimental and should be
+used only in disposable VMs; changing fairness requires a restart. Its
+affinity-constrained forward-progress test passes, but its nice-level weighted
+share validation is not yet correct. See
+[Fairness in scx_snake](docs/FAIRNESS.md) for its clock, queues, task accounting,
+placement interaction, and current limitations.
 
 Replace the complete ladder without restarting the scheduler:
 
@@ -217,6 +227,13 @@ second window. Each image runs for 10 seconds by default, so the rolling window
 crossfades naturally into the next image. `Ctrl-C` stops the workers and
 restores the configured policy.
 
+Validate EEVDF shares with CPU-bound tasks pinned to one CPU:
+
+```bash
+make -C scheds/rust/scx_snake/interactive start FAIRNESS=eevdf
+make -C scheds/rust/scx_snake/interactive fairness-demo
+```
+
 Inspect the compiled ladder and resolved mask tables without attaching BPF:
 
 ```bash
@@ -231,7 +248,9 @@ The text output from `--stats 1` shows the active policy generation plus
 attempts, hits, misses, and errors for each rung. A successful update advances
 the generation and starts fresh counters with the new rung labels. Also watch
 `direct_dispatches`, `ladder_exhaustions`, `enqueues`, and `invalid_errors`; the
-last should remain zero.
+last should remain zero. EEVDF mode also reports its two queue insertion counts,
+promotions, forced advances, ordered dispatches, direct/queued runtime, lag
+clamps, and accounting errors.
 
 Use `--stats-format json` for NDJSON, `--help-stats` for counter definitions, or
 monitor an already running scheduler without a policy:
@@ -249,6 +268,7 @@ stress-ng --pipe 4 --futex 4 --timeout 30s --metrics-brief
 ## Limits
 
 Topology is resolved when a policy is attached or updated. The kernel-default
-simulation does not implement distance-ordered remote NUMA search. Exhausted
-ladders use a simple global FIFO with no topology-aware enqueue, stealing, or
-draining policy. The ABI remains experimental.
+simulation does not implement distance-ordered remote NUMA search. FIFO has no
+topology-aware enqueue, stealing, or draining policy; EEVDF is one global
+per-task fairness domain rather than a cell or NUMA hierarchy. The ABI remains
+experimental.

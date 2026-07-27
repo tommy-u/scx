@@ -76,6 +76,8 @@ impl CpuMetrics {
 pub struct Metrics {
     #[stat(desc = "Active userspace policy generation")]
     pub policy_generation: u64,
+    #[stat(desc = "Active scheduler fairness discipline", _om_skip)]
+    pub fairness_mode: String,
     #[stat(desc = "Number of select_cpu callback invocations")]
     pub select_calls: u64,
     #[stat(desc = "Number of successful direct dispatches to selected idle CPUs")]
@@ -104,6 +106,26 @@ pub struct Metrics {
     pub cell_rehomes: u64,
     #[stat(desc = "Cell rehome attempts deferred because no task-cell rung selected a CPU")]
     pub cell_rehome_misses: u64,
+    #[stat(desc = "Tasks inserted into the EEVDF eligible deadline queue")]
+    pub eevdf_eligible_enqueues: u64,
+    #[stat(desc = "Tasks inserted into the EEVDF future virtual-start queue")]
+    pub eevdf_future_enqueues: u64,
+    #[stat(desc = "Future tasks promoted after becoming EEVDF-eligible")]
+    pub eevdf_promotions: u64,
+    #[stat(desc = "Work-conserving EEVDF virtual-time frontier advances")]
+    pub eevdf_forced_advances: u64,
+    #[stat(desc = "Tasks dispatched from the EEVDF eligible queue")]
+    pub eevdf_dispatches: u64,
+    #[stat(desc = "Synchronous non-idle placements queued for strict fairness")]
+    pub eevdf_strict_preempt_queues: u64,
+    #[stat(desc = "Task runtime delivered through the idle-CPU direct path")]
+    pub eevdf_direct_runtime_ns: u64,
+    #[stat(desc = "Task runtime delivered through EEVDF ordered queues")]
+    pub eevdf_queued_runtime_ns: u64,
+    #[stat(desc = "Sleeping-task lag values clamped to one virtual request")]
+    pub eevdf_lag_clamps: u64,
+    #[stat(desc = "EEVDF state or runnable-weight accounting errors")]
+    pub eevdf_accounting_errors: u64,
     #[stat(desc = "Per-CPU Snake runtime")]
     pub cpus: BTreeMap<u32, CpuMetrics>,
     #[stat(desc = "Per-rung policy evaluation metrics")]
@@ -118,6 +140,7 @@ impl Metrics {
 
         Self {
             policy_generation: self.policy_generation,
+            fairness_mode: self.fairness_mode.clone(),
             select_calls: self.select_calls.saturating_sub(previous.select_calls),
             direct_dispatches: self
                 .direct_dispatches
@@ -140,6 +163,36 @@ impl Metrics {
             cell_rehome_misses: self
                 .cell_rehome_misses
                 .saturating_sub(previous.cell_rehome_misses),
+            eevdf_eligible_enqueues: self
+                .eevdf_eligible_enqueues
+                .saturating_sub(previous.eevdf_eligible_enqueues),
+            eevdf_future_enqueues: self
+                .eevdf_future_enqueues
+                .saturating_sub(previous.eevdf_future_enqueues),
+            eevdf_promotions: self
+                .eevdf_promotions
+                .saturating_sub(previous.eevdf_promotions),
+            eevdf_forced_advances: self
+                .eevdf_forced_advances
+                .saturating_sub(previous.eevdf_forced_advances),
+            eevdf_dispatches: self
+                .eevdf_dispatches
+                .saturating_sub(previous.eevdf_dispatches),
+            eevdf_strict_preempt_queues: self
+                .eevdf_strict_preempt_queues
+                .saturating_sub(previous.eevdf_strict_preempt_queues),
+            eevdf_direct_runtime_ns: self
+                .eevdf_direct_runtime_ns
+                .saturating_sub(previous.eevdf_direct_runtime_ns),
+            eevdf_queued_runtime_ns: self
+                .eevdf_queued_runtime_ns
+                .saturating_sub(previous.eevdf_queued_runtime_ns),
+            eevdf_lag_clamps: self
+                .eevdf_lag_clamps
+                .saturating_sub(previous.eevdf_lag_clamps),
+            eevdf_accounting_errors: self
+                .eevdf_accounting_errors
+                .saturating_sub(previous.eevdf_accounting_errors),
             cpus: self
                 .cpus
                 .iter()
@@ -160,15 +213,18 @@ impl Metrics {
             .unwrap_or_default();
         let mut output = format!(
             concat!(
-                "scx_snake policy generation {} stats\n",
+                "scx_snake policy generation {} stats (fairness: {})\n",
                 "  select calls: {} | direct dispatches: {} | ladder exhausted: {}\n",
                 "  fallback previous CPU: {} | fallback any allowed CPU: {} | invalid/errors: {}\n",
                 "  callbacks enqueue: {} | running: {} | stopping: {} | quiescent: {}\n",
                 "  select latency ns total: {} | average: {} | cumulative max: {}\n",
                 "  cell rehomes: {} | deferred rehomes: {}\n",
+                "  EEVDF eligible/future enqueues: {}/{} | promotions: {} | forced advances: {} | dispatches: {}\n",
+                "  EEVDF strict sync queues: {} | direct/queued runtime ns: {}/{} | lag clamps: {} | accounting errors: {}\n",
                 "  rungs:\n"
             ),
             self.policy_generation,
+            self.fairness_mode,
             self.select_calls,
             self.direct_dispatches,
             self.ladder_exhaustions,
@@ -184,6 +240,16 @@ impl Metrics {
             self.select_latency_max_ns,
             self.cell_rehomes,
             self.cell_rehome_misses,
+            self.eevdf_eligible_enqueues,
+            self.eevdf_future_enqueues,
+            self.eevdf_promotions,
+            self.eevdf_forced_advances,
+            self.eevdf_dispatches,
+            self.eevdf_strict_preempt_queues,
+            self.eevdf_direct_runtime_ns,
+            self.eevdf_queued_runtime_ns,
+            self.eevdf_lag_clamps,
+            self.eevdf_accounting_errors,
         );
 
         for rung in self.rungs.values() {

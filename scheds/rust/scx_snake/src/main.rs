@@ -30,6 +30,7 @@ use log::{debug, info, warn};
 use mask_tables::{dump_mask_tables, resolve_mask_tables, ResolvedMaskTable};
 use policy::{CompiledPolicy, CompiledRung, InputSource, Opcode};
 use runtime_policy::RuntimePolicy;
+use scx_snake::fairness::FairnessMode;
 use scx_stats::prelude::*;
 use scx_utils::build_id;
 use scx_utils::libbpf_clap_opts::LibbpfOpts;
@@ -64,6 +65,10 @@ enum StatsFormat {
 #[derive(Debug, Parser)]
 #[command(name = SCHEDULER_NAME, version)]
 struct Opts {
+    /// Queue discipline used after idle-CPU placement misses; EEVDF is experimental.
+    #[arg(long, value_enum, default_value_t)]
+    fairness: FairnessMode,
+
     /// TOML policy to compile and install before attaching the scheduler.
     #[arg(long, value_name = "PATH")]
     policy: Option<PathBuf>,
@@ -161,6 +166,10 @@ fn resolve_mode(opts: &Opts) -> Result<RunMode> {
     if special_modes > 1 {
         bail!("control, monitoring, update, and dump modes are mutually exclusive");
     }
+    if opts.fairness != FairnessMode::Fifo && special_modes != 0 {
+        bail!("--fairness is only valid when launching the scheduler");
+    }
+
     if opts.help_stats {
         return Ok(RunMode::HelpStats);
     }
@@ -486,6 +495,7 @@ fn aggregate_raw_stats(
     raw: &[Vec<Vec<u8>>],
     policy: &CompiledPolicy,
     generation: u64,
+    fairness: FairnessMode,
 ) -> Result<Metrics> {
     let expected = bpf_intf::snake_stat_SNAKE_NR_STATS as usize;
     if raw.len() != expected {
@@ -538,6 +548,7 @@ fn aggregate_raw_stats(
 
     Ok(Metrics {
         policy_generation: generation,
+        fairness_mode: fairness.as_str().into(),
         select_calls: value(bpf_intf::snake_stat_SNAKE_STAT_SELECT_CALLS),
         direct_dispatches: value(bpf_intf::snake_stat_SNAKE_STAT_DIRECT_DISPATCHES),
         ladder_exhaustions: value(bpf_intf::snake_stat_SNAKE_STAT_LADDER_EXHAUSTIONS),
@@ -552,6 +563,18 @@ fn aggregate_raw_stats(
         select_latency_max_ns: value(bpf_intf::snake_stat_SNAKE_STAT_SELECT_LATENCY_MAX_NS),
         cell_rehomes: value(bpf_intf::snake_stat_SNAKE_STAT_CELL_REHOMES),
         cell_rehome_misses: value(bpf_intf::snake_stat_SNAKE_STAT_CELL_REHOME_MISSES),
+        eevdf_eligible_enqueues: value(bpf_intf::snake_stat_SNAKE_STAT_EEVDF_ELIGIBLE_ENQUEUES),
+        eevdf_future_enqueues: value(bpf_intf::snake_stat_SNAKE_STAT_EEVDF_FUTURE_ENQUEUES),
+        eevdf_promotions: value(bpf_intf::snake_stat_SNAKE_STAT_EEVDF_PROMOTIONS),
+        eevdf_forced_advances: value(bpf_intf::snake_stat_SNAKE_STAT_EEVDF_FORCED_ADVANCES),
+        eevdf_dispatches: value(bpf_intf::snake_stat_SNAKE_STAT_EEVDF_DISPATCHES),
+        eevdf_strict_preempt_queues: value(
+            bpf_intf::snake_stat_SNAKE_STAT_EEVDF_STRICT_PREEMPT_QUEUES,
+        ),
+        eevdf_direct_runtime_ns: value(bpf_intf::snake_stat_SNAKE_STAT_EEVDF_DIRECT_RUNTIME_NS),
+        eevdf_queued_runtime_ns: value(bpf_intf::snake_stat_SNAKE_STAT_EEVDF_QUEUED_RUNTIME_NS),
+        eevdf_lag_clamps: value(bpf_intf::snake_stat_SNAKE_STAT_EEVDF_LAG_CLAMPS),
+        eevdf_accounting_errors: value(bpf_intf::snake_stat_SNAKE_STAT_EEVDF_ACCOUNTING_ERRORS),
         cpus,
         rungs,
     })
@@ -576,6 +599,7 @@ struct Scheduler<'object, 'policy> {
     stats_server: StatsServer<SchedulerRequest, SchedulerResponse>,
     inspector: Inspector,
     runtime: &'policy mut RuntimePolicy,
+    fairness: FairnessMode,
 }
 
 impl<'object, 'policy> Scheduler<'object, 'policy> {
@@ -591,6 +615,11 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
         builder.obj_builder.debug(opts.verbose);
         let open_opts = opts.libbpf.clone().into_bpf_open_opts();
         let mut skel = scx_ops_open!(builder, open_object, snake_ops, open_opts)?;
+        skel.maps
+            .rodata_data
+            .as_mut()
+            .context("BPF read-only data is unavailable")?
+            .fairness_mode = opts.fairness as u32;
         skel.struct_ops.snake_ops_mut().exit_dump_len = opts.exit_dump_len;
         let mut skel = scx_ops_load!(skel, snake_ops, uei)?;
         set_active_ladder(&mut skel, bpf_intf::SNAKE_LADDER_SLOT_INVALID)?;
@@ -606,9 +635,10 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
         let struct_ops = Some(scx_ops_attach!(skel, snake_ops)?);
         let stats_server = StatsServer::new(stats::server_data()).launch()?;
         info!(
-            "attached {SCHEDULER_NAME} policy generation {} with {} rungs",
+            "attached {SCHEDULER_NAME} policy generation {} with {} rungs ({:?} fairness)",
             runtime.generation,
             runtime.compiled.rungs.len(),
+            opts.fairness,
         );
         let inspector = Inspector::new(SlotPolicy::new(
             runtime.active_slot,
@@ -625,6 +655,7 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
             stats_server,
             inspector,
             runtime,
+            fairness: opts.fairness,
         })
     }
 
@@ -633,6 +664,7 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
             &read_raw_stats(&self.skel, self.runtime.active_slot)?,
             &self.runtime.compiled,
             self.runtime.generation,
+            self.fairness,
         )
     }
 
@@ -663,6 +695,7 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
                         &read_raw_stats(&self.skel, previous_slot)?,
                         &previous_policy,
                         previous_generation,
+                        self.fairness,
                     )
                 }) {
                 Ok(metrics) => metrics,
@@ -1009,7 +1042,7 @@ scope = "task_allowed"
         let policy = policy::compile_policy(policy_source()).expect("policy should compile");
         let encoded = encode_ladder(&policy, 42).expect("ladder should encode");
 
-        assert_eq!(bpf_intf::SNAKE_ABI_VERSION, 9);
+        assert_eq!(bpf_intf::SNAKE_ABI_VERSION, 10);
         assert_eq!(size_of::<bpf_intf::snake_compiled_ladder>(), 216);
         assert_eq!(offset_of!(bpf_intf::snake_compiled_ladder, generation), 0);
         assert_eq!(
@@ -1045,6 +1078,22 @@ scope = "task_allowed"
         assert_eq!(encoded.rungs[2].opcode, 0);
         assert_eq!(encoded.rungs[2].reserved, 0);
         assert_eq!(encoded.rungs[2].data, 0);
+    }
+
+    #[test]
+    fn fairness_modes_match_the_bpf_abi() {
+        assert_eq!(
+            bpf_intf::snake_fairness_mode_SNAKE_FAIRNESS_FIFO,
+            FairnessMode::Fifo as u32
+        );
+        assert_eq!(
+            bpf_intf::snake_fairness_mode_SNAKE_FAIRNESS_EEVDF,
+            FairnessMode::Eevdf as u32
+        );
+        assert_eq!(
+            u64::from(bpf_intf::SNAKE_EEVDF_SLICE_NS),
+            scx_snake::fairness::EEVDF_SLICE_NS
+        );
     }
 
     #[test]
@@ -1328,6 +1377,28 @@ scope = "task_cell"
     }
 
     #[test]
+    fn rejects_eevdf_mode_for_non_launch_operations() {
+        for args in [
+            vec!["scx_snake", "--fairness", "eevdf", "--monitor", "1"],
+            vec!["scx_snake", "--fairness", "eevdf", "--help-stats"],
+            vec![
+                "scx_snake",
+                "--fairness",
+                "eevdf",
+                "--policy",
+                "/tmp/snake.toml",
+                "--dump-compiled-policy",
+            ],
+        ] {
+            let opts = Opts::try_parse_from(args).expect("arguments should parse");
+            assert!(resolve_mode(&opts)
+                .expect_err("EEVDF must be selected only for launch")
+                .to_string()
+                .contains("only valid when launching"));
+        }
+    }
+
+    #[test]
     fn update_policy_is_a_standalone_run_mode() {
         let update =
             Opts::try_parse_from(["scx_snake", "--update-policy", "/tmp/replacement.toml"])
@@ -1410,7 +1481,8 @@ scope = "task_cell"
             &[2, 3],
         );
 
-        let metrics = aggregate_raw_stats(&raw, &policy, 42).expect("stats should aggregate");
+        let metrics = aggregate_raw_stats(&raw, &policy, 42, FairnessMode::Eevdf)
+            .expect("stats should aggregate");
 
         assert_eq!(metrics.policy_generation, 42);
         assert_eq!(metrics.select_calls, 18);
@@ -1446,7 +1518,7 @@ scope = "previous_llc"
         )
         .expect("policy should compile");
 
-        let metrics = aggregate_raw_stats(&raw_percpu_stats(), &policy, 1)
+        let metrics = aggregate_raw_stats(&raw_percpu_stats(), &policy, 1, FairnessMode::Fifo)
             .expect("stats should aggregate");
 
         assert_eq!(metrics.rungs[&0].scope, "previous_llc_half");
@@ -1464,7 +1536,7 @@ scope = "previous_llc"
         )
         .expect("policy should compile");
 
-        let metrics = aggregate_raw_stats(&raw_percpu_stats(), &policy, 1)
+        let metrics = aggregate_raw_stats(&raw_percpu_stats(), &policy, 1, FairnessMode::Fifo)
             .expect("stats should aggregate");
 
         assert_eq!(metrics.rungs[&0].operation, "pick_idle_core");
@@ -1482,7 +1554,7 @@ scope = "previous_node"
         )
         .expect("policy should compile");
 
-        let metrics = aggregate_raw_stats(&raw_percpu_stats(), &policy, 1)
+        let metrics = aggregate_raw_stats(&raw_percpu_stats(), &policy, 1, FairnessMode::Fifo)
             .expect("stats should aggregate");
 
         assert_eq!(metrics.rungs[&0].operation, "pick_idle");
@@ -1500,7 +1572,7 @@ scope = "previous_llc"
         )
         .expect("policy should compile");
 
-        let metrics = aggregate_raw_stats(&raw_percpu_stats(), &policy, 1)
+        let metrics = aggregate_raw_stats(&raw_percpu_stats(), &policy, 1, FairnessMode::Fifo)
             .expect("stats should aggregate");
 
         assert_eq!(metrics.rungs[&0].operation, "pick_random_idle");
@@ -1518,7 +1590,7 @@ scope = "previous_llc"
         )
         .expect("policy should compile");
 
-        let metrics = aggregate_raw_stats(&raw_percpu_stats(), &policy, 1)
+        let metrics = aggregate_raw_stats(&raw_percpu_stats(), &policy, 1, FairnessMode::Fifo)
             .expect("stats should aggregate");
 
         assert_eq!(metrics.rungs[&0].operation, "pick_random_idle_core");
@@ -1536,7 +1608,7 @@ scope = "task_allowed"
         )
         .expect("policy should compile");
 
-        let metrics = aggregate_raw_stats(&raw_percpu_stats(), &policy, 1)
+        let metrics = aggregate_raw_stats(&raw_percpu_stats(), &policy, 1, FairnessMode::Fifo)
             .expect("stats should aggregate");
 
         assert_eq!(metrics.rungs[&0].operation, "sync_wake_affine");
