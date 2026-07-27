@@ -102,7 +102,8 @@ static __always_inline bool rung_is_valid(const struct snake_rung *rung,
 		 ((rung->flags == SNAKE_RUNG_F_INTERSECT_TASK_ALLOWED ||
 		   rung->flags == (SNAKE_RUNG_F_INTERSECT_TASK_ALLOWED |
 				  SNAKE_RUNG_F_PICK_IDLE_CORE)) &&
-		  rung->input == SNAKE_INPUT_CPU_PREV &&
+		  (rung->input == SNAKE_INPUT_CPU_PREV ||
+		   rung->input == SNAKE_INPUT_TASK_CELL) &&
 		  rung->data < nr_mask_tables))) ||
 	       (rung->opcode == SNAKE_OP_KERNEL_DEFAULT && !rung->flags &&
 		rung->input == SNAKE_INPUT_MASK_TASK_ALLOWED && !rung->data) ||
@@ -111,7 +112,8 @@ static __always_inline bool rung_is_valid(const struct snake_rung *rung,
 		(u32)rung->data < nr_mask_tables &&
 		(u32)(rung->data >> 32) < nr_mask_tables) ||
 	       (rung->opcode == SNAKE_OP_PICK_IDLE_MASK_TABLE &&
-		rung->input == SNAKE_INPUT_CPU_PREV &&
+		(rung->input == SNAKE_INPUT_CPU_PREV ||
+		 rung->input == SNAKE_INPUT_TASK_CELL) &&
 		(rung->flags == SNAKE_RUNG_F_INTERSECT_TASK_ALLOWED ||
 		 rung->flags == (SNAKE_RUNG_F_INTERSECT_TASK_ALLOWED |
 				 SNAKE_RUNG_F_PICK_IDLE_CORE)) &&
@@ -139,6 +141,27 @@ static __always_inline s32 execute_rung(const struct snake_ladder_ctx *ctx,
 					     0);
 		return prev_cpu < 0 ? -ENOENT : prev_cpu;
 	case SNAKE_OP_PICK_RANDOM_IDLE:
+		if (rung->input == SNAKE_INPUT_TASK_CELL) {
+			struct snake_task_cell *cell;
+			s32			  exists, cpu;
+
+			cell = bpf_task_storage_get(&task_cells, p, NULL, 0);
+			if (!cell)
+				return -ENOENT;
+			exists = mask_table_has_key(ctx, rung->data,
+						    READ_ONCE(cell->cell_id));
+			if (exists <= 0)
+				return exists < 0 ? exists : -ENOENT;
+			cpu = pick_random_idle_from_mask_table(
+				ctx, p, rung->data, READ_ONCE(cell->cell_id),
+				rung->flags & SNAKE_RUNG_F_PICK_IDLE_CORE);
+			if (cpu >= 0) {
+				if (READ_ONCE(cell->needs_rehome))
+					stat_inc(ctx, SNAKE_STAT_CELL_REHOMES);
+				WRITE_ONCE(cell->needs_rehome, 0);
+			}
+			return cpu;
+		}
 		if (rung->input == SNAKE_INPUT_CPU_PREV)
 			return pick_random_idle_from_mask_table(
 				ctx, p, rung->data, prev_cpu,
@@ -156,6 +179,31 @@ static __always_inline s32 execute_rung(const struct snake_ladder_ctx *ctx,
 		return try_sync_wake_affine(ctx, p, prev_cpu, wake_flags, rung->data,
 					    dispatch_flags);
 	case SNAKE_OP_PICK_IDLE_MASK_TABLE:
+		if (rung->input == SNAKE_INPUT_TASK_CELL) {
+			struct snake_task_cell *cell;
+			s32			  exists, cpu;
+
+			cell = bpf_task_storage_get(&task_cells, p, NULL, 0);
+			if (!cell)
+				return -ENOENT;
+			exists = mask_table_has_key(ctx, rung->data,
+						    READ_ONCE(cell->cell_id));
+			if (exists <= 0)
+				return exists < 0 ? exists : -ENOENT;
+			if (rung->flags & SNAKE_RUNG_F_PICK_IDLE_CORE)
+				cpu = pick_idle_core_from_mask_table(
+					ctx, p, rung->data, READ_ONCE(cell->cell_id));
+			else
+				cpu = pick_idle_from_mask_table(
+					ctx, p, rung->data, READ_ONCE(cell->cell_id),
+					p->cpus_ptr);
+			if (cpu >= 0) {
+				if (READ_ONCE(cell->needs_rehome))
+					stat_inc(ctx, SNAKE_STAT_CELL_REHOMES);
+				WRITE_ONCE(cell->needs_rehome, 0);
+			}
+			return cpu;
+		}
 		if (rung->flags & SNAKE_RUNG_F_PICK_IDLE_CORE)
 			return pick_idle_core_from_mask_table(ctx, p, rung->data,
 							      prev_cpu);
@@ -166,6 +214,61 @@ static __always_inline s32 execute_rung(const struct snake_ladder_ctx *ctx,
 	}
 
 	return -ENOENT;
+}
+
+/* Keep annotated runnable tasks on CPUs selected by their task-cell rungs. */
+static __always_inline s32 try_enqueue_task_cell(struct snake_ladder_ctx *ctx,
+						  struct task_struct *p,
+						  u64 enq_flags)
+{
+	struct snake_task_cell *cell;
+	bool			 rehome_pending;
+	u32			 i;
+
+	cell = bpf_task_storage_get(&task_cells, p, NULL, 0);
+	if (!cell)
+		return 0;
+	rehome_pending = READ_ONCE(cell->needs_rehome);
+
+	bpf_for(i, 0, SNAKE_MAX_RUNGS)
+	{
+		struct snake_rung rung;
+		u64		  dispatch_flags = 0;
+		s32		  cpu;
+
+		if (i >= ctx->ladder->nr_rungs)
+			break;
+		rung = ctx->ladder->rungs[i];
+		if (rung.input != SNAKE_INPUT_TASK_CELL)
+			continue;
+
+		stat_inc(ctx, SNAKE_STAT_RUNG_ATTEMPT_BASE + i);
+		cpu = execute_rung(ctx, p, &rung, -1, 0, &dispatch_flags);
+		if (cpu >= 0 && cpu < nr_cpu_ids) {
+			stat_inc(ctx, SNAKE_STAT_RUNG_HIT_BASE + i);
+			if (!scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu,
+					    SCX_SLICE_DFL, enq_flags)) {
+				stat_inc(ctx, SNAKE_STAT_INVALID_ERRORS);
+				scx_bpf_error(
+					"snake failed to enqueue pid %d on cell CPU %d",
+					p->pid, cpu);
+				return -EINVAL;
+			}
+			return 1;
+		}
+		if (cpu < 0 && cpu != -ENOENT) {
+			stat_inc(ctx, SNAKE_STAT_RUNG_ERROR_BASE + i);
+			stat_inc(ctx, SNAKE_STAT_INVALID_ERRORS);
+			scx_bpf_error("snake cell rehome rung %u failed: %d", i,
+				      cpu);
+			return cpu;
+		}
+		stat_inc(ctx, SNAKE_STAT_RUNG_MISS_BASE + i);
+	}
+
+	if (rehome_pending)
+		stat_inc(ctx, SNAKE_STAT_CELL_REHOME_MISSES);
+	return 0;
 }
 
 /* Evaluate the configured rungs in order until one returns a valid hint. */

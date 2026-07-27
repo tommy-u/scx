@@ -8,7 +8,7 @@ typedef unsigned int	   u32;
 typedef unsigned long long u64;
 #endif
 
-#define SNAKE_ABI_VERSION 8
+#define SNAKE_ABI_VERSION 9
 #define SNAKE_MAX_RUNGS 8
 #define SNAKE_LADDER_SLOTS 2
 #define SNAKE_LADDER_SLOT_INVALID SNAKE_LADDER_SLOTS
@@ -17,7 +17,6 @@ typedef unsigned long long u64;
 #define SNAKE_MAX_MASK_TABLES 4
 #define SNAKE_RUNG_F_INTERSECT_TASK_ALLOWED (1U << 0)
 #define SNAKE_RUNG_F_PICK_IDLE_CORE (1U << 1)
-
 /* Stable operation codes shared by the userspace compiler and BPF. */
 enum snake_opcode {
 	SNAKE_OP_INVALID	      = 0,
@@ -41,6 +40,13 @@ enum snake_input_source {
 	SNAKE_INPUT_INVALID	      = 0,
 	SNAKE_INPUT_CPU_PREV	      = 1,
 	SNAKE_INPUT_MASK_TASK_ALLOWED = 2,
+	SNAKE_INPUT_TASK_CELL	      = 3,
+};
+
+/* Userspace annotation attached to one thread through BPF task storage. */
+struct snake_task_cell {
+	u32 cell_id;
+	u32 needs_rehome;
 };
 
 /*
@@ -86,6 +92,8 @@ enum snake_stat {
 	SNAKE_STAT_RUNTIME_NS,
 	SNAKE_STAT_SELECT_LATENCY_NS,
 	SNAKE_STAT_SELECT_LATENCY_MAX_NS,
+	SNAKE_STAT_CELL_REHOMES,
+	SNAKE_STAT_CELL_REHOME_MISSES,
 	SNAKE_STAT_GLOBAL_NR,
 	SNAKE_STAT_RUNG_ATTEMPT_BASE = SNAKE_STAT_GLOBAL_NR,
 	SNAKE_STAT_RUNG_HIT_BASE =

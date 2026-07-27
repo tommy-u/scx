@@ -1,6 +1,6 @@
 # Task Cell Annotations
 
-This proposal lets userspace assign an integer cell to an individual thread.
+This interface lets userspace assign an integer cell to an individual thread.
 A policy separately maps each cell ID to an arbitrary CPU set; cell CPU sets
 may overlap. BPF sees only a task-local integer and generic CPU masks.
 
@@ -90,7 +90,7 @@ only a cell ID:
 ```c
 struct snake_task_cell {
     __u32 cell_id;
-    __u32 reserved;
+    __u32 needs_rehome;
 };
 
 struct {
@@ -106,10 +106,12 @@ The cell rung receives `struct task_struct *p`, reads `task_cells` with
 generic cell mask. It intersects that mask with `p->cpus_ptr` before selecting
 an idle CPU. Missing annotations, missing cell definitions, and empty
 intersections are normal rung misses so later policy rungs remain authoritative.
+`needs_rehome` is set by a live userspace update and cleared after a cell rung
+places the task successfully.
 
 ## Userspace updates
 
-The CLI should send a typed request to the existing Snake control socket. The
+The CLI sends a typed request to the existing Snake control socket. The
 running scheduler owns the task-storage map FD and performs the update:
 
 ```text
@@ -133,9 +135,9 @@ annotation. Thread exit removes its task-local storage automatically. The map
 update is synchronous: after it returns successfully, the next BPF lookup sees
 the new cell ID without polling or an asynchronous propagation step.
 
-This direct path requires a kernel with `PIDFD_THREAD`. On older kernels, the
-fallback is a small BPF control program that resolves the TID with
-`bpf_task_from_pid()` and updates the same task-storage map.
+This direct path requires a kernel with `PIDFD_THREAD`; older kernels return an
+error. A future compatibility path could use a small BPF control program that
+resolves the TID with `bpf_task_from_pid()` and updates the same map.
 
 Illustrative CLI commands:
 
@@ -144,14 +146,12 @@ sudo scx_snake --set-thread-cell 4812:7
 sudo scx_snake --clear-thread-cell 4812
 ```
 
-Batch assignment should let a caller update several threads in one control
-request. The scheduler should validate the entire batch first and return the
-result for each TID. All-or-nothing application would require snapshot and
-rollback logic and remains a separate design choice.
+The initial interface updates one TID per request. Batch assignment remains a
+possible control-protocol extension.
 
 ## Policy shape
 
-One possible userspace policy syntax is:
+The userspace policy syntax is:
 
 ```toml
 [[cell]]
@@ -183,18 +183,15 @@ entries after TID reuse. Reading such a map only from `init_task` also loses
 updates made after thread creation. Task-local storage provides live updates,
 stable task identity, and automatic lifetime management.
 
-## Simpler version's placement timing
+## Placement timing
 
-The map value is current as soon as the update syscall returns, but the simpler
-cell rung reads it only from `select_cpu`, which runs when a task wakes. A task
-that is sleeping uses the new cell on its next wakeup. A continuously runnable
-task does not necessarily call `select_cpu` again promptly and therefore may
-remain on its old CPU even though its annotation is already current.
-
-If placement must converge within one time slice for continuously runnable
-tasks, Snake also needs a generic rehome check in its stop/enqueue path. That is
-separate from storage freshness and should not be hidden inside this simpler
-design.
+The map value is current as soon as the update syscall returns. A sleeping task
+uses it from `select_cpu` at its next wakeup. `enqueue` also evaluates configured
+task-cell rungs for annotated runnable tasks, keeping them in the cell whenever
+an eligible cell CPU is idle. `needs_rehome` records convergence after a live
+update and is cleared on the first successful cell placement. If every eligible
+cell CPU is busy, normal enqueue continues and the cell placement is retried
+later.
 
 ## Open decisions
 
@@ -202,8 +199,6 @@ design.
 - Whether cell annotations survive a policy replacement when the new policy
   does not define that cell ID. The safest behavior is to retain the integer
   annotation but make the cell rung miss until the ID is defined again.
-- Whether the first version is idle-only or may queue onto a busy cell CPU.
-  Idle-only composes directly with Snake's current select ladder.
 - Authorization for annotating another process's threads. The initial CLI can
   require root while the control protocol keeps room for finer checks later.
 - Whether batch assignment is best-effort per TID or atomic with rollback.

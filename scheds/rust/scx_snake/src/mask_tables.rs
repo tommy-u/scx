@@ -6,7 +6,7 @@ use anyhow::{bail, Context, Result};
 use scx_utils::Topology;
 
 use crate::bpf_intf;
-use crate::policy::{MaskTableSource, MaskTableSpec};
+use crate::policy::{CompiledPolicy, MaskTableSource};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResolvedMaskTable {
@@ -22,7 +22,8 @@ struct CpuLocation {
     core: u32,
 }
 
-pub fn resolve_mask_tables(specs: &[MaskTableSpec]) -> Result<Vec<ResolvedMaskTable>> {
+pub fn resolve_mask_tables(policy: &CompiledPolicy) -> Result<Vec<ResolvedMaskTable>> {
+    let specs = &policy.mask_tables;
     if specs.is_empty() {
         return Ok(Vec::new());
     }
@@ -90,6 +91,11 @@ pub fn resolve_mask_tables(specs: &[MaskTableSpec]) -> Result<Vec<ResolvedMaskTa
     } else {
         BTreeMap::new()
     };
+    let available_cpus = topology
+        .all_cpus
+        .keys()
+        .map(|&cpu| cpu.try_into().context("CPU ID does not fit u32"))
+        .collect::<Result<BTreeSet<_>>>()?;
 
     specs
         .iter()
@@ -99,8 +105,32 @@ pub fn resolve_mask_tables(specs: &[MaskTableSpec]) -> Result<Vec<ResolvedMaskTa
             MaskTableSource::SplitLlcByCore { parts } => {
                 build_split_llc_table(spec.id, &cpu_locations, parts)
             }
+            MaskTableSource::TaskCellById => {
+                build_task_cell_table(spec.id, &policy.cells, &available_cpus)
+            }
         })
         .collect()
+}
+
+fn build_task_cell_table(
+    id: u32,
+    cells: &BTreeMap<u32, BTreeSet<u32>>,
+    available_cpus: &BTreeSet<u32>,
+) -> Result<ResolvedMaskTable> {
+    if cells.is_empty() {
+        bail!("task-cell mask table contains no cells");
+    }
+    for (&cell_id, cpus) in cells {
+        if let Some(cpu) = cpus.difference(available_cpus).next() {
+            bail!("cell {cell_id} references unavailable CPU {cpu}");
+        }
+    }
+
+    Ok(ResolvedMaskTable {
+        id,
+        source: MaskTableSource::TaskCellById,
+        entries: cells.clone(),
+    })
 }
 
 fn build_previous_llc_table(id: u32, cpu_to_llc: &BTreeMap<u32, u32>) -> Result<ResolvedMaskTable> {
@@ -214,9 +244,14 @@ pub fn dump_mask_tables(tables: &[ResolvedMaskTable]) -> String {
     let mut output = String::new();
     for table in tables {
         output.push_str(&format!("mask table {} {:?}:\n", table.id, table.source));
-        for (cpu, cpus) in &table.entries {
+        let key_name = if table.source == MaskTableSource::TaskCellById {
+            "cell"
+        } else {
+            "cpu"
+        };
+        for (key, cpus) in &table.entries {
             output.push_str(&format!(
-                "  key cpu {cpu}: [{}]\n",
+                "  key {key_name} {key}: [{}]\n",
                 cpus.iter()
                     .map(u32::to_string)
                     .collect::<Vec<_>>()
@@ -356,6 +391,34 @@ mod tests {
             .to_string();
 
         assert!(error.contains("no CPUs"));
+    }
+
+    #[test]
+    fn builds_sparse_overlapping_task_cell_masks() {
+        let cells = BTreeMap::from([
+            (7, BTreeSet::from([0, 1, 2])),
+            (8, BTreeSet::from([1, 2, 3])),
+        ]);
+        let table = build_task_cell_table(2, &cells, &BTreeSet::from([0, 1, 2, 3]))
+            .expect("cell table should build");
+
+        assert_eq!(table.source, MaskTableSource::TaskCellById);
+        assert_eq!(table.entries[&7], BTreeSet::from([0, 1, 2]));
+        assert_eq!(table.entries[&8], BTreeSet::from([1, 2, 3]));
+        assert!(dump_mask_tables(&[table]).contains("key cell 7: [0,1,2]"));
+    }
+
+    #[test]
+    fn rejects_task_cells_that_reference_unavailable_cpus() {
+        let error = build_task_cell_table(
+            0,
+            &BTreeMap::from([(7, BTreeSet::from([0, 4]))]),
+            &BTreeSet::from([0, 1]),
+        )
+        .expect_err("unavailable cell CPU should fail")
+        .to_string();
+
+        assert!(error.contains("cell 7 references unavailable CPU 4"));
     }
 
     #[test]

@@ -91,6 +91,38 @@ CPU in the waker's LLC, then the waker CPU when its local DSQ is empty and its
 NUMA node has idle capacity. The latter is the only path that intentionally
 targets a non-idle CPU, using a preemptive handoff.
 
+### Task cells
+
+Policies can define arbitrary, overlapping CPU cells and use a thread's live
+cell annotation as another ladder scope:
+
+```toml
+[[cell]]
+id = 7
+cpus = "0-3"
+
+[[cell]]
+id = 8
+cpus = "2-5"
+
+[[rung]]
+operation = "pick_idle"
+scope = "task_cell"
+```
+
+The scheduler writes assignments synchronously to BPF task storage through a
+thread pidfd. Sleeping tasks use the new cell at their next wake; continuously
+runnable tasks also evaluate task-cell rungs from `enqueue`, keeping placement
+inside the cell whenever an eligible cell CPU is idle:
+
+```bash
+sudo ./target/release/scx_snake --set-thread-cell 4812:7
+sudo ./target/release/scx_snake --clear-thread-cell 4812
+```
+
+See [Task Cell Annotations](docs/CELL_POLICY.md) for the control and scheduling
+data flow.
+
 ## How scheduling works
 
 Userspace owns policy and topology. It converts LLCs, NUMA nodes, and optional
@@ -119,10 +151,11 @@ flags refine the operation, and `data` carries mask-table IDs. Userspace writes
 the compiled ladder and masks into an inactive BPF map slot, asks BPF to
 validate it, then atomically makes that slot active.
 
-A successful rung dispatches directly to the selected CPU's local DSQ and
-skips `enqueue`. If all rungs miss, Snake returns an affinity-safe fallback CPU
-hint; `enqueue` then puts the task on the global FIFO DSQ. There is no hidden
-idle search after the final rung.
+A successful `select_cpu` rung dispatches directly to the selected CPU's local
+DSQ and skips `enqueue`. If all rungs miss, Snake returns an affinity-safe
+fallback CPU hint; `enqueue` then puts the task on the global FIFO DSQ. An
+annotated runnable task is the explicit placement exception: `enqueue`
+re-evaluates its configured task-cell rungs before using the FIFO queue.
 
 ## Build and run
 

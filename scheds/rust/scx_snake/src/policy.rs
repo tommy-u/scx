@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0-only
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use serde::Deserialize;
 
 pub const MAX_RUNGS: usize = 8;
 pub const MAX_MASK_TABLES: usize = 4;
+pub const MAX_CELL_IDS: u32 = 1024;
 pub const RUNG_FLAG_INTERSECT_TASK_ALLOWED: u32 = 1;
 pub const RUNG_FLAG_PICK_IDLE_CORE: u32 = 1 << 1;
 
@@ -26,6 +27,7 @@ pub enum Opcode {
 pub enum InputSource {
     CpuPrev = 1,
     MaskTaskAllowed = 2,
+    TaskCell = 3,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -42,6 +44,7 @@ pub struct CompiledPolicy {
     pub fallback: Fallback,
     pub rungs: Vec<CompiledRung>,
     pub mask_tables: Vec<MaskTableSpec>,
+    pub cells: BTreeMap<u32, BTreeSet<u32>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -57,6 +60,7 @@ pub enum MaskTableSource {
     PreviousLlcByCpu,
     PreviousNodeByCpu,
     SplitLlcByCore { parts: u32 },
+    TaskCellById,
 }
 
 /// Named mask table allocated to a dense mechanical table ID.
@@ -117,6 +121,7 @@ impl InputSource {
         match self {
             Self::CpuPrev => "cpu_prev",
             Self::MaskTaskAllowed => "mask_task_allowed",
+            Self::TaskCell => "task_cell",
         }
     }
 }
@@ -137,9 +142,18 @@ impl std::error::Error for PolicyError {}
 struct SemanticPolicy {
     fallback: Option<String>,
     #[serde(default)]
+    cell: Vec<SemanticCell>,
+    #[serde(default)]
     partition: Vec<SemanticPartition>,
     #[serde(default)]
     rung: Vec<SemanticRung>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SemanticCell {
+    id: u32,
+    cpus: String,
 }
 
 #[derive(Deserialize)]
@@ -193,18 +207,70 @@ pub fn compile_policy(source: &str) -> Result<CompiledPolicy, PolicyError> {
         }
     }
 
+    let cells = compile_cells(&policy.cell)?;
     let partitions = compile_partitions(&policy.partition)?;
     let mut mask_tables = Vec::new();
     let mut rungs = Vec::with_capacity(policy.rung.len());
     for (index, rung) in policy.rung.iter().enumerate() {
-        rungs.push(compile_rung(index, rung, &partitions, &mut mask_tables)?);
+        rungs.push(compile_rung(
+            index,
+            rung,
+            &partitions,
+            !cells.is_empty(),
+            &mut mask_tables,
+        )?);
     }
 
     Ok(CompiledPolicy {
         fallback,
         rungs,
         mask_tables,
+        cells,
     })
+}
+
+fn compile_cells(cells: &[SemanticCell]) -> Result<BTreeMap<u32, BTreeSet<u32>>, PolicyError> {
+    let mut compiled = BTreeMap::new();
+
+    for (index, cell) in cells.iter().enumerate() {
+        if cell.id >= MAX_CELL_IDS {
+            return Err(PolicyError(format!(
+                "cell {index}: ID {} exceeds maximum {}",
+                cell.id,
+                MAX_CELL_IDS - 1
+            )));
+        }
+        if compiled.contains_key(&cell.id) {
+            return Err(PolicyError(format!(
+                "cell {index}: duplicate ID {}",
+                cell.id
+            )));
+        }
+
+        let cpus = scx_utils::read_cpulist(&cell.cpus)
+            .map_err(|error| PolicyError(format!("cell {index}: invalid CPU list: {error:#}")))?
+            .into_iter()
+            .map(|cpu| {
+                u32::try_from(cpu).map_err(|_| {
+                    PolicyError(format!("cell {index}: CPU {cpu} does not fit a CPU ID"))
+                })
+            })
+            .collect::<Result<BTreeSet<_>, _>>()?;
+        if cpus.is_empty() {
+            return Err(PolicyError(format!(
+                "cell {index}: CPU list must not be empty"
+            )));
+        }
+        if let Some(cpu) = cpus.iter().find(|&&cpu| cpu >= MAX_CELL_IDS) {
+            return Err(PolicyError(format!(
+                "cell {index}: CPU {cpu} exceeds mask capacity {}",
+                MAX_CELL_IDS - 1
+            )));
+        }
+        compiled.insert(cell.id, cpus);
+    }
+
+    Ok(compiled)
 }
 
 fn compile_partitions(
@@ -215,7 +281,7 @@ fn compile_partitions(
     for (index, partition) in partitions.iter().enumerate() {
         if matches!(
             partition.name.as_str(),
-            "previous_cpu" | "previous_llc" | "previous_node" | "task_allowed"
+            "previous_cpu" | "previous_llc" | "previous_node" | "task_allowed" | "task_cell"
         ) {
             return Err(PolicyError(format!(
                 "partition {index}: name `{}` is reserved",
@@ -260,16 +326,22 @@ fn compile_rung(
     index: usize,
     rung: &SemanticRung,
     partitions: &BTreeMap<String, MaskTableSource>,
+    has_cells: bool,
     mask_tables: &mut Vec<MaskTableSpec>,
 ) -> Result<CompiledRung, PolicyError> {
     if !matches!(
         rung.scope.as_str(),
-        "previous_cpu" | "previous_llc" | "previous_node" | "task_allowed"
+        "previous_cpu" | "previous_llc" | "previous_node" | "task_allowed" | "task_cell"
     ) && !partitions.contains_key(&rung.scope)
     {
         return Err(PolicyError(format!(
             "rung {index}: unknown scope `{}`",
             rung.scope
+        )));
+    }
+    if rung.scope == "task_cell" && !has_cells {
+        return Err(PolicyError(format!(
+            "rung {index}: scope `task_cell` requires at least one cell"
         )));
     }
 
@@ -301,6 +373,25 @@ fn compile_rung(
                 "rung {index}: operation `{}` is incompatible with scope `{}`",
                 rung.operation, rung.scope
             )))
+        }
+        operation @ ("pick_idle" | "pick_idle_core") if rung.scope == "task_cell" => {
+            let table_id = intern_mask_table(
+                index,
+                &rung.scope,
+                MaskTableSource::TaskCellById,
+                mask_tables,
+            )?;
+            Ok(CompiledRung {
+                opcode: Opcode::PickIdleMaskTable,
+                input: InputSource::TaskCell,
+                flags: RUNG_FLAG_INTERSECT_TASK_ALLOWED
+                    | if operation == "pick_idle_core" {
+                        RUNG_FLAG_PICK_IDLE_CORE
+                    } else {
+                        0
+                    },
+                data: table_id.into(),
+            })
         }
         operation @ ("pick_idle" | "pick_idle_core") => {
             let source = mask_table_source(&rung.scope, partitions);
@@ -337,6 +428,25 @@ fn compile_rung(
                 "rung {index}: operation `{}` is incompatible with scope `{}`",
                 rung.operation, rung.scope
             )))
+        }
+        operation @ ("pick_random_idle" | "pick_random_idle_core") if rung.scope == "task_cell" => {
+            let table_id = intern_mask_table(
+                index,
+                &rung.scope,
+                MaskTableSource::TaskCellById,
+                mask_tables,
+            )?;
+            Ok(CompiledRung {
+                opcode: Opcode::PickRandomIdle,
+                input: InputSource::TaskCell,
+                flags: RUNG_FLAG_INTERSECT_TASK_ALLOWED
+                    | if operation == "pick_random_idle_core" {
+                        RUNG_FLAG_PICK_IDLE_CORE
+                    } else {
+                        0
+                    },
+                data: table_id.into(),
+            })
         }
         operation @ ("pick_random_idle" | "pick_random_idle_core") => {
             let source = mask_table_source(&rung.scope, partitions);
@@ -402,6 +512,7 @@ fn mask_table_source(
     match scope {
         "previous_llc" => MaskTableSource::PreviousLlcByCpu,
         "previous_node" => MaskTableSource::PreviousNodeByCpu,
+        "task_cell" => MaskTableSource::TaskCellById,
         _ => *partitions
             .get(scope)
             .expect("scope existence was validated before table lowering"),
@@ -550,6 +661,74 @@ scope = "task_allowed"
                 },
             ]
         );
+    }
+
+    #[test]
+    fn lowers_overlapping_task_cells_to_one_sparse_mask_table() {
+        let policy = compile_policy(
+            r#"
+[[cell]]
+id = 7
+cpus = "0-3"
+
+[[cell]]
+id = 8
+cpus = "2-5"
+
+[[rung]]
+operation = "pick_idle"
+scope = "task_cell"
+"#,
+        )
+        .expect("cell policy should compile");
+
+        assert_eq!(policy.mask_tables.len(), 1);
+        assert_eq!(policy.mask_tables[0].name, "task_cell");
+        assert!(policy.dump().contains("input=task_cell"));
+        assert_eq!(policy.cells[&7], BTreeSet::from([0, 1, 2, 3]));
+        assert_eq!(policy.cells[&8], BTreeSet::from([2, 3, 4, 5]));
+    }
+
+    #[test]
+    fn rejects_task_cell_scope_without_cell_definitions() {
+        let error = error_for(
+            r#"
+[[rung]]
+operation = "pick_idle"
+scope = "task_cell"
+"#,
+        );
+        assert!(error.contains("requires at least one cell"));
+    }
+
+    #[test]
+    fn rejects_duplicate_and_out_of_range_cells() {
+        let duplicate = error_for(
+            r#"
+[[cell]]
+id = 7
+cpus = "0"
+[[cell]]
+id = 7
+cpus = "1"
+[[rung]]
+operation = "pick_idle"
+scope = "task_cell"
+"#,
+        );
+        assert!(duplicate.contains("duplicate ID 7"));
+
+        let out_of_range = error_for(
+            r#"
+[[cell]]
+id = 1024
+cpus = "0"
+[[rung]]
+operation = "pick_idle"
+scope = "task_cell"
+"#,
+        );
+        assert!(out_of_range.contains("exceeds maximum 1023"));
     }
 
     #[test]

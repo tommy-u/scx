@@ -26,6 +26,14 @@ struct {
 	__type(value, struct snake_task_runtime);
 } task_runtimes SEC(".maps");
 
+/* Thread annotations are updated synchronously from the userspace control path. */
+struct {
+	__uint(type, BPF_MAP_TYPE_TASK_STORAGE);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
+	__type(key, int);
+	__type(value, struct snake_task_cell);
+} task_cells SEC(".maps");
+
 struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
 	__type(key, u32);

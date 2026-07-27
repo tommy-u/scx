@@ -114,6 +114,7 @@ s32 BPF_STRUCT_OPS(snake_select_cpu, struct task_struct *p, s32 prev_cpu,
 void BPF_STRUCT_OPS(snake_enqueue, struct task_struct *p, u64 enq_flags)
 {
 	struct snake_ladder_ctx ladder_ctx = {};
+	s32 cell_enqueued;
 
 	if (acquire_active_ladder(&ladder_ctx)) {
 		scx_bpf_error("snake failed to acquire active ladder in enqueue");
@@ -121,7 +122,10 @@ void BPF_STRUCT_OPS(snake_enqueue, struct task_struct *p, u64 enq_flags)
 		return;
 	}
 	stat_inc(&ladder_ctx, SNAKE_STAT_ENQUEUES);
+	cell_enqueued = try_enqueue_task_cell(&ladder_ctx, p, enq_flags);
 	release_active_ladder(&ladder_ctx);
+	if (cell_enqueued)
+		return;
 	scx_bpf_dsq_insert(p, SCX_DSQ_GLOBAL, SCX_SLICE_DFL, enq_flags);
 }
 

@@ -12,6 +12,7 @@ use scx_stats_derive::{stat_doc, Stats};
 use serde::{Deserialize, Serialize};
 
 use crate::control::{SchedulerRequest, SchedulerResponse};
+use crate::task_cells::ThreadCellAssignment;
 
 #[stat_doc]
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize, Stats)]
@@ -99,6 +100,10 @@ pub struct Metrics {
     pub select_latency_ns: u64,
     #[stat(desc = "Maximum select_cpu latency in nanoseconds for this policy generation")]
     pub select_latency_max_ns: u64,
+    #[stat(desc = "Live cell annotation changes placed on an idle CPU in the selected cell")]
+    pub cell_rehomes: u64,
+    #[stat(desc = "Cell rehome attempts deferred because no task-cell rung selected a CPU")]
+    pub cell_rehome_misses: u64,
     #[stat(desc = "Per-CPU Snake runtime")]
     pub cpus: BTreeMap<u32, CpuMetrics>,
     #[stat(desc = "Per-rung policy evaluation metrics")]
@@ -131,6 +136,10 @@ impl Metrics {
                 .select_latency_ns
                 .saturating_sub(previous.select_latency_ns),
             select_latency_max_ns: self.select_latency_max_ns,
+            cell_rehomes: self.cell_rehomes.saturating_sub(previous.cell_rehomes),
+            cell_rehome_misses: self
+                .cell_rehome_misses
+                .saturating_sub(previous.cell_rehome_misses),
             cpus: self
                 .cpus
                 .iter()
@@ -156,6 +165,7 @@ impl Metrics {
                 "  fallback previous CPU: {} | fallback any allowed CPU: {} | invalid/errors: {}\n",
                 "  callbacks enqueue: {} | running: {} | stopping: {} | quiescent: {}\n",
                 "  select latency ns total: {} | average: {} | cumulative max: {}\n",
+                "  cell rehomes: {} | deferred rehomes: {}\n",
                 "  rungs:\n"
             ),
             self.policy_generation,
@@ -172,6 +182,8 @@ impl Metrics {
             self.select_latency_ns,
             average_latency_ns,
             self.select_latency_max_ns,
+            self.cell_rehomes,
+            self.cell_rehome_misses,
         );
 
         for rung in self.rungs.values() {
@@ -249,6 +261,31 @@ pub fn server_data() -> StatsServerData<SchedulerRequest, SchedulerResponse> {
         Ok(read)
     });
 
+    let set_cell: Box<dyn StatsOpener<SchedulerRequest, SchedulerResponse>> = Box::new(move |_| {
+        let read: Box<dyn StatsReader<SchedulerRequest, SchedulerResponse>> =
+            Box::new(move |args, (req_ch, res_ch)| {
+                let tid = parse_arg::<i32>(args, "tid", "thread_cell_set")?;
+                let cell_id = parse_arg::<u32>(args, "cell_id", "thread_cell_set")?;
+                req_ch.send(SchedulerRequest::SetThreadCell(ThreadCellAssignment {
+                    tid,
+                    cell_id,
+                }))?;
+                receive_thread_cell_response(res_ch.recv()?)
+            });
+        Ok(read)
+    });
+
+    let clear_cell: Box<dyn StatsOpener<SchedulerRequest, SchedulerResponse>> =
+        Box::new(move |_| {
+            let read: Box<dyn StatsReader<SchedulerRequest, SchedulerResponse>> =
+                Box::new(move |args, (req_ch, res_ch)| {
+                    let tid = parse_arg::<i32>(args, "tid", "thread_cell_clear")?;
+                    req_ch.send(SchedulerRequest::ClearThreadCell { tid })?;
+                    receive_thread_cell_response(res_ch.recv()?)
+                });
+            Ok(read)
+        });
+
     StatsServerData::new()
         .add_meta(Metrics::meta())
         .add_meta(CpuMetrics::meta())
@@ -261,6 +298,41 @@ pub fn server_data() -> StatsServerData<SchedulerRequest, SchedulerResponse> {
                 close: None,
             },
         )
+        .add_ops(
+            "thread_cell_set",
+            StatsOps {
+                open: set_cell,
+                close: None,
+            },
+        )
+        .add_ops(
+            "thread_cell_clear",
+            StatsOps {
+                open: clear_cell,
+                close: None,
+            },
+        )
+}
+
+fn parse_arg<T>(args: &BTreeMap<String, String>, key: &str, operation: &str) -> Result<T>
+where
+    T: std::str::FromStr,
+    T::Err: std::fmt::Display,
+{
+    let value = args
+        .get(key)
+        .with_context(|| format!("{operation} requires a {key} argument"))?;
+    value
+        .parse()
+        .map_err(|error| anyhow::anyhow!("invalid {key} `{value}`: {error}"))
+}
+
+fn receive_thread_cell_response(response: SchedulerResponse) -> Result<serde_json::Value> {
+    match response {
+        SchedulerResponse::ThreadCell(Ok(response)) => Ok(serde_json::to_value(response)?),
+        SchedulerResponse::ThreadCell(Err(error)) => bail!(error),
+        response => bail!("unexpected response to thread cell request: {response:?}"),
+    }
 }
 
 pub fn monitor(interval: Duration, shutdown: Arc<AtomicBool>) -> Result<()> {

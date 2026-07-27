@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::bpf_intf;
 use crate::mask_tables::ResolvedMaskTable;
-use crate::policy::{self, CompiledPolicy, MaskTableSpec};
+use crate::policy::{self, CompiledPolicy};
 
 /// Userspace policy state committed alongside the active BPF ladder slot.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -82,11 +82,10 @@ pub fn replace_policy<B, R>(
 ) -> Result<PolicyUpdateResponse>
 where
     B: PolicyBackend,
-    R: FnOnce(&[MaskTableSpec]) -> Result<Vec<ResolvedMaskTable>>,
+    R: FnOnce(&CompiledPolicy) -> Result<Vec<ResolvedMaskTable>>,
 {
     let compiled = policy::compile_policy(&source).context("compiling replacement policy")?;
-    let tables = resolve_tables(&compiled.mask_tables)
-        .context("resolving replacement policy mask tables")?;
+    let tables = resolve_tables(&compiled).context("resolving replacement policy mask tables")?;
     let generation = current
         .generation
         .checked_add(1)

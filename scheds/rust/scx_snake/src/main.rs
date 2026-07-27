@@ -7,6 +7,7 @@ mod mask_tables;
 mod policy;
 mod runtime_policy;
 mod stats;
+mod task_cells;
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -35,6 +36,7 @@ use scx_utils::{
     UserExitInfo,
 };
 use stats::{CpuMetrics, Metrics, RungMetrics};
+use task_cells::{ThreadCellAssignment, ThreadCellResponse};
 
 const SCHEDULER_NAME: &str = "scx_snake";
 const SLOT_QUIESCENCE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -58,9 +60,26 @@ struct Opts {
     #[arg(
         long,
         value_name = "PATH",
-        conflicts_with_all = ["policy", "dump_compiled_policy", "stats", "monitor", "help_stats"]
+        conflicts_with_all = ["policy", "dump_compiled_policy", "stats", "monitor", "help_stats", "set_thread_cell", "clear_thread_cell"]
     )]
     update_policy: Option<PathBuf>,
+
+    /// Assign a live thread to a policy-defined cell.
+    #[arg(
+        long,
+        value_name = "TID:CELL",
+        conflicts_with_all = ["policy", "update_policy", "dump_compiled_policy", "stats", "monitor", "help_stats", "clear_thread_cell"]
+    )]
+    set_thread_cell: Option<ThreadCellAssignment>,
+
+    /// Remove a live thread's cell annotation.
+    #[arg(
+        long,
+        value_name = "TID",
+        value_parser = task_cells::parse_tid,
+        conflicts_with_all = ["policy", "update_policy", "dump_compiled_policy", "stats", "monitor", "help_stats", "set_thread_cell"]
+    )]
+    clear_thread_cell: Option<i32>,
 
     /// Print the lowered mechanical ladder and exit without loading BPF.
     #[arg(long)]
@@ -104,6 +123,8 @@ enum RunMode {
     HelpStats,
     Monitor(Duration),
     Update(PathBuf),
+    SetThreadCell(ThreadCellAssignment),
+    ClearThreadCell(i32),
     Dump(PathBuf),
     Launch(PathBuf),
 }
@@ -122,11 +143,11 @@ fn resolve_mode(opts: &Opts) -> Result<RunMode> {
     let special_modes = usize::from(opts.help_stats)
         + usize::from(opts.monitor.is_some())
         + usize::from(opts.update_policy.is_some())
+        + usize::from(opts.set_thread_cell.is_some())
+        + usize::from(opts.clear_thread_cell.is_some())
         + usize::from(opts.dump_compiled_policy);
     if special_modes > 1 {
-        bail!(
-            "--help-stats, --monitor, --update-policy, and --dump-compiled-policy are mutually exclusive"
-        );
+        bail!("control, monitoring, update, and dump modes are mutually exclusive");
     }
 
     if opts.help_stats {
@@ -137,6 +158,12 @@ fn resolve_mode(opts: &Opts) -> Result<RunMode> {
     }
     if let Some(path) = opts.update_policy.clone() {
         return Ok(RunMode::Update(path));
+    }
+    if let Some(assignment) = opts.set_thread_cell {
+        return Ok(RunMode::SetThreadCell(assignment));
+    }
+    if let Some(tid) = opts.clear_thread_cell {
+        return Ok(RunMode::ClearThreadCell(tid));
     }
 
     let policy = opts
@@ -396,6 +423,9 @@ fn scope_label<'policy>(
     rung: &CompiledRung,
 ) -> Result<&'policy str> {
     match (rung.opcode, rung.input) {
+        (Opcode::PickIdleMaskTable | Opcode::PickRandomIdle, InputSource::TaskCell) => {
+            Ok("task_cell")
+        }
         (Opcode::PickIdleMaskTable | Opcode::PickRandomIdle, InputSource::CpuPrev) => {
             let table_id = u32::try_from(rung.data).context("mask table ID does not fit u32")?;
             policy
@@ -407,6 +437,7 @@ fn scope_label<'policy>(
         }
         (_, InputSource::CpuPrev) => Ok("previous_cpu"),
         (_, InputSource::MaskTaskAllowed) => Ok("task_allowed"),
+        (_, InputSource::TaskCell) => bail!("operation cannot consume a task-cell input"),
     }
 }
 
@@ -508,6 +539,8 @@ fn aggregate_raw_stats(
         quiescent: value(bpf_intf::snake_stat_SNAKE_STAT_QUIESCENT),
         select_latency_ns: value(bpf_intf::snake_stat_SNAKE_STAT_SELECT_LATENCY_NS),
         select_latency_max_ns: value(bpf_intf::snake_stat_SNAKE_STAT_SELECT_LATENCY_MAX_NS),
+        cell_rehomes: value(bpf_intf::snake_stat_SNAKE_STAT_CELL_REHOMES),
+        cell_rehome_misses: value(bpf_intf::snake_stat_SNAKE_STAT_CELL_REHOME_MISSES),
         cpus,
         rungs,
     })
@@ -599,6 +632,36 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
         Ok(response)
     }
 
+    fn set_thread_cell(&mut self, assignment: ThreadCellAssignment) -> Result<ThreadCellResponse> {
+        if !self
+            .runtime
+            .compiled
+            .cells
+            .contains_key(&assignment.cell_id)
+        {
+            bail!(
+                "active policy generation {} does not define cell {}",
+                self.runtime.generation,
+                assignment.cell_id
+            );
+        }
+        task_cells::set_thread_cell(&self.skel.maps.task_cells, assignment)?;
+        Ok(ThreadCellResponse {
+            tid: assignment.tid,
+            cell_id: Some(assignment.cell_id),
+            rehome_requested: true,
+        })
+    }
+
+    fn clear_thread_cell(&mut self, tid: i32) -> Result<ThreadCellResponse> {
+        task_cells::clear_thread_cell(&self.skel.maps.task_cells, tid)?;
+        Ok(ThreadCellResponse {
+            tid,
+            cell_id: None,
+            rehome_requested: false,
+        })
+    }
+
     fn exited(&self) -> bool {
         uei_exited!(&self.skel, uei)
     }
@@ -615,6 +678,18 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
                         .replace_policy(source)
                         .map_err(|error| format!("{error:#}"));
                     response_channel.send(SchedulerResponse::ReplacePolicy(response))?;
+                }
+                Ok(SchedulerRequest::SetThreadCell(assignment)) => {
+                    let response = self
+                        .set_thread_cell(assignment)
+                        .map_err(|error| format!("{error:#}"));
+                    response_channel.send(SchedulerResponse::ThreadCell(response))?;
+                }
+                Ok(SchedulerRequest::ClearThreadCell { tid }) => {
+                    let response = self
+                        .clear_thread_cell(tid)
+                        .map_err(|error| format!("{error:#}"));
+                    response_channel.send(SchedulerResponse::ThreadCell(response))?;
                 }
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => {
@@ -702,9 +777,19 @@ fn main() -> Result<()> {
             );
             return Ok(());
         }
+        RunMode::SetThreadCell(assignment) => {
+            init_logging(opts.verbose)?;
+            println!("{}", control::set_running_thread_cell(assignment)?);
+            return Ok(());
+        }
+        RunMode::ClearThreadCell(tid) => {
+            init_logging(opts.verbose)?;
+            println!("{}", control::clear_running_thread_cell(tid)?);
+            return Ok(());
+        }
         RunMode::Dump(path) => {
             let (_, policy) = load_policy(&path)?;
-            let mask_tables = resolve_mask_tables(&policy.mask_tables)?;
+            let mask_tables = resolve_mask_tables(&policy)?;
             print!("{}{}", policy.dump(), dump_mask_tables(&mask_tables));
             return Ok(());
         }
@@ -735,7 +820,7 @@ fn main() -> Result<()> {
 
             let mut open_object = MaybeUninit::uninit();
             loop {
-                let mask_tables = resolve_mask_tables(&runtime.compiled.mask_tables)?;
+                let mask_tables = resolve_mask_tables(&runtime.compiled)?;
                 let exit_info = {
                     let mut scheduler =
                         Scheduler::init(&opts, &mut runtime, &mask_tables, &mut open_object)?;
@@ -814,7 +899,7 @@ scope = "task_allowed"
         let policy = policy::compile_policy(policy_source()).expect("policy should compile");
         let encoded = encode_ladder(&policy, 42).expect("ladder should encode");
 
-        assert_eq!(bpf_intf::SNAKE_ABI_VERSION, 8);
+        assert_eq!(bpf_intf::SNAKE_ABI_VERSION, 9);
         assert_eq!(size_of::<bpf_intf::snake_compiled_ladder>(), 216);
         assert_eq!(offset_of!(bpf_intf::snake_compiled_ladder, generation), 0);
         assert_eq!(
@@ -1047,6 +1132,36 @@ scope = "task_allowed"
     }
 
     #[test]
+    fn rust_task_cell_instruction_matches_the_bpf_abi() {
+        let compiled = policy::compile_policy(
+            r#"
+[[cell]]
+id = 7
+cpus = "0-1"
+
+[[rung]]
+operation = "pick_idle"
+scope = "task_cell"
+"#,
+        )
+        .expect("cell policy should compile");
+        let encoded = encode_rung(compiled.rungs[0]);
+
+        assert_eq!(
+            encoded.opcode,
+            bpf_intf::snake_opcode_SNAKE_OP_PICK_IDLE_MASK_TABLE
+        );
+        assert_eq!(
+            encoded.input,
+            bpf_intf::snake_input_source_SNAKE_INPUT_TASK_CELL
+        );
+        assert_eq!(encoded.flags, bpf_intf::SNAKE_RUNG_F_INTERSECT_TASK_ALLOWED);
+        assert_eq!(encoded.data, 0);
+        assert_eq!(size_of::<bpf_intf::snake_task_cell>(), 8);
+        assert_eq!(policy::MAX_CELL_IDS, bpf_intf::SNAKE_MAX_CPUS);
+    }
+
+    #[test]
     fn requires_policy_for_launch_and_dump_but_not_monitor_or_help() {
         let launch =
             Opts::try_parse_from(["scx_snake"]).expect("argument parsing itself should succeed");
@@ -1128,6 +1243,26 @@ scope = "task_allowed"
             "1",
         ])
         .is_err());
+    }
+
+    #[test]
+    fn thread_cell_updates_parse_as_standalone_control_modes() {
+        let set = Opts::try_parse_from(["scx_snake", "--set-thread-cell", "4812:7"])
+            .expect("set command should parse");
+        assert!(matches!(
+            resolve_mode(&set),
+            Ok(RunMode::SetThreadCell(ThreadCellAssignment {
+                tid: 4812,
+                cell_id: 7
+            }))
+        ));
+
+        let clear = Opts::try_parse_from(["scx_snake", "--clear-thread-cell", "4812"])
+            .expect("clear command should parse");
+        assert!(matches!(
+            resolve_mode(&clear),
+            Ok(RunMode::ClearThreadCell(4812))
+        ));
     }
 
     #[test]
