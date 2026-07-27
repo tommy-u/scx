@@ -54,6 +54,17 @@ export function rungPercentages(metrics) {
   };
 }
 
+export function rungLadderPercentages(metrics, ladderMetrics) {
+  const selectCalls = Math.max(0, Number(ladderMetrics?.select_calls) || 0);
+  if (selectCalls === 0) {
+    return { hit: 0, miss: 0 };
+  }
+  return {
+    hit: Math.max(0, Number(metrics?.hits) || 0) * 100 / selectCalls,
+    miss: Math.max(0, Number(metrics?.misses) || 0) * 100 / selectCalls,
+  };
+}
+
 export function ladderPercentages(metrics) {
   const selectCalls = Math.max(0, Number(metrics?.select_calls) || 0);
   if (selectCalls === 0) {

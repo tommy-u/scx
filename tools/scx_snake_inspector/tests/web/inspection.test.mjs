@@ -4,6 +4,7 @@
 // GNU General Public License version 2.
 
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
@@ -11,6 +12,7 @@ import {
   fieldReferenceGroups,
   ladderPercentages,
   routeFromHash,
+  rungLadderPercentages,
   rungPercentages,
 } from "../../src/web/inspection.js";
 
@@ -69,6 +71,33 @@ test("rung hit and miss percentages use attempts as the denominator", () => {
     rungPercentages({ attempts: 0, hits: 0, misses: 0, errors: 0 }),
     { hit: 0, miss: 0 },
   );
+});
+
+test("rung ladder percentages use all select calls as the denominator", () => {
+  assert.deepEqual(
+    rungLadderPercentages(
+      { attempts: 40, hits: 30, misses: 8, errors: 2 },
+      { select_calls: 400 },
+    ),
+    { hit: 7.5, miss: 2 },
+  );
+  assert.deepEqual(
+    rungLadderPercentages({ attempts: 0, hits: 0, misses: 0 }, { select_calls: 0 }),
+    { hit: 0, miss: 0 },
+  );
+});
+
+test("rung metric columns have stable equal-width geometry", () => {
+  const stylesheet = readFileSync(
+    new URL("../../src/web/style.css", import.meta.url),
+    "utf8",
+  );
+  const rule = stylesheet.match(/\.rung-metrics\s*\{(?<body>[^}]*)\}/)?.groups?.body;
+
+  assert.ok(rule, "expected a .rung-metrics rule");
+  assert.match(rule, /flex:\s*0 0 min\(58%, 320px\)/);
+  assert.match(rule, /width:\s*min\(58%, 320px\)/);
+  assert.match(rule, /grid-template-columns:\s*repeat\(4, minmax\(0, 1fr\)\)/);
 });
 
 test("ladder percentages count each select call once", () => {

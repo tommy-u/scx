@@ -752,8 +752,10 @@ button:focus-visible {
 }
 
 .rung-metrics {
+  flex: 0 0 min(58%, 320px);
+  width: min(58%, 320px);
   display: grid;
-  grid-template-columns: repeat(4, minmax(52px, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 8px;
 }
 
@@ -1354,6 +1356,7 @@ button:focus-visible {
 
   .rung-metrics {
     margin-top: 8px;
+    width: 100%;
   }
 
   .rung-fields {

@@ -18,6 +18,7 @@ import {
   fieldReferenceGroups,
   ladderPercentages,
   routeFromHash,
+  rungLadderPercentages,
   rungPercentages,
 } from "/assets/inspection.js";
 
@@ -669,7 +670,9 @@ function renderSlot(slot) {
   const ladderRates = ladderPercentages(metrics);
   const metricKind = slot.state === "active" ? "Live cumulative metrics" : "Frozen last-active metrics";
   const timestamp = slot.state === "active" ? slot.activated_at_ms : slot.deactivated_at_ms;
-  const rungs = slot.policy.rungs.map((rung, index) => renderRung(rung, index, slot.policy.rungs.length)).join("");
+  const rungs = slot.policy.rungs
+    .map((rung, index) => renderRung(rung, index, slot.policy.rungs.length, metrics))
+    .join("");
   const maskTables = slot.policy.mask_tables.length > 0
     ? slot.policy.mask_tables.map((table) => `
         <li><code>${escapeHtml(String(table.id))}</code> ${escapeHtml(table.name)}
@@ -823,9 +826,10 @@ async function activateSelectedPolicy() {
   }
 }
 
-function renderRung(rung, index, count) {
+function renderRung(rung, index, count, ladderMetrics) {
   const metrics = rung.metrics || {};
   const percentages = rungPercentages(metrics);
+  const ladderRates = rungLadderPercentages(metrics, ladderMetrics);
   const missDestination = index + 1 < count ? `rung ${index + 1}` : "fallback";
   return `
     <article class="rung-row">
@@ -838,8 +842,8 @@ function renderRung(rung, index, count) {
           </div>
           <dl class="rung-metrics">
             <div><dt>Attempts</dt><dd>${formatCount(metrics.attempts)}</dd></div>
-            <div><dt>Hits</dt><dd>${formatCount(metrics.hits)}<small>${formatPercentage(percentages.hit)}</small></dd></div>
-            <div><dt>Misses</dt><dd>${formatCount(metrics.misses)}<small>${formatPercentage(percentages.miss)}</small></dd></div>
+            <div><dt>Hits</dt><dd>${formatCount(metrics.hits)}<small>${formatPercentage(percentages.hit)} of rung attempts</small><small>${formatPercentage(ladderRates.hit)} of ladder calls</small></dd></div>
+            <div><dt>Misses</dt><dd>${formatCount(metrics.misses)}<small>${formatPercentage(percentages.miss)} of rung attempts</small><small>${formatPercentage(ladderRates.miss)} of ladder calls</small></dd></div>
             <div><dt>Errors</dt><dd>${formatCount(metrics.errors)}</dd></div>
           </dl>
         </header>
