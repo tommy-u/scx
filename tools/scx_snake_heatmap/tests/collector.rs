@@ -5,7 +5,9 @@
 
 use std::path::PathBuf;
 
-use scx_snake_heatmap::collector::{decode_counter_entry, find_symbol_address, CollectorConfig};
+use scx_snake_heatmap::collector::{
+    decode_counter_entry, decode_cpu_runtime_stats, find_symbol_address, CollectorConfig,
+};
 use scx_snake_heatmap::model::CpuPair;
 use scx_snake_heatmap::scope::TaskScope;
 
@@ -57,4 +59,22 @@ fn kallsyms_lookup_matches_the_exact_nonzero_symbol() {
     assert!(
         find_symbol_address("0000000000000000 D ext_sched_class\n", "ext_sched_class").is_err()
     );
+}
+
+#[test]
+fn snake_stats_decode_per_cpu_runtime_and_ignore_other_metrics() {
+    let payload = serde_json::json!({
+        "policy_generation": 4,
+        "select_calls": 99,
+        "cpus": {
+            "0": {"cpu": 0, "runtime_ns": 1250},
+            "7": {"cpu": 7, "runtime_ns": 8750}
+        }
+    });
+
+    assert_eq!(
+        decode_cpu_runtime_stats(payload).unwrap(),
+        std::collections::BTreeMap::from([(0, 1250), (7, 8750)])
+    );
+    assert!(decode_cpu_runtime_stats(serde_json::json!({"select_calls": 4})).is_err());
 }

@@ -50,6 +50,27 @@ impl RungMetrics {
 
 #[stat_doc]
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize, Stats)]
+#[stat(_om_prefix = "cpu_", _om_label = "cpu")]
+pub struct CpuMetrics {
+    #[stat(desc = "Logical CPU ID", _om_skip)]
+    pub cpu: u32,
+    #[stat(desc = "Nanoseconds Snake tasks ran on this CPU")]
+    pub runtime_ns: u64,
+}
+
+impl CpuMetrics {
+    fn delta(&self, previous: Option<&Self>) -> Self {
+        Self {
+            cpu: self.cpu,
+            runtime_ns: self
+                .runtime_ns
+                .saturating_sub(previous.map_or(0, |metrics| metrics.runtime_ns)),
+        }
+    }
+}
+
+#[stat_doc]
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize, Stats)]
 #[stat(top)]
 pub struct Metrics {
     #[stat(desc = "Active userspace policy generation")]
@@ -78,6 +99,8 @@ pub struct Metrics {
     pub select_latency_ns: u64,
     #[stat(desc = "Maximum select_cpu latency in nanoseconds for this policy generation")]
     pub select_latency_max_ns: u64,
+    #[stat(desc = "Per-CPU Snake runtime")]
+    pub cpus: BTreeMap<u32, CpuMetrics>,
     #[stat(desc = "Per-rung policy evaluation metrics")]
     pub rungs: BTreeMap<u32, RungMetrics>,
 }
@@ -108,6 +131,11 @@ impl Metrics {
                 .select_latency_ns
                 .saturating_sub(previous.select_latency_ns),
             select_latency_max_ns: self.select_latency_max_ns,
+            cpus: self
+                .cpus
+                .iter()
+                .map(|(cpu, metrics)| (*cpu, metrics.delta(previous.cpus.get(cpu))))
+                .collect(),
             rungs: self
                 .rungs
                 .iter()
@@ -223,6 +251,7 @@ pub fn server_data() -> StatsServerData<SchedulerRequest, SchedulerResponse> {
 
     StatsServerData::new()
         .add_meta(Metrics::meta())
+        .add_meta(CpuMetrics::meta())
         .add_meta(RungMetrics::meta())
         .add_ops("top", StatsOps { open, close: None })
         .add_ops(
@@ -359,6 +388,65 @@ mod tests {
     }
 
     #[test]
+    fn delta_preserves_cpu_ids_and_deltas_runtime() {
+        let previous = Metrics {
+            cpus: BTreeMap::from([
+                (
+                    0,
+                    CpuMetrics {
+                        cpu: 0,
+                        runtime_ns: 1_000,
+                    },
+                ),
+                (
+                    3,
+                    CpuMetrics {
+                        cpu: 3,
+                        runtime_ns: 4_000,
+                    },
+                ),
+            ]),
+            ..Default::default()
+        };
+        let current = Metrics {
+            cpus: BTreeMap::from([
+                (
+                    0,
+                    CpuMetrics {
+                        cpu: 0,
+                        runtime_ns: 1_750,
+                    },
+                ),
+                (
+                    3,
+                    CpuMetrics {
+                        cpu: 3,
+                        runtime_ns: 4_250,
+                    },
+                ),
+            ]),
+            ..Default::default()
+        };
+
+        let delta = current.delta(&previous);
+
+        assert_eq!(
+            delta.cpus[&0],
+            CpuMetrics {
+                cpu: 0,
+                runtime_ns: 750
+            }
+        );
+        assert_eq!(
+            delta.cpus[&3],
+            CpuMetrics {
+                cpu: 3,
+                runtime_ns: 250
+            }
+        );
+    }
+
+    #[test]
     fn generation_change_uses_the_new_generation_as_a_fresh_baseline() {
         let previous = Metrics {
             policy_generation: 7,
@@ -397,6 +485,13 @@ mod tests {
             select_calls: 7,
             direct_dispatches: 4,
             select_latency_max_ns: 123,
+            cpus: BTreeMap::from([(
+                2,
+                CpuMetrics {
+                    cpu: 2,
+                    runtime_ns: 8_500,
+                },
+            )]),
             rungs: BTreeMap::from([(0, rung(0, "claim_idle", "previous_cpu", 7, 4, 3, 0))]),
             ..Default::default()
         };
@@ -410,6 +505,8 @@ mod tests {
         assert_eq!(parsed["select_calls"], 7);
         assert_eq!(parsed["direct_dispatches"], 4);
         assert_eq!(parsed["select_latency_max_ns"], 123);
+        assert_eq!(parsed["cpus"]["2"]["cpu"], 2);
+        assert_eq!(parsed["cpus"]["2"]["runtime_ns"], 8_500);
         assert_eq!(parsed["rungs"]["0"]["operation"], "claim_idle");
     }
 }

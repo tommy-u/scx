@@ -9,7 +9,7 @@ use std::sync::{Arc, RwLock};
 use serde::Serialize;
 use tokio::sync::watch;
 
-use crate::model::{CpuPair, RollingHistory, WindowError};
+use crate::model::{CpuPair, CpuUsageHistory, RollingHistory, WindowError};
 use crate::scope::TaskScope;
 use crate::topology::TopologyView;
 
@@ -28,6 +28,13 @@ pub struct SchedulerView {
 }
 
 #[derive(Clone, Debug, Serialize)]
+pub struct CpuUsageView {
+    pub cpu: u32,
+    pub runtime_ns: u64,
+    pub utilization_pct: f64,
+}
+
+#[derive(Clone, Debug, Serialize)]
 pub struct SnapshotView {
     pub sequence: u64,
     pub window_ms: u64,
@@ -40,18 +47,25 @@ pub struct SnapshotView {
     pub collector_error: Option<String>,
     pub pair_map_failures: u64,
     pub task_storage_failures: u64,
+    pub cpu_usage_observed_ms: u64,
+    pub cpu_usage_scope: &'static str,
+    pub cpu_usage_error: Option<String>,
+    pub cpu_usage: Vec<CpuUsageView>,
     pub cells: Vec<CellView>,
 }
 
 struct LiveData {
     history: RollingHistory,
+    cpu_history: CpuUsageHistory,
     now_ms: u64,
+    cpu_now_ms: u64,
     sequence: u64,
     scheduler: SchedulerView,
     scope: TaskScope,
     collector_error: Option<String>,
     pair_map_failures: u64,
     task_storage_failures: u64,
+    cpu_usage_error: Option<String>,
 }
 
 #[derive(Clone)]
@@ -69,7 +83,9 @@ impl Dashboard {
             topology: Arc::new(topology),
             live: Arc::new(RwLock::new(LiveData {
                 history: RollingHistory::new(max_window_ms),
+                cpu_history: CpuUsageHistory::new(max_window_ms),
                 now_ms: 0,
+                cpu_now_ms: 0,
                 sequence: 0,
                 scheduler: SchedulerView {
                     name: String::new(),
@@ -80,6 +96,7 @@ impl Dashboard {
                 collector_error: None,
                 pair_map_failures: 0,
                 task_storage_failures: 0,
+                cpu_usage_error: None,
             })),
             updates,
             max_window_ms,
@@ -109,7 +126,42 @@ impl Dashboard {
         let sequence = {
             let mut live = self.live.write().expect("dashboard lock poisoned");
             live.history.reset(at_ms, baseline);
+            live.cpu_history.reset(at_ms);
             live.now_ms = at_ms;
+            live.cpu_now_ms = at_ms;
+            live.sequence = live.sequence.wrapping_add(1);
+            live.sequence
+        };
+        self.updates.send_replace(sequence);
+    }
+
+    pub fn reset_migrations(&self, at_ms: u64, baseline: &BTreeMap<CpuPair, u64>) {
+        let sequence = {
+            let mut live = self.live.write().expect("dashboard lock poisoned");
+            live.history.reset(at_ms, baseline);
+            live.now_ms = at_ms;
+            live.sequence = live.sequence.wrapping_add(1);
+            live.sequence
+        };
+        self.updates.send_replace(sequence);
+    }
+
+    pub fn reset_cpu_usage(&self, at_ms: u64) {
+        let sequence = {
+            let mut live = self.live.write().expect("dashboard lock poisoned");
+            live.cpu_history.reset(at_ms);
+            live.cpu_now_ms = at_ms;
+            live.sequence = live.sequence.wrapping_add(1);
+            live.sequence
+        };
+        self.updates.send_replace(sequence);
+    }
+
+    pub fn ingest_cpu_usage(&self, at_ms: u64, runtime_ns: &BTreeMap<u32, u64>) {
+        let sequence = {
+            let mut live = self.live.write().expect("dashboard lock poisoned");
+            live.cpu_history.ingest(at_ms, runtime_ns);
+            live.cpu_now_ms = at_ms;
             live.sequence = live.sequence.wrapping_add(1);
             live.sequence
         };
@@ -157,9 +209,20 @@ impl Dashboard {
         self.updates.send_replace(sequence);
     }
 
+    pub fn set_cpu_usage_error(&self, error: Option<String>) {
+        let sequence = {
+            let mut live = self.live.write().expect("dashboard lock poisoned");
+            live.cpu_usage_error = error;
+            live.sequence = live.sequence.wrapping_add(1);
+            live.sequence
+        };
+        self.updates.send_replace(sequence);
+    }
+
     pub fn snapshot(&self, window_ms: u64) -> Result<SnapshotView, WindowError> {
         let live = self.live.read().expect("dashboard lock poisoned");
         let view = live.history.view(live.now_ms, window_ms)?;
+        let cpu_view = live.cpu_history.view(live.cpu_now_ms, window_ms)?;
         let cells = view
             .cells
             .into_iter()
@@ -174,6 +237,22 @@ impl Dashboard {
         } else {
             view.total as f64 * 1_000.0 / view.observed_ms as f64
         };
+        let cpu_usage = cpu_view
+            .runtime_ns
+            .into_iter()
+            .map(|(cpu, runtime_ns)| {
+                let utilization_pct = if cpu_view.observed_ms == 0 {
+                    0.0
+                } else {
+                    runtime_ns as f64 * 100.0 / (cpu_view.observed_ms as f64 * 1_000_000.0)
+                };
+                CpuUsageView {
+                    cpu,
+                    runtime_ns,
+                    utilization_pct,
+                }
+            })
+            .collect();
 
         Ok(SnapshotView {
             sequence: live.sequence,
@@ -187,6 +266,10 @@ impl Dashboard {
             collector_error: live.collector_error.clone(),
             pair_map_failures: live.pair_map_failures,
             task_storage_failures: live.task_storage_failures,
+            cpu_usage_observed_ms: cpu_view.observed_ms,
+            cpu_usage_scope: "all_snake_tasks",
+            cpu_usage_error: live.cpu_usage_error.clone(),
+            cpu_usage,
             cells,
         })
     }

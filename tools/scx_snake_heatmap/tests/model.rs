@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 
-use scx_snake_heatmap::model::{CpuPair, RollingHistory};
+use scx_snake_heatmap::model::{CpuPair, CpuUsageHistory, RollingHistory};
 
 fn counters(entries: &[(CpuPair, u64)]) -> BTreeMap<CpuPair, u64> {
     entries.iter().copied().collect()
@@ -66,4 +66,39 @@ fn invalid_windows_are_rejected() {
 
     assert!(history.view(0, 0).is_err());
     assert!(history.view(0, 5_001).is_err());
+}
+
+#[test]
+fn cpu_usage_view_sums_runtime_deltas_inside_the_window() {
+    let mut history = CpuUsageHistory::new(5_000);
+    history.reset(0);
+    history.ingest(250, &BTreeMap::from([(0, 100_000_000), (1, 200_000_000)]));
+    history.ingest(500, &BTreeMap::from([(0, 50_000_000), (1, 25_000_000)]));
+
+    let full = history.view(500, 500).unwrap();
+    assert_eq!(
+        full.runtime_ns,
+        BTreeMap::from([(0, 150_000_000), (1, 225_000_000)])
+    );
+    assert_eq!(full.observed_ms, 500);
+
+    let recent = history.view(600, 300).unwrap();
+    assert_eq!(
+        recent.runtime_ns,
+        BTreeMap::from([(0, 50_000_000), (1, 25_000_000)])
+    );
+    assert_eq!(recent.observed_ms, 300);
+}
+
+#[test]
+fn cpu_usage_reset_discards_runtime_from_the_previous_scheduler_epoch() {
+    let mut history = CpuUsageHistory::new(5_000);
+    history.reset(0);
+    history.ingest(250, &BTreeMap::from([(0, 200_000_000)]));
+    history.reset(300);
+    history.ingest(550, &BTreeMap::from([(0, 75_000_000)]));
+
+    let view = history.view(550, 1_000).unwrap();
+    assert_eq!(view.runtime_ns, BTreeMap::from([(0, 75_000_000)]));
+    assert_eq!(view.observed_ms, 250);
 }

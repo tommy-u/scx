@@ -30,6 +30,26 @@ export function buildMatrix(topology, cells, orderMode) {
   return { order, positions, values, max, total };
 }
 
+export function buildCpuUsage(topology, entries, orderMode) {
+  const sourceOrder = orderMode === "numeric"
+    ? topology.numeric_order
+    : topology.topology_order;
+  const order = [...sourceOrder];
+  const positions = new Map(order.map((cpu, index) => [cpu, index]));
+  const runtimeNs = new Float64Array(order.length);
+  const utilizationPct = new Float64Array(order.length);
+
+  for (const entry of entries) {
+    const index = positions.get(entry.cpu);
+    if (index === undefined) {
+      continue;
+    }
+    runtimeNs[index] = Math.max(0, entry.runtime_ns || 0);
+    utilizationPct[index] = Math.max(0, entry.utilization_pct || 0);
+  }
+  return { order, positions, runtimeNs, utilizationPct };
+}
+
 export function normalizeCount(value, max, scale) {
   if (value <= 0 || max <= 0) {
     return 0;
@@ -38,6 +58,10 @@ export function normalizeCount(value, max, scale) {
     return Math.min(1, value / max);
   }
   return Math.min(1, Math.log1p(value) / Math.log1p(max));
+}
+
+export function normalizeUtilization(value, scale) {
+  return normalizeCount(Math.max(0, Math.min(100, value)), 100, scale);
 }
 
 export function topologyBoundaries(topology, order) {
@@ -57,6 +81,23 @@ export function topologyBoundaries(topology, order) {
     }
   }
   return boundaries;
+}
+
+export function topologyGroups(topology, order, level) {
+  const cpus = new Map(topology.cpus.map((cpu) => [cpu.cpu, cpu]));
+  const groups = [];
+  let start = 0;
+  let value = cpus.get(order[0])?.[level];
+
+  for (let index = 1; index <= order.length; index += 1) {
+    const next = index < order.length ? cpus.get(order[index])?.[level] : undefined;
+    if (index === order.length || next !== value) {
+      groups.push({ start, end: index, value });
+      start = index;
+      value = next;
+    }
+  }
+  return groups;
 }
 
 export function parseTgids(input) {

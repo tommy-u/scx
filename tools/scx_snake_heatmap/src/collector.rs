@@ -13,6 +13,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use libbpf_rs::skel::{OpenSkel, SkelBuilder};
 use libbpf_rs::{MapCore, MapFlags};
+use scx_stats::StatsClient;
+use serde::Deserialize;
 
 use crate::bpf_skel::BpfSkelBuilder;
 use crate::dashboard::Dashboard;
@@ -23,7 +25,9 @@ use crate::{bpf_intf, model::CpuPair};
 const DEFAULT_OPS_PATH: &str = "/sys/kernel/sched_ext/root/ops";
 const DEFAULT_ENABLE_SEQ_PATH: &str = "/sys/kernel/sched_ext/enable_seq";
 const DEFAULT_KALLSYMS_PATH: &str = "/proc/kallsyms";
+const DEFAULT_STATS_PATH: &str = "/var/run/scx/root/stats";
 const MAX_PAIR_MAP_ENTRIES: usize = 1_048_576;
+const STATS_TIMEOUT_MS: u64 = 1_000;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CollectorConfig {
@@ -75,6 +79,35 @@ pub fn decode_counter_entry(key: &[u8], value: &[u8]) -> anyhow::Result<(CpuPair
     Ok((CpuPair::new(from, to), count))
 }
 
+#[derive(Debug, Deserialize)]
+struct SnakeCpuMetrics {
+    cpu: u32,
+    runtime_ns: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct SnakeMetrics {
+    #[serde(default)]
+    cpus: BTreeMap<u32, SnakeCpuMetrics>,
+}
+
+pub fn decode_cpu_runtime_stats(value: serde_json::Value) -> anyhow::Result<BTreeMap<u32, u64>> {
+    let metrics: SnakeMetrics = serde_json::from_value(value)?;
+    if metrics.cpus.is_empty() {
+        anyhow::bail!("running Snake does not export per-CPU runtime");
+    }
+    metrics
+        .cpus
+        .into_iter()
+        .map(|(cpu, metrics)| {
+            if metrics.cpu != cpu {
+                anyhow::bail!("Snake CPU metric key {cpu} contains CPU {}", metrics.cpu);
+            }
+            Ok((cpu, metrics.runtime_ns))
+        })
+        .collect()
+}
+
 pub fn find_symbol_address(kallsyms: &str, symbol: &str) -> anyhow::Result<u64> {
     let address = kallsyms
         .lines()
@@ -107,6 +140,7 @@ pub struct CollectorOptions {
     pub ops_path: PathBuf,
     pub enable_seq_path: PathBuf,
     pub kallsyms_path: PathBuf,
+    pub stats_path: PathBuf,
 }
 
 impl Default for CollectorOptions {
@@ -116,6 +150,7 @@ impl Default for CollectorOptions {
             ops_path: DEFAULT_OPS_PATH.into(),
             enable_seq_path: DEFAULT_ENABLE_SEQ_PATH.into(),
             kallsyms_path: DEFAULT_KALLSYMS_PATH.into(),
+            stats_path: DEFAULT_STATS_PATH.into(),
         }
     }
 }
@@ -170,6 +205,8 @@ pub fn run_collector(
 
     let mut last_scheduler_name = String::new();
     let mut last_health = (0_u64, 0_u64);
+    let mut stats_client = None;
+    let mut last_cpu_usage_error = None;
     loop {
         match commands.recv_timeout(options.poll_interval) {
             Ok(CollectorCommand::SetScope(new_scope)) => {
@@ -179,7 +216,7 @@ pub fn run_collector(
                 generation = next_generation(generation);
                 let now_ms = elapsed_ms(started);
                 let baseline = read_counts(&skel.maps.migration_counts)?;
-                dashboard.reset(now_ms, &baseline);
+                dashboard.reset_migrations(now_ms, &baseline);
                 dashboard.set_scope(scope.clone());
                 write_config(
                     &skel.maps.collector_cfg,
@@ -208,12 +245,16 @@ pub fn run_collector(
                 generation = next_generation(generation);
                 let baseline = read_counts(&skel.maps.migration_counts)?;
                 dashboard.reset(now_ms, &baseline);
+                stats_client = None;
+                set_cpu_usage_error(&dashboard, &mut last_cpu_usage_error, None);
                 write_config(&skel.maps.collector_cfg, true, generation, &scope)?;
             }
             GateChange::Stopped => {
                 write_config(&skel.maps.collector_cfg, false, generation, &scope)?;
                 let baseline = read_counts(&skel.maps.migration_counts)?;
                 dashboard.reset(now_ms, &baseline);
+                stats_client = None;
+                set_cpu_usage_error(&dashboard, &mut last_cpu_usage_error, None);
             }
             GateChange::None => {}
         }
@@ -232,7 +273,55 @@ pub fn run_collector(
         if gate.is_active() {
             let counts = read_counts(&skel.maps.migration_counts)?;
             dashboard.ingest(now_ms, &counts);
+            match read_cpu_runtime(&mut stats_client, &options.stats_path) {
+                Ok((runtime_ns, connected)) => {
+                    if connected {
+                        dashboard.reset_cpu_usage(now_ms);
+                    }
+                    dashboard.ingest_cpu_usage(now_ms, &runtime_ns);
+                    set_cpu_usage_error(&dashboard, &mut last_cpu_usage_error, None);
+                }
+                Err(error) => {
+                    stats_client = None;
+                    set_cpu_usage_error(
+                        &dashboard,
+                        &mut last_cpu_usage_error,
+                        Some(format!("Snake utilization unavailable: {error:#}")),
+                    );
+                }
+            }
         }
+    }
+}
+
+fn read_cpu_runtime(
+    client: &mut Option<StatsClient>,
+    stats_path: &Path,
+) -> Result<(BTreeMap<u32, u64>, bool)> {
+    let connected = client.is_none();
+    if connected {
+        *client = Some(
+            StatsClient::new()
+                .set_path(stats_path)
+                .connect(Some(STATS_TIMEOUT_MS))
+                .with_context(|| format!("connecting to {}", stats_path.display()))?,
+        );
+    }
+    let payload = client
+        .as_mut()
+        .context("Snake stats client is unavailable")?
+        .request::<serde_json::Value>("stats", Vec::new())?;
+    Ok((decode_cpu_runtime_stats(payload)?, connected))
+}
+
+fn set_cpu_usage_error(
+    dashboard: &Dashboard,
+    previous: &mut Option<String>,
+    error: Option<String>,
+) {
+    if *previous != error {
+        dashboard.set_cpu_usage_error(error.clone());
+        *previous = error;
     }
 }
 

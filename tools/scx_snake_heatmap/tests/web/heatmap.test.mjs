@@ -7,11 +7,14 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  buildCpuUsage,
   buildMatrix,
   infernoColor,
   normalizeCount,
+  normalizeUtilization,
   parseTgids,
   topologyBoundaries,
+  topologyGroups,
 } from "../../src/web/heatmap.js";
 
 const topology = {
@@ -51,10 +54,46 @@ test("normalizeCount supports linear and logarithmic scales", () => {
   assert.equal(normalizeCount(1, 0, "log"), 0);
 });
 
+test("buildCpuUsage aligns runtime with the selected CPU order", () => {
+  const numeric = buildCpuUsage(
+    topology,
+    [
+      { cpu: 3, runtime_ns: 75, utilization_pct: 30 },
+      { cpu: 1, runtime_ns: 25, utilization_pct: 10 },
+      { cpu: 99, runtime_ns: 500, utilization_pct: 100 },
+    ],
+    "numeric",
+  );
+
+  assert.deepEqual(numeric.order, [0, 1, 2, 3]);
+  assert.deepEqual([...numeric.runtimeNs], [0, 25, 0, 75]);
+  assert.deepEqual([...numeric.utilizationPct], [0, 10, 0, 30]);
+
+  const grouped = buildCpuUsage(topology, [{ cpu: 3, runtime_ns: 75, utilization_pct: 30 }], "topology");
+  assert.deepEqual(grouped.order, [1, 2, 3, 0]);
+  assert.deepEqual([...grouped.utilizationPct], [0, 0, 30, 0]);
+});
+
+test("normalizeUtilization uses an absolute zero-to-one-hundred scale", () => {
+  assert.equal(normalizeUtilization(0, "linear"), 0);
+  assert.equal(normalizeUtilization(25, "linear"), 0.25);
+  assert.equal(normalizeUtilization(100, "linear"), 1);
+  assert.equal(normalizeUtilization(150, "linear"), 1);
+  assert.ok(normalizeUtilization(10, "log") > 0.5);
+});
+
 test("topologyBoundaries reports the strongest boundary at each split", () => {
   assert.deepEqual(topologyBoundaries(topology, topology.topology_order), [
     { index: 2, level: "llc" },
     { index: 3, level: "node" },
+  ]);
+});
+
+test("topologyGroups reports contiguous LLC spans", () => {
+  assert.deepEqual(topologyGroups(topology, topology.topology_order, "llc"), [
+    { start: 0, end: 2, value: 0 },
+    { start: 2, end: 3, value: 1 },
+    { start: 3, end: 4, value: 2 },
   ]);
 });
 

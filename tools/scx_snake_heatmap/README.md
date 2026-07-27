@@ -9,6 +9,13 @@ The binary embeds its web UI and serves it on a loopback address. The page
 provides rolling-window, CPU-order, color-scale, zoom, TGID, and cgroup
 selectors.
 
+An aligned strip below the matrix shows per-CPU utilization reported by
+Snake's stats socket. The strip always covers all Snake tasks; TGID and cgroup
+selectors apply only to the migration matrix. Window, CPU order, color scale,
+and zoom apply to both views. When connected to an older Snake without the
+per-CPU runtime export, the matrix remains available and the page reports that
+utilization is unavailable.
+
 ## Build and run
 
 ```bash

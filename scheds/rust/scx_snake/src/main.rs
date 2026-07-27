@@ -34,7 +34,7 @@ use scx_utils::{
     scx_ops_attach, scx_ops_load, scx_ops_open, try_set_rlimit_infinity, uei_exited, uei_report,
     UserExitInfo,
 };
-use stats::{Metrics, RungMetrics};
+use stats::{CpuMetrics, Metrics, RungMetrics};
 
 const SCHEDULER_NAME: &str = "scx_snake";
 const SLOT_QUIESCENCE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -410,9 +410,8 @@ fn scope_label<'policy>(
     }
 }
 
-fn decode_stat(raw: &[Vec<u8>], use_max: bool) -> Result<u64> {
-    let values = raw
-        .iter()
+fn decode_per_cpu_stat(raw: &[Vec<u8>]) -> Result<Vec<u64>> {
+    raw.iter()
         .enumerate()
         .map(|(cpu, bytes)| {
             let bytes: [u8; size_of::<u64>()] = bytes.as_slice().try_into().with_context(|| {
@@ -424,7 +423,11 @@ fn decode_stat(raw: &[Vec<u8>], use_max: bool) -> Result<u64> {
             })?;
             Ok(u64::from_ne_bytes(bytes))
         })
-        .collect::<Result<Vec<_>>>()?;
+        .collect()
+}
+
+fn decode_stat(raw: &[Vec<u8>], use_max: bool) -> Result<u64> {
+    let values = decode_per_cpu_stat(raw)?;
 
     if use_max {
         Ok(values.into_iter().max().unwrap_or_default())
@@ -462,6 +465,14 @@ fn aggregate_raw_stats(
     }
 
     let value = |index: u32| values[index as usize];
+    let cpus = decode_per_cpu_stat(&raw[bpf_intf::snake_stat_SNAKE_STAT_RUNTIME_NS as usize])?
+        .into_iter()
+        .enumerate()
+        .map(|(cpu, runtime_ns)| {
+            let cpu = u32::try_from(cpu).context("CPU index does not fit u32")?;
+            Ok((cpu, CpuMetrics { cpu, runtime_ns }))
+        })
+        .collect::<Result<BTreeMap<_, _>>>()?;
     let rungs = policy
         .rungs
         .iter()
@@ -497,6 +508,7 @@ fn aggregate_raw_stats(
         quiescent: value(bpf_intf::snake_stat_SNAKE_STAT_QUIESCENT),
         select_latency_ns: value(bpf_intf::snake_stat_SNAKE_STAT_SELECT_LATENCY_NS),
         select_latency_max_ns: value(bpf_intf::snake_stat_SNAKE_STAT_SELECT_LATENCY_MAX_NS),
+        cpus,
         rungs,
     })
 }
@@ -1139,6 +1151,11 @@ scope = "task_allowed"
         );
         set_stat(
             &mut raw,
+            bpf_intf::snake_stat_SNAKE_STAT_RUNTIME_NS,
+            &[25_000, 75_000],
+        );
+        set_stat(
+            &mut raw,
             bpf_intf::snake_stat_SNAKE_STAT_RUNG_ATTEMPT_BASE,
             &[4, 6],
         );
@@ -1154,6 +1171,8 @@ scope = "task_allowed"
         assert_eq!(metrics.select_calls, 18);
         assert_eq!(metrics.select_latency_ns, 350);
         assert_eq!(metrics.select_latency_max_ns, 900);
+        assert_eq!(metrics.cpus[&0].runtime_ns, 25_000);
+        assert_eq!(metrics.cpus[&1].runtime_ns, 75_000);
         assert_eq!(metrics.rungs[&0].attempts, 10);
         assert_eq!(metrics.rungs[&0].operation, "claim_idle");
         assert_eq!(metrics.rungs[&0].scope, "previous_cpu");

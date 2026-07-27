@@ -4,11 +4,14 @@
 // GNU General Public License version 2.
 
 import {
+  buildCpuUsage,
   buildMatrix,
   infernoColor,
   normalizeCount,
+  normalizeUtilization,
   parseTgids,
   topologyBoundaries,
+  topologyGroups,
 } from "/assets/heatmap.js";
 
 const numberFormat = new Intl.NumberFormat();
@@ -186,16 +189,15 @@ function renderSnapshot() {
   elements.windowCoverage.textContent = `${formatDuration(snapshot.observed_ms)} / ${formatDuration(snapshot.window_ms)}`;
   elements.scopeSummary.textContent = formatScope(snapshot.scope);
 
+  const notices = [];
   if (snapshot.collector_error) {
     setStatus("error", "Collector unavailable");
-    showNotice(snapshot.collector_error);
+    notices.push(snapshot.collector_error);
   } else {
     if (snapshot.pair_map_failures || snapshot.task_storage_failures) {
-      showNotice(
+      notices.push(
         `${numberFormat.format(snapshot.pair_map_failures)} pair-map failures | ${numberFormat.format(snapshot.task_storage_failures)} task-state failures`,
       );
-    } else {
-      hideNotice();
     }
     if (snapshot.scheduler.active) {
       setStatus("active", `Snake active | generation ${snapshot.scheduler.enable_seq}`);
@@ -203,6 +205,14 @@ function renderSnapshot() {
       const current = snapshot.scheduler.name || "none";
       setStatus("waiting", `Waiting for Snake | current ${current}`);
     }
+  }
+  if (snapshot.cpu_usage_error) {
+    notices.push(snapshot.cpu_usage_error);
+  }
+  if (notices.length > 0) {
+    showNotice(notices.join(" | "));
+  } else {
+    hideNotice();
   }
   renderHeatmap();
 }
@@ -213,14 +223,21 @@ function renderHeatmap() {
   }
   const cells = state.snapshot?.cells || [];
   const matrix = buildMatrix(state.topology, cells, state.orderMode);
+  const usage = buildCpuUsage(
+    state.topology,
+    state.snapshot?.cpu_usage || [],
+    state.orderMode,
+  );
   const cpuCount = matrix.order.length;
   const viewportWidth = Math.max(320, elements.viewport.clientWidth || 800);
   const fitCell = (viewportWidth - 104) / Math.max(1, cpuCount);
   const cellSize = Math.max(2, Math.min(9, fitCell)) * state.zoom;
-  const margins = { left: 58, top: 20, right: 18, bottom: 52 };
+  const margins = { left: 64, top: 20, right: 18 };
   const matrixSize = cpuCount * cellSize;
+  const usageTop = margins.top + matrixSize + 68;
+  const usageHeight = Math.max(13, Math.min(26, cellSize * 2.5));
   const width = Math.ceil(margins.left + matrixSize + margins.right);
-  const height = Math.ceil(margins.top + matrixSize + margins.bottom);
+  const height = Math.ceil(usageTop + usageHeight + 46);
   const pixelRatio = Math.min(2, window.devicePixelRatio || 1);
 
   elements.canvas.style.width = `${width}px`;
@@ -252,11 +269,85 @@ function renderHeatmap() {
 
   drawBoundaries(context, matrix, margins, matrixSize, cellSize);
   drawAxes(context, matrix.order, margins, matrixSize, cellSize);
-  state.geometry = { cellSize, margins, matrix, matrixSize };
+  drawCpuUsage(context, usage, margins, matrixSize, cellSize, usageTop, usageHeight);
+  state.geometry = {
+    cellSize,
+    margins,
+    matrix,
+    matrixSize,
+    usage,
+    usageHeight,
+    usageTop,
+  };
   elements.canvas.setAttribute(
     "aria-label",
-    `CPU migration heatmap with ${numberFormat.format(matrix.total)} transitions across ${cpuCount} CPUs`,
+    `CPU migration heatmap with ${numberFormat.format(matrix.total)} transitions and all-Snake utilization across ${cpuCount} CPUs`,
   );
+}
+
+function drawCpuUsage(context, usage, margins, matrixSize, cellSize, top, height) {
+  context.fillStyle = "#11161c";
+  context.fillRect(margins.left, top, matrixSize, height);
+  for (let index = 0; index < usage.order.length; index += 1) {
+    const utilization = usage.utilizationPct[index];
+    if (utilization <= 0) {
+      continue;
+    }
+    context.fillStyle = infernoColor(normalizeUtilization(utilization, state.scale));
+    context.fillRect(
+      margins.left + index * cellSize,
+      top,
+      Math.ceil(cellSize),
+      height,
+    );
+  }
+
+  context.fillStyle = "#25313b";
+  context.font = "600 10px ui-sans-serif, system-ui, sans-serif";
+  context.textAlign = "right";
+  context.textBaseline = "middle";
+  context.fillText("All Snake", margins.left - 7, top + height / 2);
+
+  const boundaries = topologyBoundaries(state.topology, usage.order);
+  for (const boundary of boundaries) {
+    const x = margins.left + boundary.index * cellSize;
+    context.beginPath();
+    context.lineWidth = boundary.level === "llc" ? 2 : 1;
+    context.strokeStyle = boundary.level === "llc" ? "#ffffff" : "#6f7f8b";
+    context.moveTo(x, top);
+    context.lineTo(x, top + height);
+    context.stroke();
+  }
+
+  context.fillStyle = "#43515d";
+  context.font = "10px ui-monospace, SFMono-Regular, Menlo, monospace";
+  context.textAlign = "center";
+  const labelStep = Math.max(1, Math.ceil(usage.order.length / 24));
+  for (let index = 0; index < usage.order.length; index += labelStep) {
+    context.fillText(
+      String(usage.order[index]),
+      margins.left + (index + 0.5) * cellSize,
+      top + height + 10,
+    );
+  }
+
+  const bracketY = top + height + 23;
+  context.font = "600 9px ui-sans-serif, system-ui, sans-serif";
+  for (const group of topologyGroups(state.topology, usage.order, "llc")) {
+    const left = margins.left + group.start * cellSize;
+    const right = margins.left + group.end * cellSize;
+    context.beginPath();
+    context.lineWidth = 1;
+    context.strokeStyle = "#82919c";
+    context.moveTo(left, bracketY - 3);
+    context.lineTo(left, bracketY);
+    context.lineTo(right, bracketY);
+    context.lineTo(right, bracketY - 3);
+    context.stroke();
+    if (right - left >= 30 && group.value !== undefined) {
+      context.fillText(`LLC ${group.value}`, (left + right) / 2, bracketY + 10);
+    }
+  }
 }
 
 function drawBoundaries(context, matrix, margins, matrixSize, cellSize) {
@@ -309,11 +400,31 @@ function showTooltip(event) {
     return;
   }
   const bounds = elements.canvas.getBoundingClientRect();
-  const x = event.clientX - bounds.left - geometry.margins.left;
-  const y = event.clientY - bounds.top - geometry.margins.top;
+  const canvasX = event.clientX - bounds.left;
+  const canvasY = event.clientY - bounds.top;
+  const x = canvasX - geometry.margins.left;
+  const y = canvasY - geometry.margins.top;
   const column = Math.floor(x / geometry.cellSize);
   const row = Math.floor(y / geometry.cellSize);
   const size = geometry.matrix.order.length;
+  if (
+    column >= 0 && column < size &&
+    canvasY >= geometry.usageTop &&
+    canvasY < geometry.usageTop + geometry.usageHeight
+  ) {
+    const cpu = geometry.usage.order[column];
+    const runtimeNs = geometry.usage.runtimeNs[column];
+    const utilization = geometry.usage.utilizationPct[column];
+    const cpuInfo = new Map(state.topology.cpus.map((entry) => [entry.cpu, entry]));
+    elements.tooltip.textContent = [
+      `CPU ${cpu}`,
+      `All Snake utilization: ${utilization.toFixed(1)}%`,
+      `${formatRuntime(runtimeNs)} runtime over ${formatDuration(state.snapshot?.cpu_usage_observed_ms || 0)}`,
+      topologyLine("Topology", cpuInfo.get(cpu)),
+    ].join("\n");
+    positionTooltip(event);
+    return;
+  }
   if (row < 0 || column < 0 || row >= size || column >= size) {
     hideTooltip();
     return;
@@ -330,6 +441,10 @@ function showTooltip(event) {
     topologyLine("Destination", cpuInfo.get(to)),
   ].join("\n");
 
+  positionTooltip(event);
+}
+
+function positionTooltip(event) {
   const viewportBounds = elements.viewport.getBoundingClientRect();
   const left = event.clientX - viewportBounds.left + elements.viewport.scrollLeft + 14;
   const top = event.clientY - viewportBounds.top + elements.viewport.scrollTop + 14;
@@ -386,6 +501,19 @@ function formatDuration(milliseconds) {
   }
   const minutes = seconds / 60;
   return `${Number.isInteger(minutes) ? minutes : minutes.toFixed(1)} min`;
+}
+
+function formatRuntime(nanoseconds) {
+  if (nanoseconds >= 1_000_000_000) {
+    return `${(nanoseconds / 1_000_000_000).toFixed(2)} s`;
+  }
+  if (nanoseconds >= 1_000_000) {
+    return `${(nanoseconds / 1_000_000).toFixed(1)} ms`;
+  }
+  if (nanoseconds >= 1_000) {
+    return `${(nanoseconds / 1_000).toFixed(1)} us`;
+  }
+  return `${numberFormat.format(nanoseconds)} ns`;
 }
 
 function formatRate(rate) {

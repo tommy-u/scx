@@ -45,6 +45,8 @@ async fn snapshot_endpoint_returns_the_requested_rolling_window() {
     let pair = CpuPair::new(0, 1);
     dashboard.ingest(0, &BTreeMap::new());
     dashboard.ingest(250, &BTreeMap::from([(pair, 4)]));
+    dashboard.reset_cpu_usage(0);
+    dashboard.ingest_cpu_usage(250, &BTreeMap::from([(0, 125_000_000), (1, 250_000_000)]));
     dashboard.set_scheduler("snake", true, 11);
     let (tx, _rx) = mpsc::channel();
     let root = tempfile::tempdir().unwrap();
@@ -75,6 +77,15 @@ async fn snapshot_endpoint_returns_the_requested_rolling_window() {
     assert_eq!(json["observed_ms"], 250);
     assert_eq!(json["total"], 4);
     assert_eq!(json["cells"], json!([{"from": 0, "to": 1, "count": 4}]));
+    assert_eq!(json["cpu_usage_observed_ms"], 250);
+    assert_eq!(
+        json["cpu_usage"],
+        json!([
+            {"cpu": 0, "runtime_ns": 125_000_000, "utilization_pct": 50.0},
+            {"cpu": 1, "runtime_ns": 250_000_000, "utilization_pct": 100.0},
+        ])
+    );
+    assert_eq!(json["cpu_usage_scope"], "all_snake_tasks");
 }
 
 #[tokio::test]
@@ -106,6 +117,7 @@ async fn snapshot_endpoint_rejects_a_window_beyond_retention() {
 async fn snapshot_endpoint_exposes_collector_health() {
     let dashboard = dashboard();
     dashboard.set_collector_health(Some("BPF attach denied".into()), 2, 3);
+    dashboard.set_cpu_usage_error(Some("Snake stats unavailable".into()));
     let (tx, _rx) = mpsc::channel();
     let root = tempfile::tempdir().unwrap();
     let app = router(ApiContext::new(
@@ -131,6 +143,7 @@ async fn snapshot_endpoint_exposes_collector_health() {
     assert_eq!(json["collector_error"], "BPF attach denied");
     assert_eq!(json["pair_map_failures"], 2);
     assert_eq!(json["task_storage_failures"], 3);
+    assert_eq!(json["cpu_usage_error"], "Snake stats unavailable");
 }
 
 #[tokio::test]

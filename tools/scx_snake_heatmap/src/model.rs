@@ -28,6 +28,12 @@ pub struct WindowView {
     pub observed_ms: u64,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CpuUsageWindow {
+    pub runtime_ns: BTreeMap<u32, u64>,
+    pub observed_ms: u64,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WindowError {
     Empty,
@@ -55,6 +61,75 @@ impl Error for WindowError {}
 struct DeltaBin {
     at_ms: u64,
     counts: BTreeMap<CpuPair, u64>,
+}
+
+#[derive(Debug)]
+struct CpuUsageBin {
+    at_ms: u64,
+    runtime_ns: BTreeMap<u32, u64>,
+}
+
+#[derive(Debug)]
+pub struct CpuUsageHistory {
+    max_window_ms: u64,
+    started_at_ms: Option<u64>,
+    bins: VecDeque<CpuUsageBin>,
+}
+
+impl CpuUsageHistory {
+    pub fn new(max_window_ms: u64) -> Self {
+        assert!(max_window_ms > 0, "maximum window must be non-zero");
+        Self {
+            max_window_ms,
+            started_at_ms: None,
+            bins: VecDeque::new(),
+        }
+    }
+
+    pub fn ingest(&mut self, at_ms: u64, runtime_ns: &BTreeMap<u32, u64>) {
+        if self.started_at_ms.is_none() {
+            self.reset(at_ms);
+        }
+        let runtime_ns = runtime_ns
+            .iter()
+            .filter_map(|(&cpu, &runtime_ns)| (runtime_ns > 0).then_some((cpu, runtime_ns)))
+            .collect::<BTreeMap<_, _>>();
+        if !runtime_ns.is_empty() {
+            self.bins.push_back(CpuUsageBin { at_ms, runtime_ns });
+        }
+        self.expire(at_ms.saturating_sub(self.max_window_ms));
+    }
+
+    pub fn reset(&mut self, at_ms: u64) {
+        self.started_at_ms = Some(at_ms);
+        self.bins.clear();
+    }
+
+    pub fn view(&self, now_ms: u64, window_ms: u64) -> Result<CpuUsageWindow, WindowError> {
+        validate_window(window_ms, self.max_window_ms)?;
+        let cutoff_ms = now_ms.saturating_sub(window_ms);
+        let mut runtime_ns = BTreeMap::<u32, u64>::new();
+        for bin in self.bins.iter().filter(|bin| bin.at_ms > cutoff_ms) {
+            for (&cpu, &delta_ns) in &bin.runtime_ns {
+                let total = runtime_ns.entry(cpu).or_default();
+                *total = total.saturating_add(delta_ns);
+            }
+        }
+        let observed_ms = self
+            .started_at_ms
+            .map(|started| now_ms.saturating_sub(started).min(window_ms))
+            .unwrap_or(0);
+        Ok(CpuUsageWindow {
+            runtime_ns,
+            observed_ms,
+        })
+    }
+
+    fn expire(&mut self, cutoff_ms: u64) {
+        while self.bins.front().is_some_and(|bin| bin.at_ms <= cutoff_ms) {
+            self.bins.pop_front();
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -110,15 +185,7 @@ impl RollingHistory {
     }
 
     pub fn view(&self, now_ms: u64, window_ms: u64) -> Result<WindowView, WindowError> {
-        if window_ms == 0 {
-            return Err(WindowError::Empty);
-        }
-        if window_ms > self.max_window_ms {
-            return Err(WindowError::TooLong {
-                requested_ms: window_ms,
-                max_ms: self.max_window_ms,
-            });
-        }
+        validate_window(window_ms, self.max_window_ms)?;
 
         let cutoff_ms = now_ms.saturating_sub(window_ms);
         let mut cells = BTreeMap::<CpuPair, u64>::new();
@@ -146,4 +213,17 @@ impl RollingHistory {
             self.bins.pop_front();
         }
     }
+}
+
+fn validate_window(window_ms: u64, max_window_ms: u64) -> Result<(), WindowError> {
+    if window_ms == 0 {
+        return Err(WindowError::Empty);
+    }
+    if window_ms > max_window_ms {
+        return Err(WindowError::TooLong {
+            requested_ms: window_ms,
+            max_ms: max_window_ms,
+        });
+    }
+    Ok(())
 }

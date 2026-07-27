@@ -128,27 +128,47 @@ void BPF_STRUCT_OPS(snake_enqueue, struct task_struct *p, u64 enq_flags)
 void BPF_STRUCT_OPS(snake_running, struct task_struct *p)
 {
 	struct snake_ladder_ctx ladder_ctx = {};
+	struct snake_task_runtime *runtime;
 
-	(void)p;
 	if (acquire_active_ladder(&ladder_ctx)) {
 		scx_bpf_error("snake failed to acquire active ladder in running");
 		return;
 	}
 	stat_inc(&ladder_ctx, SNAKE_STAT_RUNNING);
+	runtime = bpf_task_storage_get(&task_runtimes, p, 0,
+				       BPF_LOCAL_STORAGE_GET_F_CREATE);
+	if (!runtime) {
+		stat_inc(&ladder_ctx, SNAKE_STAT_INVALID_ERRORS);
+		release_active_ladder(&ladder_ctx);
+		return;
+	}
+	runtime->started_exec_runtime = p->se.sum_exec_runtime;
+	runtime->valid = 1;
 	release_active_ladder(&ladder_ctx);
 }
 
 void BPF_STRUCT_OPS(snake_stopping, struct task_struct *p, bool runnable)
 {
 	struct snake_ladder_ctx ladder_ctx = {};
+	struct snake_task_runtime *runtime;
+	u64 current_runtime;
 
-	(void)p;
 	(void)runnable;
 	if (acquire_active_ladder(&ladder_ctx)) {
 		scx_bpf_error("snake failed to acquire active ladder in stopping");
 		return;
 	}
 	stat_inc(&ladder_ctx, SNAKE_STAT_STOPPING);
+	runtime = bpf_task_storage_get(&task_runtimes, p, 0, 0);
+	if (runtime && runtime->valid) {
+		current_runtime = p->se.sum_exec_runtime;
+		if (current_runtime >= runtime->started_exec_runtime)
+			stat_add(&ladder_ctx, SNAKE_STAT_RUNTIME_NS,
+				 current_runtime - runtime->started_exec_runtime);
+		else
+			stat_inc(&ladder_ctx, SNAKE_STAT_INVALID_ERRORS);
+		runtime->valid = 0;
+	}
 	release_active_ladder(&ladder_ctx);
 }
 

@@ -1060,6 +1060,7 @@ dependencies = [
  "http-body-util",
  "libbpf-rs",
  "scx_cargo",
+ "scx_stats",
  "scx_utils",
  "serde",
  "serde_json",
