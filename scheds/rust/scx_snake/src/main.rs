@@ -45,7 +45,7 @@ use scx_utils::{
     scx_ops_attach, scx_ops_load, scx_ops_open, try_set_rlimit_infinity, uei_exited, uei_report,
     UserExitInfo,
 };
-use stats::{CellMetrics, CpuMetrics, Metrics, RungMetrics};
+use stats::{CallbackTimingMetrics, CellMetrics, CpuMetrics, Metrics, RungMetrics};
 use task_cells::{ThreadCellAssignment, ThreadCellResponse};
 
 const SCHEDULER_NAME: &str = "scx_snake";
@@ -75,6 +75,16 @@ struct Opts {
     /// Queue discipline used after idle-CPU placement misses; VTIME and EEVDF are experimental.
     #[arg(long, value_enum, default_value_t)]
     fairness: FairnessMode,
+
+    /// Sample one in every N callback executions for timing; zero disables timing.
+    #[arg(
+        long,
+        value_parser = parse_callback_timing_sample_rate,
+        default_value_t = 64,
+        value_name = "N",
+        conflicts_with_all = ["update_policy", "dump_compiled_policy", "stats", "monitor", "help_stats", "set_thread_cell", "clear_thread_cell"]
+    )]
+    callback_timing_sample_rate: u32,
 
     /// TOML policy to compile and install before attaching the scheduler.
     #[arg(long, value_name = "PATH")]
@@ -161,6 +171,16 @@ fn parse_positive_seconds(value: &str) -> std::result::Result<f64, String> {
         return Err("interval must be a positive finite number".into());
     }
     Ok(seconds)
+}
+
+fn parse_callback_timing_sample_rate(value: &str) -> std::result::Result<u32, String> {
+    let rate = value
+        .parse::<u32>()
+        .map_err(|error| format!("invalid callback timing sample rate `{value}`: {error}"))?;
+    if rate == 0 || (rate.is_power_of_two() && rate <= 4096) {
+        return Ok(rate);
+    }
+    Err("callback timing sample rate must be zero or a power of two through 4096".into())
 }
 
 fn resolve_mode(opts: &Opts) -> Result<RunMode> {
@@ -617,7 +637,8 @@ fn wait_for_slot_quiescent(skel: &BpfSkel<'_>, slot: u32, timeout: Duration) -> 
 }
 
 fn clear_slot_stats(skel: &mut BpfSkel<'_>, slot: u32) -> Result<()> {
-    let zeroes = vec![0_u64.to_ne_bytes().to_vec(); libbpf_rs::num_possible_cpus()?];
+    let nr_cpus = libbpf_rs::num_possible_cpus()?;
+    let zeroes = vec![0_u64.to_ne_bytes().to_vec(); nr_cpus];
     for stat in 0..bpf_intf::snake_stat_SNAKE_NR_STATS {
         let key = runtime_policy::stat_index(slot, stat)?;
         skel.maps
@@ -635,6 +656,14 @@ fn clear_slot_stats(skel: &mut BpfSkel<'_>, slot: u32) -> Result<()> {
                     format!("clearing ladder slot {slot} cell {cell} statistic {stat}")
                 })?;
         }
+    }
+    let callback_zeroes = vec![vec![0; size_of::<bpf_intf::snake_callback_timing>()]; nr_cpus];
+    for callback in 0..bpf_intf::snake_callback_SNAKE_NR_CALLBACKS {
+        let key = runtime_policy::callback_timing_index(slot, callback)?;
+        skel.maps
+            .callback_timing
+            .update_percpu(&key.to_ne_bytes(), &callback_zeroes, MapFlags::ANY)
+            .with_context(|| format!("clearing ladder slot {slot} callback timing {callback}"))?;
     }
     Ok(())
 }
@@ -874,7 +903,69 @@ fn aggregate_raw_stats(
         cpus,
         cells: BTreeMap::new(),
         rungs,
+        callback_timing: BTreeMap::new(),
     })
+}
+
+const CALLBACK_NAMES: [&str; bpf_intf::snake_callback_SNAKE_NR_CALLBACKS as usize] = [
+    "select_cpu",
+    "enqueue",
+    "dispatch",
+    "runnable",
+    "running",
+    "stopping",
+    "quiescent",
+];
+
+fn aggregate_raw_callback_timing(
+    raw: &[Vec<Vec<u8>>],
+) -> Result<BTreeMap<String, CallbackTimingMetrics>> {
+    if raw.len() != CALLBACK_NAMES.len() {
+        bail!(
+            "callback timing map returned {} entries, expected {}",
+            raw.len(),
+            CALLBACK_NAMES.len()
+        );
+    }
+    let bucket_count = bpf_intf::SNAKE_CALLBACK_TIMING_BUCKETS as usize;
+    let expected_size = size_of::<bpf_intf::snake_callback_timing>();
+
+    CALLBACK_NAMES
+        .iter()
+        .zip(raw)
+        .map(|(name, per_cpu)| {
+            let mut metrics = CallbackTimingMetrics {
+                total_ns: 0,
+                buckets: vec![0; bucket_count],
+            };
+            for (cpu, bytes) in per_cpu.iter().enumerate() {
+                if bytes.len() != expected_size {
+                    bail!(
+                        "CPU {cpu} callback timing value has {} bytes, expected {expected_size}",
+                        bytes.len()
+                    );
+                }
+                let value = |index: usize| -> Result<u64> {
+                    let offset = index * size_of::<u64>();
+                    Ok(u64::from_ne_bytes(
+                        bytes[offset..offset + size_of::<u64>()]
+                            .try_into()
+                            .context("decoding callback timing value")?,
+                    ))
+                };
+                metrics.total_ns = metrics
+                    .total_ns
+                    .checked_add(value(0)?)
+                    .context("callback timing total overflowed u64")?;
+                for (bucket, total) in metrics.buckets.iter_mut().enumerate() {
+                    *total = total
+                        .checked_add(value(1 + bucket)?)
+                        .context("callback timing bucket overflowed u64")?;
+                }
+            }
+            Ok(((*name).to_owned(), metrics))
+        })
+        .collect()
 }
 
 fn aggregate_raw_cell_stats(
@@ -954,6 +1045,21 @@ fn read_raw_stats(skel: &BpfSkel<'_>, slot: u32) -> Result<Vec<Vec<Vec<u8>>>> {
         .collect()
 }
 
+fn read_raw_callback_timing(skel: &BpfSkel<'_>, slot: u32) -> Result<Vec<Vec<Vec<u8>>>> {
+    (0..bpf_intf::snake_callback_SNAKE_NR_CALLBACKS)
+        .map(|callback| {
+            let index = runtime_policy::callback_timing_index(slot, callback)?;
+            skel.maps
+                .callback_timing
+                .lookup_percpu(&index.to_ne_bytes(), MapFlags::ANY)
+                .with_context(|| {
+                    format!("looking up ladder slot {slot} callback timing {callback}")
+                })?
+                .ok_or_else(|| anyhow!("callback timing map has no entry {index}"))
+        })
+        .collect()
+}
+
 fn read_raw_cell_stats(
     skel: &BpfSkel<'_>,
     slot: u32,
@@ -1004,6 +1110,11 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
             .as_mut()
             .context("BPF read-only data is unavailable")?
             .fairness_mode = opts.fairness as u32;
+        skel.maps
+            .rodata_data
+            .as_mut()
+            .context("BPF read-only data is unavailable")?
+            .callback_timing_sample_rate = opts.callback_timing_sample_rate;
         skel.struct_ops.snake_ops_mut().exit_dump_len = opts.exit_dump_len;
         let mut skel = scx_ops_load!(skel, snake_ops, uei)?;
         install_queue_topology(&mut skel, queue_topology)?;
@@ -1050,7 +1161,8 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
             ),
             opts.fairness,
             queue_topology.cloned(),
-        );
+        )
+        .with_callback_timing_sample_rate(opts.callback_timing_sample_rate);
 
         Ok(Self {
             skel,
@@ -1077,6 +1189,10 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
                 topology,
             )?;
         }
+        metrics.callback_timing = aggregate_raw_callback_timing(&read_raw_callback_timing(
+            &self.skel,
+            self.runtime.active_slot,
+        )?)?;
         Ok(metrics)
     }
 
@@ -1129,6 +1245,9 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
                             topology,
                         )?;
                     }
+                    metrics.callback_timing = aggregate_raw_callback_timing(
+                        &read_raw_callback_timing(&self.skel, previous_slot)?,
+                    )?;
                     Ok(metrics)
                 }) {
                 Ok(metrics) => metrics,
@@ -1510,11 +1629,60 @@ scope = "task_allowed"
             .collect()
     }
 
+    #[test]
+    fn callback_timing_sample_rate_accepts_disabled_and_bounded_powers_of_two() {
+        for value in ["0", "1", "2", "64", "4096"] {
+            assert_eq!(
+                parse_callback_timing_sample_rate(value).unwrap(),
+                value.parse::<u32>().unwrap()
+            );
+        }
+        for value in ["3", "63", "4097", "8192", "not-a-number"] {
+            assert!(parse_callback_timing_sample_rate(value).is_err(), "{value}");
+        }
+    }
+
     fn set_stat(raw: &mut [Vec<Vec<u8>>], index: u32, cpu_values: &[u64]) {
         raw[index as usize] = cpu_values
             .iter()
             .map(|value| value.to_ne_bytes().to_vec())
             .collect();
+    }
+
+    fn callback_timing_bytes(total_ns: u64, buckets: &[(usize, u64)]) -> Vec<u8> {
+        let mut values = vec![0_u64; 1 + bpf_intf::SNAKE_CALLBACK_TIMING_BUCKETS as usize];
+        values[0] = total_ns;
+        for &(bucket, count) in buckets {
+            values[1 + bucket] = count;
+        }
+        values.into_iter().flat_map(u64::to_ne_bytes).collect()
+    }
+
+    #[test]
+    fn aggregates_percpu_callback_timing_by_stable_callback_name() {
+        let empty = callback_timing_bytes(0, &[]);
+        let mut raw = vec![
+            vec![empty.clone(), empty.clone()];
+            bpf_intf::snake_callback_SNAKE_NR_CALLBACKS as usize
+        ];
+        raw[bpf_intf::snake_callback_SNAKE_CALLBACK_SELECT_CPU as usize] = vec![
+            callback_timing_bytes(100, &[(3, 2), (8, 1)]),
+            callback_timing_bytes(250, &[(3, 5), (9, 4)]),
+        ];
+
+        let timing = aggregate_raw_callback_timing(&raw).expect("timing should aggregate");
+
+        assert_eq!(timing.len(), 7);
+        assert_eq!(timing["select_cpu"].total_ns, 350);
+        assert_eq!(timing["select_cpu"].buckets[3], 7);
+        assert_eq!(timing["select_cpu"].buckets[8], 1);
+        assert_eq!(timing["select_cpu"].buckets[9], 4);
+        assert_eq!(timing["enqueue"].buckets.iter().sum::<u64>(), 0);
+        assert!(timing.contains_key("dispatch"));
+        assert!(timing.contains_key("runnable"));
+        assert!(timing.contains_key("running"));
+        assert!(timing.contains_key("stopping"));
+        assert!(timing.contains_key("quiescent"));
     }
 
     #[test]
@@ -1544,7 +1712,8 @@ scope = "task_allowed"
         let policy = policy::compile_policy(policy_source()).expect("policy should compile");
         let encoded = encode_ladder(&policy, 42).expect("ladder should encode");
 
-        assert_eq!(bpf_intf::SNAKE_ABI_VERSION, 17);
+        assert_eq!(bpf_intf::SNAKE_ABI_VERSION, 18);
+        assert_eq!(size_of::<bpf_intf::snake_callback_timing>(), 520);
         assert_eq!(size_of::<bpf_intf::snake_compiled_ladder>(), 352);
         assert_eq!(offset_of!(bpf_intf::snake_compiled_ladder, generation), 0);
         assert_eq!(
@@ -1820,6 +1989,15 @@ scope = "task_cell"
             runtime_policy::stat_index(1, 0).unwrap(),
             bpf_intf::snake_stat_SNAKE_NR_STATS
         );
+        assert_eq!(
+            runtime_policy::callback_timing_index(1, 0).unwrap(),
+            bpf_intf::snake_callback_SNAKE_NR_CALLBACKS
+        );
+        assert!(runtime_policy::callback_timing_index(
+            0,
+            bpf_intf::snake_callback_SNAKE_NR_CALLBACKS
+        )
+        .is_err());
         assert!(runtime_policy::mask_data_index(2, 0, 0).is_err());
         assert!(runtime_policy::mask_data_index(0, 4, 0).is_err());
         assert!(runtime_policy::mask_data_index(0, 0, 1024).is_err());

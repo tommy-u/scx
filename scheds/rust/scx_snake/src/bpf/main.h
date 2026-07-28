@@ -7,6 +7,7 @@
 #include "intf.h"
 
 static u32 nr_cpu_ids;
+const volatile u32 callback_timing_sample_rate = 64;
 
 struct snake_ladder_ctx {
 	u32				 slot;
@@ -108,6 +109,13 @@ struct {
 struct {
 	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
 	__type(key, u32);
+	__type(value, struct snake_callback_timing);
+	__uint(max_entries, SNAKE_LADDER_SLOTS * SNAKE_NR_CALLBACKS);
+} callback_timing SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__type(key, u32);
 	__type(value, u64);
 	__uint(max_entries, SNAKE_LADDER_SLOTS *SNAKE_MAX_QUEUE_CELLS *
 			    SNAKE_NR_CELL_STATS);
@@ -185,6 +193,49 @@ static __always_inline void stat_add(const struct snake_ladder_ctx *ctx, u32 idx
 static __always_inline void stat_inc(const struct snake_ladder_ctx *ctx, u32 idx)
 {
 	stat_add(ctx, idx, 1);
+}
+
+static __always_inline u64 callback_timing_start(void)
+{
+	u32 rate = callback_timing_sample_rate;
+
+	if (!rate)
+		return 0;
+	if (rate > 1 && (bpf_get_prandom_u32() & (rate - 1)))
+		return 0;
+	return bpf_ktime_get_ns();
+}
+
+static __always_inline void
+callback_timing_finish(const struct snake_ladder_ctx *ctx, u32 callback,
+		       u64 started_at)
+{
+	struct snake_callback_timing *timing;
+	u64 elapsed;
+	u32 bucket = 0, key;
+
+	if (!started_at || callback >= SNAKE_NR_CALLBACKS ||
+	    ctx->slot >= SNAKE_LADDER_SLOTS)
+		return;
+	elapsed = bpf_ktime_get_ns() - started_at;
+	if (elapsed > 1)
+		bucket = log2_u64(elapsed) - 1;
+	if (bucket >= SNAKE_CALLBACK_TIMING_BUCKETS)
+		bucket = SNAKE_CALLBACK_TIMING_BUCKETS - 1;
+	key = ctx->slot * SNAKE_NR_CALLBACKS + callback;
+	timing = bpf_map_lookup_elem(&callback_timing, &key);
+	if (!timing)
+		return;
+	timing->total_ns += elapsed;
+	timing->buckets[bucket]++;
+}
+
+static __always_inline void
+release_timed_callback(struct snake_ladder_ctx *ctx, u32 callback,
+		       u64 started_at)
+{
+	callback_timing_finish(ctx, callback, started_at);
+	release_active_ladder(ctx);
 }
 
 static __always_inline void

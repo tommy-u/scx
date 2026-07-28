@@ -251,6 +251,7 @@ cargo build --release -p scx_snake
 sudo ./target/release/scx_snake \
   --policy scheds/rust/scx_snake/examples/kernel-default-sim.toml \
   --fairness fifo \
+  --callback-timing-sample-rate 64 \
   --stats 1
 ```
 
@@ -260,6 +261,13 @@ requires a restart. EEVDF's affinity-constrained forward-progress test passes,
 but its nice-level weighted-share validation is not yet correct. See
 [Fairness in scx_snake](docs/FAIRNESS.md) for the clocks, queues, task
 accounting, placement interaction, and current limitations.
+
+Callback execution-time sampling defaults to one in every 64 invocations for
+`select_cpu`, `enqueue`, `dispatch`, `runnable`, `running`, `stopping`, and
+`quiescent`. `--callback-timing-sample-rate N` accepts zero to disable sampling
+or a power of two through 4096. Unsampled calls perform only the sampling
+decision; sampled calls update a per-CPU base-2 nanosecond histogram without
+atomic contention. Changing the rate requires restarting Snake.
 
 Run a cell queue policy only with VTIME:
 
@@ -366,6 +374,12 @@ its two queue insertion counts, promotions, forced advances, direct/queued
 runtime, lag clamps, and accounting errors.
 Queue mode also publishes `membership_no_cell_runs` and
 `membership_invalid_runs`; the latter must remain zero.
+
+The inspection stats target also publishes cumulative sampled callback
+histograms for the active policy generation. `scx_snake_inspector` turns these
+into rolling and policy-lifetime mean, p50, p95, and p99 estimates in its
+Callbacks tab. Percentiles are reported as the upper bound of a base-2 bucket;
+p95 requires at least 20 samples and p99 at least 100.
 
 Use `--stats-format json` for NDJSON, `--help-stats` for counter definitions, or
 monitor an already running scheduler without a policy:

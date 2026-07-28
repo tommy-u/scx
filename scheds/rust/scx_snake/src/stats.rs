@@ -16,6 +16,39 @@ use crate::task_cells::ThreadCellAssignment;
 
 #[stat_doc]
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize, Stats)]
+#[stat(_om_prefix = "callback_timing_", _om_label = "callback")]
+pub struct CallbackTimingMetrics {
+    #[stat(desc = "Total sampled callback execution time")]
+    pub total_ns: u64,
+    #[stat(desc = "Base-2 nanosecond callback execution-time buckets", _om_skip)]
+    pub buckets: Vec<u64>,
+}
+
+impl CallbackTimingMetrics {
+    fn delta(&self, previous: Option<&Self>) -> Self {
+        Self {
+            total_ns: self
+                .total_ns
+                .saturating_sub(previous.map_or(0, |metrics| metrics.total_ns)),
+            buckets: self
+                .buckets
+                .iter()
+                .enumerate()
+                .map(|(index, count)| {
+                    count.saturating_sub(
+                        previous
+                            .and_then(|metrics| metrics.buckets.get(index))
+                            .copied()
+                            .unwrap_or_default(),
+                    )
+                })
+                .collect(),
+        }
+    }
+}
+
+#[stat_doc]
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize, Stats)]
 #[stat(_om_prefix = "rung_", _om_label = "rung_index")]
 pub struct RungMetrics {
     #[stat(desc = "Zero-based position in the policy ladder", _om_skip)]
@@ -229,6 +262,8 @@ pub struct Metrics {
     pub cells: BTreeMap<u32, CellMetrics>,
     #[stat(desc = "Per-rung policy evaluation metrics")]
     pub rungs: BTreeMap<u32, RungMetrics>,
+    #[stat(desc = "Sampled callback execution-time histograms", _om_skip)]
+    pub callback_timing: BTreeMap<String, CallbackTimingMetrics>,
 }
 
 impl Metrics {
@@ -355,6 +390,16 @@ impl Metrics {
                 .rungs
                 .iter()
                 .map(|(index, rung)| (*index, rung.delta(previous.rungs.get(index))))
+                .collect(),
+            callback_timing: self
+                .callback_timing
+                .iter()
+                .map(|(name, metrics)| {
+                    (
+                        name.clone(),
+                        metrics.delta(previous.callback_timing.get(name)),
+                    )
+                })
                 .collect(),
         }
     }
@@ -577,6 +622,7 @@ pub fn server_data() -> StatsServerData<SchedulerRequest, SchedulerResponse> {
 
     StatsServerData::new()
         .add_meta(Metrics::meta())
+        .add_meta(CallbackTimingMetrics::meta())
         .add_meta(CpuMetrics::meta())
         .add_meta(CellMetrics::meta())
         .add_meta(RungMetrics::meta())
@@ -672,6 +718,37 @@ mod tests {
             misses,
             errors,
         }
+    }
+
+    #[test]
+    fn callback_timing_delta_subtracts_totals_and_each_bucket() {
+        let previous = Metrics {
+            policy_generation: 7,
+            callback_timing: BTreeMap::from([(
+                "dispatch".into(),
+                CallbackTimingMetrics {
+                    total_ns: 100,
+                    buckets: vec![1, 2, 3],
+                },
+            )]),
+            ..Default::default()
+        };
+        let current = Metrics {
+            policy_generation: 7,
+            callback_timing: BTreeMap::from([(
+                "dispatch".into(),
+                CallbackTimingMetrics {
+                    total_ns: 350,
+                    buckets: vec![4, 8, 10],
+                },
+            )]),
+            ..Default::default()
+        };
+
+        let timing = &current.delta(&previous).callback_timing["dispatch"];
+
+        assert_eq!(timing.total_ns, 250);
+        assert_eq!(timing.buckets, vec![3, 6, 7]);
     }
 
     #[test]

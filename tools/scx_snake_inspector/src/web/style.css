@@ -477,6 +477,111 @@ button:focus-visible {
   white-space: nowrap;
 }
 
+.callback-control-band {
+  min-height: 58px;
+}
+
+.callback-summary-band {
+  padding: 12px clamp(16px, 3vw, 40px);
+  background: var(--surface-muted);
+  border-bottom: 1px solid var(--border);
+}
+
+.callback-summary-band dl {
+  width: min(760px, 100%);
+  margin: 0;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.callback-summary-band dl > div {
+  min-width: 0;
+  padding: 0 18px;
+  border-left: 1px solid var(--border);
+}
+
+.callback-summary-band dl > div:first-child {
+  padding-left: 0;
+  border-left: 0;
+}
+
+.callback-summary-band dt {
+  color: var(--muted);
+  font-size: 0.66rem;
+  font-weight: 680;
+}
+
+.callback-summary-band dd {
+  margin: 3px 0 0;
+  overflow-wrap: anywhere;
+  font-size: 0.9rem;
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+}
+
+.callback-table-section {
+  padding: 20px clamp(12px, 3vw, 40px) 32px;
+}
+
+.callback-table-wrap {
+  overflow: auto;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.callback-table-wrap table {
+  width: 100%;
+  min-width: 680px;
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+
+.callback-table-wrap th,
+.callback-table-wrap td {
+  height: 48px;
+  padding: 9px 14px;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.76rem;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.callback-table-wrap tr:last-child th,
+.callback-table-wrap tr:last-child td {
+  border-bottom: 0;
+}
+
+.callback-table-wrap thead th {
+  height: 40px;
+  color: var(--muted);
+  background: var(--surface-muted);
+  font-size: 0.64rem;
+  font-weight: 720;
+  text-transform: uppercase;
+}
+
+.callback-table-wrap th:first-child,
+.callback-table-wrap td:first-child {
+  width: 23%;
+  text-align: left;
+}
+
+.callback-table-wrap tbody th {
+  font-weight: 700;
+}
+
+.callback-table-wrap code {
+  font-size: 0.74rem;
+}
+
+.callback-table-wrap .callback-empty {
+  height: 100px;
+  color: var(--muted);
+  text-align: center;
+}
+
 .slot-comparison {
   padding: 20px clamp(12px, 3vw, 40px) 32px;
   display: grid;
@@ -1550,6 +1655,30 @@ button:focus-visible {
 
   .view-freshness {
     padding-top: 3px;
+  }
+
+  .callback-summary-band {
+    padding: 11px 12px;
+  }
+
+  .callback-summary-band dl {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    row-gap: 12px;
+  }
+
+  .callback-summary-band dl > div,
+  .callback-summary-band dl > div:first-child {
+    padding: 0 10px;
+    border-left: 1px solid var(--border);
+  }
+
+  .callback-summary-band dl > div:nth-child(odd) {
+    padding-left: 0;
+    border-left: 0;
+  }
+
+  .callback-table-section {
+    padding: 12px 8px 20px;
   }
 
   .slot-comparison,

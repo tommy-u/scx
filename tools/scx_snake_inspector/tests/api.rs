@@ -40,6 +40,48 @@ fn dashboard() -> Dashboard {
     Dashboard::new(topology, 5_000)
 }
 
+fn callback_timing_snapshot(
+    generation: u64,
+    dispatch_total_ns: u64,
+    dispatch_samples: u64,
+) -> Value {
+    let mut callbacks = serde_json::Map::new();
+    for name in [
+        "select_cpu",
+        "enqueue",
+        "dispatch",
+        "runnable",
+        "running",
+        "stopping",
+        "quiescent",
+    ] {
+        let mut buckets = vec![0_u64; 64];
+        let total_ns = if name == "dispatch" {
+            buckets[5] = dispatch_samples;
+            dispatch_total_ns
+        } else {
+            0
+        };
+        callbacks.insert(
+            name.into(),
+            json!({"total_ns": total_ns, "buckets": buckets}),
+        );
+    }
+    json!({
+        "schema_version": 1,
+        "active_slot": 0,
+        "callback_timing_sample_rate": 64,
+        "slots": [{
+            "slot": 0,
+            "state": "active",
+            "generation": generation,
+            "metrics": {"callback_timing": callbacks}
+        }],
+        "cells": [],
+        "task_mappings": []
+    })
+}
+
 #[tokio::test]
 async fn snapshot_endpoint_returns_the_requested_rolling_window() {
     let dashboard = dashboard();
@@ -191,6 +233,67 @@ async fn inspection_endpoint_returns_the_latest_scheduler_read_model() {
     assert_eq!(json["snapshot"]["active_slot"], 1);
     assert_eq!(json["snapshot"]["cells"][0]["id"], 7);
     assert_eq!(json["snapshot"]["task_mappings"][0]["tid"], 4812);
+}
+
+#[tokio::test]
+async fn callback_timing_endpoint_returns_window_and_lifetime_percentiles() {
+    let dashboard = dashboard();
+    dashboard.set_scheduler("snake", true, 4);
+    dashboard.set_inspection_at(0, Some(callback_timing_snapshot(7, 0, 0)), None);
+    dashboard.set_inspection_at(1_000, Some(callback_timing_snapshot(7, 6_300, 100)), None);
+    let (tx, _rx) = mpsc::channel();
+    let root = tempfile::tempdir().unwrap();
+    let context = ApiContext::new(dashboard, tx, "secret", root.path().to_path_buf());
+
+    let response = router(context.clone())
+        .oneshot(
+            Request::builder()
+                .uri("/api/callback-timing?scope=window&window_ms=2000")
+                .header("host", "127.0.0.1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    let dispatch = json["callbacks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["callback"] == "dispatch")
+        .unwrap();
+
+    assert_eq!(json["status"], "ready");
+    assert_eq!(json["scope"], "window");
+    assert_eq!(json["window_ms"], 2_000);
+    assert_eq!(json["observed_ms"], 1_000);
+    assert_eq!(json["generation"], 7);
+    assert_eq!(json["sample_rate"], 64);
+    assert_eq!(json["callbacks"].as_array().unwrap().len(), 7);
+    assert_eq!(dispatch["samples"], 100);
+    assert_eq!(dispatch["mean_ns"], 63);
+    assert_eq!(dispatch["p50_ns"], 63);
+    assert_eq!(dispatch["p95_ns"], 63);
+    assert_eq!(dispatch["p99_ns"], 63);
+
+    let lifetime = router(context)
+        .oneshot(
+            Request::builder()
+                .uri("/api/callback-timing?scope=lifetime")
+                .header("host", "127.0.0.1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(lifetime.status(), StatusCode::OK);
+    let body = lifetime.into_body().collect().await.unwrap().to_bytes();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["scope"], "lifetime");
+    assert_eq!(json["window_ms"], Value::Null);
+    assert_eq!(json["observed_ms"], Value::Null);
 }
 
 #[tokio::test]

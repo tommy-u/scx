@@ -388,8 +388,9 @@ pub fn run_collector(
             }
             if Instant::now() >= next_inspection_at {
                 match read_inspection(&mut stats_client, &options.stats_path) {
-                    Ok(snapshot) => dashboard.set_inspection(Some(snapshot), None),
-                    Err(error) => dashboard.set_inspection(
+                    Ok(snapshot) => dashboard.set_inspection_at(now_ms, Some(snapshot), None),
+                    Err(error) => dashboard.set_inspection_at(
+                        now_ms,
                         None,
                         Some(format!("Snake inspection unavailable: {error:#}")),
                     ),

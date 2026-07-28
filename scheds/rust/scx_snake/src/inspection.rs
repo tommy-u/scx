@@ -152,6 +152,7 @@ pub struct TaskMappingInspectionView {
 pub struct InspectionView {
     pub schema_version: u32,
     pub active_slot: u32,
+    pub callback_timing_sample_rate: u32,
     pub fairness: FairnessInspectionView,
     pub queue_topology: Option<QueueTopologyInspectionView>,
     pub slots: Vec<SlotInspectionView>,
@@ -210,6 +211,7 @@ pub struct QueueTopologyInspectionView {
 
 pub struct Inspector {
     active_slot: u32,
+    callback_timing_sample_rate: u32,
     fairness: FairnessInspectionView,
     queue_topology: Option<QueueTopologyInspectionView>,
     slots: [Option<SlotPolicy>; 2],
@@ -227,11 +229,17 @@ impl Inspector {
         slots[active_slot as usize] = Some(active);
         Self {
             active_slot,
+            callback_timing_sample_rate: 64,
             fairness: fairness_view(fairness, queue_topology.is_some()),
             queue_topology: queue_topology.as_ref().map(queue_topology_view),
             slots,
             assignments: BTreeMap::new(),
         }
+    }
+
+    pub fn with_callback_timing_sample_rate(mut self, sample_rate: u32) -> Self {
+        self.callback_timing_sample_rate = sample_rate;
+        self
     }
 
     pub fn activate(&mut self, next: SlotPolicy, frozen_metrics: Metrics, at_ms: u64) {
@@ -323,6 +331,7 @@ impl Inspector {
         InspectionView {
             schema_version: 1,
             active_slot: self.active_slot,
+            callback_timing_sample_rate: self.callback_timing_sample_rate,
             fairness: self.fairness.clone(),
             queue_topology: self.queue_topology.clone(),
             slots,
@@ -1014,13 +1023,15 @@ scope = "task_cell_borrowable"
     #[test]
     fn activation_preserves_the_previous_slot_and_its_frozen_metrics() {
         let mut inspector =
-            Inspector::new(slot(0, 1, FIRST_POLICY, 1_000), FairnessMode::Fifo, None);
+            Inspector::new(slot(0, 1, FIRST_POLICY, 1_000), FairnessMode::Fifo, None)
+                .with_callback_timing_sample_rate(128);
         inspector.activate(slot(1, 2, SECOND_POLICY, 2_000), metrics(1, 30), 2_000);
 
         let view = inspector.snapshot(metrics(2, 8), Vec::new());
 
         assert_eq!(view.schema_version, 1);
         assert_eq!(view.active_slot, 1);
+        assert_eq!(view.callback_timing_sample_rate, 128);
         assert_eq!(view.slots.len(), 2);
         assert_eq!(view.slots[0].state, SlotState::Inactive);
         assert_eq!(view.slots[0].generation, Some(1));

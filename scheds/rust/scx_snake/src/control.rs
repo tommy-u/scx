@@ -254,6 +254,7 @@ scope = "task_allowed"
                     crate::inspection::InspectionView {
                         schema_version: 1,
                         active_slot: 1,
+                        callback_timing_sample_rate: 64,
                         fairness: crate::inspection::FairnessInspectionView {
                             mode_name: "fifo".into(),
                             clock_model: "no virtual-time clock".into(),

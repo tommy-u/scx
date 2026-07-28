@@ -21,6 +21,7 @@
 
     <nav class="primary-nav" id="primaryNav" aria-label="Inspector views">
       <a href="#/activity" data-route="activity" aria-current="page">Activity</a>
+      <a href="#/callbacks" data-route="callbacks">Callbacks</a>
       <a href="#/policy" data-route="policy">Policy</a>
       <a href="#/cells" data-route="cells">Cells</a>
     </nav>
@@ -98,6 +99,48 @@
           <canvas id="heatmapCanvas" width="800" height="800" role="img" aria-label="CPU migration heatmap"></canvas>
           <div class="heatmap-tooltip hidden" id="heatmapTooltip" role="tooltip"></div>
         </div>
+        </section>
+      </section>
+
+      <section class="view-panel hidden" id="callbacksView" data-view="callbacks" aria-labelledby="callbacksTitle">
+        <header class="view-heading">
+          <div>
+            <h2 id="callbacksTitle">Callback execution time</h2>
+            <p>Sampled scheduler callback duration for the active policy generation</p>
+          </div>
+          <span class="view-freshness" id="callbacksFreshness">Waiting for Snake</span>
+        </header>
+        <section class="control-band callback-control-band" aria-label="Callback timing controls">
+          <label class="control-field">
+            <span>Range</span>
+            <select id="callbackRangeSelect" aria-label="Callback timing range"></select>
+          </label>
+        </section>
+        <section class="callback-summary-band" aria-label="Callback timing summary">
+          <dl>
+            <div><dt>Sampling</dt><dd id="callbackSampleRate">—</dd></div>
+            <div><dt>Generation</dt><dd id="callbackGeneration">—</dd></div>
+            <div><dt>Range</dt><dd id="callbackRange">—</dd></div>
+            <div><dt>Coverage</dt><dd id="callbackCoverage">—</dd></div>
+          </dl>
+        </section>
+        <p class="notice hidden" id="callbacksNotice" role="status"></p>
+        <section class="callback-table-section" aria-label="Callback timing percentiles">
+          <div class="callback-table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">Callback</th>
+                  <th scope="col">Samples</th>
+                  <th scope="col">Mean</th>
+                  <th scope="col">p50 approx.</th>
+                  <th scope="col">p95 approx.</th>
+                  <th scope="col">p99 approx.</th>
+                </tr>
+              </thead>
+              <tbody id="callbackTimingRows"></tbody>
+            </table>
+          </div>
         </section>
       </section>
 

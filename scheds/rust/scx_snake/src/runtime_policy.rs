@@ -176,6 +176,16 @@ pub fn stat_index(slot: u32, stat: u32) -> Result<u32> {
     Ok(slot * bpf_intf::snake_stat_SNAKE_NR_STATS + stat)
 }
 
+pub fn callback_timing_index(slot: u32, callback: u32) -> Result<u32> {
+    if slot >= bpf_intf::SNAKE_LADDER_SLOTS {
+        bail!("invalid ladder slot {slot}");
+    }
+    if callback >= bpf_intf::snake_callback_SNAKE_NR_CALLBACKS {
+        bail!("invalid callback {callback}");
+    }
+    Ok(slot * bpf_intf::snake_callback_SNAKE_NR_CALLBACKS + callback)
+}
+
 pub fn cell_stat_index(slot: u32, cell: u32, stat: u32) -> Result<u32> {
     if slot >= bpf_intf::SNAKE_LADDER_SLOTS {
         bail!("invalid ladder slot {slot}");

@@ -73,6 +73,7 @@ pub fn router(context: ApiContext) -> Router {
         .route("/api/topology", get(topology))
         .route("/api/snapshot", get(snapshot))
         .route("/api/inspection", get(inspection))
+        .route("/api/callback-timing", get(callback_timing))
         .route("/api/policies", get(policies))
         .route("/api/policies/activate", post(activate_policy))
         .route("/api/events", get(events))
@@ -177,6 +178,39 @@ async fn snapshot(
 
 async fn inspection(State(context): State<ApiContext>) -> impl IntoResponse {
     Json(context.dashboard.inspection())
+}
+
+#[derive(Deserialize)]
+struct CallbackTimingQuery {
+    scope: String,
+    window_ms: Option<u64>,
+}
+
+async fn callback_timing(
+    State(context): State<ApiContext>,
+    Query(query): Query<CallbackTimingQuery>,
+) -> Result<impl IntoResponse, ApiError> {
+    match query.scope.as_str() {
+        "window" => {
+            let window_ms = query
+                .window_ms
+                .ok_or_else(|| ApiError::bad_request("window scope requires window_ms"))?;
+            context
+                .dashboard
+                .callback_timing_window(window_ms)
+                .map(Json)
+                .map_err(|error| ApiError::bad_request(error.to_string()))
+        }
+        "lifetime" if query.window_ms.is_none() => {
+            Ok(Json(context.dashboard.callback_timing_lifetime()))
+        }
+        "lifetime" => Err(ApiError::bad_request(
+            "lifetime scope does not accept window_ms",
+        )),
+        _ => Err(ApiError::bad_request(
+            "callback timing scope must be window or lifetime",
+        )),
+    }
 }
 
 async fn policies(State(context): State<ApiContext>) -> impl IntoResponse {

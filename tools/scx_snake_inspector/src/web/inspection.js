@@ -3,11 +3,28 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 
-const ROUTES = new Set(["activity", "policy", "cells"]);
+const ROUTES = new Set(["activity", "policy", "cells", "callbacks"]);
 
 export function routeFromHash(hash) {
   const route = String(hash || "").replace(/^#\/?/, "");
   return ROUTES.has(route) ? route : "activity";
+}
+
+export function formatCallbackDuration(value) {
+  if (value == null || !Number.isFinite(Number(value)) || Number(value) < 0) {
+    return "—";
+  }
+  const nanoseconds = Number(value);
+  if (nanoseconds < 1_000) {
+    return `${Math.round(nanoseconds)} ns`;
+  }
+  if (nanoseconds < 1_000_000) {
+    return `${(nanoseconds / 1_000).toFixed(2)} µs`;
+  }
+  if (nanoseconds < 1_000_000_000) {
+    return `${(nanoseconds / 1_000_000).toFixed(2)} ms`;
+  }
+  return `${(nanoseconds / 1_000_000_000).toFixed(2)} s`;
 }
 
 export function fieldReferenceGroups(reference) {

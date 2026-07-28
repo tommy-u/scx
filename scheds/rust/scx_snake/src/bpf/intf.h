@@ -8,7 +8,7 @@ typedef unsigned int	   u32;
 typedef unsigned long long u64;
 #endif
 
-#define SNAKE_ABI_VERSION 17
+#define SNAKE_ABI_VERSION 18
 #define SNAKE_MAX_RUNGS 8
 #define SNAKE_MAX_QUEUE_RUNGS 8
 #define SNAKE_LADDER_SLOTS 2
@@ -38,12 +38,29 @@ typedef unsigned long long u64;
 #define SNAKE_BASE_WEIGHT 100
 #define SNAKE_TASK_CELL_F_MANUAL (1U << 0)
 #define SNAKE_TASK_CELL_F_MANAGED (1U << 1)
+#define SNAKE_CALLBACK_TIMING_BUCKETS 64
 
 enum snake_fairness_mode {
 	SNAKE_FAIRNESS_INVALID = 0,
 	SNAKE_FAIRNESS_FIFO    = 1,
 	SNAKE_FAIRNESS_EEVDF   = 2,
 	SNAKE_FAIRNESS_VTIME   = 3,
+};
+
+enum snake_callback {
+	SNAKE_CALLBACK_SELECT_CPU = 0,
+	SNAKE_CALLBACK_ENQUEUE,
+	SNAKE_CALLBACK_DISPATCH,
+	SNAKE_CALLBACK_RUNNABLE,
+	SNAKE_CALLBACK_RUNNING,
+	SNAKE_CALLBACK_STOPPING,
+	SNAKE_CALLBACK_QUIESCENT,
+	SNAKE_NR_CALLBACKS,
+};
+
+struct snake_callback_timing {
+	u64 total_ns;
+	u64 buckets[SNAKE_CALLBACK_TIMING_BUCKETS];
 };
 
 /* Stable operation codes shared by the userspace compiler and BPF. */

@@ -17,6 +17,7 @@ import {
   compactCpuList,
   decorateCells,
   fieldReferenceGroups,
+  formatCallbackDuration,
   ladderPercentages,
   queueLadderSections,
   queueTopologyModel,
@@ -35,6 +36,15 @@ const elements = {
   activePairs: document.querySelector("#activePairs"),
   applyScope: document.querySelector("#applyScope"),
   canvas: document.querySelector("#heatmapCanvas"),
+  callbackCoverage: document.querySelector("#callbackCoverage"),
+  callbackFreshness: document.querySelector("#callbacksFreshness"),
+  callbackGeneration: document.querySelector("#callbackGeneration"),
+  callbackRange: document.querySelector("#callbackRange"),
+  callbackRangeSelect: document.querySelector("#callbackRangeSelect"),
+  callbackSampleRate: document.querySelector("#callbackSampleRate"),
+  callbacksNotice: document.querySelector("#callbacksNotice"),
+  callbacksView: document.querySelector("#callbacksView"),
+  callbackTimingRows: document.querySelector("#callbackTimingRows"),
   cgroupField: document.querySelector("#cgroupField"),
   cgroupInput: document.querySelector("#cgroupInput"),
   cellsFreshness: document.querySelector("#cellsFreshness"),
@@ -77,6 +87,10 @@ const elements = {
 };
 
 const state = {
+  callbackRange: String(initialWindowMs),
+  callbackTiming: null,
+  callbackTimingError: null,
+  callbackTimingLoading: false,
   eventSource: null,
   geometry: null,
   inspection: null,
@@ -84,6 +98,7 @@ const state = {
   inspectionLoading: false,
   inspectionSequence: 0,
   lastInspectionAt: 0,
+  lastCallbackTimingAt: 0,
   orderMode: "topology",
   popoverPinned: false,
   policyCatalog: null,
@@ -104,6 +119,7 @@ const state = {
 };
 
 configureWindowSelector();
+configureCallbackRangeSelector();
 bindControls();
 start().catch((error) => {
   setStatus("error", "Connection failed");
@@ -120,8 +136,10 @@ async function start() {
   renderRoute();
   renderHeatmap();
   await loadInspection();
+  await loadCallbackTiming();
   await loadPolicyCatalog();
   window.setInterval(loadInspection, 1_000);
+  window.setInterval(loadCallbackTiming, 1_000);
   window.setInterval(loadPolicyCatalog, 5_000);
 }
 
@@ -141,10 +159,34 @@ function configureWindowSelector() {
   }
 }
 
+function configureCallbackRangeSelector() {
+  const presets = [10_000, 30_000, 60_000, 300_000]
+    .filter((value) => value <= maxWindowMs);
+  if (initialWindowMs <= maxWindowMs && !presets.includes(initialWindowMs)) {
+    presets.push(initialWindowMs);
+    presets.sort((left, right) => left - right);
+  }
+  for (const value of presets) {
+    const option = document.createElement("option");
+    option.value = String(value);
+    option.textContent = formatDuration(value);
+    option.selected = value === initialWindowMs;
+    elements.callbackRangeSelect.append(option);
+  }
+  const lifetime = document.createElement("option");
+  lifetime.value = "lifetime";
+  lifetime.textContent = "Policy lifetime";
+  elements.callbackRangeSelect.append(lifetime);
+}
+
 function bindControls() {
   elements.windowSelect.addEventListener("change", () => {
     state.windowMs = Number(elements.windowSelect.value);
     connectEvents();
+  });
+  elements.callbackRangeSelect.addEventListener("change", () => {
+    state.callbackRange = elements.callbackRangeSelect.value;
+    loadCallbackTiming();
   });
   document.querySelectorAll('input[name="cpuOrder"]').forEach((control) => {
     control.addEventListener("change", () => {
@@ -566,7 +608,12 @@ function hideTooltip() {
 
 function renderRoute() {
   state.route = routeFromHash(window.location.hash);
-  for (const view of [elements.activityView, elements.policyView, elements.cellsView]) {
+  for (const view of [
+    elements.activityView,
+    elements.callbacksView,
+    elements.policyView,
+    elements.cellsView,
+  ]) {
     view.classList.toggle("hidden", view.dataset.view !== state.route);
   }
   elements.primaryNav.querySelectorAll("[data-route]").forEach((link) => {
@@ -581,6 +628,34 @@ function renderRoute() {
     window.requestAnimationFrame(renderHeatmap);
   } else {
     renderInspectionViews();
+  }
+}
+
+async function loadCallbackTiming() {
+  if (state.callbackTimingLoading) {
+    return;
+  }
+  state.callbackTimingLoading = true;
+  const query = state.callbackRange === "lifetime"
+    ? "scope=lifetime"
+    : `scope=window&window_ms=${Number(state.callbackRange)}`;
+  try {
+    const response = await fetch(`/api/callback-timing?${query}`, { cache: "no-store" });
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      throw new Error(body.error || `Callback timing request failed (${response.status})`);
+    }
+    state.callbackTiming = await response.json();
+    state.callbackTimingError = null;
+    state.lastCallbackTimingAt = Date.now();
+  } catch (error) {
+    state.callbackTiming = null;
+    state.callbackTimingError = error.message;
+  } finally {
+    state.callbackTimingLoading = false;
+  }
+  if (state.route === "callbacks") {
+    renderCallbackTiming();
   }
 }
 
@@ -638,7 +713,62 @@ function renderInspectionViews() {
     renderPolicy();
   } else if (state.route === "cells") {
     renderCells();
+  } else if (state.route === "callbacks") {
+    renderCallbackTiming();
   }
+}
+
+function renderCallbackTiming() {
+  const timing = state.callbackTiming;
+  elements.callbackFreshness.textContent = state.lastCallbackTimingAt
+    ? `Updated ${new Date(state.lastCallbackTimingAt).toLocaleTimeString()}`
+    : "Waiting for Snake";
+  elements.callbackSampleRate.textContent = timing?.sample_rate > 0
+    ? `1 / ${numberFormat.format(timing.sample_rate)}`
+    : "Off";
+  elements.callbackGeneration.textContent = timing?.generation == null
+    ? "—"
+    : numberFormat.format(timing.generation);
+  elements.callbackRange.textContent = timing?.scope === "lifetime"
+    ? "Policy lifetime"
+    : timing?.window_ms
+      ? formatDuration(timing.window_ms)
+      : "—";
+  elements.callbackCoverage.textContent = timing?.scope === "lifetime"
+    ? "Cumulative"
+    : timing?.observed_ms == null
+      ? "—"
+      : formatDuration(timing.observed_ms);
+
+  const message = state.callbackTimingError
+    || timing?.error
+    || (timing?.status === "unsupported"
+      ? "The active Snake scheduler does not export callback timing data."
+      : timing?.status === "disabled"
+        ? "Callback timing sampling is disabled."
+        : timing?.status === "unavailable"
+          ? "Callback timing data is unavailable."
+          : timing?.callbacks?.every((row) => Number(row.samples) === 0)
+            ? "Waiting for callback timing samples."
+            : null);
+  if (message) {
+    showElementNotice(elements.callbacksNotice, message);
+  } else {
+    hideElementNotice(elements.callbacksNotice);
+  }
+
+  const rows = timing?.callbacks || [];
+  elements.callbackTimingRows.innerHTML = rows.length === 0
+    ? '<tr><td class="callback-empty" colspan="6">No callback timing rows available.</td></tr>'
+    : rows.map((row) => `
+      <tr>
+        <th scope="row"><code>${escapeHtml(row.callback)}</code></th>
+        <td>${formatCount(row.samples)}</td>
+        <td>${escapeHtml(formatCallbackDuration(row.mean_ns))}</td>
+        <td>${escapeHtml(formatCallbackDuration(row.p50_ns))}</td>
+        <td>${escapeHtml(formatCallbackDuration(row.p95_ns))}</td>
+        <td>${escapeHtml(formatCallbackDuration(row.p99_ns))}</td>
+      </tr>`).join("");
 }
 
 function renderPolicy() {

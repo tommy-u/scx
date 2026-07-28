@@ -9,6 +9,17 @@ use std::fmt::{Display, Formatter};
 
 use serde::{Deserialize, Serialize};
 
+pub const CALLBACK_TIMING_BUCKETS: usize = 64;
+pub const CALLBACK_NAMES: [&str; 7] = [
+    "select_cpu",
+    "enqueue",
+    "dispatch",
+    "runnable",
+    "running",
+    "stopping",
+    "quiescent",
+];
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 pub struct CpuPair {
     pub from: u32,
@@ -213,6 +224,230 @@ impl RollingHistory {
             self.bins.pop_front();
         }
     }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CallbackTimingCounters {
+    pub total_ns: u64,
+    pub buckets: Vec<u64>,
+}
+
+impl CallbackTimingCounters {
+    fn zero_like(&self) -> Self {
+        Self {
+            total_ns: 0,
+            buckets: vec![0; self.buckets.len()],
+        }
+    }
+
+    fn checked_delta(&self, previous: &Self) -> Option<Self> {
+        if self.buckets.len() != previous.buckets.len() {
+            return None;
+        }
+        Some(Self {
+            total_ns: self.total_ns.checked_sub(previous.total_ns)?,
+            buckets: self
+                .buckets
+                .iter()
+                .zip(&previous.buckets)
+                .map(|(current, previous)| current.checked_sub(*previous))
+                .collect::<Option<Vec<_>>>()?,
+        })
+    }
+
+    fn add_assign(&mut self, other: &Self) {
+        self.total_ns = self.total_ns.saturating_add(other.total_ns);
+        for (total, delta) in self.buckets.iter_mut().zip(&other.buckets) {
+            *total = total.saturating_add(*delta);
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.total_ns == 0 && self.buckets.iter().all(|count| *count == 0)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CallbackTimingSnapshot {
+    pub enable_seq: u64,
+    pub generation: u64,
+    pub sample_rate: u32,
+    pub callbacks: BTreeMap<String, CallbackTimingCounters>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CallbackTimingWindow {
+    pub generation: u64,
+    pub sample_rate: u32,
+    pub observed_ms: u64,
+    pub callbacks: BTreeMap<String, CallbackTimingCounters>,
+}
+
+#[derive(Debug)]
+struct CallbackTimingBin {
+    at_ms: u64,
+    callbacks: BTreeMap<String, CallbackTimingCounters>,
+}
+
+#[derive(Debug)]
+pub struct CallbackTimingHistory {
+    max_window_ms: u64,
+    started_at_ms: Option<u64>,
+    latest: Option<CallbackTimingSnapshot>,
+    bins: VecDeque<CallbackTimingBin>,
+}
+
+impl CallbackTimingHistory {
+    pub fn new(max_window_ms: u64) -> Self {
+        assert!(max_window_ms > 0, "maximum window must be non-zero");
+        Self {
+            max_window_ms,
+            started_at_ms: None,
+            latest: None,
+            bins: VecDeque::new(),
+        }
+    }
+
+    pub fn ingest(&mut self, at_ms: u64, snapshot: CallbackTimingSnapshot) {
+        let Some(previous) = self.latest.as_ref() else {
+            self.reset(at_ms, snapshot);
+            return;
+        };
+        if previous.enable_seq != snapshot.enable_seq
+            || previous.generation != snapshot.generation
+            || previous.sample_rate != snapshot.sample_rate
+        {
+            self.reset(at_ms, snapshot);
+            return;
+        }
+        let Some(callbacks) = callback_timing_delta(&snapshot.callbacks, &previous.callbacks)
+        else {
+            self.reset(at_ms, snapshot);
+            return;
+        };
+
+        if callbacks.values().any(|timing| !timing.is_empty()) {
+            self.bins.push_back(CallbackTimingBin { at_ms, callbacks });
+        }
+        self.latest = Some(snapshot);
+        self.expire(at_ms.saturating_sub(self.max_window_ms));
+    }
+
+    pub fn reset(&mut self, at_ms: u64, snapshot: CallbackTimingSnapshot) {
+        self.started_at_ms = Some(at_ms);
+        self.latest = Some(snapshot);
+        self.bins.clear();
+    }
+
+    pub fn clear(&mut self) {
+        self.started_at_ms = None;
+        self.latest = None;
+        self.bins.clear();
+    }
+
+    pub fn lifetime(&self) -> Option<&CallbackTimingSnapshot> {
+        self.latest.as_ref()
+    }
+
+    pub fn window(
+        &self,
+        now_ms: u64,
+        window_ms: u64,
+    ) -> Result<Option<CallbackTimingWindow>, WindowError> {
+        validate_window(window_ms, self.max_window_ms)?;
+        let Some(latest) = &self.latest else {
+            return Ok(None);
+        };
+        let cutoff_ms = now_ms.saturating_sub(window_ms);
+        let mut callbacks = latest
+            .callbacks
+            .iter()
+            .map(|(name, timing)| (name.clone(), timing.zero_like()))
+            .collect::<BTreeMap<_, _>>();
+        for bin in self.bins.iter().filter(|bin| bin.at_ms > cutoff_ms) {
+            for (name, delta) in &bin.callbacks {
+                if let Some(total) = callbacks.get_mut(name) {
+                    total.add_assign(delta);
+                }
+            }
+        }
+        let observed_ms = self
+            .started_at_ms
+            .map(|started| now_ms.saturating_sub(started).min(window_ms))
+            .unwrap_or(0);
+        Ok(Some(CallbackTimingWindow {
+            generation: latest.generation,
+            sample_rate: latest.sample_rate,
+            observed_ms,
+            callbacks,
+        }))
+    }
+
+    fn expire(&mut self, cutoff_ms: u64) {
+        while self.bins.front().is_some_and(|bin| bin.at_ms <= cutoff_ms) {
+            self.bins.pop_front();
+        }
+    }
+}
+
+fn callback_timing_delta(
+    current: &BTreeMap<String, CallbackTimingCounters>,
+    previous: &BTreeMap<String, CallbackTimingCounters>,
+) -> Option<BTreeMap<String, CallbackTimingCounters>> {
+    if current.len() != previous.len() || current.keys().ne(previous.keys()) {
+        return None;
+    }
+    current
+        .iter()
+        .map(|(name, timing)| Some((name.clone(), timing.checked_delta(previous.get(name)?)?)))
+        .collect()
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub struct CallbackTimingSummary {
+    pub samples: u64,
+    pub mean_ns: Option<u64>,
+    pub p50_ns: Option<u64>,
+    pub p95_ns: Option<u64>,
+    pub p99_ns: Option<u64>,
+}
+
+pub fn summarize_callback_timing(timing: &CallbackTimingCounters) -> CallbackTimingSummary {
+    let samples = timing
+        .buckets
+        .iter()
+        .fold(0_u64, |total, count| total.saturating_add(*count));
+    CallbackTimingSummary {
+        samples,
+        mean_ns: (samples > 0).then(|| timing.total_ns / samples),
+        p50_ns: percentile_upper_bound(&timing.buckets, samples, 50, 1),
+        p95_ns: percentile_upper_bound(&timing.buckets, samples, 95, 20),
+        p99_ns: percentile_upper_bound(&timing.buckets, samples, 99, 100),
+    }
+}
+
+fn percentile_upper_bound(
+    buckets: &[u64],
+    samples: u64,
+    percentile: u64,
+    minimum_samples: u64,
+) -> Option<u64> {
+    if samples < minimum_samples {
+        return None;
+    }
+    let rank = ((u128::from(samples) * u128::from(percentile)) + 99) / 100;
+    let mut cumulative = 0_u128;
+    for (bucket, count) in buckets.iter().enumerate() {
+        cumulative += u128::from(*count);
+        if cumulative >= rank {
+            return Some(if bucket >= 63 {
+                u64::MAX
+            } else {
+                (1_u64 << (bucket + 1)) - 1
+            });
+        }
+    }
+    None
 }
 
 fn validate_window(window_ms: u64, max_window_ms: u64) -> Result<(), WindowError> {
