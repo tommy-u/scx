@@ -689,6 +689,68 @@ button:focus-visible {
   font-weight: 650;
 }
 
+.policy-ladder-section {
+  border-bottom: 1px solid var(--border);
+}
+
+.ladder-heading {
+  min-height: 48px;
+  padding: 12px 14px 0;
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.ladder-heading h4,
+.queue-policy-heading h4 {
+  font-size: 0.78rem;
+  font-weight: 750;
+}
+
+.ladder-heading > span,
+.queue-policy-heading p,
+.queue-policy-heading > span {
+  color: var(--muted);
+  font-size: 0.64rem;
+  font-weight: 650;
+}
+
+.queue-policy-block {
+  border-top: 3px solid var(--surface-muted);
+}
+
+.queue-policy-heading {
+  min-height: 58px;
+  padding: 12px 14px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  background: var(--surface-muted);
+  border-bottom: 1px solid var(--border);
+}
+
+.queue-policy-heading code {
+  color: var(--ink);
+}
+
+.queue-policy-empty {
+  padding: 12px 14px;
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  color: var(--muted);
+  background: var(--surface-muted);
+  border-top: 1px solid var(--border);
+  font-size: 0.68rem;
+}
+
+.queue-policy-empty strong {
+  color: var(--ink);
+  font-size: 0.7rem;
+}
+
 .ladder-rail {
   position: relative;
   padding: 8px 14px 0;
@@ -711,6 +773,22 @@ button:focus-visible {
   gap: 10px;
   padding: 10px 0 12px;
   border-bottom: 1px solid var(--border);
+}
+
+.queue-rung-row {
+  min-height: 80px;
+}
+
+.queue-rung-row .rung-body > header {
+  min-height: 36px;
+}
+
+.queue-ladder-terminal {
+  margin: 0 14px;
+  padding: 10px 0 12px 46px;
+  color: var(--muted);
+  font-size: 0.65rem;
+  font-weight: 650;
 }
 
 .rung-index {
@@ -833,12 +911,17 @@ button:focus-visible {
   margin: 0 14px;
   padding: 12px 0;
   display: grid;
-  grid-template-columns: auto auto minmax(120px, 1fr);
+  grid-template-columns: auto auto minmax(120px, 1fr) auto;
   align-items: center;
   gap: 8px;
   color: var(--muted);
   font-size: 0.7rem;
   font-weight: 680;
+}
+
+.fallback-destination {
+  color: var(--active);
+  white-space: nowrap;
 }
 
 .ladder-summary {
@@ -1361,6 +1444,15 @@ button:focus-visible {
 
   .rung-fields {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .fallback-row {
+    grid-template-columns: auto auto minmax(0, 1fr);
+  }
+
+  .fallback-destination {
+    grid-column: 3;
+    white-space: normal;
   }
 
   .cell-detail {

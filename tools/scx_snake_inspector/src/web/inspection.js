@@ -75,3 +75,59 @@ export function ladderPercentages(metrics) {
     miss: Math.max(0, Number(metrics?.ladder_exhaustions) || 0) * 100 / selectCalls,
   };
 }
+
+export function queueRungFlow(kind, index, count) {
+  const last = index + 1 >= count;
+  if (kind === "enqueue") {
+    return {
+      hit: "Queued → stop",
+      miss: last ? "Failure → error" : `Unavailable → rung ${index + 1}`,
+    };
+  }
+  if (kind === "dispatch") {
+    return {
+      hit: "Work → dispatch",
+      miss: last ? "Empty → wrap to rung 0" : `Empty → rung ${index + 1}`,
+    };
+  }
+  throw new Error(`Unknown queue ladder kind: ${kind}`);
+}
+
+export function queueLadderSections(queues) {
+  if (!queues) {
+    return [];
+  }
+  return [
+    {
+      kind: "enqueue",
+      title: "Enqueue",
+      behavior: "First success",
+      terminal: "All targets failed → error",
+      rungs: (queues.enqueue || []).map((rung, index, all) => ({
+        ...rung,
+        role: "target",
+        flow: queueRungFlow("enqueue", index, all.length),
+      })),
+    },
+    {
+      kind: "dispatch",
+      title: "Dispatch",
+      behavior: "Cyclic per-CPU cursor",
+      terminal: "All sources empty → replenish previous task or idle",
+      rungs: (queues.dispatch || []).map((rung, index, all) => ({
+        ...rung,
+        role: "source",
+        flow: queueRungFlow("dispatch", index, all.length),
+      })),
+    },
+  ];
+}
+
+export function selectionRungHitFlow(rung, queues) {
+  if (!queues) {
+    return "Hit → dispatch";
+  }
+  return rung?.scope === "task_cell_borrowable"
+    ? "Hit → direct dispatch"
+    : "Hit → enqueue ladder";
+}

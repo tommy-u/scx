@@ -17,9 +17,11 @@ import {
   decorateCells,
   fieldReferenceGroups,
   ladderPercentages,
+  queueLadderSections,
   routeFromHash,
   rungLadderPercentages,
   rungPercentages,
+  selectionRungHitFlow,
 } from "/assets/inspection.js";
 
 const numberFormat = new Intl.NumberFormat();
@@ -671,8 +673,15 @@ function renderSlot(slot) {
   const metricKind = slot.state === "active" ? "Live cumulative metrics" : "Frozen last-active metrics";
   const timestamp = slot.state === "active" ? slot.activated_at_ms : slot.deactivated_at_ms;
   const rungs = slot.policy.rungs
-    .map((rung, index) => renderRung(rung, index, slot.policy.rungs.length, metrics))
+    .map((rung, index) => renderRung(
+      rung,
+      index,
+      slot.policy.rungs.length,
+      metrics,
+      slot.policy.queues,
+    ))
     .join("");
+  const queueLadders = renderQueuePolicy(slot.policy.queues);
   const maskTables = slot.policy.mask_tables.length > 0
     ? slot.policy.mask_tables.map((table) => `
         <li><code>${escapeHtml(String(table.id))}</code> ${escapeHtml(table.name)}
@@ -694,17 +703,25 @@ function renderSlot(slot) {
         <div><dt>Direct dispatches</dt><dd>${formatCount(metrics.direct_dispatches)}</dd></div>
         <div><dt>Exhaustions</dt><dd>${formatCount(metrics.ladder_exhaustions)}</dd></div>
       </dl>
-      <div class="ladder-rail">${rungs}</div>
-      <dl class="ladder-summary">
-        <div><dt>Entire ladder</dt><dd>${formatCount(metrics.select_calls)} evaluations<small>${formatCount(metrics.invalid_errors)} errors</small></dd></div>
-        <div><dt>Hit</dt><dd>${formatCount(metrics.direct_dispatches)}<small>${formatPercentage(ladderRates.hit)}</small></dd></div>
-        <div><dt>Miss</dt><dd>${formatCount(metrics.ladder_exhaustions)}<small>${formatPercentage(ladderRates.miss)}</small></dd></div>
-      </dl>
-      <div class="fallback-row">
-        <span>All rungs missed</span>
-        <span aria-hidden="true">→</span>
-        ${fieldButton("Fallback", slot.policy.fallback)}
-      </div>
+      <section class="policy-ladder-section idle-ladder-section">
+        <header class="ladder-heading">
+          <h4>Idle selection</h4>
+          <span>Fixed first-match order</span>
+        </header>
+        <div class="ladder-rail">${rungs}</div>
+        <dl class="ladder-summary">
+          <div><dt>Entire ladder</dt><dd>${formatCount(metrics.select_calls)} evaluations<small>${formatCount(metrics.invalid_errors)} errors</small></dd></div>
+          <div><dt>Hit</dt><dd>${formatCount(metrics.direct_dispatches)}<small>${formatPercentage(ladderRates.hit)}</small></dd></div>
+          <div><dt>Miss</dt><dd>${formatCount(metrics.ladder_exhaustions)}<small>${formatPercentage(ladderRates.miss)}</small></dd></div>
+        </dl>
+        <div class="fallback-row">
+          <span>All rungs missed</span>
+          <span aria-hidden="true">→</span>
+          ${fieldButton("Fallback", slot.policy.fallback)}
+          ${slot.policy.queues ? '<span class="fallback-destination">→ enqueue ladder</span>' : ""}
+        </div>
+      </section>
+      ${queueLadders}
       <details class="policy-details">
         <summary>Mask tables and source policy</summary>
         <h4>Installed mask tables</h4>
@@ -712,6 +729,57 @@ function renderSlot(slot) {
         <h4>Policy source</h4>
         <pre>${escapeHtml(slot.policy.source)}</pre>
       </details>
+    </section>`;
+}
+
+function renderQueuePolicy(queues) {
+  if (!queues) {
+    return `
+      <section class="queue-policy-empty">
+        <strong>Queue callback ladders</strong>
+        <span>Not configured for this policy</span>
+      </section>`;
+  }
+  const sections = queueLadderSections(queues).map(renderQueueLadder).join("");
+  return `
+    <section class="queue-policy-block">
+      <header class="queue-policy-heading">
+        <div>
+          <h4>Queue callback ladders</h4>
+          <p>Installed with this policy generation</p>
+        </div>
+        <span>Layout <code>${escapeHtml(queues.layout)}</code></span>
+      </header>
+      ${sections}
+    </section>`;
+}
+
+function renderQueueLadder(section) {
+  const rungs = section.rungs.map((rung) => `
+    <article class="rung-row queue-rung-row">
+      <div class="rung-index" aria-label="${escapeHtml(section.title)} rung ${rung.index}">${rung.index}</div>
+      <div class="rung-body">
+        <header>
+          <div>
+            <h4>${escapeHtml(rung.operation)}</h4>
+            <p>${escapeHtml(rung.role)}</p>
+          </div>
+        </header>
+        <div class="rung-flow">
+          <span class="hit-flow">${escapeHtml(rung.flow.hit)}</span>
+          <span>${escapeHtml(rung.flow.miss)}</span>
+        </div>
+      </div>
+    </article>`).join("");
+  const cycle = section.kind === "dispatch" ? '<span aria-hidden="true">↻</span> ' : "";
+  return `
+    <section class="policy-ladder-section queue-ladder-section">
+      <header class="ladder-heading">
+        <h4>${escapeHtml(section.title)}</h4>
+        <span>${cycle}${escapeHtml(section.behavior)}</span>
+      </header>
+      <div class="ladder-rail queue-ladder-rail">${rungs}</div>
+      <p class="queue-ladder-terminal">${escapeHtml(section.terminal)}</p>
     </section>`;
 }
 
@@ -826,7 +894,7 @@ async function activateSelectedPolicy() {
   }
 }
 
-function renderRung(rung, index, count, ladderMetrics) {
+function renderRung(rung, index, count, ladderMetrics, queues) {
   const metrics = rung.metrics || {};
   const percentages = rungPercentages(metrics);
   const ladderRates = rungLadderPercentages(metrics, ladderMetrics);
@@ -854,7 +922,7 @@ function renderRung(rung, index, count, ladderMetrics) {
           ${fieldButton("Data", rung.data)}
         </div>
         <div class="rung-flow">
-          <span class="hit-flow">Hit → dispatch</span>
+          <span class="hit-flow">${escapeHtml(selectionRungHitFlow(rung, queues))}</span>
           <span>Miss → ${missDestination}</span>
         </div>
       </div>

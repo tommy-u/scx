@@ -11,9 +11,12 @@ import {
   decorateCells,
   fieldReferenceGroups,
   ladderPercentages,
+  queueLadderSections,
+  queueRungFlow,
   routeFromHash,
   rungLadderPercentages,
   rungPercentages,
+  selectionRungHitFlow,
 } from "../../src/web/inspection.js";
 
 test("inspection routes default to activity and accept policy and cells", () => {
@@ -111,4 +114,63 @@ test("ladder percentages count each select call once", () => {
     { hit: 84, miss: 12 },
   );
   assert.deepEqual(ladderPercentages({ select_calls: 0 }), { hit: 0, miss: 0 });
+});
+
+test("enqueue rung flow is first-success with a terminal affinity fallback", () => {
+  assert.deepEqual(queueRungFlow("enqueue", 0, 2), {
+    hit: "Queued → stop",
+    miss: "Unavailable → rung 1",
+  });
+  assert.deepEqual(queueRungFlow("enqueue", 1, 2), {
+    hit: "Queued → stop",
+    miss: "Failure → error",
+  });
+});
+
+test("dispatch rung flow wraps its cyclic per-CPU cursor", () => {
+  assert.deepEqual(queueRungFlow("dispatch", 0, 2), {
+    hit: "Work → dispatch",
+    miss: "Empty → rung 1",
+  });
+  assert.deepEqual(queueRungFlow("dispatch", 1, 2), {
+    hit: "Work → dispatch",
+    miss: "Empty → wrap to rung 0",
+  });
+});
+
+test("queue ladder sections preserve order and callback semantics", () => {
+  assert.deepEqual(queueLadderSections(null), []);
+
+  const sections = queueLadderSections({
+    layout: "cell_llc",
+    enqueue: [
+      { index: 0, operation: "cell" },
+      { index: 1, operation: "affinity" },
+    ],
+    dispatch: [
+      { index: 0, operation: "affinity" },
+      { index: 1, operation: "cell" },
+    ],
+  });
+
+  assert.equal(sections[0].title, "Enqueue");
+  assert.equal(sections[0].behavior, "First success");
+  assert.equal(sections[0].rungs[0].role, "target");
+  assert.equal(sections[0].rungs[1].flow.miss, "Failure → error");
+  assert.equal(sections[1].title, "Dispatch");
+  assert.equal(sections[1].behavior, "Cyclic per-CPU cursor");
+  assert.equal(sections[1].rungs[0].operation, "affinity");
+  assert.equal(sections[1].rungs[1].flow.miss, "Empty → wrap to rung 0");
+});
+
+test("idle selection hits flow into the configured queue path", () => {
+  assert.equal(selectionRungHitFlow({ scope: "task_allowed" }, null), "Hit → dispatch");
+  assert.equal(
+    selectionRungHitFlow({ scope: "task_cell" }, { layout: "cell" }),
+    "Hit → enqueue ladder",
+  );
+  assert.equal(
+    selectionRungHitFlow({ scope: "task_cell_borrowable" }, { layout: "cell" }),
+    "Hit → direct dispatch",
+  );
 });

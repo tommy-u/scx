@@ -6,7 +6,8 @@ use serde::Serialize;
 
 use crate::mask_tables::ResolvedMaskTable;
 use crate::policy::{
-    CompiledPolicy, CompiledRung, Fallback, InputSource, MaskTableSource, Opcode, QueueMaskKind,
+    CompiledPolicy, CompiledRung, Fallback, InputSource, MaskTableSource, Opcode,
+    QueueDispatchSource, QueueEnqueueTarget, QueueLayout, QueueMaskKind, QueuePolicy,
     RUNG_FLAG_INTERSECT_TASK_ALLOWED, RUNG_FLAG_PICK_IDLE_CORE, RUNG_FLAG_PICK_RANDOM,
 };
 use crate::stats::{Metrics, RungMetrics};
@@ -93,7 +94,21 @@ pub struct PolicyInspectionView {
     pub source: String,
     pub fallback: FieldReferenceView,
     pub rungs: Vec<RungInspectionView>,
+    pub queues: Option<QueuePolicyInspectionView>,
     pub mask_tables: Vec<MaskTableInspectionView>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct QueueRungInspectionView {
+    pub index: u32,
+    pub operation: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct QueuePolicyInspectionView {
+    pub layout: String,
+    pub enqueue: Vec<QueueRungInspectionView>,
+    pub dispatch: Vec<QueueRungInspectionView>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -286,9 +301,46 @@ fn slot_view(
             source: policy.source.clone(),
             fallback: fallback_reference(policy.compiled.fallback),
             rungs,
+            queues: policy.compiled.queues.as_ref().map(queue_policy_view),
             mask_tables,
         }),
         metrics,
+    }
+}
+
+fn queue_policy_view(queues: &QueuePolicy) -> QueuePolicyInspectionView {
+    QueuePolicyInspectionView {
+        layout: match queues.layout {
+            QueueLayout::Cell => "cell",
+            QueueLayout::CellLlc => "cell_llc",
+        }
+        .into(),
+        enqueue: queues
+            .enqueue
+            .iter()
+            .enumerate()
+            .map(|(index, target)| QueueRungInspectionView {
+                index: index as u32,
+                operation: match target {
+                    QueueEnqueueTarget::Cell => "cell",
+                    QueueEnqueueTarget::Affinity => "affinity",
+                }
+                .into(),
+            })
+            .collect(),
+        dispatch: queues
+            .dispatch
+            .iter()
+            .enumerate()
+            .map(|(index, source)| QueueRungInspectionView {
+                index: index as u32,
+                operation: match source {
+                    QueueDispatchSource::Cell => "cell",
+                    QueueDispatchSource::Affinity => "affinity",
+                }
+                .into(),
+            })
+            .collect(),
     }
 }
 
@@ -876,5 +928,73 @@ scope = "task_cell_borrowable"
             format!("0x{:08x}", RUNG_FLAG_PICK_RANDOM | RUNG_FLAG_PICK_IDLE_CORE)
         );
         assert_eq!(rung.data.selected.value, "queue_mask:2");
+    }
+
+    #[test]
+    fn queue_callback_ladders_round_trip_in_configured_order() {
+        let inspector = Inspector::new(slot(
+            0,
+            4,
+            r#"
+[queues]
+layout = "cell_llc"
+
+[[queues.enqueue]]
+target = "cell"
+
+[[queues.enqueue]]
+target = "affinity"
+
+[[queues.dispatch]]
+source = "cell"
+
+[[queues.dispatch]]
+source = "affinity"
+
+[[cell]]
+id = 7
+cpus = "0-3"
+
+[[rung]]
+operation = "pick_idle"
+scope = "task_cell"
+"#,
+            1_000,
+        ));
+
+        let view = inspector.snapshot(metrics(4, 1), Vec::new());
+        let queues = view.slots[0]
+            .policy
+            .as_ref()
+            .unwrap()
+            .queues
+            .as_ref()
+            .expect("queue policy should be inspected");
+
+        assert_eq!(queues.layout, "cell_llc");
+        assert_eq!(
+            queues
+                .enqueue
+                .iter()
+                .map(|rung| (rung.index, rung.operation.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(0, "cell"), (1, "affinity")]
+        );
+        assert_eq!(
+            queues
+                .dispatch
+                .iter()
+                .map(|rung| (rung.index, rung.operation.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(0, "cell"), (1, "affinity")]
+        );
+    }
+
+    #[test]
+    fn placement_only_policy_has_no_queue_callback_ladders() {
+        let inspector = Inspector::new(slot(0, 5, FIRST_POLICY, 1_000));
+        let view = inspector.snapshot(metrics(5, 1), Vec::new());
+
+        assert!(view.slots[0].policy.as_ref().unwrap().queues.is_none());
     }
 }
