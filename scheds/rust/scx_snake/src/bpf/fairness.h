@@ -5,6 +5,7 @@
 const volatile u32 fairness_mode = SNAKE_FAIRNESS_FIFO;
 
 struct snake_task_runtime {
+	struct bpf_cpumask __kptr *queue_cpumask;
 	u64 started_exec_runtime;
 	u64 vruntime;
 	u64 affinity_vruntime;
@@ -17,6 +18,7 @@ struct snake_task_runtime {
 	u32 run_cell_index;
 	u32 run_owner_cell_index;
 	u32 selected_cpu;
+	u32 direct_cell_index;
 	u8  runtime_valid;
 	u8  initialized;
 	u8  runnable_accounted;
@@ -27,6 +29,7 @@ struct snake_task_runtime {
 	u8  selected_cpu_valid;
 	u8  queue_class;
 	u8  run_queue_class;
+	u8  direct_cell_valid;
 };
 
 struct snake_eevdf_domain {

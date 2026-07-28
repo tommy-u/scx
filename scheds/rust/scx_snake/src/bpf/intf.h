@@ -8,7 +8,7 @@ typedef unsigned int	   u32;
 typedef unsigned long long u64;
 #endif
 
-#define SNAKE_ABI_VERSION 14
+#define SNAKE_ABI_VERSION 15
 #define SNAKE_MAX_RUNGS 8
 #define SNAKE_MAX_QUEUE_RUNGS 8
 #define SNAKE_LADDER_SLOTS 2
@@ -26,6 +26,7 @@ typedef unsigned long long u64;
 #define SNAKE_QUEUE_LLC_NONE 0xffffffffU
 #define SNAKE_RUNG_F_INTERSECT_TASK_ALLOWED (1U << 0)
 #define SNAKE_RUNG_F_PICK_IDLE_CORE (1U << 1)
+#define SNAKE_RUNG_F_PICK_RANDOM (1U << 2)
 #define SNAKE_EEVDF_SLICE_NS 5000000ULL
 #define SNAKE_EEVDF_PROMOTE_BATCH 64
 #define SNAKE_EEVDF_ELIGIBLE_DSQ 0
@@ -51,6 +52,7 @@ enum snake_opcode {
 	SNAKE_OP_PICK_RANDOM_IDLE     = 4,
 	SNAKE_OP_KERNEL_DEFAULT	      = 5,
 	SNAKE_OP_SYNC_WAKE_AFFINE     = 6,
+	SNAKE_OP_PICK_IDLE_QUEUE_MASK = 7,
 };
 
 /* Exhaustion behavior applied when every select rung misses. */
@@ -66,6 +68,13 @@ enum snake_input_source {
 	SNAKE_INPUT_CPU_PREV	      = 1,
 	SNAKE_INPUT_MASK_TASK_ALLOWED = 2,
 	SNAKE_INPUT_TASK_CELL	      = 3,
+	SNAKE_INPUT_QUEUE_CELL	      = 4,
+};
+
+enum snake_queue_mask_kind {
+	SNAKE_QUEUE_MASK_INVALID    = 0,
+	SNAKE_QUEUE_MASK_PRIMARY    = 1,
+	SNAKE_QUEUE_MASK_BORROWABLE = 2,
 };
 
 enum snake_enqueue_opcode {

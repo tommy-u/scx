@@ -670,6 +670,13 @@ fn install_ladder_slot(
 }
 
 fn operation_label(rung: &CompiledRung) -> &'static str {
+    if rung.flags & policy::RUNG_FLAG_PICK_RANDOM != 0 {
+        return if rung.flags & policy::RUNG_FLAG_PICK_IDLE_CORE != 0 {
+            "pick_random_idle_core"
+        } else {
+            "pick_random_idle"
+        };
+    }
     if rung.flags & policy::RUNG_FLAG_PICK_IDLE_CORE != 0 {
         return match rung.opcode {
             Opcode::PickRandomIdle => "pick_random_idle_core",
@@ -679,7 +686,7 @@ fn operation_label(rung: &CompiledRung) -> &'static str {
 
     match rung.opcode {
         Opcode::ClaimIdle => "claim_idle",
-        Opcode::PickIdle | Opcode::PickIdleMaskTable => "pick_idle",
+        Opcode::PickIdle | Opcode::PickIdleMaskTable | Opcode::PickIdleQueueMask => "pick_idle",
         Opcode::PickRandomIdle => "pick_random_idle",
         Opcode::KernelDefault => "kernel_default",
         Opcode::SyncWakeAffine => "sync_wake_affine",
@@ -703,9 +710,17 @@ fn scope_label<'policy>(
                 .map(|table| table.name.as_str())
                 .with_context(|| format!("compiled rung references missing mask table {table_id}"))
         }
+        (Opcode::PickIdleQueueMask, InputSource::QueueCell) => match rung.data {
+            value if value == policy::QueueMaskKind::Primary as u64 => Ok("task_cell"),
+            value if value == policy::QueueMaskKind::Borrowable as u64 => {
+                Ok("task_cell_borrowable")
+            }
+            _ => bail!("queue-mask rung references unknown mask kind {}", rung.data),
+        },
         (_, InputSource::CpuPrev) => Ok("previous_cpu"),
         (_, InputSource::MaskTaskAllowed) => Ok("task_allowed"),
         (_, InputSource::TaskCell) => bail!("operation cannot consume a task-cell input"),
+        (_, InputSource::QueueCell) => bail!("operation cannot consume a queue-cell input"),
     }
 }
 
@@ -1433,7 +1448,7 @@ scope = "task_allowed"
         let policy = policy::compile_policy(policy_source()).expect("policy should compile");
         let encoded = encode_ladder(&policy, 42).expect("ladder should encode");
 
-        assert_eq!(bpf_intf::SNAKE_ABI_VERSION, 14);
+        assert_eq!(bpf_intf::SNAKE_ABI_VERSION, 15);
         assert_eq!(size_of::<bpf_intf::snake_compiled_ladder>(), 352);
         assert_eq!(offset_of!(bpf_intf::snake_compiled_ladder, generation), 0);
         assert_eq!(
@@ -1890,6 +1905,39 @@ scope = "task_cell"
         assert_eq!(encoded.data, 0);
         assert_eq!(size_of::<bpf_intf::snake_task_cell>(), 8);
         assert_eq!(policy::MAX_CELL_IDS, bpf_intf::SNAKE_MAX_CPUS);
+    }
+
+    #[test]
+    fn rust_borrowing_instruction_matches_the_bpf_abi() {
+        let compiled = policy::compile_policy(
+            r#"
+[queues]
+layout = "cell"
+[[cell]]
+id = 7
+cpus = "0-3"
+[[rung]]
+operation = "pick_idle_core"
+scope = "task_cell_borrowable"
+"#,
+        )
+        .expect("borrowing policy should compile");
+        let encoded = encode_rung(compiled.rungs[0]);
+
+        assert_eq!(
+            encoded.opcode,
+            bpf_intf::snake_opcode_SNAKE_OP_PICK_IDLE_QUEUE_MASK
+        );
+        assert_eq!(
+            encoded.input,
+            bpf_intf::snake_input_source_SNAKE_INPUT_QUEUE_CELL
+        );
+        assert_eq!(encoded.flags, bpf_intf::SNAKE_RUNG_F_PICK_IDLE_CORE);
+        assert_eq!(
+            encoded.data,
+            u64::from(bpf_intf::snake_queue_mask_kind_SNAKE_QUEUE_MASK_BORROWABLE)
+        );
+        assert!(compiled.mask_tables.is_empty());
     }
 
     #[test]

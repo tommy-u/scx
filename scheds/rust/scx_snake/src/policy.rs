@@ -12,6 +12,7 @@ pub const MAX_QUEUE_CELLS: usize = 32;
 pub const MAX_QUEUE_RUNGS: usize = 8;
 pub const RUNG_FLAG_INTERSECT_TASK_ALLOWED: u32 = 1;
 pub const RUNG_FLAG_PICK_IDLE_CORE: u32 = 1 << 1;
+pub const RUNG_FLAG_PICK_RANDOM: u32 = 1 << 2;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u32)]
@@ -22,6 +23,7 @@ pub enum Opcode {
     PickRandomIdle = 4,
     KernelDefault = 5,
     SyncWakeAffine = 6,
+    PickIdleQueueMask = 7,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -30,6 +32,14 @@ pub enum InputSource {
     CpuPrev = 1,
     MaskTaskAllowed = 2,
     TaskCell = 3,
+    QueueCell = 4,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u64)]
+pub enum QueueMaskKind {
+    Primary = 1,
+    Borrowable = 2,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -190,6 +200,7 @@ impl Opcode {
             Self::PickRandomIdle => "pick_random_idle",
             Self::KernelDefault => "kernel_default",
             Self::SyncWakeAffine => "sync_wake_affine",
+            Self::PickIdleQueueMask => "pick_idle_queue_mask",
         }
     }
 }
@@ -200,6 +211,7 @@ impl InputSource {
             Self::CpuPrev => "cpu_prev",
             Self::MaskTaskAllowed => "mask_task_allowed",
             Self::TaskCell => "task_cell",
+            Self::QueueCell => "queue_cell",
         }
     }
 }
@@ -324,6 +336,7 @@ pub fn compile_policy(source: &str) -> Result<CompiledPolicy, PolicyError> {
             rung,
             &partitions,
             !cells.is_empty(),
+            queues.is_some(),
             &mut mask_tables,
         )?);
     }
@@ -561,7 +574,12 @@ fn compile_partitions(
     for (index, partition) in partitions.iter().enumerate() {
         if matches!(
             partition.name.as_str(),
-            "previous_cpu" | "previous_llc" | "previous_node" | "task_allowed" | "task_cell"
+            "previous_cpu"
+                | "previous_llc"
+                | "previous_node"
+                | "task_allowed"
+                | "task_cell"
+                | "task_cell_borrowable"
         ) {
             return Err(PolicyError(format!(
                 "partition {index}: name `{}` is reserved",
@@ -607,11 +625,17 @@ fn compile_rung(
     rung: &SemanticRung,
     partitions: &BTreeMap<String, MaskTableSource>,
     has_cells: bool,
+    queue_mode: bool,
     mask_tables: &mut Vec<MaskTableSpec>,
 ) -> Result<CompiledRung, PolicyError> {
     if !matches!(
         rung.scope.as_str(),
-        "previous_cpu" | "previous_llc" | "previous_node" | "task_allowed" | "task_cell"
+        "previous_cpu"
+            | "previous_llc"
+            | "previous_node"
+            | "task_allowed"
+            | "task_cell"
+            | "task_cell_borrowable"
     ) && !partitions.contains_key(&rung.scope)
     {
         return Err(PolicyError(format!(
@@ -619,9 +643,48 @@ fn compile_rung(
             rung.scope
         )));
     }
-    if rung.scope == "task_cell" && !has_cells {
+    if rung.scope == "task_cell" && !has_cells && !queue_mode {
         return Err(PolicyError(format!(
             "rung {index}: scope `task_cell` requires at least one cell"
+        )));
+    }
+    if rung.scope == "task_cell_borrowable" && !queue_mode {
+        return Err(PolicyError(format!(
+            "rung {index}: scope `task_cell_borrowable` requires a [queues] policy"
+        )));
+    }
+
+    if queue_mode
+        && matches!(rung.scope.as_str(), "task_cell" | "task_cell_borrowable")
+        && matches!(
+            rung.operation.as_str(),
+            "pick_idle" | "pick_idle_core" | "pick_random_idle" | "pick_random_idle_core"
+        )
+    {
+        let data = if rung.scope == "task_cell" {
+            QueueMaskKind::Primary
+        } else {
+            QueueMaskKind::Borrowable
+        };
+        return Ok(CompiledRung {
+            opcode: Opcode::PickIdleQueueMask,
+            input: InputSource::QueueCell,
+            flags: if rung.operation.ends_with("_core") {
+                RUNG_FLAG_PICK_IDLE_CORE
+            } else {
+                0
+            } | if rung.operation.starts_with("pick_random") {
+                RUNG_FLAG_PICK_RANDOM
+            } else {
+                0
+            },
+            data: data as u64,
+        });
+    }
+    if rung.scope == "task_cell_borrowable" {
+        return Err(PolicyError(format!(
+            "rung {index}: operation `{}` is incompatible with scope `{}`",
+            rung.operation, rung.scope
         )));
     }
 
@@ -967,6 +1030,83 @@ scope = "task_cell"
         assert!(policy.dump().contains("input=task_cell"));
         assert_eq!(policy.cells[&7], BTreeSet::from([0, 1, 2, 3]));
         assert_eq!(policy.cells[&8], BTreeSet::from([2, 3, 4, 5]));
+    }
+
+    #[test]
+    fn queue_mode_lowers_primary_and_borrowable_cell_scopes_without_mask_tables() {
+        let policy = compile_policy(
+            r#"
+[queues]
+layout = "cell"
+
+[[cell]]
+id = 7
+cpus = "0-3"
+
+[[rung]]
+operation = "pick_idle"
+scope = "task_cell"
+
+[[rung]]
+operation = "pick_idle"
+scope = "task_cell_borrowable"
+"#,
+        )
+        .expect("queue cell scopes should compile");
+
+        assert!(policy.mask_tables.is_empty());
+        assert_eq!(policy.rungs[0].opcode, Opcode::PickIdleQueueMask);
+        assert_eq!(policy.rungs[0].input, InputSource::QueueCell);
+        assert_eq!(policy.rungs[0].data, QueueMaskKind::Primary as u64);
+        assert_eq!(policy.rungs[1].opcode, Opcode::PickIdleQueueMask);
+        assert_eq!(policy.rungs[1].input, InputSource::QueueCell);
+        assert_eq!(policy.rungs[1].data, QueueMaskKind::Borrowable as u64);
+    }
+
+    #[test]
+    fn queue_cell_idle_operations_preserve_random_and_core_semantics() {
+        let cases = [
+            ("pick_idle", 0),
+            ("pick_idle_core", RUNG_FLAG_PICK_IDLE_CORE),
+            ("pick_random_idle", RUNG_FLAG_PICK_RANDOM),
+            (
+                "pick_random_idle_core",
+                RUNG_FLAG_PICK_RANDOM | RUNG_FLAG_PICK_IDLE_CORE,
+            ),
+        ];
+
+        for (operation, flags) in cases {
+            let policy = compile_policy(&format!(
+                r#"
+[queues]
+layout = "cell"
+[[rung]]
+operation = "{operation}"
+scope = "task_cell_borrowable"
+"#
+            ))
+            .unwrap_or_else(|error| panic!("{operation} should compile: {error}"));
+
+            assert_eq!(policy.rungs[0].opcode, Opcode::PickIdleQueueMask);
+            assert_eq!(policy.rungs[0].flags, flags);
+            assert_eq!(policy.rungs[0].data, QueueMaskKind::Borrowable as u64);
+        }
+    }
+
+    #[test]
+    fn borrowing_scope_requires_queue_mode() {
+        let error = error_for(
+            r#"
+[[cell]]
+id = 7
+cpus = "0-3"
+[[rung]]
+operation = "pick_idle"
+scope = "task_cell_borrowable"
+"#,
+        );
+
+        assert!(error.contains("requires a [queues] policy"), "{error}");
     }
 
     #[test]

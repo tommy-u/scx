@@ -81,6 +81,7 @@ s32 BPF_STRUCT_OPS(snake_select_cpu, struct task_struct *p, s32 prev_cpu,
 	struct snake_ladder_ctx ladder_ctx = {};
 	u64 dispatch_flags = 0;
 	u64 started_at	   = bpf_ktime_get_ns();
+	u32 queue_cell_index = SNAKE_QUEUE_CELL_NONE;
 	s32 cpu;
 
 	if (acquire_active_ladder(&ladder_ctx)) {
@@ -90,9 +91,24 @@ s32 BPF_STRUCT_OPS(snake_select_cpu, struct task_struct *p, s32 prev_cpu,
 	stat_inc(&ladder_ctx, SNAKE_STAT_SELECT_CALLS);
 
 	cpu = walk_policy_ladder(&ladder_ctx, p, prev_cpu, wake_flags,
-				 &dispatch_flags);
+				 &dispatch_flags, &queue_cell_index);
 	if (cpu >= 0) {
 		if (queue_topology_enabled()) {
+			if (dispatch_flags & SNAKE_SELECT_F_BORROWED) {
+				if (queue_cell_index == SNAKE_QUEUE_CELL_NONE ||
+				    queue_fairness_direct_borrow(
+					    &ladder_ctx, p, cpu, queue_cell_index)) {
+					scx_bpf_error(
+						"snake failed to direct-borrow CPU %d for pid %d",
+						cpu, p->pid);
+					release_active_ladder(&ladder_ctx);
+					return -1;
+				}
+				stat_inc(&ladder_ctx, SNAKE_STAT_DIRECT_DISPATCHES);
+				finish_select(&ladder_ctx, started_at);
+				release_active_ladder(&ladder_ctx);
+				return cpu;
+			}
 			if (queue_fairness_select_cpu(&ladder_ctx, p, cpu)) {
 				scx_bpf_error("snake failed to record queue target for pid %d",
 					      p->pid);
@@ -274,6 +290,11 @@ void BPF_STRUCT_OPS(snake_quiescent, struct task_struct *p, u64 deq_flags)
 		return;
 	}
 	stat_inc(&ladder_ctx, SNAKE_STAT_QUIESCENT);
+	if (queue_topology_enabled()) {
+		queue_fairness_cancel_direct(&ladder_ctx, p);
+		release_active_ladder(&ladder_ctx);
+		return;
+	}
 	fairness_quiescent(&ladder_ctx, p, deq_flags);
 	release_active_ladder(&ladder_ctx);
 }
@@ -288,6 +309,32 @@ void BPF_STRUCT_OPS(snake_set_weight, struct task_struct *p, u32 weight)
 	}
 	fairness_set_weight(&ladder_ctx, p, weight);
 	release_active_ladder(&ladder_ctx);
+}
+
+s32 BPF_STRUCT_OPS(snake_init_task, struct task_struct *p,
+		   struct scx_init_task_args *args)
+{
+	struct snake_task_runtime *runtime;
+	struct bpf_cpumask	 *mask, *stale;
+
+	(void)args;
+	if (!queue_topology_enabled())
+		return 0;
+	runtime = bpf_task_storage_get(&task_runtimes, p, NULL,
+				       BPF_LOCAL_STORAGE_GET_F_CREATE);
+	if (!runtime)
+		return -ENOMEM;
+	if (runtime->queue_cpumask)
+		return 0;
+	mask = bpf_cpumask_create();
+	if (!mask)
+		return -ENOMEM;
+	stale = bpf_kptr_xchg(&runtime->queue_cpumask, mask);
+	if (stale) {
+		bpf_cpumask_release(stale);
+		return -EINVAL;
+	}
+	return 0;
 }
 
 /* Validate the published ladder before the scheduler can attach. */
@@ -309,6 +356,11 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(snake_init)
 	ret = fairness_init();
 	if (ret) {
 		scx_bpf_error("snake fairness initialization failed: %d", ret);
+		return ret;
+	}
+	ret = queue_init_cell_masks();
+	if (ret) {
+		scx_bpf_error("snake queue mask initialization failed: %d", ret);
 		return ret;
 	}
 	ret = create_queue_topology_dsqs();
@@ -338,6 +390,7 @@ void BPF_STRUCT_OPS(snake_exit, struct scx_exit_info *ei)
 }
 
 SCX_OPS_DEFINE(snake_ops, .select_cpu = (void *)snake_select_cpu,
+	       .init_task  = (void *)snake_init_task,
 	       .enqueue	  = (void *)snake_enqueue,
 	       .dispatch  = (void *)snake_dispatch,
 	       .runnable  = (void *)snake_runnable,

@@ -77,6 +77,7 @@ queue_ladder_enqueue(struct snake_ladder_ctx *ctx, struct task_struct *p,
 	s32			   selected_cpu = -1;
 	u32			   i;
 
+	queue_fairness_cancel_direct(ctx, p);
 	runtime = queue_fairness_prepare_runnable(ctx, p);
 	if (!runtime)
 		return -EINVAL;

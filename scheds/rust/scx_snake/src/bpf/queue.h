@@ -4,6 +4,8 @@
 
 #define SNAKE_QUEUE_CLASS_NORMAL 0
 #define SNAKE_QUEUE_CLASS_AFFINITY 1
+#define SNAKE_SELECT_F_BORROWED (1ULL << 63)
+#define SNAKE_QUEUE_CELL_NONE 0xffffffffU
 
 struct snake_queue_cpu_state {
 	u64 generation;
@@ -159,6 +161,91 @@ queue_pick_allowed_cpu(const struct task_struct *p, s32 preferred)
 			return cpu;
 	}
 	return -ENOENT;
+}
+
+static __always_inline int
+queue_build_cpumask(struct bpf_cpumask *mask,
+		    const struct snake_mask_data *data)
+{
+	u32 cpu;
+
+	if (!mask || !data || !data->valid)
+		return -EINVAL;
+	bpf_cpumask_clear(mask);
+	bpf_for(cpu, 0, SNAKE_MAX_CPUS)
+	{
+		bool set;
+
+		if (cpu >= nr_cpu_ids)
+			break;
+		set = queue_mask_contains(data, cpu);
+		if (set)
+			bpf_cpumask_set_cpu(cpu, mask);
+	}
+	return 0;
+}
+
+static __always_inline int queue_init_cell_masks(void)
+{
+	struct snake_queue_header *header = queue_config();
+	u32 i;
+
+	if (!header || header->layout == SNAKE_QUEUE_LAYOUT_NONE)
+		return 0;
+	bpf_for(i, 0, SNAKE_MAX_QUEUE_CELLS)
+	{
+		struct snake_queue_cell *cell;
+		struct snake_queue_cell_masks *slot;
+		struct bpf_cpumask *primary, *borrowable, *stale;
+
+		if (i >= header->nr_cells)
+			break;
+		cell = queue_cell(i);
+		slot = bpf_map_lookup_elem(&queue_cell_masks, &i);
+		if (!cell || !slot)
+			return -EINVAL;
+		primary = bpf_cpumask_create();
+		if (!primary)
+			return -ENOMEM;
+		if (queue_build_cpumask(primary, &cell->primary)) {
+			bpf_cpumask_release(primary);
+			return -EINVAL;
+		}
+		stale = bpf_kptr_xchg(&slot->primary, primary);
+		if (stale) {
+			bpf_cpumask_release(stale);
+			return -EINVAL;
+		}
+
+		borrowable = bpf_cpumask_create();
+		if (!borrowable)
+			return -ENOMEM;
+		if (queue_build_cpumask(borrowable, &cell->borrowable)) {
+			bpf_cpumask_release(borrowable);
+			return -EINVAL;
+		}
+		stale = bpf_kptr_xchg(&slot->borrowable, borrowable);
+		if (stale) {
+			bpf_cpumask_release(stale);
+			return -EINVAL;
+		}
+	}
+	return 0;
+}
+
+static __always_inline const struct cpumask *
+queue_cell_mask(u32 index, u32 kind)
+{
+	struct snake_queue_cell_masks *slot;
+
+	slot = bpf_map_lookup_elem(&queue_cell_masks, &index);
+	if (!slot)
+		return NULL;
+	if (kind == SNAKE_QUEUE_MASK_PRIMARY)
+		return (const struct cpumask *)slot->primary;
+	if (kind == SNAKE_QUEUE_MASK_BORROWABLE)
+		return (const struct cpumask *)slot->borrowable;
+	return NULL;
 }
 
 static __always_inline int validate_queue_topology(void)
