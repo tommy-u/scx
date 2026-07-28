@@ -30,7 +30,9 @@ use inspection::{InspectionView, Inspector, SlotPolicy};
 use libbpf_rs::{MapCore as _, MapFlags, OpenObject, ProgramInput};
 use log::{debug, info, warn};
 use mask_tables::{dump_mask_tables, resolve_mask_tables, ResolvedMaskTable};
-use policy::{CompiledPolicy, CompiledRung, InputSource, Opcode};
+use policy::{
+    CompiledPolicy, CompiledRung, InputSource, Opcode, QueueDispatchSource, QueueEnqueueTarget,
+};
 use queue_topology::{dump_queue_topology, resolve_host_queue_topology};
 use runtime_policy::RuntimePolicy;
 use scx_snake::fairness::FairnessMode;
@@ -233,6 +235,47 @@ fn encode_ladder(
         *destination = encode_rung(*rung);
     }
 
+    let mut enqueue_rungs = std::array::from_fn(|_| bpf_intf::snake_queue_rung {
+        opcode: 0,
+        flags: 0,
+    });
+    let mut dispatch_rungs = std::array::from_fn(|_| bpf_intf::snake_queue_rung {
+        opcode: 0,
+        flags: 0,
+    });
+    let (nr_enqueue_rungs, nr_dispatch_rungs) = if let Some(queues) = &policy.queues {
+        for (destination, target) in enqueue_rungs.iter_mut().zip(&queues.enqueue) {
+            destination.opcode = match target {
+                QueueEnqueueTarget::Cell => bpf_intf::snake_enqueue_opcode_SNAKE_ENQUEUE_OP_CELL,
+                QueueEnqueueTarget::Affinity => {
+                    bpf_intf::snake_enqueue_opcode_SNAKE_ENQUEUE_OP_AFFINITY
+                }
+            };
+        }
+        for (destination, source) in dispatch_rungs.iter_mut().zip(&queues.dispatch) {
+            destination.opcode = match source {
+                QueueDispatchSource::Cell => bpf_intf::snake_dispatch_opcode_SNAKE_DISPATCH_OP_CELL,
+                QueueDispatchSource::Affinity => {
+                    bpf_intf::snake_dispatch_opcode_SNAKE_DISPATCH_OP_AFFINITY
+                }
+            };
+        }
+        (
+            queues
+                .enqueue
+                .len()
+                .try_into()
+                .context("enqueue rung count does not fit the BPF ABI")?,
+            queues
+                .dispatch
+                .len()
+                .try_into()
+                .context("dispatch rung count does not fit the BPF ABI")?,
+        )
+    } else {
+        (0, 0)
+    };
+
     Ok(bpf_intf::snake_compiled_ladder {
         generation,
         policy_abi_version: bpf_intf::SNAKE_ABI_VERSION,
@@ -248,6 +291,10 @@ fn encode_ladder(
             .context("mask table count does not fit the BPF ABI")?,
         fallback_mode: policy.fallback as u32,
         rungs,
+        nr_enqueue_rungs,
+        nr_dispatch_rungs,
+        enqueue_rungs,
+        dispatch_rungs,
     })
 }
 
@@ -414,6 +461,32 @@ fn install_queue_topology(
         .queue_header
         .update(&key.to_ne_bytes(), bytes_of(&encoded.header), MapFlags::ANY)
         .context("publishing queue topology header")?;
+    Ok(())
+}
+
+fn validate_queue_callback_replacement(
+    active: &CompiledPolicy,
+    candidate: &CompiledPolicy,
+) -> Result<()> {
+    let (Some(active), Some(candidate)) = (&active.queues, &candidate.queues) else {
+        return Ok(());
+    };
+    for target in &active.enqueue {
+        if !candidate.enqueue.contains(target) {
+            bail!(
+                "cannot remove active queue enqueue target `{}` during live replacement",
+                target.as_str()
+            );
+        }
+    }
+    for source in &active.dispatch {
+        if !candidate.dispatch.contains(source) {
+            bail!(
+                "cannot remove active queue dispatch source `{}` during live replacement",
+                source.as_str()
+            );
+        }
+    }
     Ok(())
 }
 
@@ -971,6 +1044,7 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
                         "replacement changes the attachment-time queue topology; restart Snake to apply it"
                     );
                 }
+                validate_queue_callback_replacement(&previous_policy, policy)?;
                 let tables = resolve_mask_tables(policy)?;
                 activated_tables = Some(tables.clone());
                 Ok(tables)
@@ -1034,6 +1108,7 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
                 "candidate changes the attachment-time queue topology; restart Snake to apply it"
             );
         }
+        validate_queue_callback_replacement(&self.runtime.compiled, &policy)?;
         resolve_mask_tables(&policy).context("resolving candidate policy mask tables")?;
         Ok(runtime_policy::PolicyValidationResponse::from_policy(
             &policy,
@@ -1358,8 +1433,8 @@ scope = "task_allowed"
         let policy = policy::compile_policy(policy_source()).expect("policy should compile");
         let encoded = encode_ladder(&policy, 42).expect("ladder should encode");
 
-        assert_eq!(bpf_intf::SNAKE_ABI_VERSION, 13);
-        assert_eq!(size_of::<bpf_intf::snake_compiled_ladder>(), 216);
+        assert_eq!(bpf_intf::SNAKE_ABI_VERSION, 14);
+        assert_eq!(size_of::<bpf_intf::snake_compiled_ladder>(), 352);
         assert_eq!(offset_of!(bpf_intf::snake_compiled_ladder, generation), 0);
         assert_eq!(
             offset_of!(bpf_intf::snake_compiled_ladder, policy_abi_version),
@@ -1375,6 +1450,22 @@ scope = "task_allowed"
             20
         );
         assert_eq!(offset_of!(bpf_intf::snake_compiled_ladder, rungs), 24);
+        assert_eq!(
+            offset_of!(bpf_intf::snake_compiled_ladder, nr_enqueue_rungs),
+            216
+        );
+        assert_eq!(
+            offset_of!(bpf_intf::snake_compiled_ladder, nr_dispatch_rungs),
+            220
+        );
+        assert_eq!(
+            offset_of!(bpf_intf::snake_compiled_ladder, enqueue_rungs),
+            224
+        );
+        assert_eq!(
+            offset_of!(bpf_intf::snake_compiled_ladder, dispatch_rungs),
+            288
+        );
         assert_eq!(encoded.generation, 42);
         assert_eq!(encoded.policy_abi_version, bpf_intf::SNAKE_ABI_VERSION);
         assert_eq!(encoded.nr_rungs, 2);
@@ -1394,6 +1485,78 @@ scope = "task_allowed"
         assert_eq!(encoded.rungs[2].opcode, 0);
         assert_eq!(encoded.rungs[2].reserved, 0);
         assert_eq!(encoded.rungs[2].data, 0);
+        assert_eq!(encoded.nr_enqueue_rungs, 0);
+        assert_eq!(encoded.nr_dispatch_rungs, 0);
+    }
+
+    #[test]
+    fn encodes_queue_callback_ladders_in_the_active_generation() {
+        let policy = policy::compile_policy(
+            r#"
+[queues]
+layout = "cell"
+
+[[queues.enqueue]]
+target = "cell"
+[[queues.enqueue]]
+target = "affinity"
+
+[[queues.dispatch]]
+source = "cell"
+[[queues.dispatch]]
+source = "affinity"
+
+[[rung]]
+operation = "pick_idle"
+scope = "task_allowed"
+"#,
+        )
+        .unwrap();
+        let encoded = encode_ladder(&policy, 7).unwrap();
+
+        assert_eq!(encoded.nr_enqueue_rungs, 2);
+        assert_eq!(encoded.nr_dispatch_rungs, 2);
+        assert_eq!(encoded.enqueue_rungs[0].opcode, 1);
+        assert_eq!(encoded.enqueue_rungs[1].opcode, 2);
+        assert_eq!(encoded.dispatch_rungs[0].opcode, 1);
+        assert_eq!(encoded.dispatch_rungs[1].opcode, 2);
+        assert!(encoded.enqueue_rungs.iter().all(|rung| rung.flags == 0));
+        assert!(encoded.dispatch_rungs.iter().all(|rung| rung.flags == 0));
+    }
+
+    #[test]
+    fn live_queue_callback_updates_may_add_but_not_remove_sources() {
+        let compile_callbacks = |enqueue: &str, dispatch: &str| {
+            policy::compile_policy(&format!(
+                r#"
+[queues]
+layout = "cell"
+enqueue = {enqueue}
+dispatch = {dispatch}
+[[rung]]
+operation = "pick_idle"
+scope = "task_allowed"
+"#,
+            ))
+            .unwrap()
+        };
+        let affinity =
+            compile_callbacks("[{ target = \"affinity\" }]", "[{ source = \"affinity\" }]");
+        let full = compile_callbacks(
+            "[{ target = \"cell\" }, { target = \"affinity\" }]",
+            "[{ source = \"affinity\" }, { source = \"cell\" }]",
+        );
+        let reordered = compile_callbacks(
+            "[{ target = \"cell\" }, { target = \"affinity\" }]",
+            "[{ source = \"cell\" }, { source = \"affinity\" }]",
+        );
+
+        assert!(validate_queue_callback_replacement(&affinity, &full).is_ok());
+        assert!(validate_queue_callback_replacement(&full, &reordered).is_ok());
+        let error = validate_queue_callback_replacement(&full, &affinity)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("cannot remove active queue enqueue target `cell`"));
     }
 
     #[test]

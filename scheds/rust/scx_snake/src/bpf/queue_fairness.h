@@ -136,60 +136,65 @@ queue_fairness_select_cpu(struct snake_ladder_ctx *ctx, struct task_struct *p,
 }
 
 static __always_inline int
-queue_fairness_enqueue(struct snake_ladder_ctx *ctx, struct task_struct *p,
-		       u64 enq_flags)
+queue_fairness_enqueue_cell(struct snake_ladder_ctx *ctx, struct task_struct *p,
+			    struct snake_task_runtime *runtime,
+			    s32 selected_cpu, u64 enq_flags)
 {
-	struct snake_task_runtime *runtime = queue_fairness_prepare_runnable(ctx, p);
 	struct snake_queue_cell    *cell;
 	struct snake_cpu_queue     *cpuq;
-	s32			    target_cpu = -1;
-	u64			    dsq_id, vtime;
+	s32			    target_cpu = selected_cpu;
 	u64			    flags = enq_flags & ~SCX_ENQ_PREEMPT;
 
-	if (!runtime)
-		return -EINVAL;
 	cell = queue_cell(runtime->cell_index);
 	if (!cell)
 		return -EINVAL;
-	if (runtime->selected_cpu_valid &&
-	    runtime->selected_cpu < nr_cpu_ids &&
-	    bpf_cpumask_test_cpu(runtime->selected_cpu, p->cpus_ptr))
-		target_cpu = runtime->selected_cpu;
-	runtime->selected_cpu_valid = 0;
-
-	if (queue_primary_subset(cell, p)) {
-		cpuq = target_cpu >= 0 ? queue_cpu(target_cpu) : NULL;
-		if (!cpuq || cpuq->owner_cell_index != runtime->cell_index) {
-			target_cpu = queue_pick_primary_cpu(cell, p, -1);
-			if (target_cpu < 0)
-				return target_cpu;
-			cpuq = queue_cpu(target_cpu);
-		}
-		if (!cpuq || cpuq->owner_cell_index != runtime->cell_index)
-			return -EINVAL;
-		dsq_id = queue_normal_dsq(cpuq->normal_queue_index);
-		vtime = runtime->vruntime;
-		runtime->queue_class = SNAKE_QUEUE_CLASS_NORMAL;
-		cell_stat_inc(ctx, runtime->cell_index,
-			      SNAKE_CELL_STAT_NORMAL_ENQUEUES);
-	} else {
-		target_cpu = queue_pick_allowed_cpu(p, target_cpu);
+	if (!queue_primary_subset(cell, p))
+		return -ENOENT;
+	cpuq = target_cpu >= 0 ? queue_cpu(target_cpu) : NULL;
+	if (!cpuq || cpuq->owner_cell_index != runtime->cell_index) {
+		target_cpu = queue_pick_primary_cpu(cell, p, -1);
 		if (target_cpu < 0)
 			return target_cpu;
-		if (queue_fairness_prepare_affinity(ctx, runtime))
-			return -EINVAL;
-		dsq_id = queue_affinity_dsq(target_cpu);
-		vtime = runtime->affinity_vruntime;
-		runtime->queue_class = SNAKE_QUEUE_CLASS_AFFINITY;
-		stat_inc(ctx, SNAKE_STAT_VTIME_CPU_ENQUEUES);
-		cell_stat_inc(ctx, runtime->cell_index,
-			      SNAKE_CELL_STAT_AFFINITY_ENQUEUES);
+		cpuq = queue_cpu(target_cpu);
 	}
+	if (!cpuq || cpuq->owner_cell_index != runtime->cell_index)
+		return -EINVAL;
+	runtime->queue_class = SNAKE_QUEUE_CLASS_NORMAL;
 	runtime->run_direct = 0;
-	if (!scx_bpf_dsq_insert_vtime(p, dsq_id, SNAKE_VTIME_SLICE_NS,
-				       vtime, flags))
+	if (!scx_bpf_dsq_insert_vtime(p,
+				       queue_normal_dsq(cpuq->normal_queue_index),
+				       SNAKE_VTIME_SLICE_NS, runtime->vruntime,
+				       flags))
 		return -EINVAL;
 	stat_inc(ctx, SNAKE_STAT_VTIME_ENQUEUES);
+	cell_stat_inc(ctx, runtime->cell_index, SNAKE_CELL_STAT_NORMAL_ENQUEUES);
+	scx_bpf_kick_cpu(target_cpu, SCX_KICK_IDLE);
+	return 0;
+}
+
+static __always_inline int
+queue_fairness_enqueue_affinity(struct snake_ladder_ctx *ctx,
+				struct task_struct *p,
+				struct snake_task_runtime *runtime,
+				s32 selected_cpu, u64 enq_flags)
+{
+	s32 target_cpu = queue_pick_allowed_cpu(p, selected_cpu);
+	u64 flags = enq_flags & ~SCX_ENQ_PREEMPT;
+
+	if (target_cpu < 0)
+		return target_cpu;
+	if (queue_fairness_prepare_affinity(ctx, runtime))
+		return -EINVAL;
+	runtime->queue_class = SNAKE_QUEUE_CLASS_AFFINITY;
+	runtime->run_direct = 0;
+	if (!scx_bpf_dsq_insert_vtime(p, queue_affinity_dsq(target_cpu),
+				       SNAKE_VTIME_SLICE_NS,
+				       runtime->affinity_vruntime, flags))
+		return -EINVAL;
+	stat_inc(ctx, SNAKE_STAT_VTIME_ENQUEUES);
+	stat_inc(ctx, SNAKE_STAT_VTIME_CPU_ENQUEUES);
+	cell_stat_inc(ctx, runtime->cell_index,
+		      SNAKE_CELL_STAT_AFFINITY_ENQUEUES);
 	scx_bpf_kick_cpu(target_cpu, SCX_KICK_IDLE);
 	return 0;
 }
@@ -275,96 +280,54 @@ queue_fairness_keep_running(struct snake_ladder_ctx *ctx,
 	return 1;
 }
 
-static __always_inline int
-queue_fairness_dispatch(struct snake_ladder_ctx *ctx, s32 cpu,
-			struct task_struct *prev)
+static __always_inline s32
+queue_fairness_dispatch_source(struct snake_ladder_ctx *ctx,
+			       struct snake_cpu_queue *cpuq, s32 cpu,
+			       struct task_struct *prev, u32 opcode)
 {
-	struct snake_cpu_queue *cpuq = queue_cpu(cpu);
 	struct snake_queue_cell *cell;
-	struct snake_queue_cpu_state *state;
-	u64 affinity_id = queue_affinity_dsq(cpu), normal_id;
-	u64 affinity_vtime = 0, normal_vtime = 0;
-	u32 key = 0, normal_index, first_class, second_class;
-	s32 local_queued, keep;
-	bool affinity_ready, normal_ready;
+	u64 dsq_id, candidate_vtime = 0;
+	u32 class, normal_index;
+	s32 keep;
 
 	if (!cpuq)
 		return -EINVAL;
-	local_queued = scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | cpu);
-	if (local_queued < 0)
-		return local_queued;
-	if (local_queued > 0)
-		return 0;
-	cell = queue_cell(cpuq->owner_cell_index);
-	if (!cell)
+	if (opcode == SNAKE_DISPATCH_OP_CELL) {
+		cell = queue_cell(cpuq->owner_cell_index);
+		if (!cell)
+			return -EINVAL;
+		normal_index = cpuq->normal_queue_index;
+		dsq_id = queue_normal_dsq(normal_index);
+		if (!queue_fairness_head(dsq_id, &candidate_vtime)) {
+			if (!queue_fairness_remote_normal(cell, normal_index,
+						  &normal_index,
+						  &candidate_vtime))
+				return 0;
+			dsq_id = queue_normal_dsq(normal_index);
+		}
+		class = SNAKE_QUEUE_CLASS_NORMAL;
+	} else if (opcode == SNAKE_DISPATCH_OP_AFFINITY) {
+		dsq_id = queue_affinity_dsq(cpu);
+		if (!queue_fairness_head(dsq_id, &candidate_vtime))
+			return 0;
+		class = SNAKE_QUEUE_CLASS_AFFINITY;
+	} else {
 		return -EINVAL;
-	normal_index = cpuq->normal_queue_index;
-	normal_id = queue_normal_dsq(normal_index);
-	normal_ready = queue_fairness_head(normal_id, &normal_vtime);
-	if (!normal_ready && queue_fairness_remote_normal(cell, normal_index,
-							 &normal_index,
-							 &normal_vtime)) {
-		normal_id = queue_normal_dsq(normal_index);
-		normal_ready = true;
-	}
-	affinity_ready = queue_fairness_head(affinity_id, &affinity_vtime);
-	state = bpf_map_lookup_elem(&queue_cpu_states, &key);
-	if (!state)
-		return -EINVAL;
-	if (!state->initialized) {
-		state->next_class = SNAKE_QUEUE_CLASS_AFFINITY;
-		state->initialized = 1;
-	}
-	if (!normal_ready && !affinity_ready)
-		goto keep_running;
-	if (!normal_ready)
-		first_class = SNAKE_QUEUE_CLASS_AFFINITY;
-	else if (!affinity_ready)
-		first_class = SNAKE_QUEUE_CLASS_NORMAL;
-	else
-		first_class = state->next_class;
-	second_class = first_class == SNAKE_QUEUE_CLASS_NORMAL ?
-			       SNAKE_QUEUE_CLASS_AFFINITY :
-			       SNAKE_QUEUE_CLASS_NORMAL;
-	keep = first_class == SNAKE_QUEUE_CLASS_NORMAL ?
-		       queue_fairness_keep_running(ctx, prev, first_class,
-					   normal_vtime) :
-		       queue_fairness_keep_running(ctx, prev, first_class,
-					   affinity_vtime);
-	if (keep < 0)
-		return keep;
-	if (keep)
-		return 0;
-	if ((first_class == SNAKE_QUEUE_CLASS_NORMAL &&
-	     queue_fairness_move(ctx, normal_id, first_class)) ||
-	    (first_class == SNAKE_QUEUE_CLASS_AFFINITY &&
-	     queue_fairness_move(ctx, affinity_id, first_class))) {
-		state->next_class = second_class;
-		return 0;
-	}
-	keep = second_class == SNAKE_QUEUE_CLASS_NORMAL && normal_ready ?
-		       queue_fairness_keep_running(ctx, prev, second_class,
-					   normal_vtime) :
-	       second_class == SNAKE_QUEUE_CLASS_AFFINITY && affinity_ready ?
-		       queue_fairness_keep_running(ctx, prev, second_class,
-					   affinity_vtime) :
-		       0;
-	if (keep < 0)
-		return keep;
-	if (keep)
-		return 0;
-	if ((second_class == SNAKE_QUEUE_CLASS_NORMAL && normal_ready &&
-	     queue_fairness_move(ctx, normal_id, second_class)) ||
-	    (second_class == SNAKE_QUEUE_CLASS_AFFINITY && affinity_ready &&
-	     queue_fairness_move(ctx, affinity_id, second_class))) {
-		state->next_class = first_class;
-		return 0;
 	}
 
-keep_running:
+	keep = queue_fairness_keep_running(ctx, prev, class, candidate_vtime);
+	if (keep < 0)
+		return keep;
+	if (keep)
+		return 1;
+	return queue_fairness_move(ctx, dsq_id, class) ? 1 : 0;
+}
+
+static __always_inline void
+queue_fairness_replenish(struct task_struct *prev)
+{
 	if (prev && (prev->scx.flags & SCX_TASK_QUEUED))
 		prev->scx.slice = SNAKE_VTIME_SLICE_NS;
-	return 0;
 }
 
 static __always_inline int

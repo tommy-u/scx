@@ -9,6 +9,7 @@ pub const MAX_RUNGS: usize = 8;
 pub const MAX_MASK_TABLES: usize = 4;
 pub const MAX_CELL_IDS: u32 = 1024;
 pub const MAX_QUEUE_CELLS: usize = 32;
+pub const MAX_QUEUE_RUNGS: usize = 8;
 pub const RUNG_FLAG_INTERSECT_TASK_ALLOWED: u32 = 1;
 pub const RUNG_FLAG_PICK_IDLE_CORE: u32 = 1 << 1;
 
@@ -60,6 +61,22 @@ pub enum QueueLayout {
 pub struct QueuePolicy {
     pub layout: QueueLayout,
     pub cell0_cpu_weight: u32,
+    pub enqueue: Vec<QueueEnqueueTarget>,
+    pub dispatch: Vec<QueueDispatchSource>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum QueueEnqueueTarget {
+    Cell = 1,
+    Affinity = 2,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum QueueDispatchSource {
+    Cell = 1,
+    Affinity = 2,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -91,9 +108,21 @@ impl CompiledPolicy {
         let mut output = format!("fallback: {}\n", self.fallback.as_str());
         if let Some(queues) = &self.queues {
             output.push_str(&format!(
-                "queues: layout={} cell0_cpu_weight={}\n",
+                "queues: layout={} cell0_cpu_weight={} enqueue={} dispatch={}\n",
                 queues.layout.as_str(),
                 queues.cell0_cpu_weight,
+                queues
+                    .enqueue
+                    .iter()
+                    .map(|target| target.as_str())
+                    .collect::<Vec<_>>()
+                    .join(","),
+                queues
+                    .dispatch
+                    .iter()
+                    .map(|source| source.as_str())
+                    .collect::<Vec<_>>()
+                    .join(","),
             ));
         }
         output.push_str(
@@ -121,6 +150,24 @@ impl QueueLayout {
         match self {
             Self::Cell => "cell",
             Self::CellLlc => "cell_llc",
+        }
+    }
+}
+
+impl QueueEnqueueTarget {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Cell => "cell",
+            Self::Affinity => "affinity",
+        }
+    }
+}
+
+impl QueueDispatchSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Cell => "cell",
+            Self::Affinity => "affinity",
         }
     }
 }
@@ -195,6 +242,20 @@ struct SemanticQueuePolicy {
     layout: String,
     #[serde(default = "default_cell_weight")]
     cell0_cpu_weight: u32,
+    enqueue: Option<Vec<SemanticQueueEnqueueRung>>,
+    dispatch: Option<Vec<SemanticQueueDispatchRung>>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SemanticQueueEnqueueRung {
+    target: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SemanticQueueDispatchRung {
+    source: String,
 }
 
 const fn default_cell_weight() -> u32 {
@@ -304,10 +365,127 @@ fn compile_queue_policy(
             "queue default cell weight must be positive".into(),
         ));
     }
+    let (enqueue, dispatch) = if queues.enqueue.is_none() && queues.dispatch.is_none() {
+        (
+            vec![QueueEnqueueTarget::Cell, QueueEnqueueTarget::Affinity],
+            vec![QueueDispatchSource::Affinity, QueueDispatchSource::Cell],
+        )
+    } else {
+        let enqueue = compile_queue_enqueue(queues.enqueue.as_deref().unwrap_or(&[]))?;
+        let dispatch = compile_queue_dispatch(queues.dispatch.as_deref().unwrap_or(&[]))?;
+        validate_queue_callback_pair(&enqueue, &dispatch)?;
+        (enqueue, dispatch)
+    };
     Ok(Some(QueuePolicy {
         layout,
         cell0_cpu_weight: queues.cell0_cpu_weight,
+        enqueue,
+        dispatch,
     }))
+}
+
+fn compile_queue_enqueue(
+    rungs: &[SemanticQueueEnqueueRung],
+) -> Result<Vec<QueueEnqueueTarget>, PolicyError> {
+    if rungs.is_empty() {
+        return Err(PolicyError("queue enqueue ladder must not be empty".into()));
+    }
+    if rungs.len() > MAX_QUEUE_RUNGS {
+        return Err(PolicyError(format!(
+            "queue enqueue ladder has too many rungs: maximum is {MAX_QUEUE_RUNGS}"
+        )));
+    }
+
+    let mut compiled = Vec::with_capacity(rungs.len());
+    for rung in rungs {
+        let target = match rung.target.as_str() {
+            "cell" => QueueEnqueueTarget::Cell,
+            "affinity" => QueueEnqueueTarget::Affinity,
+            target => {
+                return Err(PolicyError(format!(
+                    "unknown enqueue target `{target}`; expected `cell` or `affinity`"
+                )))
+            }
+        };
+        if compiled.contains(&target) {
+            return Err(PolicyError(format!(
+                "duplicate enqueue target `{}`",
+                target.as_str()
+            )));
+        }
+        compiled.push(target);
+    }
+
+    if !compiled.contains(&QueueEnqueueTarget::Affinity) {
+        return Err(PolicyError(
+            "queue enqueue ladder must contain `affinity`".into(),
+        ));
+    }
+    if compiled.last() != Some(&QueueEnqueueTarget::Affinity) {
+        return Err(PolicyError(
+            "enqueue target `affinity` must be terminal".into(),
+        ));
+    }
+    Ok(compiled)
+}
+
+fn compile_queue_dispatch(
+    rungs: &[SemanticQueueDispatchRung],
+) -> Result<Vec<QueueDispatchSource>, PolicyError> {
+    if rungs.is_empty() {
+        return Err(PolicyError(
+            "queue dispatch ladder must not be empty".into(),
+        ));
+    }
+    if rungs.len() > MAX_QUEUE_RUNGS {
+        return Err(PolicyError(format!(
+            "queue dispatch ladder has too many rungs: maximum is {MAX_QUEUE_RUNGS}"
+        )));
+    }
+
+    let mut compiled = Vec::with_capacity(rungs.len());
+    for rung in rungs {
+        let source = match rung.source.as_str() {
+            "cell" => QueueDispatchSource::Cell,
+            "affinity" => QueueDispatchSource::Affinity,
+            source => {
+                return Err(PolicyError(format!(
+                    "unknown dispatch source `{source}`; expected `cell` or `affinity`"
+                )))
+            }
+        };
+        if compiled.contains(&source) {
+            return Err(PolicyError(format!(
+                "duplicate dispatch source `{}`",
+                source.as_str()
+            )));
+        }
+        compiled.push(source);
+    }
+
+    if !compiled.contains(&QueueDispatchSource::Affinity) {
+        return Err(PolicyError(
+            "queue dispatch ladder must contain `affinity`".into(),
+        ));
+    }
+    Ok(compiled)
+}
+
+fn validate_queue_callback_pair(
+    enqueue: &[QueueEnqueueTarget],
+    dispatch: &[QueueDispatchSource],
+) -> Result<(), PolicyError> {
+    let enqueue_has_cell = enqueue.contains(&QueueEnqueueTarget::Cell);
+    let dispatch_has_cell = dispatch.contains(&QueueDispatchSource::Cell);
+    match (enqueue_has_cell, dispatch_has_cell) {
+        (true, false) => Err(PolicyError(
+            "queue dispatch ladder must contain `cell` when enqueue contains `cell`".into(),
+        )),
+        (false, true) => Err(PolicyError(
+            "queue dispatch ladder must not contain `cell` when enqueue omits `cell`".into(),
+        )),
+        _ => Ok(()),
+    }
 }
 
 fn compile_cells(
@@ -819,6 +997,211 @@ scope = "task_cell"
         assert_eq!(policy.queues.as_ref().unwrap().cell0_cpu_weight, 2);
         assert_eq!(policy.cell_cpu_weights[&7], 5);
         assert_eq!(policy.cell_cpu_weights[&8], 1);
+    }
+
+    #[test]
+    fn queue_callback_ladders_default_to_compatible_ordering() {
+        let policy = compile_policy(
+            r#"
+[queues]
+layout = "cell"
+
+[[cell]]
+id = 7
+cpus = "0-3"
+
+[[rung]]
+operation = "pick_idle"
+scope = "task_cell"
+"#,
+        )
+        .expect("queue policy should compile");
+
+        let queues = policy.queues.as_ref().unwrap();
+        assert_eq!(
+            queues.enqueue,
+            vec![QueueEnqueueTarget::Cell, QueueEnqueueTarget::Affinity]
+        );
+        assert_eq!(
+            queues.dispatch,
+            vec![QueueDispatchSource::Affinity, QueueDispatchSource::Cell]
+        );
+        assert!(policy
+            .dump()
+            .contains("enqueue=cell,affinity dispatch=affinity,cell"));
+    }
+
+    #[test]
+    fn compiles_explicit_queue_callback_ladders() {
+        let policy = compile_policy(
+            r#"
+[queues]
+layout = "cell_llc"
+
+[[queues.enqueue]]
+target = "cell"
+
+[[queues.enqueue]]
+target = "affinity"
+
+[[queues.dispatch]]
+source = "cell"
+
+[[queues.dispatch]]
+source = "affinity"
+
+[[cell]]
+id = 7
+cpus = "0-3"
+
+[[rung]]
+operation = "pick_idle"
+scope = "task_cell"
+"#,
+        )
+        .expect("explicit queue callback ladders should compile");
+
+        let queues = policy.queues.as_ref().unwrap();
+        assert_eq!(
+            queues.enqueue,
+            vec![QueueEnqueueTarget::Cell, QueueEnqueueTarget::Affinity]
+        );
+        assert_eq!(
+            queues.dispatch,
+            vec![QueueDispatchSource::Cell, QueueDispatchSource::Affinity]
+        );
+    }
+
+    #[test]
+    fn compiles_affinity_only_queue_callback_ladders() {
+        let policy = compile_policy(
+            r#"
+[queues]
+layout = "cell"
+
+[[queues.enqueue]]
+target = "affinity"
+
+[[queues.dispatch]]
+source = "affinity"
+
+[[cell]]
+id = 7
+cpus = "0-3"
+
+[[rung]]
+operation = "pick_idle"
+scope = "task_cell"
+"#,
+        )
+        .expect("affinity-only callback ladders should compile");
+
+        let queues = policy.queues.as_ref().unwrap();
+        assert_eq!(queues.enqueue, vec![QueueEnqueueTarget::Affinity]);
+        assert_eq!(queues.dispatch, vec![QueueDispatchSource::Affinity]);
+    }
+
+    #[test]
+    fn rejects_invalid_queue_enqueue_ladders() {
+        let cases = [
+            ("enqueue = []\ndispatch = []", "enqueue ladder must not be empty"),
+            (
+                "enqueue = [{ target = \"cell\" }]\ndispatch = [{ source = \"cell\" }]",
+                "enqueue ladder must contain `affinity`",
+            ),
+            (
+                "enqueue = [{ target = \"affinity\" }, { target = \"cell\" }]\ndispatch = [{ source = \"affinity\" }, { source = \"cell\" }]",
+                "enqueue target `affinity` must be terminal",
+            ),
+            (
+                "enqueue = [{ target = \"cell\" }, { target = \"cell\" }, { target = \"affinity\" }]\ndispatch = [{ source = \"affinity\" }, { source = \"cell\" }]",
+                "duplicate enqueue target `cell`",
+            ),
+            (
+                "enqueue = [{ target = \"bogus\" }, { target = \"affinity\" }]\ndispatch = [{ source = \"affinity\" }]",
+                "unknown enqueue target `bogus`",
+            ),
+        ];
+
+        for (callbacks, expected) in cases {
+            let source = format!(
+                "[queues]\nlayout = \"cell\"\n{callbacks}\n[[rung]]\noperation = \"pick_idle\"\nscope = \"task_allowed\"\n"
+            );
+            let error = error_for(&source);
+            assert!(error.contains(expected), "{error}");
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_queue_dispatch_ladders() {
+        let cases = [
+            (
+                "enqueue = [{ target = \"affinity\" }]\ndispatch = []",
+                "dispatch ladder must not be empty",
+            ),
+            (
+                "enqueue = [{ target = \"affinity\" }]\ndispatch = [{ source = \"cell\" }]",
+                "dispatch ladder must contain `affinity`",
+            ),
+            (
+                "enqueue = [{ target = \"affinity\" }]\ndispatch = [{ source = \"affinity\" }, { source = \"affinity\" }]",
+                "duplicate dispatch source `affinity`",
+            ),
+            (
+                "enqueue = [{ target = \"cell\" }, { target = \"affinity\" }]\ndispatch = [{ source = \"affinity\" }]",
+                "dispatch ladder must contain `cell` when enqueue contains `cell`",
+            ),
+            (
+                "enqueue = [{ target = \"affinity\" }]\ndispatch = [{ source = \"affinity\" }, { source = \"cell\" }]",
+                "dispatch ladder must not contain `cell` when enqueue omits `cell`",
+            ),
+            (
+                "enqueue = [{ target = \"affinity\" }]\ndispatch = [{ source = \"bogus\" }]",
+                "unknown dispatch source `bogus`",
+            ),
+        ];
+
+        for (callbacks, expected) in cases {
+            let source = format!(
+                "[queues]\nlayout = \"cell\"\n{callbacks}\n[[rung]]\noperation = \"pick_idle\"\nscope = \"task_allowed\"\n"
+            );
+            let error = error_for(&source);
+            assert!(error.contains(expected), "{error}");
+        }
+    }
+
+    #[test]
+    fn rejects_partially_omitted_queue_callback_ladders() {
+        for (callbacks, expected) in [
+            (
+                "enqueue = [{ target = \"affinity\" }]",
+                "dispatch ladder must not be empty",
+            ),
+            (
+                "dispatch = [{ source = \"affinity\" }]",
+                "enqueue ladder must not be empty",
+            ),
+        ] {
+            let source = format!(
+                "[queues]\nlayout = \"cell\"\n{callbacks}\n[[rung]]\noperation = \"pick_idle\"\nscope = \"task_allowed\"\n"
+            );
+            let error = error_for(&source);
+            assert!(error.contains(expected), "{error}");
+        }
+    }
+
+    #[test]
+    fn rejects_queue_callback_ladders_longer_than_eight_rungs() {
+        let enqueue = (0..9)
+            .map(|_| "{ target = \"affinity\" }")
+            .collect::<Vec<_>>()
+            .join(", ");
+        let source = format!(
+            "[queues]\nlayout = \"cell\"\nenqueue = [{enqueue}]\ndispatch = [{{ source = \"affinity\" }}]\n[[rung]]\noperation = \"pick_idle\"\nscope = \"task_allowed\"\n"
+        );
+
+        let error = error_for(&source);
+        assert!(error.contains("enqueue ladder has too many rungs: maximum is 8"));
     }
 
     #[test]

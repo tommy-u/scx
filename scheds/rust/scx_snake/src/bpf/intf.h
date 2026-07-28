@@ -8,8 +8,9 @@ typedef unsigned int	   u32;
 typedef unsigned long long u64;
 #endif
 
-#define SNAKE_ABI_VERSION 13
+#define SNAKE_ABI_VERSION 14
 #define SNAKE_MAX_RUNGS 8
+#define SNAKE_MAX_QUEUE_RUNGS 8
 #define SNAKE_LADDER_SLOTS 2
 #define SNAKE_LADDER_SLOT_INVALID SNAKE_LADDER_SLOTS
 #define SNAKE_MAX_CPUS 1024
@@ -65,6 +66,18 @@ enum snake_input_source {
 	SNAKE_INPUT_CPU_PREV	      = 1,
 	SNAKE_INPUT_MASK_TASK_ALLOWED = 2,
 	SNAKE_INPUT_TASK_CELL	      = 3,
+};
+
+enum snake_enqueue_opcode {
+	SNAKE_ENQUEUE_OP_INVALID  = 0,
+	SNAKE_ENQUEUE_OP_CELL     = 1,
+	SNAKE_ENQUEUE_OP_AFFINITY = 2,
+};
+
+enum snake_dispatch_opcode {
+	SNAKE_DISPATCH_OP_INVALID  = 0,
+	SNAKE_DISPATCH_OP_CELL     = 1,
+	SNAKE_DISPATCH_OP_AFFINITY = 2,
 };
 
 /* Userspace annotation attached to one thread through BPF task storage. */
@@ -139,6 +152,11 @@ struct snake_rung {
 	u64 data;
 };
 
+struct snake_queue_rung {
+	u32 opcode;
+	u32 flags;
+};
+
 /* Complete userspace-compiled ladder installed as one runtime generation. */
 struct snake_compiled_ladder {
 	u64		  generation;
@@ -147,6 +165,10 @@ struct snake_compiled_ladder {
 	u32		  nr_mask_tables;
 	u32		  fallback_mode;
 	struct snake_rung rungs[SNAKE_MAX_RUNGS];
+	u32		  nr_enqueue_rungs;
+	u32		  nr_dispatch_rungs;
+	struct snake_queue_rung enqueue_rungs[SNAKE_MAX_QUEUE_RUNGS];
+	struct snake_queue_rung dispatch_rungs[SNAKE_MAX_QUEUE_RUNGS];
 };
 
 /* Fixed map-key layout for global and per-rung scheduler counters. */

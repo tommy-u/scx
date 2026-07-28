@@ -6,7 +6,8 @@
 #define SNAKE_QUEUE_CLASS_AFFINITY 1
 
 struct snake_queue_cpu_state {
-	u32 next_class;
+	u64 generation;
+	u32 next_dispatch_rung;
 	u32 initialized;
 };
 

@@ -3,6 +3,7 @@
 #include "queue.h"
 #include "fairness.h"
 #include "queue_fairness.h"
+#include "queue_ladder.h"
 #include "ladder.h"
 
 char _license[] SEC("license") = "GPL";
@@ -24,6 +25,8 @@ validate_compiled_ladder(const struct snake_compiled_ladder *ladder)
 		return -EINVAL;
 	if (ladder->fallback_mode != SNAKE_FALLBACK_PREVIOUS_CPU &&
 	    ladder->fallback_mode != SNAKE_FALLBACK_ANY_ALLOWED)
+		return -EINVAL;
+	if (validate_queue_ladders(ladder))
 		return -EINVAL;
 
 	bpf_for(i, 0, SNAKE_MAX_RUNGS)
@@ -159,7 +162,7 @@ void BPF_STRUCT_OPS(snake_enqueue, struct task_struct *p, u64 enq_flags)
 	}
 	stat_inc(&ladder_ctx, SNAKE_STAT_ENQUEUES);
 	if (queue_topology_enabled()) {
-		if (queue_fairness_enqueue(&ladder_ctx, p, enq_flags))
+		if (queue_ladder_enqueue(&ladder_ctx, p, enq_flags))
 			scx_bpf_error("snake queue enqueue failed for pid %d", p->pid);
 		release_active_ladder(&ladder_ctx);
 		return;
@@ -184,7 +187,7 @@ void BPF_STRUCT_OPS(snake_dispatch, s32 cpu, struct task_struct *prev)
 		return;
 	}
 	if (queue_topology_enabled()) {
-		if (queue_fairness_dispatch(&ladder_ctx, cpu, prev))
+		if (queue_ladder_dispatch(&ladder_ctx, cpu, prev))
 			scx_bpf_error("snake queue dispatch failed on CPU %d", cpu);
 		release_active_ladder(&ladder_ctx);
 		return;
