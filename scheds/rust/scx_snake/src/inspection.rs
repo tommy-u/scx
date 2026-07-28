@@ -319,7 +319,7 @@ fn fairness_view(mode: FairnessMode, has_queue_topology: bool) -> FairnessInspec
     let clock_model = match (mode, has_queue_topology) {
         (FairnessMode::Fifo, _) => "no virtual-time clock",
         (FairnessMode::Eevdf, _) => "one global aggregate virtual-time clock",
-        (FairnessMode::Vtime, true) => "per-cell normal clocks; one shared global affinity clock",
+        (FairnessMode::Vtime, true) => "one clock per cell shared by normal and affinity queues",
         (FairnessMode::Vtime, false) => "one shared global VTIME clock",
     };
     FairnessInspectionView {
@@ -472,6 +472,7 @@ fn queue_policy_view(queues: &QueuePolicy) -> QueuePolicyInspectionView {
                 operation: match source {
                     QueueDispatchSource::Cell => "cell",
                     QueueDispatchSource::Affinity => "affinity",
+                    QueueDispatchSource::MinVtime => "min_vtime(cell,affinity)",
                 }
                 .into(),
             })
@@ -1137,6 +1138,46 @@ scope = "task_cell"
     }
 
     #[test]
+    fn min_vtime_dispatch_round_trips_as_one_combined_operation() {
+        let inspector = Inspector::new(
+            slot(
+                0,
+                5,
+                r#"
+[queues]
+layout = "cell"
+enqueue = [{ target = "cell" }, { target = "affinity" }]
+dispatch = [{ operation = "min_vtime" }]
+
+[[cell]]
+id = 7
+cpus = "0-3"
+
+[[rung]]
+operation = "pick_idle"
+scope = "task_cell"
+"#,
+                1_000,
+            ),
+            FairnessMode::Vtime,
+            None,
+        );
+
+        let view = inspector.snapshot(metrics(5, 1), Vec::new());
+        let dispatch = &view.slots[0]
+            .policy
+            .as_ref()
+            .unwrap()
+            .queues
+            .as_ref()
+            .unwrap()
+            .dispatch;
+
+        assert_eq!(dispatch.len(), 1);
+        assert_eq!(dispatch[0].operation, "min_vtime(cell,affinity)");
+    }
+
+    #[test]
     fn placement_only_policy_has_no_queue_callback_ladders() {
         let inspector = Inspector::new(slot(0, 5, FIRST_POLICY, 1_000), FairnessMode::Fifo, None);
         let view = inspector.snapshot(metrics(5, 1), Vec::new());
@@ -1178,7 +1219,7 @@ scope = "task_cell"
         assert_eq!(view.fairness.mode_name, "vtime");
         assert_eq!(
             view.fairness.clock_model,
-            "per-cell normal clocks; one shared global affinity clock"
+            "one clock per cell shared by normal and affinity queues"
         );
         assert_eq!(resolved.layout, "cell_llc");
         assert_eq!(resolved.affinity_queue_count, 4);

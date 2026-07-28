@@ -97,6 +97,9 @@ export function queueLadderSections(queues) {
   if (!queues) {
     return [];
   }
+  const dispatch = queues.dispatch || [];
+  const minVtime = dispatch.length === 1
+    && dispatch[0].operation === "min_vtime(cell,affinity)";
   return [
     {
       kind: "enqueue",
@@ -112,12 +115,22 @@ export function queueLadderSections(queues) {
     {
       kind: "dispatch",
       title: "Dispatch",
-      behavior: "Cyclic per-CPU cursor",
-      terminal: "All sources empty → replenish previous task or idle",
-      rungs: (queues.dispatch || []).map((rung, index, all) => ({
+      cyclic: !minVtime,
+      behavior: minVtime
+        ? "Lowest VTIME; alternating exact ties"
+        : "Cyclic per-CPU cursor",
+      terminal: minVtime
+        ? "Both sources empty → replenish previous task or idle"
+        : "All sources empty → replenish previous task or idle",
+      rungs: dispatch.map((rung, index, all) => ({
         ...rung,
-        role: "source",
-        flow: queueRungFlow("dispatch", index, all.length),
+        role: minVtime ? "operation" : "source",
+        flow: minVtime
+          ? {
+              hit: "Earlier head → dispatch",
+              miss: "Both empty → replenish previous task or idle",
+            }
+          : queueRungFlow("dispatch", index, all.length),
       })),
     },
   ];

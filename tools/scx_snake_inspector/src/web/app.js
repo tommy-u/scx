@@ -849,7 +849,7 @@ function renderQueueLadder(section) {
         </div>
       </div>
     </article>`).join("");
-  const cycle = section.kind === "dispatch" ? '<span aria-hidden="true">↻</span> ' : "";
+  const cycle = section.cyclic ? '<span aria-hidden="true">↻</span> ' : "";
   return `
     <section class="policy-ladder-section queue-ladder-section">
       <header class="ladder-heading">

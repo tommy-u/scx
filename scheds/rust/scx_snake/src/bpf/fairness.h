@@ -15,6 +15,7 @@ struct snake_task_runtime {
 	u32 active_weight;
 	u32 pending_weight;
 	u32 cell_index;
+	u32 affinity_cell_index;
 	u32 run_cell_index;
 	u32 run_owner_cell_index;
 	u32 selected_cpu;

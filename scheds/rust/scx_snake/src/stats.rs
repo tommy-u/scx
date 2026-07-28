@@ -197,6 +197,8 @@ pub struct Metrics {
     pub vtime_credit_clamps: u64,
     #[stat(desc = "VTIME state and runtime accounting errors")]
     pub vtime_accounting_errors: u64,
+    #[stat(desc = "Equal cell and affinity VTIME heads resolved by alternating ties")]
+    pub vtime_equal_head_ties: u64,
     #[stat(desc = "Tasks inserted into the EEVDF eligible deadline queue")]
     pub eevdf_eligible_enqueues: u64,
     #[stat(desc = "Tasks inserted into the EEVDF future virtual-start queue")]
@@ -296,6 +298,9 @@ impl Metrics {
             vtime_accounting_errors: self
                 .vtime_accounting_errors
                 .saturating_sub(previous.vtime_accounting_errors),
+            vtime_equal_head_ties: self
+                .vtime_equal_head_ties
+                .saturating_sub(previous.vtime_equal_head_ties),
             eevdf_eligible_enqueues: self
                 .eevdf_eligible_enqueues
                 .saturating_sub(previous.eevdf_eligible_enqueues),
@@ -359,7 +364,7 @@ impl Metrics {
                 "  select latency ns total: {} | average: {} | cumulative max: {}\n",
                 "  cell rehomes: {} | deferred rehomes: {} | queue preemptions/stale runs: {}/{} | borrow yields: {}\n",
                 "  VTIME enqueues: {} (per-CPU: {}) | dispatches: {} (per-CPU: {}) | strict sync queues: {}\n",
-                "  VTIME direct/queued runtime ns: {}/{} | credit clamps: {} | accounting errors: {}\n",
+                "  VTIME direct/queued runtime ns: {}/{} | credit clamps: {} | accounting errors: {} | equal-head ties: {}\n",
                 "  EEVDF eligible/future enqueues: {}/{} | promotions: {} | forced advances: {} | dispatches: {}\n",
                 "  EEVDF strict sync queues: {} | direct/queued runtime ns: {}/{} | lag clamps: {} | accounting errors: {}\n",
                 "  rungs:\n"
@@ -395,6 +400,7 @@ impl Metrics {
             self.vtime_queued_runtime_ns,
             self.vtime_credit_clamps,
             self.vtime_accounting_errors,
+            self.vtime_equal_head_ties,
             self.eevdf_eligible_enqueues,
             self.eevdf_future_enqueues,
             self.eevdf_promotions,

@@ -219,19 +219,39 @@ queue_fairness_cancel_direct(struct snake_ladder_ctx *ctx,
 
 static __always_inline int
 queue_fairness_prepare_affinity(struct snake_ladder_ctx *ctx,
-				struct snake_task_runtime *runtime)
+				struct snake_task_runtime *runtime,
+				u32 owner_cell_index)
 {
-	struct snake_vtime_domain *domain = fairness_vtime_domain();
-	u64			    minimum, now;
+	struct snake_vtime_domain *task_domain, *old_domain, *new_domain;
+	u64			    minimum, task_now, old_now, new_now;
 
-	if (!domain || !runtime)
+	if (!runtime)
 		return -EINVAL;
-	now = queue_domain_now(domain);
+	new_domain = queue_cell_domain(owner_cell_index);
+	if (!new_domain)
+		return -EINVAL;
+	new_now = queue_domain_now(new_domain);
 	if (!runtime->affinity_initialized) {
-		runtime->affinity_vruntime = now;
+		task_domain = queue_cell_domain(runtime->cell_index);
+		if (!task_domain)
+			return -EINVAL;
+		task_now = queue_domain_now(task_domain);
+		runtime->affinity_vruntime = queue_translate_vruntime(
+			runtime->vruntime, task_now, new_now);
+		runtime->affinity_cell_index = owner_cell_index;
 		runtime->affinity_initialized = 1;
+	} else if (runtime->affinity_cell_index != owner_cell_index) {
+		old_domain = queue_cell_domain(runtime->affinity_cell_index);
+		if (!old_domain)
+			return -EINVAL;
+		old_now = queue_domain_now(old_domain);
+		runtime->affinity_vruntime = queue_translate_vruntime(
+			runtime->affinity_vruntime, old_now, new_now);
+		runtime->affinity_cell_index = owner_cell_index;
+		cell_stat_inc(ctx, owner_cell_index,
+			      SNAKE_CELL_STAT_CLOCK_TRANSITIONS);
 	}
-	minimum = now - SNAKE_VTIME_SLICE_NS;
+	minimum = new_now - SNAKE_VTIME_SLICE_NS;
 	if (time_before(runtime->affinity_vruntime, minimum)) {
 		runtime->affinity_vruntime = minimum;
 		stat_inc(ctx, SNAKE_STAT_VTIME_CREDIT_CLAMPS);
@@ -324,12 +344,15 @@ queue_fairness_enqueue_affinity(struct snake_ladder_ctx *ctx,
 				struct snake_task_runtime *runtime,
 				s32 selected_cpu, u64 enq_flags)
 {
+	struct snake_cpu_queue *cpuq;
 	s32 target_cpu = queue_pick_allowed_cpu(p, selected_cpu);
 	u64 flags = enq_flags & ~SCX_ENQ_PREEMPT;
 
 	if (target_cpu < 0)
 		return target_cpu;
-	if (queue_fairness_prepare_affinity(ctx, runtime))
+	cpuq = queue_cpu(target_cpu);
+	if (!cpuq || queue_fairness_prepare_affinity(
+			     ctx, runtime, cpuq->owner_cell_index))
 		return -EINVAL;
 	runtime->queue_class = SNAKE_QUEUE_CLASS_AFFINITY;
 	runtime->run_direct = 0;
@@ -394,6 +417,54 @@ queue_fairness_move(struct snake_ladder_ctx *ctx, u64 dsq_id, u32 class)
 	return true;
 }
 
+struct snake_queue_candidate {
+	u64 dsq_id;
+	u64 vtime;
+	u32 class;
+	u32 valid;
+};
+
+static __always_inline int
+queue_fairness_normal_candidate(struct snake_cpu_queue *cpuq,
+				struct snake_queue_candidate *candidate)
+{
+	struct snake_queue_cell *cell;
+	u32 normal_index;
+
+	if (!cpuq || !candidate)
+		return -EINVAL;
+	candidate->valid = 0;
+	cell = queue_cell(cpuq->owner_cell_index);
+	if (!cell)
+		return -EINVAL;
+	normal_index = cpuq->normal_queue_index;
+	candidate->dsq_id = queue_normal_dsq(normal_index);
+	if (!queue_fairness_head(candidate->dsq_id, &candidate->vtime)) {
+		if (!queue_fairness_remote_normal(cell, normal_index, &normal_index,
+						  &candidate->vtime))
+			return 0;
+		candidate->dsq_id = queue_normal_dsq(normal_index);
+	}
+	candidate->class = SNAKE_QUEUE_CLASS_NORMAL;
+	candidate->valid = 1;
+	return 0;
+}
+
+static __always_inline int
+queue_fairness_affinity_candidate(s32 cpu,
+				  struct snake_queue_candidate *candidate)
+{
+	if (!candidate || cpu < 0 || cpu >= nr_cpu_ids)
+		return -EINVAL;
+	candidate->valid = 0;
+	candidate->dsq_id = queue_affinity_dsq(cpu);
+	if (!queue_fairness_head(candidate->dsq_id, &candidate->vtime))
+		return 0;
+	candidate->class = SNAKE_QUEUE_CLASS_AFFINITY;
+	candidate->valid = 1;
+	return 0;
+}
+
 static __always_inline bool
 queue_fairness_rehome_pending(struct task_struct *p,
 			      struct snake_task_runtime *runtime)
@@ -417,6 +488,7 @@ queue_fairness_direct_borrowed(struct snake_task_runtime *runtime)
 
 static __always_inline s32
 queue_fairness_keep_running(struct snake_ladder_ctx *ctx,
+			    struct snake_cpu_queue *cpuq,
 			    struct task_struct *prev, u32 class,
 			    u64 candidate_vtime)
 {
@@ -427,7 +499,7 @@ queue_fairness_keep_running(struct snake_ladder_ctx *ctx,
 	if (!prev || !(prev->scx.flags & SCX_TASK_QUEUED))
 		return 0;
 	runtime = fairness_task(ctx, prev, false);
-	if (!runtime || !runtime->runtime_valid)
+	if (!runtime || !runtime->runtime_valid || !cpuq)
 		return -EINVAL;
 	if (queue_fairness_direct_borrowed(runtime)) {
 		stat_inc(ctx, SNAKE_STAT_QUEUE_BORROW_YIELDS);
@@ -439,6 +511,16 @@ queue_fairness_keep_running(struct snake_ladder_ctx *ctx,
 	}
 	if (runtime->run_queue_class != class)
 		return 0;
+	if (runtime->run_owner_cell_index != cpuq->owner_cell_index)
+		return 0;
+	if (class == SNAKE_QUEUE_CLASS_AFFINITY) {
+		if (!runtime->affinity_initialized)
+			return -EINVAL;
+		if (runtime->affinity_cell_index != cpuq->owner_cell_index)
+			return 0;
+	} else if (runtime->run_cell_index != cpuq->owner_cell_index) {
+		return 0;
+	}
 	current = prev->se.sum_exec_runtime;
 	if (current < runtime->started_exec_runtime) {
 		stat_inc(ctx, SNAKE_STAT_INVALID_ERRORS);
@@ -454,6 +536,115 @@ queue_fairness_keep_running(struct snake_ladder_ctx *ctx,
 		return 0;
 	prev->scx.slice = SNAKE_VTIME_SLICE_NS;
 	return 1;
+}
+
+static __always_inline s32
+queue_fairness_keep_running_min(struct snake_ladder_ctx *ctx,
+				struct snake_cpu_queue *cpuq,
+				struct task_struct *prev, u64 candidate_vtime)
+{
+	struct snake_task_runtime *runtime;
+	u64 current, delta, projected, vruntime;
+	u32 weight;
+
+	if (!prev || !(prev->scx.flags & SCX_TASK_QUEUED))
+		return 0;
+	runtime = fairness_task(ctx, prev, false);
+	if (!runtime || !runtime->runtime_valid || !cpuq)
+		return -EINVAL;
+	if (queue_fairness_direct_borrowed(runtime)) {
+		stat_inc(ctx, SNAKE_STAT_QUEUE_BORROW_YIELDS);
+		return 0;
+	}
+	if (queue_fairness_rehome_pending(prev, runtime)) {
+		stat_inc(ctx, SNAKE_STAT_QUEUE_REHOME_PREEMPTIONS);
+		return 0;
+	}
+	/* A core-retained prev from another cell clock cannot enter this order. */
+	if (runtime->run_owner_cell_index != cpuq->owner_cell_index)
+		return 0;
+	if (runtime->run_queue_class == SNAKE_QUEUE_CLASS_AFFINITY) {
+		if (!runtime->affinity_initialized)
+			return -EINVAL;
+		if (runtime->affinity_cell_index != cpuq->owner_cell_index)
+			return 0;
+		vruntime = runtime->affinity_vruntime;
+	} else {
+		if (runtime->run_queue_class != SNAKE_QUEUE_CLASS_NORMAL)
+			return -EINVAL;
+		/* Borrowed normal work remains charged to its task cell clock. */
+		if (runtime->run_cell_index != cpuq->owner_cell_index)
+			return 0;
+		vruntime = runtime->vruntime;
+	}
+	current = prev->se.sum_exec_runtime;
+	if (current < runtime->started_exec_runtime) {
+		stat_inc(ctx, SNAKE_STAT_INVALID_ERRORS);
+		return -ERANGE;
+	}
+	delta = current - runtime->started_exec_runtime;
+	weight = runtime->active_weight ?: fairness_task_weight(prev);
+	projected = vruntime + fairness_scale_inverse(delta, weight);
+	if (time_before(candidate_vtime, projected))
+		return 0;
+	prev->scx.slice = SNAKE_VTIME_SLICE_NS;
+	return 1;
+}
+
+static __always_inline s32
+queue_fairness_dispatch_min(struct snake_ladder_ctx *ctx,
+			    struct snake_cpu_queue *cpuq, s32 cpu,
+			    struct task_struct *prev, u32 *equal_preference)
+{
+	struct snake_queue_candidate normal = {}, affinity = {};
+	struct snake_queue_candidate *winner, *loser;
+	s32 keep, ret;
+
+	if (!equal_preference)
+		return -EINVAL;
+	ret = queue_fairness_normal_candidate(cpuq, &normal);
+	if (ret)
+		return ret;
+	ret = queue_fairness_affinity_candidate(cpu, &affinity);
+	if (ret)
+		return ret;
+	if (!normal.valid && !affinity.valid)
+		return 0;
+	if (!affinity.valid ||
+	    (normal.valid && time_before(normal.vtime, affinity.vtime))) {
+		winner = &normal;
+		loser = affinity.valid ? &affinity : NULL;
+	} else if (!normal.valid || time_before(affinity.vtime, normal.vtime)) {
+		winner = &affinity;
+		loser = normal.valid ? &normal : NULL;
+	} else {
+		stat_inc(ctx, SNAKE_STAT_VTIME_EQUAL_HEAD_TIES);
+		if (*equal_preference == SNAKE_QUEUE_CLASS_AFFINITY) {
+			winner = &affinity;
+			loser = &normal;
+			*equal_preference = SNAKE_QUEUE_CLASS_NORMAL;
+		} else {
+			winner = &normal;
+			loser = &affinity;
+			*equal_preference = SNAKE_QUEUE_CLASS_AFFINITY;
+		}
+	}
+
+	keep = queue_fairness_keep_running_min(ctx, cpuq, prev, winner->vtime);
+	if (keep < 0)
+		return keep;
+	if (keep)
+		return 1;
+	if (queue_fairness_move(ctx, winner->dsq_id, winner->class))
+		return 1;
+	if (!loser)
+		return 0;
+	keep = queue_fairness_keep_running_min(ctx, cpuq, prev, loser->vtime);
+	if (keep < 0)
+		return keep;
+	if (keep)
+		return 1;
+	return queue_fairness_move(ctx, loser->dsq_id, loser->class) ? 1 : 0;
 }
 
 static __always_inline s32
@@ -491,7 +682,8 @@ queue_fairness_dispatch_source(struct snake_ladder_ctx *ctx,
 		return -EINVAL;
 	}
 
-	keep = queue_fairness_keep_running(ctx, prev, class, candidate_vtime);
+	keep = queue_fairness_keep_running(ctx, cpuq, prev, class,
+					   candidate_vtime);
 	if (keep < 0)
 		return keep;
 	if (keep)
@@ -500,14 +692,15 @@ queue_fairness_dispatch_source(struct snake_ladder_ctx *ctx,
 }
 
 static __always_inline int
-queue_fairness_replenish(struct snake_ladder_ctx *ctx, struct task_struct *prev)
+queue_fairness_replenish(struct snake_ladder_ctx *ctx,
+			 struct snake_cpu_queue *cpuq, struct task_struct *prev)
 {
 	struct snake_task_runtime *runtime;
 
 	if (!prev || !(prev->scx.flags & SCX_TASK_QUEUED))
 		return 0;
 	runtime = fairness_task(ctx, prev, false);
-	if (!runtime)
+	if (!runtime || !cpuq)
 		return -EINVAL;
 	if (queue_fairness_direct_borrowed(runtime)) {
 		stat_inc(ctx, SNAKE_STAT_QUEUE_BORROW_YIELDS);
@@ -515,6 +708,17 @@ queue_fairness_replenish(struct snake_ladder_ctx *ctx, struct task_struct *prev)
 	}
 	if (queue_fairness_rehome_pending(prev, runtime)) {
 		stat_inc(ctx, SNAKE_STAT_QUEUE_REHOME_PREEMPTIONS);
+		return 0;
+	}
+	if (runtime->run_owner_cell_index != cpuq->owner_cell_index)
+		return 0;
+	if (runtime->run_queue_class == SNAKE_QUEUE_CLASS_AFFINITY) {
+		if (!runtime->affinity_initialized)
+			return -EINVAL;
+		if (runtime->affinity_cell_index != cpuq->owner_cell_index)
+			return 0;
+	} else if (runtime->run_queue_class != SNAKE_QUEUE_CLASS_NORMAL ||
+		   runtime->run_cell_index != cpuq->owner_cell_index) {
 		return 0;
 	}
 	prev->scx.slice = SNAKE_VTIME_SLICE_NS;
@@ -548,6 +752,10 @@ queue_fairness_running(struct snake_ladder_ctx *ctx, struct task_struct *p)
 		if (!runtime)
 			return -EINVAL;
 	}
+	cpu = bpf_get_smp_processor_id();
+	cpuq = queue_cpu(cpu);
+	if (!cpuq)
+		return -EINVAL;
 	domain = queue_cell_domain(runtime->cell_index);
 	if (!domain)
 		return -EINVAL;
@@ -556,7 +764,10 @@ queue_fairness_running(struct snake_ladder_ctx *ctx, struct task_struct *p)
 		domain->vtime_now = runtime->vruntime;
 	bpf_spin_unlock(&domain->lock);
 	if (runtime->queue_class == SNAKE_QUEUE_CLASS_AFFINITY) {
-		domain = fairness_vtime_domain();
+		if (queue_fairness_prepare_affinity(ctx, runtime,
+					    cpuq->owner_cell_index))
+			return -EINVAL;
+		domain = queue_cell_domain(cpuq->owner_cell_index);
 		if (!domain)
 			return -EINVAL;
 		bpf_spin_lock(&domain->lock);
@@ -564,10 +775,8 @@ queue_fairness_running(struct snake_ladder_ctx *ctx, struct task_struct *p)
 			domain->vtime_now = runtime->affinity_vruntime;
 		bpf_spin_unlock(&domain->lock);
 	}
-	cpu = bpf_get_smp_processor_id();
-	cpuq = queue_cpu(cpu);
-	if (!cpuq)
-		return -EINVAL;
+	/* select_cpu() may be followed directly by running() when prev is kept. */
+	runtime->selected_cpu_valid = 0;
 	runtime->run_cell_index = runtime->cell_index;
 	runtime->run_owner_cell_index = cpuq ? cpuq->owner_cell_index : 0;
 	runtime->run_queue_class = runtime->queue_class;

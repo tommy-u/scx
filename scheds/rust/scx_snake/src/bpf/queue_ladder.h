@@ -6,7 +6,7 @@ static __always_inline int
 validate_queue_ladders(const struct snake_compiled_ladder *ladder)
 {
 	bool enqueue_cell = false, enqueue_affinity = false;
-	bool dispatch_cell = false, dispatch_affinity = false;
+	bool dispatch_cell = false, dispatch_affinity = false, dispatch_min = false;
 	u32  i;
 
 	if (!queue_topology_enabled())
@@ -53,13 +53,20 @@ validate_queue_ladders(const struct snake_compiled_ladder *ladder)
 		if (!rung || rung->flags)
 			return -EINVAL;
 		if (rung->opcode == SNAKE_DISPATCH_OP_CELL) {
-			if (dispatch_cell)
+			if (dispatch_cell || dispatch_min)
 				return -EINVAL;
 			dispatch_cell = true;
 		} else if (rung->opcode == SNAKE_DISPATCH_OP_AFFINITY) {
-			if (dispatch_affinity)
+			if (dispatch_affinity || dispatch_min)
 				return -EINVAL;
 			dispatch_affinity = true;
+		} else if (rung->opcode == SNAKE_DISPATCH_OP_MIN_VTIME) {
+			if (dispatch_cell || dispatch_affinity || dispatch_min ||
+			    ladder->nr_dispatch_rungs != 1)
+				return -EINVAL;
+			dispatch_cell = true;
+			dispatch_affinity = true;
+			dispatch_min = true;
 		} else {
 			return -EINVAL;
 		}
@@ -136,7 +143,23 @@ queue_ladder_dispatch(struct snake_ladder_ctx *ctx, s32 cpu,
 	    state->next_dispatch_rung >= ctx->ladder->nr_dispatch_rungs) {
 		state->generation = ctx->ladder->generation;
 		state->next_dispatch_rung = 0;
+		state->next_equal_class = SNAKE_QUEUE_CLASS_NORMAL;
 		state->initialized = 1;
+	}
+	if (ctx->ladder->nr_dispatch_rungs == 1) {
+		const struct snake_queue_rung *only =
+			MEMBER_VPTR(ctx->ladder->dispatch_rungs, [0]);
+		s32 result;
+
+		if (!only)
+			return -EINVAL;
+		if (only->opcode == SNAKE_DISPATCH_OP_MIN_VTIME) {
+			result = queue_fairness_dispatch_min(
+				ctx, cpuq, cpu, prev, &state->next_equal_class);
+			if (result < 0)
+				return result;
+			return result ? 0 : queue_fairness_replenish(ctx, cpuq, prev);
+		}
 	}
 	start = state->next_dispatch_rung;
 
@@ -166,7 +189,7 @@ queue_ladder_dispatch(struct snake_ladder_ctx *ctx, s32 cpu,
 		state->next_dispatch_rung = index;
 		return 0;
 	}
-	return queue_fairness_replenish(ctx, prev);
+	return queue_fairness_replenish(ctx, cpuq, prev);
 }
 
 #endif /* __SCX_SNAKE_QUEUE_LADDER_H */

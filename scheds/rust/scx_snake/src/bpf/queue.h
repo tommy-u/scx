@@ -10,6 +10,7 @@
 struct snake_queue_cpu_state {
 	u64 generation;
 	u32 next_dispatch_rung;
+	u32 next_equal_class;
 	u32 initialized;
 };
 
@@ -144,11 +145,16 @@ queue_pick_primary_cpu(const struct snake_queue_cell *cell,
 static __always_inline s32
 queue_pick_allowed_cpu(const struct task_struct *p, s32 preferred)
 {
+	s32 current;
 	u32 offset, start;
 
 	if (preferred >= 0 && preferred < nr_cpu_ids && queue_cpu(preferred) &&
 	    bpf_cpumask_test_cpu(preferred, p->cpus_ptr))
 		return preferred;
+	current = scx_bpf_task_cpu(p);
+	if (current >= 0 && current < nr_cpu_ids && queue_cpu(current) &&
+	    bpf_cpumask_test_cpu(current, p->cpus_ptr))
+		return current;
 	start = bpf_get_prandom_u32() % nr_cpu_ids;
 	bpf_for(offset, 0, SNAKE_MAX_CPUS)
 	{

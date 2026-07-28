@@ -258,6 +258,9 @@ fn encode_ladder(
                 QueueDispatchSource::Affinity => {
                     bpf_intf::snake_dispatch_opcode_SNAKE_DISPATCH_OP_AFFINITY
                 }
+                QueueDispatchSource::MinVtime => {
+                    bpf_intf::snake_dispatch_opcode_SNAKE_DISPATCH_OP_MIN_VTIME
+                }
             };
         }
         (
@@ -479,12 +482,21 @@ fn validate_queue_callback_replacement(
             );
         }
     }
-    for source in &active.dispatch {
-        if !candidate.dispatch.contains(source) {
-            bail!(
-                "cannot remove active queue dispatch source `{}` during live replacement",
-                source.as_str()
-            );
+    let dispatch_classes = |dispatch: &[QueueDispatchSource]| {
+        let min_vtime = dispatch.contains(&QueueDispatchSource::MinVtime);
+        (
+            min_vtime || dispatch.contains(&QueueDispatchSource::Cell),
+            min_vtime || dispatch.contains(&QueueDispatchSource::Affinity),
+        )
+    };
+    let (active_cell, active_affinity) = dispatch_classes(&active.dispatch);
+    let (candidate_cell, candidate_affinity) = dispatch_classes(&candidate.dispatch);
+    for (active, candidate, source) in [
+        (active_cell, candidate_cell, "cell"),
+        (active_affinity, candidate_affinity, "affinity"),
+    ] {
+        if active && !candidate {
+            bail!("cannot remove active queue dispatch source `{source}` during live replacement");
         }
     }
     Ok(())
@@ -842,6 +854,7 @@ fn aggregate_raw_stats(
         vtime_queued_runtime_ns: value(bpf_intf::snake_stat_SNAKE_STAT_VTIME_QUEUED_RUNTIME_NS),
         vtime_credit_clamps: value(bpf_intf::snake_stat_SNAKE_STAT_VTIME_CREDIT_CLAMPS),
         vtime_accounting_errors: value(bpf_intf::snake_stat_SNAKE_STAT_VTIME_ACCOUNTING_ERRORS),
+        vtime_equal_head_ties: value(bpf_intf::snake_stat_SNAKE_STAT_VTIME_EQUAL_HEAD_TIES),
         eevdf_eligible_enqueues: value(bpf_intf::snake_stat_SNAKE_STAT_EEVDF_ELIGIBLE_ENQUEUES),
         eevdf_future_enqueues: value(bpf_intf::snake_stat_SNAKE_STAT_EEVDF_FUTURE_ENQUEUES),
         eevdf_promotions: value(bpf_intf::snake_stat_SNAKE_STAT_EEVDF_PROMOTIONS),
@@ -1457,7 +1470,7 @@ scope = "task_allowed"
         let policy = policy::compile_policy(policy_source()).expect("policy should compile");
         let encoded = encode_ladder(&policy, 42).expect("ladder should encode");
 
-        assert_eq!(bpf_intf::SNAKE_ABI_VERSION, 15);
+        assert_eq!(bpf_intf::SNAKE_ABI_VERSION, 16);
         assert_eq!(size_of::<bpf_intf::snake_compiled_ladder>(), 352);
         assert_eq!(offset_of!(bpf_intf::snake_compiled_ladder, generation), 0);
         assert_eq!(
@@ -1549,6 +1562,28 @@ scope = "task_allowed"
     }
 
     #[test]
+    fn encodes_min_vtime_dispatch_opcode() {
+        let policy = policy::compile_policy(
+            r#"
+[queues]
+layout = "cell"
+enqueue = [{ target = "cell" }, { target = "affinity" }]
+dispatch = [{ operation = "min_vtime" }]
+
+[[rung]]
+operation = "pick_idle"
+scope = "task_allowed"
+"#,
+        )
+        .unwrap();
+        let encoded = encode_ladder(&policy, 7).unwrap();
+
+        assert_eq!(encoded.nr_dispatch_rungs, 1);
+        assert_eq!(encoded.dispatch_rungs[0].opcode, 3);
+        assert_eq!(encoded.dispatch_rungs[0].flags, 0);
+    }
+
+    #[test]
     fn live_queue_callback_updates_may_add_but_not_remove_sources() {
         let compile_callbacks = |enqueue: &str, dispatch: &str| {
             policy::compile_policy(&format!(
@@ -1574,9 +1609,15 @@ scope = "task_allowed"
             "[{ target = \"cell\" }, { target = \"affinity\" }]",
             "[{ source = \"cell\" }, { source = \"affinity\" }]",
         );
+        let min_vtime = compile_callbacks(
+            "[{ target = \"cell\" }, { target = \"affinity\" }]",
+            "[{ operation = \"min_vtime\" }]",
+        );
 
         assert!(validate_queue_callback_replacement(&affinity, &full).is_ok());
         assert!(validate_queue_callback_replacement(&full, &reordered).is_ok());
+        assert!(validate_queue_callback_replacement(&full, &min_vtime).is_ok());
+        assert!(validate_queue_callback_replacement(&min_vtime, &reordered).is_ok());
         let error = validate_queue_callback_replacement(&full, &affinity)
             .unwrap_err()
             .to_string();

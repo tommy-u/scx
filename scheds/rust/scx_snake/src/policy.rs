@@ -87,6 +87,7 @@ pub enum QueueEnqueueTarget {
 pub enum QueueDispatchSource {
     Cell = 1,
     Affinity = 2,
+    MinVtime = 3,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -178,6 +179,7 @@ impl QueueDispatchSource {
         match self {
             Self::Cell => "cell",
             Self::Affinity => "affinity",
+            Self::MinVtime => "min_vtime(cell,affinity)",
         }
     }
 }
@@ -267,7 +269,8 @@ struct SemanticQueueEnqueueRung {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SemanticQueueDispatchRung {
-    source: String,
+    source: Option<String>,
+    operation: Option<String>,
 }
 
 const fn default_cell_weight() -> u32 {
@@ -458,13 +461,24 @@ fn compile_queue_dispatch(
 
     let mut compiled = Vec::with_capacity(rungs.len());
     for rung in rungs {
-        let source = match rung.source.as_str() {
-            "cell" => QueueDispatchSource::Cell,
-            "affinity" => QueueDispatchSource::Affinity,
-            source => {
+        let source = match (rung.source.as_deref(), rung.operation.as_deref()) {
+            (Some("cell"), None) => QueueDispatchSource::Cell,
+            (Some("affinity"), None) => QueueDispatchSource::Affinity,
+            (Some(source), None) => {
                 return Err(PolicyError(format!(
                     "unknown dispatch source `{source}`; expected `cell` or `affinity`"
                 )))
+            }
+            (None, Some("min_vtime")) => QueueDispatchSource::MinVtime,
+            (None, Some(operation)) => {
+                return Err(PolicyError(format!(
+                    "unknown dispatch operation `{operation}`; expected `min_vtime`"
+                )))
+            }
+            _ => {
+                return Err(PolicyError(
+                    "dispatch rung must specify exactly one of `source` or `operation`".into(),
+                ))
             }
         };
         if compiled.contains(&source) {
@@ -476,7 +490,15 @@ fn compile_queue_dispatch(
         compiled.push(source);
     }
 
-    if !compiled.contains(&QueueDispatchSource::Affinity) {
+    if compiled.contains(&QueueDispatchSource::MinVtime) && compiled.len() != 1 {
+        return Err(PolicyError(
+            "min_vtime must be the sole dispatch operation".into(),
+        ));
+    }
+
+    if !compiled.contains(&QueueDispatchSource::Affinity)
+        && !compiled.contains(&QueueDispatchSource::MinVtime)
+    {
         return Err(PolicyError(
             "queue dispatch ladder must contain `affinity`".into(),
         ));
@@ -489,7 +511,16 @@ fn validate_queue_callback_pair(
     dispatch: &[QueueDispatchSource],
 ) -> Result<(), PolicyError> {
     let enqueue_has_cell = enqueue.contains(&QueueEnqueueTarget::Cell);
-    let dispatch_has_cell = dispatch.contains(&QueueDispatchSource::Cell);
+    let min_vtime = dispatch.contains(&QueueDispatchSource::MinVtime);
+    if min_vtime
+        && !(enqueue.contains(&QueueEnqueueTarget::Cell)
+            && enqueue.contains(&QueueEnqueueTarget::Affinity))
+    {
+        return Err(PolicyError(
+            "min_vtime requires both `cell` and `affinity` enqueue targets".into(),
+        ));
+    }
+    let dispatch_has_cell = dispatch.contains(&QueueDispatchSource::Cell) || min_vtime;
     match (enqueue_has_cell, dispatch_has_cell) {
         (true, false) => Err(PolicyError(
             "queue dispatch ladder must contain `cell` when enqueue contains `cell`".into(),
@@ -1210,6 +1241,56 @@ scope = "task_cell"
             queues.dispatch,
             vec![QueueDispatchSource::Cell, QueueDispatchSource::Affinity]
         );
+    }
+
+    #[test]
+    fn compiles_min_vtime_dispatch_operation() {
+        let policy = compile_policy(
+            r#"
+[queues]
+layout = "cell"
+enqueue = [{ target = "cell" }, { target = "affinity" }]
+dispatch = [{ operation = "min_vtime" }]
+
+[[cell]]
+id = 7
+cpus = "0-3"
+
+[[rung]]
+operation = "pick_idle"
+scope = "task_cell"
+"#,
+        )
+        .expect("min_vtime dispatch should compile");
+
+        assert_eq!(policy.queues.as_ref().unwrap().dispatch.len(), 1);
+        assert!(policy.dump().contains("dispatch=min_vtime(cell,affinity)"));
+    }
+
+    #[test]
+    fn rejects_invalid_min_vtime_dispatch_ladders() {
+        let cases = [
+            (
+                "enqueue = [{ target = \"affinity\" }]\ndispatch = [{ operation = \"min_vtime\" }]",
+                "min_vtime requires both `cell` and `affinity` enqueue targets",
+            ),
+            (
+                "enqueue = [{ target = \"cell\" }, { target = \"affinity\" }]\ndispatch = [{ operation = \"min_vtime\" }, { source = \"cell\" }]",
+                "min_vtime must be the sole dispatch operation",
+            ),
+            (
+                "enqueue = [{ target = \"cell\" }, { target = \"affinity\" }]\ndispatch = [{ source = \"cell\", operation = \"min_vtime\" }]",
+                "dispatch rung must specify exactly one of `source` or `operation`",
+            ),
+        ];
+
+        for (callbacks, expected) in cases {
+            let source = format!(
+                "[queues]\nlayout = \"cell\"\n{callbacks}\n[[rung]]\noperation = \"pick_idle\"\nscope = \"task_allowed\"\n"
+            );
+            let error = error_for(&source);
+            assert!(error.contains(expected), "{error}");
+        }
     }
 
     #[test]

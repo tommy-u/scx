@@ -10,6 +10,7 @@ tmpdir=$(mktemp -d)
 initial=${tmpdir}/initial.toml
 replacement=${tmpdir}/replacement.toml
 reordered=${tmpdir}/reordered.toml
+min_vtime=${tmpdir}/min-vtime.toml
 invalid=${tmpdir}/invalid.toml
 snake_log=${tmpdir}/snake.log
 update_log=${tmpdir}/update.log
@@ -171,7 +172,11 @@ write_policy() {
                 'target = "cell"' \
                 '[[queues.enqueue]]' \
                 'target = "affinity"'
-            if [[ ${mode} == full_affinity_first ]]; then
+            if [[ ${mode} == min_vtime ]]; then
+                printf '%s\n' \
+                    '[[queues.dispatch]]' \
+                    'operation = "min_vtime"'
+            elif [[ ${mode} == full_affinity_first ]]; then
                 printf '%s\n' \
                     '[[queues.dispatch]]' \
                     'source = "affinity"' \
@@ -216,6 +221,7 @@ dmesg_lines=$(dmesg | wc -l)
 write_policy "${initial}" cell affinity
 write_policy "${replacement}" cell full_cell_first
 write_policy "${reordered}" cell full_affinity_first
+write_policy "${min_vtime}" cell min_vtime
 write_policy "${invalid}" cell_llc full_cell_first
 
 "${snake_bin}" --policy "${initial}" --fairness vtime --stats 0.25 \
@@ -280,6 +286,40 @@ if normal == 0 or affinity == 0:
 PY
 scheduler_enabled || fail "scheduler exited after callback dispatch reorder"
 
+"${snake_bin}" --update-policy "${min_vtime}" >"${update_log}" 2>&1 ||
+    fail "min_vtime callback replacement failed"
+grep -q 'activated policy generation 4' "${update_log}" ||
+    fail "min_vtime replacement did not advance the generation"
+sleep 2
+python3 - "${snake_log}" <<'PY' || fail "min_vtime did not dispatch both queue classes"
+import re
+import sys
+
+generation = None
+normal = 0
+affinity = 0
+with open(sys.argv[1], encoding="utf-8") as stream:
+    for line in stream:
+        match = re.search(r"policy generation (\d+) stats", line)
+        if match:
+            generation = int(match.group(1))
+            continue
+        if generation != 4:
+            continue
+        match = re.search(r"dispatches (\d+)/(?P<affinity>\d+)", line)
+        if match:
+            normal += int(match.group(1))
+            affinity += int(match.group("affinity"))
+if normal == 0 or affinity == 0:
+    raise SystemExit(f"generation 4 dispatches normal={normal} affinity={affinity}")
+PY
+scheduler_enabled || fail "scheduler exited after min_vtime replacement"
+
+timeout --signal=TERM --kill-after=2s 8s \
+    stress-ng --fork "${cpus}" --fork-max 4 --fork-vm --timeout 3s \
+    >/dev/null 2>&1 || fail "min_vtime fork/exit churn failed"
+scheduler_enabled || fail "scheduler exited during min_vtime fork/exit churn"
+
 if "${snake_bin}" --update-policy "${initial}" >"${update_log}" 2>&1; then
     fail "source-removing callback replacement unexpectedly succeeded"
 fi
@@ -301,8 +341,8 @@ stress_pid=
 stop_pid "${pinned_pid}"
 pinned_pid=
 
-run_dispatch_order_phase "${reordered}" 4 AN
-run_dispatch_order_phase "${replacement}" 5 NA
+run_dispatch_order_phase "${reordered}" 5 AN
+run_dispatch_order_phase "${replacement}" 6 NA
 echo "PASS: live dispatch source order selected the first ready queue"
 
 if "${snake_bin}" --update-policy "${invalid}" >"${update_log}" 2>&1; then

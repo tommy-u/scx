@@ -2,8 +2,9 @@
 
 use scx_snake::fairness::{
     advance_virtual_time, clamp_virtual_lag, clamp_vtime_credit, is_eligible, later_vtime_frontier,
-    next_dispatch_class, restore_vruntime, scale_inverse_weight, translate_vruntime,
-    virtual_deadline, DispatchClass, FairnessMode, EEVDF_SLICE_NS, VTIME_SLICE_NS,
+    min_vtime_dispatch_class, next_dispatch_class, restore_vruntime, scale_inverse_weight,
+    translate_vruntime, virtual_deadline, DispatchClass, FairnessMode, EEVDF_SLICE_NS,
+    VTIME_SLICE_NS,
 };
 
 #[test]
@@ -75,6 +76,43 @@ fn dispatch_classes_alternate_without_comparing_clocks() {
     assert_eq!(
         next_dispatch_class(false, false, DispatchClass::Normal),
         None
+    );
+}
+
+#[test]
+fn min_vtime_selects_the_earliest_available_head() {
+    assert_eq!(
+        min_vtime_dispatch_class(Some(10), Some(20), DispatchClass::Normal),
+        Some((DispatchClass::Normal, DispatchClass::Normal))
+    );
+    assert_eq!(
+        min_vtime_dispatch_class(Some(20), Some(10), DispatchClass::Normal),
+        Some((DispatchClass::Affinity, DispatchClass::Normal))
+    );
+    assert_eq!(
+        min_vtime_dispatch_class(Some(10), None, DispatchClass::Affinity),
+        Some((DispatchClass::Normal, DispatchClass::Affinity))
+    );
+    assert_eq!(
+        min_vtime_dispatch_class(None, Some(10), DispatchClass::Normal),
+        Some((DispatchClass::Affinity, DispatchClass::Normal))
+    );
+    assert_eq!(
+        min_vtime_dispatch_class(None, None, DispatchClass::Normal),
+        None
+    );
+}
+
+#[test]
+fn min_vtime_alternates_equal_heads_and_handles_wraparound() {
+    let first = min_vtime_dispatch_class(Some(10), Some(10), DispatchClass::Normal).unwrap();
+    assert_eq!(first, (DispatchClass::Normal, DispatchClass::Affinity));
+    let second = min_vtime_dispatch_class(Some(10), Some(10), first.1).unwrap();
+    assert_eq!(second, (DispatchClass::Affinity, DispatchClass::Normal));
+
+    assert_eq!(
+        min_vtime_dispatch_class(Some(u64::MAX - 5), Some(4), DispatchClass::Normal,),
+        Some((DispatchClass::Normal, DispatchClass::Normal))
     );
 }
 

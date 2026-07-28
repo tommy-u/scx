@@ -8,7 +8,7 @@ typedef unsigned int	   u32;
 typedef unsigned long long u64;
 #endif
 
-#define SNAKE_ABI_VERSION 15
+#define SNAKE_ABI_VERSION 16
 #define SNAKE_MAX_RUNGS 8
 #define SNAKE_MAX_QUEUE_RUNGS 8
 #define SNAKE_LADDER_SLOTS 2
@@ -88,6 +88,7 @@ enum snake_dispatch_opcode {
 	SNAKE_DISPATCH_OP_INVALID  = 0,
 	SNAKE_DISPATCH_OP_CELL     = 1,
 	SNAKE_DISPATCH_OP_AFFINITY = 2,
+	SNAKE_DISPATCH_OP_MIN_VTIME = 3,
 };
 
 /* Userspace annotation attached to one thread through BPF task storage. */
@@ -212,6 +213,7 @@ enum snake_stat {
 	SNAKE_STAT_VTIME_QUEUED_RUNTIME_NS,
 	SNAKE_STAT_VTIME_CREDIT_CLAMPS,
 	SNAKE_STAT_VTIME_ACCOUNTING_ERRORS,
+	SNAKE_STAT_VTIME_EQUAL_HEAD_TIES,
 	SNAKE_STAT_EEVDF_ELIGIBLE_ENQUEUES,
 	SNAKE_STAT_EEVDF_FUTURE_ENQUEUES,
 	SNAKE_STAT_EEVDF_PROMOTIONS,

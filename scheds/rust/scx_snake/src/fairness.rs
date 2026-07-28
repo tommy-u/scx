@@ -80,6 +80,28 @@ pub fn next_dispatch_class(
     }
 }
 
+pub fn min_vtime_dispatch_class(
+    normal_vtime: Option<u64>,
+    affinity_vtime: Option<u64>,
+    equal_preference: DispatchClass,
+) -> Option<(DispatchClass, DispatchClass)> {
+    match (normal_vtime, affinity_vtime) {
+        (None, None) => None,
+        (Some(_), None) => Some((DispatchClass::Normal, equal_preference)),
+        (None, Some(_)) => Some((DispatchClass::Affinity, equal_preference)),
+        (Some(normal), Some(affinity)) if vtime_before(normal, affinity) => {
+            Some((DispatchClass::Normal, equal_preference))
+        }
+        (Some(normal), Some(affinity)) if vtime_before(affinity, normal) => {
+            Some((DispatchClass::Affinity, equal_preference))
+        }
+        (Some(_), Some(_)) => match equal_preference {
+            DispatchClass::Normal => Some((DispatchClass::Normal, DispatchClass::Affinity)),
+            DispatchClass::Affinity => Some((DispatchClass::Affinity, DispatchClass::Normal)),
+        },
+    }
+}
+
 pub fn scale_inverse_weight(delta_ns: u64, weight: u64) -> Result<u64, &'static str> {
     if weight == 0 {
         return Err("weight must be non-zero");

@@ -254,6 +254,21 @@ sudo ./target/release/scx_snake \
   --stats 1
 ```
 
+To observe combined clock-ordered dispatch in the inspector, run the
+`min_vtime` example instead:
+
+```bash
+sudo ./target/release/scx_snake \
+  --policy scheds/rust/scx_snake/examples/cell-min-vtime.toml \
+  --fairness vtime \
+  --stats 1
+```
+
+With `scx_snake_inspector` listening on its default port, open
+`http://127.0.0.1:8787/#policy`. The Dispatch ladder should show
+`min_vtime(cell,affinity)`, `Lowest VTIME; alternating exact ties`, and no
+cyclic cursor marker. Use `Ctrl-C` in the scheduler terminal to stop Snake.
+
 Replace the complete ladder without restarting the scheduler:
 
 ```bash

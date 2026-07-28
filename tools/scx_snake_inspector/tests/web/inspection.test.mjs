@@ -161,8 +161,24 @@ test("queue ladder sections preserve order and callback semantics", () => {
   assert.equal(sections[0].rungs[1].flow.miss, "Failure → error");
   assert.equal(sections[1].title, "Dispatch");
   assert.equal(sections[1].behavior, "Cyclic per-CPU cursor");
+  assert.equal(sections[1].cyclic, true);
   assert.equal(sections[1].rungs[0].operation, "affinity");
   assert.equal(sections[1].rungs[1].flow.miss, "Empty → wrap to rung 0");
+});
+
+test("min_vtime dispatch is presented as a combined clock-order operation", () => {
+  const sections = queueLadderSections({
+    layout: "cell",
+    enqueue: [
+      { index: 0, operation: "cell" },
+      { index: 1, operation: "affinity" },
+    ],
+    dispatch: [{ index: 0, operation: "min_vtime(cell,affinity)" }],
+  });
+
+  assert.equal(sections[1].behavior, "Lowest VTIME; alternating exact ties");
+  assert.equal(sections[1].cyclic, false);
+  assert.equal(sections[1].rungs[0].role, "operation");
 });
 
 test("idle selection hits flow into the configured queue path", () => {
@@ -181,7 +197,7 @@ test("resolved queue topology model labels cells and DSQs for display", () => {
   const model = queueTopologyModel(
     {
       mode_name: "vtime",
-      clock_model: "per-cell normal clocks; one shared global affinity clock",
+      clock_model: "one clock per cell shared by normal and affinity queues",
     },
     {
       layout: "cell_llc",

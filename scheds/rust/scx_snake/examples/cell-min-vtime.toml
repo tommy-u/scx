@@ -1,0 +1,35 @@
+# Compare each CPU owner's normal cell queue with that CPU's affinity queue in
+# one shared cell VTIME domain. Queue policies require --fairness vtime.
+# This example assumes CPUs 0-7 are online.
+fallback = "any_allowed"
+
+[queues]
+layout = "cell_llc"
+cell0_cpu_weight = 1
+
+[[queues.enqueue]]
+target = "cell"
+
+[[queues.enqueue]]
+target = "affinity"
+
+[[queues.dispatch]]
+operation = "min_vtime"
+
+[[cell]]
+id = 1
+cpus = "0-7"
+cpu_weight = 1
+
+[[cell]]
+id = 2
+cpus = "0-7"
+cpu_weight = 1
+
+[[rung]]
+operation = "pick_idle_core"
+scope = "task_cell"
+
+[[rung]]
+operation = "pick_idle"
+scope = "task_allowed"
