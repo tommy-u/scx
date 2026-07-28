@@ -65,7 +65,7 @@ enum StatsFormat {
 #[derive(Debug, Parser)]
 #[command(name = SCHEDULER_NAME, version)]
 struct Opts {
-    /// Queue discipline used after idle-CPU placement misses; EEVDF is experimental.
+    /// Queue discipline used after idle-CPU placement misses; VTIME and EEVDF are experimental.
     #[arg(long, value_enum, default_value_t)]
     fairness: FairnessMode,
 
@@ -563,6 +563,17 @@ fn aggregate_raw_stats(
         select_latency_max_ns: value(bpf_intf::snake_stat_SNAKE_STAT_SELECT_LATENCY_MAX_NS),
         cell_rehomes: value(bpf_intf::snake_stat_SNAKE_STAT_CELL_REHOMES),
         cell_rehome_misses: value(bpf_intf::snake_stat_SNAKE_STAT_CELL_REHOME_MISSES),
+        vtime_enqueues: value(bpf_intf::snake_stat_SNAKE_STAT_VTIME_ENQUEUES),
+        vtime_dispatches: value(bpf_intf::snake_stat_SNAKE_STAT_VTIME_DISPATCHES),
+        vtime_cpu_enqueues: value(bpf_intf::snake_stat_SNAKE_STAT_VTIME_CPU_ENQUEUES),
+        vtime_cpu_dispatches: value(bpf_intf::snake_stat_SNAKE_STAT_VTIME_CPU_DISPATCHES),
+        vtime_strict_preempt_queues: value(
+            bpf_intf::snake_stat_SNAKE_STAT_VTIME_STRICT_PREEMPT_QUEUES,
+        ),
+        vtime_direct_runtime_ns: value(bpf_intf::snake_stat_SNAKE_STAT_VTIME_DIRECT_RUNTIME_NS),
+        vtime_queued_runtime_ns: value(bpf_intf::snake_stat_SNAKE_STAT_VTIME_QUEUED_RUNTIME_NS),
+        vtime_credit_clamps: value(bpf_intf::snake_stat_SNAKE_STAT_VTIME_CREDIT_CLAMPS),
+        vtime_accounting_errors: value(bpf_intf::snake_stat_SNAKE_STAT_VTIME_ACCOUNTING_ERRORS),
         eevdf_eligible_enqueues: value(bpf_intf::snake_stat_SNAKE_STAT_EEVDF_ELIGIBLE_ENQUEUES),
         eevdf_future_enqueues: value(bpf_intf::snake_stat_SNAKE_STAT_EEVDF_FUTURE_ENQUEUES),
         eevdf_promotions: value(bpf_intf::snake_stat_SNAKE_STAT_EEVDF_PROMOTIONS),
@@ -1042,7 +1053,7 @@ scope = "task_allowed"
         let policy = policy::compile_policy(policy_source()).expect("policy should compile");
         let encoded = encode_ladder(&policy, 42).expect("ladder should encode");
 
-        assert_eq!(bpf_intf::SNAKE_ABI_VERSION, 10);
+        assert_eq!(bpf_intf::SNAKE_ABI_VERSION, 12);
         assert_eq!(size_of::<bpf_intf::snake_compiled_ladder>(), 216);
         assert_eq!(offset_of!(bpf_intf::snake_compiled_ladder, generation), 0);
         assert_eq!(
@@ -1091,8 +1102,22 @@ scope = "task_allowed"
             FairnessMode::Eevdf as u32
         );
         assert_eq!(
+            bpf_intf::snake_fairness_mode_SNAKE_FAIRNESS_VTIME,
+            FairnessMode::Vtime as u32
+        );
+        assert_eq!(
             u64::from(bpf_intf::SNAKE_EEVDF_SLICE_NS),
             scx_snake::fairness::EEVDF_SLICE_NS
+        );
+        assert_eq!(
+            u64::from(bpf_intf::SNAKE_VTIME_SLICE_NS),
+            scx_snake::fairness::VTIME_SLICE_NS
+        );
+        assert_eq!(bpf_intf::SNAKE_VTIME_GLOBAL_DSQ, 2);
+        assert_eq!(bpf_intf::SNAKE_VTIME_CPU_DSQ_BASE, 3);
+        assert!(
+            bpf_intf::SNAKE_VTIME_CPU_DSQ_BASE + bpf_intf::SNAKE_MAX_CPUS
+                > bpf_intf::SNAKE_VTIME_GLOBAL_DSQ
         );
     }
 
@@ -1472,6 +1497,16 @@ scope = "task_cell"
         );
         set_stat(
             &mut raw,
+            bpf_intf::snake_stat_SNAKE_STAT_VTIME_CPU_ENQUEUES,
+            &[13, 17],
+        );
+        set_stat(
+            &mut raw,
+            bpf_intf::snake_stat_SNAKE_STAT_VTIME_CPU_DISPATCHES,
+            &[11, 19],
+        );
+        set_stat(
+            &mut raw,
             bpf_intf::snake_stat_SNAKE_STAT_RUNG_ATTEMPT_BASE,
             &[4, 6],
         );
@@ -1488,6 +1523,8 @@ scope = "task_cell"
         assert_eq!(metrics.select_calls, 18);
         assert_eq!(metrics.select_latency_ns, 350);
         assert_eq!(metrics.select_latency_max_ns, 900);
+        assert_eq!(metrics.vtime_cpu_enqueues, 30);
+        assert_eq!(metrics.vtime_cpu_dispatches, 30);
         assert_eq!(metrics.cpus[&0].runtime_ns, 25_000);
         assert_eq!(metrics.cpus[&1].runtime_ns, 75_000);
         assert_eq!(metrics.rungs[&0].attempts, 10);

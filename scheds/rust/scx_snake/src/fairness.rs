@@ -4,6 +4,7 @@ use clap::ValueEnum;
 
 pub const BASE_WEIGHT: u64 = 100;
 pub const EEVDF_SLICE_NS: u64 = 5_000_000;
+pub const VTIME_SLICE_NS: u64 = 5_000_000;
 
 #[repr(u32)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
@@ -11,6 +12,7 @@ pub enum FairnessMode {
     #[default]
     Fifo = 1,
     Eevdf = 2,
+    Vtime = 3,
 }
 
 impl FairnessMode {
@@ -18,7 +20,30 @@ impl FairnessMode {
         match self {
             Self::Fifo => "fifo",
             Self::Eevdf => "eevdf",
+            Self::Vtime => "vtime",
         }
+    }
+}
+
+fn vtime_before(lhs: u64, rhs: u64) -> bool {
+    (lhs.wrapping_sub(rhs) as i64) < 0
+}
+
+pub fn later_vtime_frontier(frontier: u64, candidate: u64) -> u64 {
+    if vtime_before(frontier, candidate) {
+        candidate
+    } else {
+        frontier
+    }
+}
+
+pub fn clamp_vtime_credit(vruntime: u64, frontier: u64) -> u64 {
+    let minimum = frontier.wrapping_sub(VTIME_SLICE_NS);
+
+    if vtime_before(vruntime, minimum) {
+        minimum
+    } else {
+        vruntime
     }
 }
 

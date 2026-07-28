@@ -106,6 +106,24 @@ pub struct Metrics {
     pub cell_rehomes: u64,
     #[stat(desc = "Cell rehome attempts deferred because no task-cell rung selected a CPU")]
     pub cell_rehome_misses: u64,
+    #[stat(desc = "Tasks inserted into the VTIME ordered queue")]
+    pub vtime_enqueues: u64,
+    #[stat(desc = "Tasks dispatched from the VTIME ordered queue")]
+    pub vtime_dispatches: u64,
+    #[stat(desc = "Affinity-restricted tasks inserted into per-CPU VTIME queues")]
+    pub vtime_cpu_enqueues: u64,
+    #[stat(desc = "Tasks dispatched from per-CPU VTIME queues")]
+    pub vtime_cpu_dispatches: u64,
+    #[stat(desc = "Synchronous non-idle placements queued for VTIME ordering")]
+    pub vtime_strict_preempt_queues: u64,
+    #[stat(desc = "Task runtime delivered through the VTIME idle-CPU direct path")]
+    pub vtime_direct_runtime_ns: u64,
+    #[stat(desc = "Task runtime delivered through the VTIME ordered queue")]
+    pub vtime_queued_runtime_ns: u64,
+    #[stat(desc = "VTIME sleeper credits clamped to one virtual slice")]
+    pub vtime_credit_clamps: u64,
+    #[stat(desc = "VTIME state and runtime accounting errors")]
+    pub vtime_accounting_errors: u64,
     #[stat(desc = "Tasks inserted into the EEVDF eligible deadline queue")]
     pub eevdf_eligible_enqueues: u64,
     #[stat(desc = "Tasks inserted into the EEVDF future virtual-start queue")]
@@ -163,6 +181,31 @@ impl Metrics {
             cell_rehome_misses: self
                 .cell_rehome_misses
                 .saturating_sub(previous.cell_rehome_misses),
+            vtime_enqueues: self.vtime_enqueues.saturating_sub(previous.vtime_enqueues),
+            vtime_dispatches: self
+                .vtime_dispatches
+                .saturating_sub(previous.vtime_dispatches),
+            vtime_cpu_enqueues: self
+                .vtime_cpu_enqueues
+                .saturating_sub(previous.vtime_cpu_enqueues),
+            vtime_cpu_dispatches: self
+                .vtime_cpu_dispatches
+                .saturating_sub(previous.vtime_cpu_dispatches),
+            vtime_strict_preempt_queues: self
+                .vtime_strict_preempt_queues
+                .saturating_sub(previous.vtime_strict_preempt_queues),
+            vtime_direct_runtime_ns: self
+                .vtime_direct_runtime_ns
+                .saturating_sub(previous.vtime_direct_runtime_ns),
+            vtime_queued_runtime_ns: self
+                .vtime_queued_runtime_ns
+                .saturating_sub(previous.vtime_queued_runtime_ns),
+            vtime_credit_clamps: self
+                .vtime_credit_clamps
+                .saturating_sub(previous.vtime_credit_clamps),
+            vtime_accounting_errors: self
+                .vtime_accounting_errors
+                .saturating_sub(previous.vtime_accounting_errors),
             eevdf_eligible_enqueues: self
                 .eevdf_eligible_enqueues
                 .saturating_sub(previous.eevdf_eligible_enqueues),
@@ -219,6 +262,8 @@ impl Metrics {
                 "  callbacks enqueue: {} | running: {} | stopping: {} | quiescent: {}\n",
                 "  select latency ns total: {} | average: {} | cumulative max: {}\n",
                 "  cell rehomes: {} | deferred rehomes: {}\n",
+                "  VTIME enqueues: {} (per-CPU: {}) | dispatches: {} (per-CPU: {}) | strict sync queues: {}\n",
+                "  VTIME direct/queued runtime ns: {}/{} | credit clamps: {} | accounting errors: {}\n",
                 "  EEVDF eligible/future enqueues: {}/{} | promotions: {} | forced advances: {} | dispatches: {}\n",
                 "  EEVDF strict sync queues: {} | direct/queued runtime ns: {}/{} | lag clamps: {} | accounting errors: {}\n",
                 "  rungs:\n"
@@ -240,6 +285,15 @@ impl Metrics {
             self.select_latency_max_ns,
             self.cell_rehomes,
             self.cell_rehome_misses,
+            self.vtime_enqueues,
+            self.vtime_cpu_enqueues,
+            self.vtime_dispatches,
+            self.vtime_cpu_dispatches,
+            self.vtime_strict_preempt_queues,
+            self.vtime_direct_runtime_ns,
+            self.vtime_queued_runtime_ns,
+            self.vtime_credit_clamps,
+            self.vtime_accounting_errors,
             self.eevdf_eligible_enqueues,
             self.eevdf_future_enqueues,
             self.eevdf_promotions,
@@ -498,6 +552,8 @@ mod tests {
             stopping: 28,
             quiescent: 3,
             select_latency_ns: 2_000,
+            vtime_cpu_enqueues: 20,
+            vtime_cpu_dispatches: 19,
             ..Default::default()
         };
         let current = Metrics {
@@ -512,6 +568,8 @@ mod tests {
             stopping: 1,
             quiescent: 0,
             select_latency_ns: 100,
+            vtime_cpu_enqueues: 2,
+            vtime_cpu_dispatches: 1,
             ..Default::default()
         };
 
@@ -528,6 +586,8 @@ mod tests {
         assert_eq!(delta.stopping, 0);
         assert_eq!(delta.quiescent, 0);
         assert_eq!(delta.select_latency_ns, 0);
+        assert_eq!(delta.vtime_cpu_enqueues, 0);
+        assert_eq!(delta.vtime_cpu_dispatches, 0);
     }
 
     #[test]

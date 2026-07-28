@@ -1,19 +1,22 @@
 # Fairness in scx_snake
 
-> **Experimental:** FIFO remains the default. Run EEVDF only in disposable
-> VMs. Its affinity-constrained forward-progress regression passes, but the
-> pinned nice-level demo currently produces approximately equal service instead
-> of the expected weighted shares.
+> **Experimental:** FIFO remains the default. Run VTIME and EEVDF only in
+> disposable VMs. EEVDF's affinity-constrained forward-progress regression
+> passes, but its pinned nice-level demo currently produces approximately equal
+> service instead of the expected weighted shares.
 
 Snake separates CPU placement from CPU-time fairness. The policy ladder and
 task cells choose where a task may run. The startup `--fairness` option chooses
 which runnable task runs when tasks contend for CPU time.
 
-Two disciplines are implemented:
+Three disciplines are implemented:
 
 ```bash
 # Existing behavior and the default.
 scx_snake --policy policy.toml --fairness fifo
+
+# Experimental weighted virtual runtime.
+scx_snake --policy policy.toml --fairness vtime
 
 # Experimental global EEVDF.
 scx_snake --policy policy.toml --fairness eevdf
@@ -32,6 +35,53 @@ built-in global FIFO DSQ with the same slice.
 
 FIFO does not provide weighted fairness. It remains available as the control
 for placement experiments and compatibility comparisons.
+
+## Global-clock VTIME
+
+VTIME uses one global custom DSQ for unrestricted tasks and one custom DSQ per
+CPU for affinity-restricted tasks. Every queue is ordered by task virtual
+runtime and shares the same global clock. VTIME assigns a fixed physical slice
+of 5 ms and charges actual runtime using the kernel-provided task weight:
+
+```text
+task.vruntime += runtime_ns * 100 / task.weight
+```
+
+The global frontier follows the latest virtual runtime observed when a task
+starts running:
+
+```text
+vtime_now = max(vtime_now, task.vruntime)
+```
+
+Before a runnable task is dispatched or enqueued, Snake limits accumulated
+sleeper credit to one virtual slice:
+
+```text
+task.vruntime = max(task.vruntime, vtime_now - 5 ms)
+```
+
+Queued tasks are inserted with `scx_bpf_dsq_insert_vtime()`. A task allowed on
+every possible CPU uses the global DSQ. An affinity-restricted task is
+distributed to an allowed CPU's custom DSQ and that CPU is kicked if idle. At
+dispatch, a CPU compares the heads of its custom DSQ and the global DSQ, then
+moves only the earlier task to its FIFO local DSQ. This avoids scanning past a
+large incompatible affinity group and preserves VTIME ordering for pinned
+tasks. All of these queues still charge the same clock; they do not create
+per-CPU entitlements.
+
+Dispatch also projects the currently running task's VTIME through the runtime
+it has consumed since `running()`. sched_ext calls `dispatch()` before
+`stopping()` records that runtime, so Snake replenishes the current task when
+its projected VTIME is still earlier than the queued candidate. Without that
+comparison, two CPU-bound tasks alternate regardless of weight.
+
+Successful idle-CPU ladder placement can still use the direct local path;
+direct and queued execution use the same runtime accounting.
+
+This policy deliberately has no EEVDF eligibility, virtual requests, deadlines,
+or future queue. It is the smaller weighted-fairness control and the initial
+foundation for later user-selected per-cell queue domains.
 
 ## Global EEVDF
 
@@ -120,19 +170,20 @@ create a separate fairness domain or entitlement; fairness is global per task.
 
 Userspace supplies startup mode, compiled placement policy, resolved CPU masks,
 and live task-to-cell annotations. BPF reads the kernel task weight and runtime,
-maintains runnable weight, virtual time, per-task requests and lag, and performs
-all eligibility, promotion, and dispatch decisions. Picture/gallery shapes and
-cell meanings remain entirely in userspace.
+maintains VTIME or EEVDF clocks and per-task state, and performs ordering and
+dispatch decisions. Picture/gallery shapes and cell meanings remain entirely
+in userspace.
 
 The BPF implementation is isolated in [`src/bpf/fairness.h`](../src/bpf/fairness.h).
 Placement execution remains in [`src/bpf/ladder.h`](../src/bpf/ladder.h).
 
 ## Validation demo
 
-Start Snake in EEVDF mode, then run the pinned workload from another terminal:
+Start Snake in either ordered mode, then run the pinned workload from another
+terminal:
 
 ```bash
-make -C scheds/rust/scx_snake/interactive start FAIRNESS=eevdf
+make -C scheds/rust/scx_snake/interactive start FAIRNESS=vtime
 make -C scheds/rust/scx_snake/interactive fairness-demo
 ```
 
@@ -148,6 +199,15 @@ the measured seconds per case. The demo checks:
 forced clock advances, ordered dispatches, strict sync queues, direct and queued
 runtime, lag clamps, and accounting errors.
 
+The VM-only VTIME regression combines a heavily oversubscribed narrow affinity
+group with wide work. It must survive beyond the watchdog interval and report
+per-CPU queue activity:
+
+```bash
+sudo scheds/rust/scx_snake/tests/vtime_mixed_affinity.sh \
+  target/release/scx_snake
+```
+
 The VM-only affinity regression exercises this forward-progress rule:
 
 ```bash
@@ -157,7 +217,9 @@ sudo scheds/rust/scx_snake/tests/eevdf_affinity_future.sh \
 
 ## Current scope
 
-The implementation is one global per-task fairness domain. It does not provide
-cell-level weights, hierarchical group fairness, per-NUMA clocks, or live mode
-switching. The global virtual clock uses a BPF spin lock; scalability under
-large runnable sets is an explicit experiment rather than a production claim.
+Each ordered implementation currently has one global per-task fairness clock.
+VTIME shards affinity-restricted queue storage by CPU for forward progress, but
+does not assign per-CPU entitlements. Neither policy provides cell-level
+weights, hierarchical group fairness, per-NUMA clocks, or live mode switching.
+Their global clocks use BPF spin locks; scalability under large runnable sets is
+an explicit experiment rather than a production claim.

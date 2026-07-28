@@ -154,7 +154,9 @@ validate it, then atomically makes that slot active.
 A successful `select_cpu` rung dispatches directly to the selected CPU's local
 DSQ and skips `enqueue`. If all rungs miss, Snake returns an affinity-safe
 fallback CPU hint; `enqueue` then uses the selected fairness discipline. FIFO
-uses the built-in global DSQ. EEVDF uses global future and eligible ordered DSQs
+uses the built-in global DSQ. VTIME uses one global vruntime-ordered DSQ and a
+set of per-CPU vruntime-ordered DSQs for affinity-restricted work, all sharing
+one maximum-task frontier. EEVDF uses global future and eligible ordered DSQs
 with an aggregate virtual clock. An annotated runnable task is the explicit
 placement exception: `enqueue` re-evaluates its configured task-cell rungs
 before using the fairness queue.
@@ -176,12 +178,12 @@ sudo ./target/release/scx_snake \
   --stats 1
 ```
 
-FIFO is the default. The `--fairness eevdf` mode is experimental and should be
-used only in disposable VMs; changing fairness requires a restart. Its
-affinity-constrained forward-progress test passes, but its nice-level weighted
-share validation is not yet correct. See
-[Fairness in scx_snake](docs/FAIRNESS.md) for its clock, queues, task accounting,
-placement interaction, and current limitations.
+FIFO is the default. The `--fairness vtime` and `--fairness eevdf` modes are
+experimental and should be used only in disposable VMs; changing fairness
+requires a restart. EEVDF's affinity-constrained forward-progress test passes,
+but its nice-level weighted-share validation is not yet correct. See
+[Fairness in scx_snake](docs/FAIRNESS.md) for the clocks, queues, task
+accounting, placement interaction, and current limitations.
 
 Replace the complete ladder without restarting the scheduler:
 
@@ -248,9 +250,11 @@ The text output from `--stats 1` shows the active policy generation plus
 attempts, hits, misses, and errors for each rung. A successful update advances
 the generation and starts fresh counters with the new rung labels. Also watch
 `direct_dispatches`, `ladder_exhaustions`, `enqueues`, and `invalid_errors`; the
-last should remain zero. EEVDF mode also reports its two queue insertion counts,
-promotions, forced advances, ordered dispatches, direct/queued runtime, lag
-clamps, and accounting errors.
+last should remain zero. VTIME reports ordered enqueues and dispatches, the
+per-CPU subset of each, direct/queued runtime, sleeper-credit clamps, and
+accounting errors. EEVDF also reports its two queue insertion counts,
+promotions, forced advances, direct/queued runtime, lag clamps, and accounting
+errors.
 
 Use `--stats-format json` for NDJSON, `--help-stats` for counter definitions, or
 monitor an already running scheduler without a policy:
@@ -269,6 +273,7 @@ stress-ng --pipe 4 --futex 4 --timeout 30s --metrics-brief
 
 Topology is resolved when a policy is attached or updated. The kernel-default
 simulation does not implement distance-ordered remote NUMA search. FIFO has no
-topology-aware enqueue, stealing, or draining policy; EEVDF is one global
-per-task fairness domain rather than a cell or NUMA hierarchy. The ABI remains
-experimental.
+topology-aware enqueue, stealing, or draining policy; VTIME and EEVDF are global
+clock domains rather than cell or NUMA hierarchies. VTIME's per-CPU queues are
+an affinity-forward-progress mechanism, not a configurable queue policy or a
+separate entitlement domain. The ABI remains experimental.

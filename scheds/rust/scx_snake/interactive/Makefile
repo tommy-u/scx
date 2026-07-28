@@ -78,7 +78,7 @@ help:
 	@printf "%36s$(YELLOW)%s$(NC)\n" "" "DEMO_INTERVAL=$(DEMO_INTERVAL)"
 	@printf "  $(YELLOW)*$(NC) $(GREEN)%-31s$(NC) %s\n" "cell-art-gallery" "Cycle flower, heart, cat, and snake migration art"
 	@printf "%36s$(YELLOW)%s$(NC)\n" "" "ART_INTERVAL=$(ART_INTERVAL) ART_CYCLES=$(ART_CYCLES) RESTORE_POLICY=$(RESTORE_POLICY)"
-	@printf "  $(YELLOW)*$(NC) $(GREEN)%-31s$(NC) %s\n" "fairness-demo" "Validate EEVDF shares with pinned CPU-bound tasks"
+	@printf "  $(YELLOW)*$(NC) $(GREEN)%-31s$(NC) %s\n" "fairness-demo" "Validate VTIME or EEVDF shares with pinned CPU-bound tasks"
 	@printf "%36s$(YELLOW)%s$(NC)\n" "" "FAIRNESS_CPU=$(FAIRNESS_CPU) FAIRNESS_DURATION=$(FAIRNESS_DURATION)"
 	@printf "    $(GREEN)%-31s$(NC) %s\n" "cell-demo-start" "Start tasks in generated cell 0"
 	@printf "    $(GREEN)%-31s$(NC) %s\n" "cell-demo-move" "Move tasks to CELL=0, 1, or 2"

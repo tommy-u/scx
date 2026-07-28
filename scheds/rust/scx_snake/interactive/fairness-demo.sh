@@ -25,10 +25,15 @@ command -v nice >/dev/null || die "nice is required"
 [[ ${DURATION} =~ ^[1-9][0-9]*$ ]] || die "FAIRNESS_DURATION must be a positive integer"
 
 snake_pid=$(pgrep -o -x scx_snake || true)
-[[ -n ${snake_pid} ]] || die "start Snake with 'make start FAIRNESS=eevdf' first"
+[[ -n ${snake_pid} ]] || die "start Snake with 'make start FAIRNESS=vtime' first"
 snake_args=$(tr '\0' ' ' <"/proc/${snake_pid}/cmdline" 2>/dev/null || true)
-[[ " ${snake_args} " == *" --fairness eevdf "* ]] ||
-    die "the running Snake instance was not launched with --fairness eevdf"
+if [[ " ${snake_args} " == *" --fairness vtime "* ]]; then
+    FAIRNESS_MODE=vtime
+elif [[ " ${snake_args} " == *" --fairness eevdf "* ]]; then
+    FAIRNESS_MODE=eevdf
+else
+    die "the running Snake instance must use --fairness vtime or eevdf"
+fi
 
 if [[ -z ${CPU} ]]; then
     CPU=$(lscpu -p=CPU,ONLINE | awk -F, '$1 !~ /^#/ && $2 == "Y" { print $1; exit }')
@@ -93,7 +98,8 @@ run_case() {
     printf '%-28s nice=%-10s ticks=%s\n' "${label}" "${nice_levels[*]}" "${deltas[*]}"
 }
 
-printf 'Snake EEVDF fairness demo: CPU %s, %ss measured per case\n' "${CPU}" "${DURATION}"
+printf 'Snake %s fairness demo: CPU %s, %ss measured per case\n' \
+    "${FAIRNESS_MODE^^}" "${CPU}" "${DURATION}"
 
 run_case "equal weights" 0 0
 equal_ratio=$(ratio "${CASE_DELTAS[0]}" "${CASE_DELTAS[1]}") || die "equal-weight task made no progress"

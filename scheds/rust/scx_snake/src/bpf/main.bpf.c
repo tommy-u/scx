@@ -82,9 +82,11 @@ s32 BPF_STRUCT_OPS(snake_select_cpu, struct task_struct *p, s32 prev_cpu,
 	cpu = walk_policy_ladder(&ladder_ctx, p, prev_cpu, wake_flags,
 				 &dispatch_flags);
 	if (cpu >= 0) {
-		if (fairness_is_eevdf() && (dispatch_flags & SCX_ENQ_PREEMPT)) {
+		if (fairness_is_ordered() && (dispatch_flags & SCX_ENQ_PREEMPT)) {
 			stat_inc(&ladder_ctx,
-				 SNAKE_STAT_EEVDF_STRICT_PREEMPT_QUEUES);
+				 fairness_is_vtime() ?
+					 SNAKE_STAT_VTIME_STRICT_PREEMPT_QUEUES :
+					 SNAKE_STAT_EEVDF_STRICT_PREEMPT_QUEUES);
 			finish_select(&ladder_ctx, started_at);
 			release_active_ladder(&ladder_ctx);
 			return cpu;
@@ -147,12 +149,11 @@ void BPF_STRUCT_OPS(snake_dispatch, s32 cpu, struct task_struct *prev)
 {
 	struct snake_ladder_ctx ladder_ctx = {};
 
-	(void)prev;
 	if (acquire_active_ladder(&ladder_ctx)) {
 		scx_bpf_error("snake failed to acquire active ladder in dispatch");
 		return;
 	}
-	fairness_dispatch(&ladder_ctx, cpu);
+	fairness_dispatch(&ladder_ctx, cpu, prev);
 	release_active_ladder(&ladder_ctx);
 }
 
