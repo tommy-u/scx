@@ -8,6 +8,7 @@ use serde::Deserialize;
 pub const MAX_RUNGS: usize = 8;
 pub const MAX_MASK_TABLES: usize = 4;
 pub const MAX_CELL_IDS: u32 = 1024;
+pub const MAX_QUEUE_CELLS: usize = 32;
 pub const RUNG_FLAG_INTERSECT_TASK_ALLOWED: u32 = 1;
 pub const RUNG_FLAG_PICK_IDLE_CORE: u32 = 1 << 1;
 
@@ -45,6 +46,20 @@ pub struct CompiledPolicy {
     pub rungs: Vec<CompiledRung>,
     pub mask_tables: Vec<MaskTableSpec>,
     pub cells: BTreeMap<u32, BTreeSet<u32>>,
+    pub cell_cpu_weights: BTreeMap<u32, u32>,
+    pub queues: Option<QueuePolicy>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum QueueLayout {
+    Cell,
+    CellLlc,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct QueuePolicy {
+    pub layout: QueueLayout,
+    pub cell0_cpu_weight: u32,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -74,6 +89,13 @@ pub struct MaskTableSpec {
 impl CompiledPolicy {
     pub fn dump(&self) -> String {
         let mut output = format!("fallback: {}\n", self.fallback.as_str());
+        if let Some(queues) = &self.queues {
+            output.push_str(&format!(
+                "queues: layout={} cell0_cpu_weight={}\n",
+                queues.layout.as_str(),
+                queues.cell0_cpu_weight,
+            ));
+        }
         output.push_str(
             &self
                 .rungs
@@ -91,6 +113,15 @@ impl CompiledPolicy {
                 .collect::<String>(),
         );
         output
+    }
+}
+
+impl QueueLayout {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Cell => "cell",
+            Self::CellLlc => "cell_llc",
+        }
     }
 }
 
@@ -141,6 +172,7 @@ impl std::error::Error for PolicyError {}
 #[serde(deny_unknown_fields)]
 struct SemanticPolicy {
     fallback: Option<String>,
+    queues: Option<SemanticQueuePolicy>,
     #[serde(default)]
     cell: Vec<SemanticCell>,
     #[serde(default)]
@@ -154,6 +186,19 @@ struct SemanticPolicy {
 struct SemanticCell {
     id: u32,
     cpus: String,
+    cpu_weight: Option<u32>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SemanticQueuePolicy {
+    layout: String,
+    #[serde(default = "default_cell_weight")]
+    cell0_cpu_weight: u32,
+}
+
+const fn default_cell_weight() -> u32 {
+    1
 }
 
 #[derive(Deserialize)]
@@ -207,7 +252,8 @@ pub fn compile_policy(source: &str) -> Result<CompiledPolicy, PolicyError> {
         }
     }
 
-    let cells = compile_cells(&policy.cell)?;
+    let queues = compile_queue_policy(policy.queues.as_ref(), policy.cell.len())?;
+    let (cells, cell_cpu_weights) = compile_cells(&policy.cell, queues.is_some())?;
     let partitions = compile_partitions(&policy.partition)?;
     let mut mask_tables = Vec::new();
     let mut rungs = Vec::with_capacity(policy.rung.len());
@@ -226,11 +272,50 @@ pub fn compile_policy(source: &str) -> Result<CompiledPolicy, PolicyError> {
         rungs,
         mask_tables,
         cells,
+        cell_cpu_weights,
+        queues,
     })
 }
 
-fn compile_cells(cells: &[SemanticCell]) -> Result<BTreeMap<u32, BTreeSet<u32>>, PolicyError> {
+fn compile_queue_policy(
+    queues: Option<&SemanticQueuePolicy>,
+    declared_cells: usize,
+) -> Result<Option<QueuePolicy>, PolicyError> {
+    let Some(queues) = queues else {
+        return Ok(None);
+    };
+    if declared_cells >= MAX_QUEUE_CELLS {
+        return Err(PolicyError(format!(
+            "queue policies support at most {} declared cells plus synthetic cell 0",
+            MAX_QUEUE_CELLS - 1
+        )));
+    }
+    let layout = match queues.layout.as_str() {
+        "cell" => QueueLayout::Cell,
+        "cell_llc" => QueueLayout::CellLlc,
+        layout => {
+            return Err(PolicyError(format!(
+                "unknown queue layout `{layout}`; expected `cell` or `cell_llc`"
+            )))
+        }
+    };
+    if queues.cell0_cpu_weight == 0 {
+        return Err(PolicyError(
+            "queue default cell weight must be positive".into(),
+        ));
+    }
+    Ok(Some(QueuePolicy {
+        layout,
+        cell0_cpu_weight: queues.cell0_cpu_weight,
+    }))
+}
+
+fn compile_cells(
+    cells: &[SemanticCell],
+    queue_policy: bool,
+) -> Result<(BTreeMap<u32, BTreeSet<u32>>, BTreeMap<u32, u32>), PolicyError> {
     let mut compiled = BTreeMap::new();
+    let mut weights = BTreeMap::new();
 
     for (index, cell) in cells.iter().enumerate() {
         if cell.id >= MAX_CELL_IDS {
@@ -244,6 +329,22 @@ fn compile_cells(cells: &[SemanticCell]) -> Result<BTreeMap<u32, BTreeSet<u32>>,
             return Err(PolicyError(format!(
                 "cell {index}: duplicate ID {}",
                 cell.id
+            )));
+        }
+        if queue_policy && cell.id == 0 {
+            return Err(PolicyError(
+                "cell ID 0 is reserved for unannotated tasks in queue policies".into(),
+            ));
+        }
+        if !queue_policy && cell.cpu_weight.is_some() {
+            return Err(PolicyError(format!(
+                "cell {index}: cpu_weight requires a [queues] policy"
+            )));
+        }
+        let weight = cell.cpu_weight.unwrap_or(1);
+        if weight == 0 {
+            return Err(PolicyError(format!(
+                "cell {index}: cpu_weight must be positive"
             )));
         }
 
@@ -268,9 +369,10 @@ fn compile_cells(cells: &[SemanticCell]) -> Result<BTreeMap<u32, BTreeSet<u32>>,
             )));
         }
         compiled.insert(cell.id, cpus);
+        weights.insert(cell.id, weight);
     }
 
-    Ok(compiled)
+    Ok((compiled, weights))
 }
 
 fn compile_partitions(
@@ -687,6 +789,117 @@ scope = "task_cell"
         assert!(policy.dump().contains("input=task_cell"));
         assert_eq!(policy.cells[&7], BTreeSet::from([0, 1, 2, 3]));
         assert_eq!(policy.cells[&8], BTreeSet::from([2, 3, 4, 5]));
+    }
+
+    #[test]
+    fn compiles_weighted_cell_queue_policy() {
+        let policy = compile_policy(
+            r#"
+[queues]
+layout = "cell_llc"
+cell0_cpu_weight = 2
+
+[[cell]]
+id = 7
+cpus = "0-3"
+cpu_weight = 5
+
+[[cell]]
+id = 8
+cpus = "2-5"
+
+[[rung]]
+operation = "pick_idle"
+scope = "task_cell"
+"#,
+        )
+        .expect("weighted queue policy should compile");
+
+        assert_eq!(policy.queues.as_ref().unwrap().layout, QueueLayout::CellLlc);
+        assert_eq!(policy.queues.as_ref().unwrap().cell0_cpu_weight, 2);
+        assert_eq!(policy.cell_cpu_weights[&7], 5);
+        assert_eq!(policy.cell_cpu_weights[&8], 1);
+    }
+
+    #[test]
+    fn queue_policy_rejects_reserved_cell_zero() {
+        let error = error_for(
+            r#"
+[queues]
+layout = "cell"
+
+[[cell]]
+id = 0
+cpus = "0"
+
+[[rung]]
+operation = "pick_idle"
+scope = "task_cell"
+"#,
+        );
+
+        assert!(error.contains("cell ID 0 is reserved"), "{error}");
+    }
+
+    #[test]
+    fn queue_policy_rejects_more_than_31_declared_cells() {
+        let mut source = String::from("[queues]\nlayout = \"cell\"\n");
+        for id in 1..=32 {
+            source.push_str(&format!("[[cell]]\nid = {id}\ncpus = \"{}\"\n", id - 1));
+        }
+        source.push_str("[[rung]]\noperation = \"pick_idle\"\nscope = \"task_cell\"\n");
+
+        let error = error_for(&source);
+        assert!(error.contains("at most 31 declared cells"), "{error}");
+    }
+
+    #[test]
+    fn queue_policy_rejects_zero_weights() {
+        for source in [
+            r#"
+[queues]
+layout = "cell"
+cell0_cpu_weight = 0
+[[rung]]
+operation = "pick_idle"
+scope = "task_allowed"
+"#,
+            r#"
+[queues]
+layout = "cell"
+[[cell]]
+id = 1
+cpus = "0"
+cpu_weight = 0
+[[rung]]
+operation = "pick_idle"
+scope = "task_cell"
+"#,
+        ] {
+            let error = error_for(source);
+            assert!(error.contains("weight must be positive"), "{error}");
+        }
+    }
+
+    #[test]
+    fn cell_weight_requires_queue_policy() {
+        let error = error_for(
+            r#"
+[[cell]]
+id = 7
+cpus = "0-3"
+cpu_weight = 2
+
+[[rung]]
+operation = "pick_idle"
+scope = "task_cell"
+"#,
+        );
+
+        assert!(
+            error.contains("cpu_weight requires a [queues] policy"),
+            "{error}"
+        );
     }
 
     #[test]

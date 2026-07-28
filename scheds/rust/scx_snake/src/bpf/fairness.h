@@ -7,16 +7,26 @@ const volatile u32 fairness_mode = SNAKE_FAIRNESS_FIFO;
 struct snake_task_runtime {
 	u64 started_exec_runtime;
 	u64 vruntime;
+	u64 affinity_vruntime;
 	u64 deadline;
 	u64 request_remaining_ns;
 	s64 sleep_lag;
 	u32 active_weight;
 	u32 pending_weight;
+	u32 cell_index;
+	u32 run_cell_index;
+	u32 run_owner_cell_index;
+	u32 selected_cpu;
 	u8  runtime_valid;
 	u8  initialized;
 	u8  runnable_accounted;
 	u8  has_sleep_lag;
 	u8  run_direct;
+	u8  cell_initialized;
+	u8  affinity_initialized;
+	u8  selected_cpu_valid;
+	u8  queue_class;
+	u8  run_queue_class;
 };
 
 struct snake_eevdf_domain {
@@ -45,6 +55,13 @@ struct {
 	__type(value, struct snake_vtime_domain);
 	__uint(max_entries, 1);
 } vtime_domain SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__type(key, u32);
+	__type(value, struct snake_vtime_domain);
+	__uint(max_entries, SNAKE_MAX_QUEUE_CELLS);
+} cell_vtime_domains SEC(".maps");
 
 struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
@@ -759,6 +776,8 @@ static __always_inline int fairness_init(void)
 	if (fairness_mode == SNAKE_FAIRNESS_FIFO)
 		return 0;
 	if (fairness_is_vtime()) {
+		if (queue_topology_enabled())
+			return 0;
 		if (nr_cpu_ids > SNAKE_MAX_CPUS)
 			return -E2BIG;
 		ret = scx_bpf_create_dsq(SNAKE_VTIME_GLOBAL_DSQ, -1);

@@ -2,8 +2,8 @@
 
 use scx_snake::fairness::{
     advance_virtual_time, clamp_virtual_lag, clamp_vtime_credit, is_eligible, later_vtime_frontier,
-    restore_vruntime, scale_inverse_weight, virtual_deadline, FairnessMode, EEVDF_SLICE_NS,
-    VTIME_SLICE_NS,
+    next_dispatch_class, restore_vruntime, scale_inverse_weight, translate_vruntime,
+    virtual_deadline, DispatchClass, FairnessMode, EEVDF_SLICE_NS, VTIME_SLICE_NS,
 };
 
 #[test]
@@ -47,6 +47,34 @@ fn vtime_sleeper_credit_is_bounded_to_one_slice() {
     assert_eq!(
         clamp_vtime_credit(frontier + VTIME_SLICE_NS, frontier),
         frontier + VTIME_SLICE_NS
+    );
+}
+
+#[test]
+fn cell_clock_transition_preserves_only_bounded_lag() {
+    assert_eq!(translate_vruntime(90, 100, 1_000, 20), 990);
+    assert_eq!(translate_vruntime(50, 100, 1_000, 20), 980);
+    assert_eq!(translate_vruntime(140, 100, 1_000, 20), 1_020);
+    assert_eq!(translate_vruntime(110, 100, 1_000, 20), 1_010);
+}
+
+#[test]
+fn dispatch_classes_alternate_without_comparing_clocks() {
+    let first = next_dispatch_class(true, true, DispatchClass::Affinity).unwrap();
+    assert_eq!(first, (DispatchClass::Affinity, DispatchClass::Normal));
+    let second = next_dispatch_class(true, true, first.1).unwrap();
+    assert_eq!(second, (DispatchClass::Normal, DispatchClass::Affinity));
+    assert_eq!(
+        next_dispatch_class(true, false, DispatchClass::Affinity),
+        Some((DispatchClass::Normal, DispatchClass::Affinity))
+    );
+    assert_eq!(
+        next_dispatch_class(false, true, DispatchClass::Normal),
+        Some((DispatchClass::Affinity, DispatchClass::Normal))
+    );
+    assert_eq!(
+        next_dispatch_class(false, false, DispatchClass::Normal),
+        None
     );
 }
 

@@ -8,13 +8,21 @@ typedef unsigned int	   u32;
 typedef unsigned long long u64;
 #endif
 
-#define SNAKE_ABI_VERSION 12
+#define SNAKE_ABI_VERSION 13
 #define SNAKE_MAX_RUNGS 8
 #define SNAKE_LADDER_SLOTS 2
 #define SNAKE_LADDER_SLOT_INVALID SNAKE_LADDER_SLOTS
 #define SNAKE_MAX_CPUS 1024
 #define SNAKE_MASK_BYTES (SNAKE_MAX_CPUS / 8)
 #define SNAKE_MAX_MASK_TABLES 4
+#define SNAKE_MAX_QUEUE_CELLS 32
+#define SNAKE_MAX_NORMAL_QUEUES SNAKE_MAX_CPUS
+#define SNAKE_QUEUE_LAYOUT_NONE 0U
+#define SNAKE_QUEUE_LAYOUT_CELL 1U
+#define SNAKE_QUEUE_LAYOUT_CELL_LLC 2U
+#define SNAKE_AFFINITY_DSQ_BASE 0x10000000ULL
+#define SNAKE_NORMAL_DSQ_BASE 0x20000000ULL
+#define SNAKE_QUEUE_LLC_NONE 0xffffffffU
 #define SNAKE_RUNG_F_INTERSECT_TASK_ALLOWED (1U << 0)
 #define SNAKE_RUNG_F_PICK_IDLE_CORE (1U << 1)
 #define SNAKE_EEVDF_SLICE_NS 5000000ULL
@@ -65,6 +73,60 @@ struct snake_task_cell {
 	u32 needs_rehome;
 };
 
+/* Serialized userspace CPU mask stored in immutable queue descriptors. */
+struct snake_mask_data {
+	u32 valid;
+	u8  bits[SNAKE_MASK_BYTES];
+};
+
+struct snake_queue_header {
+	u32 layout;
+	u32 nr_cells;
+	u32 nr_normal_queues;
+	u32 nr_cpus;
+};
+
+struct snake_queue_cell {
+	u32 valid;
+	u32 external_id;
+	u32 cpu_weight;
+	u32 clock_index;
+	u32 first_normal_queue;
+	u32 nr_normal_queues;
+	u32 reserved[2];
+	struct snake_mask_data primary;
+	struct snake_mask_data borrowable;
+};
+
+struct snake_normal_queue {
+	u32 valid;
+	u32 cell_index;
+	u32 clock_index;
+	u32 llc_id;
+	u32 consumer_cpu;
+	u32 reserved[3];
+};
+
+struct snake_cpu_queue {
+	u32 valid;
+	u32 owner_cell_index;
+	u32 llc_id;
+	u32 normal_queue_index;
+};
+
+enum snake_cell_stat {
+	SNAKE_CELL_STAT_RUNTIME_NS = 0,
+	SNAKE_CELL_STAT_PRIMARY_RUNTIME_NS,
+	SNAKE_CELL_STAT_BORROWED_RUNTIME_NS,
+	SNAKE_CELL_STAT_LENT_RUNTIME_NS,
+	SNAKE_CELL_STAT_NORMAL_ENQUEUES,
+	SNAKE_CELL_STAT_AFFINITY_ENQUEUES,
+	SNAKE_CELL_STAT_NORMAL_DISPATCHES,
+	SNAKE_CELL_STAT_AFFINITY_DISPATCHES,
+	SNAKE_CELL_STAT_CLOCK_TRANSITIONS,
+	SNAKE_NR_CELL_STATS,
+};
+
 /*
  * Mechanical instruction consumed by BPF. Semantic topology concepts must be
  * lowered by userspace into operand sources and data tables.
@@ -85,12 +147,6 @@ struct snake_compiled_ladder {
 	u32		  nr_mask_tables;
 	u32		  fallback_mode;
 	struct snake_rung rungs[SNAKE_MAX_RUNGS];
-};
-
-/* Serialized userspace mask entry consumed when BPF initializes a table. */
-struct snake_mask_data {
-	u32 valid;
-	u8  bits[SNAKE_MASK_BYTES];
 };
 
 /* Fixed map-key layout for global and per-rung scheduler counters. */

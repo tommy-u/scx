@@ -176,6 +176,21 @@ pub fn stat_index(slot: u32, stat: u32) -> Result<u32> {
     Ok(slot * bpf_intf::snake_stat_SNAKE_NR_STATS + stat)
 }
 
+pub fn cell_stat_index(slot: u32, cell: u32, stat: u32) -> Result<u32> {
+    if slot >= bpf_intf::SNAKE_LADDER_SLOTS {
+        bail!("invalid ladder slot {slot}");
+    }
+    if cell >= bpf_intf::SNAKE_MAX_QUEUE_CELLS {
+        bail!("invalid queue cell {cell}");
+    }
+    if stat >= bpf_intf::snake_cell_stat_SNAKE_NR_CELL_STATS {
+        bail!("invalid cell statistic {stat}");
+    }
+    Ok((slot * bpf_intf::SNAKE_MAX_QUEUE_CELLS + cell)
+        * bpf_intf::snake_cell_stat_SNAKE_NR_CELL_STATS
+        + stat)
+}
+
 pub fn nonzero_reader_counts(raw: &[Vec<u8>]) -> Result<Vec<(usize, u32)>> {
     raw.iter()
         .enumerate()

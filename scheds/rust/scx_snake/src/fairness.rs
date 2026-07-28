@@ -15,6 +15,12 @@ pub enum FairnessMode {
     Vtime = 3,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DispatchClass {
+    Normal,
+    Affinity,
+}
+
 impl FairnessMode {
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -44,6 +50,33 @@ pub fn clamp_vtime_credit(vruntime: u64, frontier: u64) -> u64 {
         minimum
     } else {
         vruntime
+    }
+}
+
+pub fn translate_vruntime(vruntime: u64, old_frontier: u64, new_frontier: u64, limit: u64) -> u64 {
+    let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+    let lag = (vruntime.wrapping_sub(old_frontier) as i64).clamp(-limit, limit);
+
+    if lag >= 0 {
+        new_frontier.wrapping_add(lag as u64)
+    } else {
+        new_frontier.wrapping_sub(lag.unsigned_abs())
+    }
+}
+
+pub fn next_dispatch_class(
+    normal_ready: bool,
+    affinity_ready: bool,
+    next: DispatchClass,
+) -> Option<(DispatchClass, DispatchClass)> {
+    match (normal_ready, affinity_ready) {
+        (false, false) => None,
+        (true, false) => Some((DispatchClass::Normal, DispatchClass::Affinity)),
+        (false, true) => Some((DispatchClass::Affinity, DispatchClass::Normal)),
+        (true, true) => match next {
+            DispatchClass::Normal => Some((DispatchClass::Normal, DispatchClass::Affinity)),
+            DispatchClass::Affinity => Some((DispatchClass::Affinity, DispatchClass::Normal)),
+        },
     }
 }
 

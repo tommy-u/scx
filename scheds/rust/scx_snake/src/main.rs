@@ -2,10 +2,12 @@
 
 mod bpf_intf;
 mod bpf_skel;
+mod cell_allocation;
 mod control;
 mod inspection;
 mod mask_tables;
 mod policy;
+mod queue_topology;
 mod runtime_policy;
 mod stats;
 mod task_cells;
@@ -29,6 +31,7 @@ use libbpf_rs::{MapCore as _, MapFlags, OpenObject, ProgramInput};
 use log::{debug, info, warn};
 use mask_tables::{dump_mask_tables, resolve_mask_tables, ResolvedMaskTable};
 use policy::{CompiledPolicy, CompiledRung, InputSource, Opcode};
+use queue_topology::{dump_queue_topology, resolve_host_queue_topology};
 use runtime_policy::RuntimePolicy;
 use scx_snake::fairness::FairnessMode;
 use scx_stats::prelude::*;
@@ -38,7 +41,7 @@ use scx_utils::{
     scx_ops_attach, scx_ops_load, scx_ops_open, try_set_rlimit_infinity, uei_exited, uei_report,
     UserExitInfo,
 };
-use stats::{CpuMetrics, Metrics, RungMetrics};
+use stats::{CellMetrics, CpuMetrics, Metrics, RungMetrics};
 use task_cells::{ThreadCellAssignment, ThreadCellResponse};
 
 const SCHEDULER_NAME: &str = "scx_snake";
@@ -253,6 +256,167 @@ fn bytes_of<T>(value: &T) -> &[u8] {
     unsafe { std::slice::from_raw_parts(value as *const T as *const u8, std::mem::size_of::<T>()) }
 }
 
+struct EncodedQueueTopology {
+    header: bpf_intf::snake_queue_header,
+    cell_lookup: Vec<u32>,
+    cells: Vec<bpf_intf::snake_queue_cell>,
+    normal_queues: Vec<bpf_intf::snake_normal_queue>,
+    cpu_queues: Vec<bpf_intf::snake_cpu_queue>,
+}
+
+fn encode_queue_topology(topology: &queue_topology::QueueTopology) -> Result<EncodedQueueTopology> {
+    let mut cell_lookup = vec![0_u32; policy::MAX_CELL_IDS as usize];
+    let mut cells = (0..bpf_intf::SNAKE_MAX_QUEUE_CELLS)
+        .map(|_| bpf_intf::snake_queue_cell {
+            valid: 0,
+            external_id: 0,
+            cpu_weight: 0,
+            clock_index: 0,
+            first_normal_queue: 0,
+            nr_normal_queues: 0,
+            reserved: [0; 2],
+            primary: bpf_intf::snake_mask_data {
+                valid: 0,
+                bits: [0; bpf_intf::SNAKE_MASK_BYTES as usize],
+            },
+            borrowable: bpf_intf::snake_mask_data {
+                valid: 0,
+                bits: [0; bpf_intf::SNAKE_MASK_BYTES as usize],
+            },
+        })
+        .collect::<Vec<_>>();
+    let mut normal_queues = (0..bpf_intf::SNAKE_MAX_NORMAL_QUEUES)
+        .map(|_| bpf_intf::snake_normal_queue {
+            valid: 0,
+            cell_index: 0,
+            clock_index: 0,
+            llc_id: bpf_intf::SNAKE_QUEUE_LLC_NONE,
+            consumer_cpu: 0,
+            reserved: [0; 3],
+        })
+        .collect::<Vec<_>>();
+    let mut cpu_queues = (0..bpf_intf::SNAKE_MAX_CPUS)
+        .map(|_| bpf_intf::snake_cpu_queue {
+            valid: 0,
+            owner_cell_index: 0,
+            llc_id: 0,
+            normal_queue_index: 0,
+        })
+        .collect::<Vec<_>>();
+
+    if topology.cells.len() > cells.len() {
+        bail!("queue topology exceeds BPF cell capacity");
+    }
+    if topology.normal_queues.len() > normal_queues.len() {
+        bail!("queue topology exceeds BPF normal queue capacity");
+    }
+    for cell in &topology.cells {
+        let lookup = cell_lookup
+            .get_mut(cell.external_id as usize)
+            .with_context(|| format!("cell ID {} exceeds BPF lookup capacity", cell.external_id))?;
+        *lookup = cell.index + 1;
+        let destination = cells
+            .get_mut(cell.index as usize)
+            .with_context(|| format!("cell index {} exceeds BPF capacity", cell.index))?;
+        *destination = bpf_intf::snake_queue_cell {
+            valid: 1,
+            external_id: cell.external_id,
+            cpu_weight: cell.cpu_weight,
+            clock_index: cell.index,
+            first_normal_queue: cell.normal_queues.first().copied().unwrap_or(0),
+            nr_normal_queues: cell.normal_queues.len().try_into()?,
+            reserved: [0; 2],
+            primary: mask_tables::serialize_entry(&cell.primary)?,
+            borrowable: mask_tables::serialize_entry(&cell.borrowable)?,
+        };
+    }
+    for queue in &topology.normal_queues {
+        normal_queues[queue.index as usize] = bpf_intf::snake_normal_queue {
+            valid: 1,
+            cell_index: queue.cell_index,
+            clock_index: queue.clock_index,
+            llc_id: queue.llc_id.unwrap_or(bpf_intf::SNAKE_QUEUE_LLC_NONE),
+            consumer_cpu: *queue
+                .consumers
+                .first()
+                .context("normal queue has no consumer CPU")?,
+            reserved: [0; 3],
+        };
+    }
+    for (&cpu, queue) in &topology.cpu_queues {
+        let destination = cpu_queues
+            .get_mut(cpu as usize)
+            .with_context(|| format!("CPU {cpu} exceeds BPF queue capacity"))?;
+        *destination = bpf_intf::snake_cpu_queue {
+            valid: 1,
+            owner_cell_index: queue.owner_cell_index,
+            llc_id: queue.llc_id,
+            normal_queue_index: queue.normal_queue_index,
+        };
+    }
+    let nr_cpus = topology.cpu_queues.len().try_into()?;
+    let layout = match topology.layout {
+        policy::QueueLayout::Cell => bpf_intf::SNAKE_QUEUE_LAYOUT_CELL,
+        policy::QueueLayout::CellLlc => bpf_intf::SNAKE_QUEUE_LAYOUT_CELL_LLC,
+    };
+    Ok(EncodedQueueTopology {
+        header: bpf_intf::snake_queue_header {
+            layout,
+            nr_cells: topology.cells.len().try_into()?,
+            nr_normal_queues: topology.normal_queues.len().try_into()?,
+            nr_cpus,
+        },
+        cell_lookup,
+        cells,
+        normal_queues,
+        cpu_queues,
+    })
+}
+
+fn install_queue_topology(
+    skel: &mut BpfSkel<'_>,
+    topology: Option<&queue_topology::QueueTopology>,
+) -> Result<()> {
+    let Some(topology) = topology else {
+        return Ok(());
+    };
+    let encoded = encode_queue_topology(topology)?;
+    for (key, value) in encoded.cell_lookup.iter().enumerate() {
+        let key = u32::try_from(key)?;
+        skel.maps
+            .queue_cell_lookup
+            .update(&key.to_ne_bytes(), &value.to_ne_bytes(), MapFlags::ANY)
+            .with_context(|| format!("installing queue cell lookup {key}"))?;
+    }
+    for (key, value) in encoded.cells.iter().enumerate() {
+        let key = u32::try_from(key)?;
+        skel.maps
+            .queue_cells
+            .update(&key.to_ne_bytes(), bytes_of(value), MapFlags::ANY)
+            .with_context(|| format!("installing queue cell {key}"))?;
+    }
+    for (key, value) in encoded.normal_queues.iter().enumerate() {
+        let key = u32::try_from(key)?;
+        skel.maps
+            .normal_queues
+            .update(&key.to_ne_bytes(), bytes_of(value), MapFlags::ANY)
+            .with_context(|| format!("installing normal queue {key}"))?;
+    }
+    for (key, value) in encoded.cpu_queues.iter().enumerate() {
+        let key = u32::try_from(key)?;
+        skel.maps
+            .cpu_queues
+            .update(&key.to_ne_bytes(), bytes_of(value), MapFlags::ANY)
+            .with_context(|| format!("installing CPU queue {key}"))?;
+    }
+    let key = 0_u32;
+    skel.maps
+        .queue_header
+        .update(&key.to_ne_bytes(), bytes_of(&encoded.header), MapFlags::ANY)
+        .context("publishing queue topology header")?;
+    Ok(())
+}
+
 fn install_mask_tables(
     skel: &mut BpfSkel<'_>,
     slot: u32,
@@ -373,6 +537,17 @@ fn clear_slot_stats(skel: &mut BpfSkel<'_>, slot: u32) -> Result<()> {
             .stats
             .update_percpu(&key.to_ne_bytes(), &zeroes, MapFlags::ANY)
             .with_context(|| format!("clearing ladder slot {slot} statistic {stat}"))?;
+    }
+    for cell in 0..bpf_intf::SNAKE_MAX_QUEUE_CELLS {
+        for stat in 0..bpf_intf::snake_cell_stat_SNAKE_NR_CELL_STATS {
+            let key = runtime_policy::cell_stat_index(slot, cell, stat)?;
+            skel.maps
+                .cell_stats
+                .update_percpu(&key.to_ne_bytes(), &zeroes, MapFlags::ANY)
+                .with_context(|| {
+                    format!("clearing ladder slot {slot} cell {cell} statistic {stat}")
+                })?;
+        }
     }
     Ok(())
 }
@@ -587,8 +762,73 @@ fn aggregate_raw_stats(
         eevdf_lag_clamps: value(bpf_intf::snake_stat_SNAKE_STAT_EEVDF_LAG_CLAMPS),
         eevdf_accounting_errors: value(bpf_intf::snake_stat_SNAKE_STAT_EEVDF_ACCOUNTING_ERRORS),
         cpus,
+        cells: BTreeMap::new(),
         rungs,
     })
+}
+
+fn aggregate_raw_cell_stats(
+    raw: &[Vec<Vec<u8>>],
+    topology: &queue_topology::QueueTopology,
+) -> Result<BTreeMap<u32, CellMetrics>> {
+    let nr_stats = bpf_intf::snake_cell_stat_SNAKE_NR_CELL_STATS as usize;
+    let expected = topology.cells.len() * nr_stats;
+    if raw.len() != expected {
+        bail!(
+            "cell statistics map returned {} entries, expected {expected}",
+            raw.len()
+        );
+    }
+    let value = |cell: usize, stat: u32| -> Result<u64> {
+        decode_stat(&raw[cell * nr_stats + stat as usize], false)
+    };
+    topology
+        .cells
+        .iter()
+        .enumerate()
+        .map(|(dense, cell)| {
+            Ok((
+                cell.external_id,
+                CellMetrics {
+                    id: cell.external_id,
+                    index: cell.index,
+                    runtime_ns: value(dense, bpf_intf::snake_cell_stat_SNAKE_CELL_STAT_RUNTIME_NS)?,
+                    primary_runtime_ns: value(
+                        dense,
+                        bpf_intf::snake_cell_stat_SNAKE_CELL_STAT_PRIMARY_RUNTIME_NS,
+                    )?,
+                    borrowed_runtime_ns: value(
+                        dense,
+                        bpf_intf::snake_cell_stat_SNAKE_CELL_STAT_BORROWED_RUNTIME_NS,
+                    )?,
+                    lent_runtime_ns: value(
+                        dense,
+                        bpf_intf::snake_cell_stat_SNAKE_CELL_STAT_LENT_RUNTIME_NS,
+                    )?,
+                    normal_enqueues: value(
+                        dense,
+                        bpf_intf::snake_cell_stat_SNAKE_CELL_STAT_NORMAL_ENQUEUES,
+                    )?,
+                    affinity_enqueues: value(
+                        dense,
+                        bpf_intf::snake_cell_stat_SNAKE_CELL_STAT_AFFINITY_ENQUEUES,
+                    )?,
+                    normal_dispatches: value(
+                        dense,
+                        bpf_intf::snake_cell_stat_SNAKE_CELL_STAT_NORMAL_DISPATCHES,
+                    )?,
+                    affinity_dispatches: value(
+                        dense,
+                        bpf_intf::snake_cell_stat_SNAKE_CELL_STAT_AFFINITY_DISPATCHES,
+                    )?,
+                    clock_transitions: value(
+                        dense,
+                        bpf_intf::snake_cell_stat_SNAKE_CELL_STAT_CLOCK_TRANSITIONS,
+                    )?,
+                },
+            ))
+        })
+        .collect()
 }
 
 fn read_raw_stats(skel: &BpfSkel<'_>, slot: u32) -> Result<Vec<Vec<Vec<u8>>>> {
@@ -604,6 +844,26 @@ fn read_raw_stats(skel: &BpfSkel<'_>, slot: u32) -> Result<Vec<Vec<Vec<u8>>>> {
         .collect()
 }
 
+fn read_raw_cell_stats(
+    skel: &BpfSkel<'_>,
+    slot: u32,
+    nr_cells: usize,
+) -> Result<Vec<Vec<Vec<u8>>>> {
+    (0..nr_cells as u32)
+        .flat_map(|cell| {
+            (0..bpf_intf::snake_cell_stat_SNAKE_NR_CELL_STATS).map(move |stat| (cell, stat))
+        })
+        .map(|(cell, stat)| {
+            let index = runtime_policy::cell_stat_index(slot, cell, stat)?;
+            skel.maps
+                .cell_stats
+                .lookup_percpu(&index.to_ne_bytes(), MapFlags::ANY)
+                .with_context(|| format!("looking up cell {cell} statistic {stat}"))?
+                .ok_or_else(|| anyhow!("cell statistics map has no entry {index}"))
+        })
+        .collect()
+}
+
 struct Scheduler<'object, 'policy> {
     skel: BpfSkel<'object>,
     struct_ops: Option<libbpf_rs::Link>,
@@ -611,6 +871,7 @@ struct Scheduler<'object, 'policy> {
     inspector: Inspector,
     runtime: &'policy mut RuntimePolicy,
     fairness: FairnessMode,
+    queue_topology: Option<queue_topology::QueueTopology>,
 }
 
 impl<'object, 'policy> Scheduler<'object, 'policy> {
@@ -618,6 +879,7 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
         opts: &Opts,
         runtime: &'policy mut RuntimePolicy,
         mask_tables: &[ResolvedMaskTable],
+        queue_topology: Option<&queue_topology::QueueTopology>,
         open_object: &'object mut MaybeUninit<OpenObject>,
     ) -> Result<Self> {
         try_set_rlimit_infinity();
@@ -633,6 +895,7 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
             .fairness_mode = opts.fairness as u32;
         skel.struct_ops.snake_ops_mut().exit_dump_len = opts.exit_dump_len;
         let mut skel = scx_ops_load!(skel, snake_ops, uei)?;
+        install_queue_topology(&mut skel, queue_topology)?;
         set_active_ladder(&mut skel, bpf_intf::SNAKE_LADDER_SLOT_INVALID)?;
         install_ladder_slot(
             &mut skel,
@@ -667,16 +930,24 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
             inspector,
             runtime,
             fairness: opts.fairness,
+            queue_topology: queue_topology.cloned(),
         })
     }
 
     fn metrics(&self) -> Result<Metrics> {
-        aggregate_raw_stats(
+        let mut metrics = aggregate_raw_stats(
             &read_raw_stats(&self.skel, self.runtime.active_slot)?,
             &self.runtime.compiled,
             self.runtime.generation,
             self.fairness,
-        )
+        )?;
+        if let Some(topology) = &self.queue_topology {
+            metrics.cells = aggregate_raw_cell_stats(
+                &read_raw_cell_stats(&self.skel, self.runtime.active_slot, topology.cells.len())?,
+                topology,
+            )?;
+        }
+        Ok(metrics)
     }
 
     fn replace_policy(&mut self, source: String) -> Result<runtime_policy::PolicyUpdateResponse> {
@@ -685,6 +956,7 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
         let previous_policy = self.runtime.compiled.clone();
         let fallback_frozen_metrics = self.metrics()?;
         let mut activated_tables = None;
+        let active_queue_topology = self.queue_topology.clone();
         let mut backend = BpfPolicyBackend {
             skel: &mut self.skel,
         };
@@ -692,6 +964,13 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
             self.runtime,
             source,
             |policy| {
+                let candidate = resolve_host_queue_topology(policy)
+                    .context("resolving replacement policy queue topology")?;
+                if candidate != active_queue_topology {
+                    bail!(
+                        "replacement changes the attachment-time queue topology; restart Snake to apply it"
+                    );
+                }
                 let tables = resolve_mask_tables(policy)?;
                 activated_tables = Some(tables.clone());
                 Ok(tables)
@@ -702,12 +981,19 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
         let frozen_metrics =
             match wait_for_slot_quiescent(&self.skel, previous_slot, SLOT_QUIESCENCE_TIMEOUT)
                 .and_then(|_| {
-                    aggregate_raw_stats(
+                    let mut metrics = aggregate_raw_stats(
                         &read_raw_stats(&self.skel, previous_slot)?,
                         &previous_policy,
                         previous_generation,
                         self.fairness,
-                    )
+                    )?;
+                    if let Some(topology) = &self.queue_topology {
+                        metrics.cells = aggregate_raw_cell_stats(
+                            &read_raw_cell_stats(&self.skel, previous_slot, topology.cells.len())?,
+                            topology,
+                        )?;
+                    }
+                    Ok(metrics)
                 }) {
                 Ok(metrics) => metrics,
                 Err(error) => {
@@ -741,6 +1027,13 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
 
     fn validate_policy(&self, source: &str) -> Result<runtime_policy::PolicyValidationResponse> {
         let policy = policy::compile_policy(source).context("compiling candidate policy")?;
+        let candidate =
+            resolve_host_queue_topology(&policy).context("resolving candidate queue topology")?;
+        if candidate != self.queue_topology {
+            bail!(
+                "candidate changes the attachment-time queue topology; restart Snake to apply it"
+            );
+        }
         resolve_mask_tables(&policy).context("resolving candidate policy mask tables")?;
         Ok(runtime_policy::PolicyValidationResponse::from_policy(
             &policy,
@@ -945,6 +1238,9 @@ fn main() -> Result<()> {
             let (_, policy) = load_policy(&path)?;
             let mask_tables = resolve_mask_tables(&policy)?;
             print!("{}{}", policy.dump(), dump_mask_tables(&mask_tables));
+            if let Some(topology) = resolve_host_queue_topology(&policy)? {
+                print!("{}", dump_queue_topology(&topology));
+            }
             return Ok(());
         }
         RunMode::Launch(path) => {
@@ -974,10 +1270,19 @@ fn main() -> Result<()> {
 
             let mut open_object = MaybeUninit::uninit();
             loop {
+                let queue_topology = resolve_host_queue_topology(&runtime.compiled)?;
+                if queue_topology.is_some() && opts.fairness != FairnessMode::Vtime {
+                    bail!("[queues] policies require --fairness vtime");
+                }
                 let mask_tables = resolve_mask_tables(&runtime.compiled)?;
                 let exit_info = {
-                    let mut scheduler =
-                        Scheduler::init(&opts, &mut runtime, &mask_tables, &mut open_object)?;
+                    let mut scheduler = Scheduler::init(
+                        &opts,
+                        &mut runtime,
+                        &mask_tables,
+                        queue_topology.as_ref(),
+                        &mut open_object,
+                    )?;
                     scheduler.run(shutdown.clone())?
                 };
                 if !exit_info.should_restart() {
@@ -1053,7 +1358,7 @@ scope = "task_allowed"
         let policy = policy::compile_policy(policy_source()).expect("policy should compile");
         let encoded = encode_ladder(&policy, 42).expect("ladder should encode");
 
-        assert_eq!(bpf_intf::SNAKE_ABI_VERSION, 12);
+        assert_eq!(bpf_intf::SNAKE_ABI_VERSION, 13);
         assert_eq!(size_of::<bpf_intf::snake_compiled_ladder>(), 216);
         assert_eq!(offset_of!(bpf_intf::snake_compiled_ladder, generation), 0);
         assert_eq!(
@@ -1119,6 +1424,85 @@ scope = "task_allowed"
             bpf_intf::SNAKE_VTIME_CPU_DSQ_BASE + bpf_intf::SNAKE_MAX_CPUS
                 > bpf_intf::SNAKE_VTIME_GLOBAL_DSQ
         );
+    }
+
+    #[test]
+    fn queue_topology_encoding_matches_the_bpf_abi() {
+        let policy = policy::compile_policy(
+            r#"
+[queues]
+layout = "cell_llc"
+[[cell]]
+id = 7
+cpus = "0-3"
+[[rung]]
+operation = "pick_idle"
+scope = "task_cell"
+"#,
+        )
+        .unwrap();
+        let topology = queue_topology::resolve_queue_topology(
+            &policy,
+            &std::collections::BTreeSet::from([0, 1, 2, 3]),
+            &BTreeMap::from([(0, 10), (1, 10), (2, 20), (3, 20)]),
+        )
+        .unwrap()
+        .unwrap();
+        let encoded = encode_queue_topology(&topology).unwrap();
+
+        assert_eq!(encoded.header.layout, bpf_intf::SNAKE_QUEUE_LAYOUT_CELL_LLC);
+        assert_eq!(encoded.header.nr_cells, 2);
+        assert_eq!(encoded.header.nr_cpus, 4);
+        assert_eq!(encoded.cell_lookup[0], 1);
+        assert_eq!(encoded.cell_lookup[7], 2);
+        for queue in encoded
+            .normal_queues
+            .iter()
+            .take(encoded.header.nr_normal_queues as usize)
+        {
+            assert_eq!(queue.clock_index, queue.cell_index);
+        }
+        assert_eq!(
+            u64::from(bpf_intf::SNAKE_AFFINITY_DSQ_BASE) & (3_u64 << 62),
+            0
+        );
+        assert_eq!(
+            u64::from(bpf_intf::SNAKE_NORMAL_DSQ_BASE) & (3_u64 << 62),
+            0
+        );
+        assert!(bpf_intf::SNAKE_AFFINITY_DSQ_BASE > bpf_intf::SNAKE_VTIME_CPU_DSQ_BASE);
+        assert!(bpf_intf::SNAKE_NORMAL_DSQ_BASE > bpf_intf::SNAKE_AFFINITY_DSQ_BASE);
+    }
+
+    #[test]
+    fn queue_topology_encoding_accepts_sparse_online_cpu_ids() {
+        let policy = policy::compile_policy(
+            r#"
+[queues]
+layout = "cell"
+[[cell]]
+id = 7
+cpus = "3"
+[[rung]]
+operation = "pick_idle"
+scope = "task_cell"
+"#,
+        )
+        .unwrap();
+        let topology = queue_topology::resolve_queue_topology(
+            &policy,
+            &std::collections::BTreeSet::from([1, 3]),
+            &BTreeMap::from([(1, 10), (3, 20)]),
+        )
+        .unwrap()
+        .unwrap();
+        let encoded = encode_queue_topology(&topology).unwrap();
+
+        assert_eq!(encoded.header.nr_cpus, 2);
+        assert_eq!(encoded.cpu_queues[0].valid, 0);
+        assert_eq!(encoded.cpu_queues[1].valid, 1);
+        assert_eq!(encoded.cpu_queues[2].valid, 0);
+        assert_eq!(encoded.cpu_queues[3].valid, 1);
     }
 
     #[test]

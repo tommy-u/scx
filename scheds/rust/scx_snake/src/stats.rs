@@ -72,6 +72,69 @@ impl CpuMetrics {
 
 #[stat_doc]
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize, Stats)]
+#[stat(_om_prefix = "cell_", _om_label = "cell_id")]
+pub struct CellMetrics {
+    #[stat(desc = "External task-cell ID", _om_skip)]
+    pub id: u32,
+    #[stat(desc = "Dense queue and clock index", _om_skip)]
+    pub index: u32,
+    #[stat(desc = "Runtime charged to tasks in this cell")]
+    pub runtime_ns: u64,
+    #[stat(desc = "Runtime consumed on CPUs owned by this cell")]
+    pub primary_runtime_ns: u64,
+    #[stat(desc = "Runtime this cell consumed on CPUs owned by other cells")]
+    pub borrowed_runtime_ns: u64,
+    #[stat(desc = "Runtime other cells consumed on CPUs owned by this cell")]
+    pub lent_runtime_ns: u64,
+    #[stat(desc = "Tasks inserted into normal cell queues")]
+    pub normal_enqueues: u64,
+    #[stat(desc = "Tasks inserted into affinity queues")]
+    pub affinity_enqueues: u64,
+    #[stat(desc = "Normal cell tasks selected for execution")]
+    pub normal_dispatches: u64,
+    #[stat(desc = "Affinity tasks selected for execution")]
+    pub affinity_dispatches: u64,
+    #[stat(desc = "Task migrations into this cell clock")]
+    pub clock_transitions: u64,
+}
+
+impl CellMetrics {
+    fn delta(&self, previous: Option<&Self>) -> Self {
+        let previous = previous.cloned().unwrap_or_default();
+        Self {
+            id: self.id,
+            index: self.index,
+            runtime_ns: self.runtime_ns.saturating_sub(previous.runtime_ns),
+            primary_runtime_ns: self
+                .primary_runtime_ns
+                .saturating_sub(previous.primary_runtime_ns),
+            borrowed_runtime_ns: self
+                .borrowed_runtime_ns
+                .saturating_sub(previous.borrowed_runtime_ns),
+            lent_runtime_ns: self
+                .lent_runtime_ns
+                .saturating_sub(previous.lent_runtime_ns),
+            normal_enqueues: self
+                .normal_enqueues
+                .saturating_sub(previous.normal_enqueues),
+            affinity_enqueues: self
+                .affinity_enqueues
+                .saturating_sub(previous.affinity_enqueues),
+            normal_dispatches: self
+                .normal_dispatches
+                .saturating_sub(previous.normal_dispatches),
+            affinity_dispatches: self
+                .affinity_dispatches
+                .saturating_sub(previous.affinity_dispatches),
+            clock_transitions: self
+                .clock_transitions
+                .saturating_sub(previous.clock_transitions),
+        }
+    }
+}
+
+#[stat_doc]
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize, Stats)]
 #[stat(top)]
 pub struct Metrics {
     #[stat(desc = "Active userspace policy generation")]
@@ -146,6 +209,8 @@ pub struct Metrics {
     pub eevdf_accounting_errors: u64,
     #[stat(desc = "Per-CPU Snake runtime")]
     pub cpus: BTreeMap<u32, CpuMetrics>,
+    #[stat(desc = "Per-cell fairness and resource-consumption metrics")]
+    pub cells: BTreeMap<u32, CellMetrics>,
     #[stat(desc = "Per-rung policy evaluation metrics")]
     pub rungs: BTreeMap<u32, RungMetrics>,
 }
@@ -241,6 +306,11 @@ impl Metrics {
                 .iter()
                 .map(|(cpu, metrics)| (*cpu, metrics.delta(previous.cpus.get(cpu))))
                 .collect(),
+            cells: self
+                .cells
+                .iter()
+                .map(|(id, metrics)| (*id, metrics.delta(previous.cells.get(id))))
+                .collect(),
             rungs: self
                 .rungs
                 .iter()
@@ -316,6 +386,21 @@ impl Metrics {
                 rung.hits,
                 rung.misses,
                 rung.errors,
+            ));
+        }
+        for cell in self.cells.values() {
+            output.push_str(&format!(
+                "    cell {}: runtime {} | primary {} | borrowed {} | lent {} | normal/affinity enqueues {}/{} | dispatches {}/{} | clock transitions {}\n",
+                cell.id,
+                cell.runtime_ns,
+                cell.primary_runtime_ns,
+                cell.borrowed_runtime_ns,
+                cell.lent_runtime_ns,
+                cell.normal_enqueues,
+                cell.affinity_enqueues,
+                cell.normal_dispatches,
+                cell.affinity_dispatches,
+                cell.clock_transitions,
             ));
         }
         output
@@ -443,6 +528,7 @@ pub fn server_data() -> StatsServerData<SchedulerRequest, SchedulerResponse> {
     StatsServerData::new()
         .add_meta(Metrics::meta())
         .add_meta(CpuMetrics::meta())
+        .add_meta(CellMetrics::meta())
         .add_meta(RungMetrics::meta())
         .add_ops("top", StatsOps { open, close: None })
         .add_ops(

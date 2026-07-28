@@ -1,6 +1,8 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 #include "main.h"
+#include "queue.h"
 #include "fairness.h"
+#include "queue_fairness.h"
 #include "ladder.h"
 
 char _license[] SEC("license") = "GPL";
@@ -61,6 +63,11 @@ int prepare_ladder(void *ctx)
 		return ret;
 
 	nr_cpu_ids = scx_bpf_nr_cpu_ids();
+	ret = validate_queue_topology();
+	if (ret)
+		return ret;
+	if (queue_topology_enabled() && !fairness_is_vtime())
+		return -EINVAL;
 	return prepare_mask_tables(slot, ladder);
 }
 
@@ -82,6 +89,17 @@ s32 BPF_STRUCT_OPS(snake_select_cpu, struct task_struct *p, s32 prev_cpu,
 	cpu = walk_policy_ladder(&ladder_ctx, p, prev_cpu, wake_flags,
 				 &dispatch_flags);
 	if (cpu >= 0) {
+		if (queue_topology_enabled()) {
+			if (queue_fairness_select_cpu(&ladder_ctx, p, cpu)) {
+				scx_bpf_error("snake failed to record queue target for pid %d",
+					      p->pid);
+				release_active_ladder(&ladder_ctx);
+				return -1;
+			}
+			finish_select(&ladder_ctx, started_at);
+			release_active_ladder(&ladder_ctx);
+			return cpu;
+		}
 		if (fairness_is_ordered() && (dispatch_flags & SCX_ENQ_PREEMPT)) {
 			stat_inc(&ladder_ctx,
 				 fairness_is_vtime() ?
@@ -117,6 +135,13 @@ s32 BPF_STRUCT_OPS(snake_select_cpu, struct task_struct *p, s32 prev_cpu,
 		release_active_ladder(&ladder_ctx);
 		return cpu;
 	}
+	if (queue_topology_enabled() &&
+	    queue_fairness_select_cpu(&ladder_ctx, p, cpu)) {
+		scx_bpf_error("snake failed to record fallback queue target for pid %d",
+			      p->pid);
+		release_active_ladder(&ladder_ctx);
+		return -1;
+	}
 	finish_select(&ladder_ctx, started_at);
 	release_active_ladder(&ladder_ctx);
 	return cpu;
@@ -130,10 +155,15 @@ void BPF_STRUCT_OPS(snake_enqueue, struct task_struct *p, u64 enq_flags)
 
 	if (acquire_active_ladder(&ladder_ctx)) {
 		scx_bpf_error("snake failed to acquire active ladder in enqueue");
-		scx_bpf_dsq_insert(p, SCX_DSQ_GLOBAL, SCX_SLICE_DFL, enq_flags);
 		return;
 	}
 	stat_inc(&ladder_ctx, SNAKE_STAT_ENQUEUES);
+	if (queue_topology_enabled()) {
+		if (queue_fairness_enqueue(&ladder_ctx, p, enq_flags))
+			scx_bpf_error("snake queue enqueue failed for pid %d", p->pid);
+		release_active_ladder(&ladder_ctx);
+		return;
+	}
 	slice = fairness_dispatch_slice(&ladder_ctx, p, true);
 	cell_enqueued = try_enqueue_task_cell(&ladder_ctx, p, enq_flags, slice);
 	if (cell_enqueued)
@@ -153,6 +183,12 @@ void BPF_STRUCT_OPS(snake_dispatch, s32 cpu, struct task_struct *prev)
 		scx_bpf_error("snake failed to acquire active ladder in dispatch");
 		return;
 	}
+	if (queue_topology_enabled()) {
+		if (queue_fairness_dispatch(&ladder_ctx, cpu, prev))
+			scx_bpf_error("snake queue dispatch failed on CPU %d", cpu);
+		release_active_ladder(&ladder_ctx);
+		return;
+	}
 	fairness_dispatch(&ladder_ctx, cpu, prev);
 	release_active_ladder(&ladder_ctx);
 }
@@ -166,6 +202,13 @@ void BPF_STRUCT_OPS(snake_runnable, struct task_struct *p, u64 enq_flags)
 		scx_bpf_error("snake failed to acquire active ladder in runnable");
 		return;
 	}
+	if (queue_topology_enabled()) {
+		if (!queue_fairness_prepare_runnable(&ladder_ctx, p))
+			scx_bpf_error("snake queue runnable preparation failed for pid %d",
+				      p->pid);
+		release_active_ladder(&ladder_ctx);
+		return;
+	}
 	fairness_runnable(&ladder_ctx, p);
 	release_active_ladder(&ladder_ctx);
 }
@@ -176,6 +219,14 @@ void BPF_STRUCT_OPS(snake_running, struct task_struct *p)
 
 	if (acquire_active_ladder(&ladder_ctx)) {
 		scx_bpf_error("snake failed to acquire active ladder in running");
+		return;
+	}
+	if (queue_topology_enabled()) {
+		stat_inc(&ladder_ctx, SNAKE_STAT_RUNNING);
+		if (queue_fairness_running(&ladder_ctx, p))
+			scx_bpf_error("snake queue running accounting failed for pid %d",
+				      p->pid);
+		release_active_ladder(&ladder_ctx);
 		return;
 	}
 	stat_inc(&ladder_ctx, SNAKE_STAT_RUNNING);
@@ -191,6 +242,18 @@ void BPF_STRUCT_OPS(snake_stopping, struct task_struct *p, bool runnable)
 	(void)runnable;
 	if (acquire_active_ladder(&ladder_ctx)) {
 		scx_bpf_error("snake failed to acquire active ladder in stopping");
+		return;
+	}
+	if (queue_topology_enabled()) {
+		stat_inc(&ladder_ctx, SNAKE_STAT_STOPPING);
+		if (queue_fairness_stopping(&ladder_ctx, p, &runtime_ns)) {
+			scx_bpf_error("snake queue stopping accounting failed for pid %d",
+				      p->pid);
+			release_active_ladder(&ladder_ctx);
+			return;
+		}
+		stat_add(&ladder_ctx, SNAKE_STAT_RUNTIME_NS, runtime_ns);
+		release_active_ladder(&ladder_ctx);
 		return;
 	}
 	stat_inc(&ladder_ctx, SNAKE_STAT_STOPPING);
@@ -231,9 +294,23 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(snake_init)
 	int			 ret;
 
 	nr_cpu_ids = scx_bpf_nr_cpu_ids();
+	ret = validate_queue_topology();
+	if (ret) {
+		scx_bpf_error("snake queue topology validation failed: %d", ret);
+		return ret;
+	}
+	if (queue_topology_enabled() && !fairness_is_vtime()) {
+		scx_bpf_error("snake queue topology requires VTIME fairness");
+		return -EINVAL;
+	}
 	ret = fairness_init();
 	if (ret) {
 		scx_bpf_error("snake fairness initialization failed: %d", ret);
+		return ret;
+	}
+	ret = create_queue_topology_dsqs();
+	if (ret) {
+		scx_bpf_error("snake queue DSQ creation failed: %d", ret);
 		return ret;
 	}
 	if (acquire_active_ladder(&ladder_ctx)) {
