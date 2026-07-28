@@ -254,6 +254,11 @@ scope = "task_allowed"
                     crate::inspection::InspectionView {
                         schema_version: 1,
                         active_slot: 1,
+                        fairness: crate::inspection::FairnessInspectionView {
+                            mode_name: "fifo".into(),
+                            clock_model: "no virtual-time clock".into(),
+                        },
+                        queue_topology: None,
                         slots: Vec::new(),
                         cells: Vec::new(),
                         task_mappings: Vec::new(),

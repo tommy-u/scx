@@ -2,14 +2,17 @@
 
 use std::collections::BTreeMap;
 
+use scx_snake::fairness::FairnessMode;
 use serde::Serialize;
 
+use crate::bpf_intf;
 use crate::mask_tables::ResolvedMaskTable;
 use crate::policy::{
     CompiledPolicy, CompiledRung, Fallback, InputSource, MaskTableSource, Opcode,
     QueueDispatchSource, QueueEnqueueTarget, QueueLayout, QueueMaskKind, QueuePolicy,
     RUNG_FLAG_INTERSECT_TASK_ALLOWED, RUNG_FLAG_PICK_IDLE_CORE, RUNG_FLAG_PICK_RANDOM,
 };
+use crate::queue_topology::QueueTopology;
 use crate::stats::{Metrics, RungMetrics};
 
 #[derive(Clone, Debug)]
@@ -147,24 +150,83 @@ pub struct TaskMappingInspectionView {
 pub struct InspectionView {
     pub schema_version: u32,
     pub active_slot: u32,
+    pub fairness: FairnessInspectionView,
+    pub queue_topology: Option<QueueTopologyInspectionView>,
     pub slots: Vec<SlotInspectionView>,
     pub cells: Vec<CellInspectionView>,
     pub task_mappings: Vec<TaskMappingInspectionView>,
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub struct FairnessInspectionView {
+    pub mode_name: String,
+    pub clock_model: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct QueueCellInspectionView {
+    pub external_id: u32,
+    pub index: u32,
+    pub synthetic: bool,
+    pub cpu_weight: u32,
+    pub clock_index: u32,
+    pub primary_cpus: Vec<u32>,
+    pub borrowable_cpus: Vec<u32>,
+    pub normal_queue_indices: Vec<u32>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct NormalQueueInspectionView {
+    pub index: u32,
+    pub dsq_id: u64,
+    pub cell_index: u32,
+    pub cell_id: u32,
+    pub clock_index: u32,
+    pub llc_id: Option<u32>,
+    pub consumer_cpus: Vec<u32>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct CpuQueueRouteInspectionView {
+    pub cpu: u32,
+    pub owner_cell_id: u32,
+    pub owner_cell_index: u32,
+    pub llc_id: u32,
+    pub normal_queue_index: u32,
+    pub normal_dsq_id: u64,
+    pub affinity_dsq_id: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct QueueTopologyInspectionView {
+    pub layout: String,
+    pub affinity_queue_count: usize,
+    pub cells: Vec<QueueCellInspectionView>,
+    pub normal_queues: Vec<NormalQueueInspectionView>,
+    pub cpu_routes: Vec<CpuQueueRouteInspectionView>,
+}
+
 pub struct Inspector {
     active_slot: u32,
+    fairness: FairnessInspectionView,
+    queue_topology: Option<QueueTopologyInspectionView>,
     slots: [Option<SlotPolicy>; 2],
     assignments: BTreeMap<i32, u32>,
 }
 
 impl Inspector {
-    pub fn new(active: SlotPolicy) -> Self {
+    pub fn new(
+        active: SlotPolicy,
+        fairness: FairnessMode,
+        queue_topology: Option<QueueTopology>,
+    ) -> Self {
         let active_slot = active.slot;
         let mut slots = std::array::from_fn(|_| None);
         slots[active_slot as usize] = Some(active);
         Self {
             active_slot,
+            fairness: fairness_view(fairness, queue_topology.is_some()),
+            queue_topology: queue_topology.as_ref().map(queue_topology_view),
             slots,
             assignments: BTreeMap::new(),
         }
@@ -244,10 +306,83 @@ impl Inspector {
         InspectionView {
             schema_version: 1,
             active_slot: self.active_slot,
+            fairness: self.fairness.clone(),
+            queue_topology: self.queue_topology.clone(),
             slots,
             cells,
             task_mappings,
         }
+    }
+}
+
+fn fairness_view(mode: FairnessMode, has_queue_topology: bool) -> FairnessInspectionView {
+    let clock_model = match (mode, has_queue_topology) {
+        (FairnessMode::Fifo, _) => "no virtual-time clock",
+        (FairnessMode::Eevdf, _) => "one global aggregate virtual-time clock",
+        (FairnessMode::Vtime, true) => "per-cell normal clocks; one shared global affinity clock",
+        (FairnessMode::Vtime, false) => "one shared global VTIME clock",
+    };
+    FairnessInspectionView {
+        mode_name: mode.as_str().into(),
+        clock_model: clock_model.into(),
+    }
+}
+
+fn queue_topology_view(topology: &QueueTopology) -> QueueTopologyInspectionView {
+    let cell_id_by_index = topology
+        .cells
+        .iter()
+        .map(|cell| (cell.index, cell.external_id))
+        .collect::<BTreeMap<_, _>>();
+    QueueTopologyInspectionView {
+        layout: match topology.layout {
+            QueueLayout::Cell => "cell",
+            QueueLayout::CellLlc => "cell_llc",
+        }
+        .into(),
+        affinity_queue_count: topology.cpu_queues.len(),
+        cells: topology
+            .cells
+            .iter()
+            .map(|cell| QueueCellInspectionView {
+                external_id: cell.external_id,
+                index: cell.index,
+                synthetic: cell.external_id == 0,
+                cpu_weight: cell.cpu_weight,
+                clock_index: cell.index,
+                primary_cpus: cell.primary.iter().copied().collect(),
+                borrowable_cpus: cell.borrowable.iter().copied().collect(),
+                normal_queue_indices: cell.normal_queues.clone(),
+            })
+            .collect(),
+        normal_queues: topology
+            .normal_queues
+            .iter()
+            .map(|queue| NormalQueueInspectionView {
+                index: queue.index,
+                dsq_id: u64::from(bpf_intf::SNAKE_NORMAL_DSQ_BASE) + u64::from(queue.index),
+                cell_index: queue.cell_index,
+                cell_id: cell_id_by_index[&queue.cell_index],
+                clock_index: queue.clock_index,
+                llc_id: queue.llc_id,
+                consumer_cpus: queue.consumers.iter().copied().collect(),
+            })
+            .collect(),
+        cpu_routes: topology
+            .cpu_queues
+            .values()
+            .map(|route| CpuQueueRouteInspectionView {
+                cpu: route.cpu,
+                owner_cell_id: cell_id_by_index[&route.owner_cell_index],
+                owner_cell_index: route.owner_cell_index,
+                llc_id: route.llc_id,
+                normal_queue_index: route.normal_queue_index,
+                normal_dsq_id: u64::from(bpf_intf::SNAKE_NORMAL_DSQ_BASE)
+                    + u64::from(route.normal_queue_index),
+                affinity_dsq_id: u64::from(bpf_intf::SNAKE_AFFINITY_DSQ_BASE)
+                    + u64::from(route.cpu),
+            })
+            .collect(),
     }
 }
 
@@ -793,7 +928,9 @@ mod tests {
 
     use super::*;
     use crate::policy;
+    use crate::queue_topology;
     use crate::stats::{Metrics, RungMetrics};
+    use scx_snake::fairness::FairnessMode;
 
     const FIRST_POLICY: &str = r#"
 [[rung]]
@@ -858,7 +995,8 @@ scope = "task_cell_borrowable"
 
     #[test]
     fn activation_preserves_the_previous_slot_and_its_frozen_metrics() {
-        let mut inspector = Inspector::new(slot(0, 1, FIRST_POLICY, 1_000));
+        let mut inspector =
+            Inspector::new(slot(0, 1, FIRST_POLICY, 1_000), FairnessMode::Fifo, None);
         inspector.activate(slot(1, 2, SECOND_POLICY, 2_000), metrics(1, 30), 2_000);
 
         let view = inspector.snapshot(metrics(2, 8), Vec::new());
@@ -883,7 +1021,7 @@ scope = "task_cell_borrowable"
 
     #[test]
     fn rung_fields_separate_context_valid_choices_from_other_abi_choices() {
-        let inspector = Inspector::new(slot(0, 2, SECOND_POLICY, 1_000));
+        let inspector = Inspector::new(slot(0, 2, SECOND_POLICY, 1_000), FairnessMode::Fifo, None);
 
         let view = inspector.snapshot(metrics(2, 8), Vec::new());
         let policy = view.slots[0].policy.as_ref().unwrap();
@@ -915,7 +1053,11 @@ scope = "task_cell_borrowable"
 
     #[test]
     fn borrowing_rung_round_trips_through_inspection() {
-        let inspector = Inspector::new(slot(0, 3, QUEUE_BORROW_POLICY, 1_000));
+        let inspector = Inspector::new(
+            slot(0, 3, QUEUE_BORROW_POLICY, 1_000),
+            FairnessMode::Vtime,
+            None,
+        );
         let view = inspector.snapshot(metrics(3, 4), Vec::new());
         let rung = &view.slots[0].policy.as_ref().unwrap().rungs[0];
 
@@ -932,10 +1074,11 @@ scope = "task_cell_borrowable"
 
     #[test]
     fn queue_callback_ladders_round_trip_in_configured_order() {
-        let inspector = Inspector::new(slot(
-            0,
-            4,
-            r#"
+        let inspector = Inspector::new(
+            slot(
+                0,
+                4,
+                r#"
 [queues]
 layout = "cell_llc"
 
@@ -959,8 +1102,11 @@ cpus = "0-3"
 operation = "pick_idle"
 scope = "task_cell"
 "#,
-            1_000,
-        ));
+                1_000,
+            ),
+            FairnessMode::Vtime,
+            None,
+        );
 
         let view = inspector.snapshot(metrics(4, 1), Vec::new());
         let queues = view.slots[0]
@@ -992,9 +1138,68 @@ scope = "task_cell"
 
     #[test]
     fn placement_only_policy_has_no_queue_callback_ladders() {
-        let inspector = Inspector::new(slot(0, 5, FIRST_POLICY, 1_000));
+        let inspector = Inspector::new(slot(0, 5, FIRST_POLICY, 1_000), FairnessMode::Fifo, None);
         let view = inspector.snapshot(metrics(5, 1), Vec::new());
 
         assert!(view.slots[0].policy.as_ref().unwrap().queues.is_none());
+    }
+
+    #[test]
+    fn resolved_queue_topology_exposes_allocation_dsq_and_cpu_routes() {
+        let source = r#"
+[queues]
+layout = "cell_llc"
+
+[[cell]]
+id = 7
+cpus = "0-2"
+cpu_weight = 2
+
+[[rung]]
+operation = "pick_idle"
+scope = "task_cell"
+"#;
+        let active = slot(0, 6, source, 1_000);
+        let topology = queue_topology::resolve_queue_topology(
+            &active.compiled,
+            &[0, 1, 2, 3].into_iter().collect(),
+            &BTreeMap::from([(0, 10), (1, 10), (2, 20), (3, 20)]),
+        )
+        .unwrap()
+        .unwrap();
+        let inspector = Inspector::new(active, FairnessMode::Vtime, Some(topology));
+
+        let view = inspector.snapshot(metrics(6, 1), Vec::new());
+        let resolved = view
+            .queue_topology
+            .as_ref()
+            .expect("queue topology should be inspected");
+
+        assert_eq!(view.fairness.mode_name, "vtime");
+        assert_eq!(
+            view.fairness.clock_model,
+            "per-cell normal clocks; one shared global affinity clock"
+        );
+        assert_eq!(resolved.layout, "cell_llc");
+        assert_eq!(resolved.affinity_queue_count, 4);
+        assert_eq!(resolved.cells[0].external_id, 0);
+        assert!(resolved.cells[0].synthetic);
+        assert_eq!(resolved.cells[1].external_id, 7);
+        assert_eq!(resolved.cells[1].cpu_weight, 2);
+        assert_eq!(resolved.cells[1].clock_index, resolved.cells[1].index);
+        assert!(!resolved.cells[1].primary_cpus.is_empty());
+        assert_eq!(resolved.normal_queues[0].dsq_id, 0x20000000);
+        assert_eq!(resolved.cpu_routes[0].affinity_dsq_id, 0x10000000);
+        assert_eq!(resolved.cpu_routes[3].affinity_dsq_id, 0x10000003);
+    }
+
+    #[test]
+    fn placement_only_inspection_still_describes_fairness_without_queue_topology() {
+        let inspector = Inspector::new(slot(0, 7, FIRST_POLICY, 1_000), FairnessMode::Fifo, None);
+        let view = inspector.snapshot(metrics(7, 1), Vec::new());
+
+        assert_eq!(view.fairness.mode_name, "fifo");
+        assert_eq!(view.fairness.clock_model, "no virtual-time clock");
+        assert!(view.queue_topology.is_none());
     }
 }

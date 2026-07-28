@@ -1007,14 +1007,18 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
             runtime.compiled.rungs.len(),
             opts.fairness,
         );
-        let inspector = Inspector::new(SlotPolicy::new(
-            runtime.active_slot,
-            runtime.generation,
-            runtime.source.clone(),
-            runtime.compiled.clone(),
-            mask_tables.to_vec(),
-            unix_time_ms(),
-        ));
+        let inspector = Inspector::new(
+            SlotPolicy::new(
+                runtime.active_slot,
+                runtime.generation,
+                runtime.source.clone(),
+                runtime.compiled.clone(),
+                mask_tables.to_vec(),
+                unix_time_ms(),
+            ),
+            opts.fairness,
+            queue_topology.cloned(),
+        );
 
         Ok(Self {
             skel,

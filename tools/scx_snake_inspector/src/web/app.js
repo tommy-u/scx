@@ -14,10 +14,12 @@ import {
   topologyGroups,
 } from "/assets/heatmap.js";
 import {
+  compactCpuList,
   decorateCells,
   fieldReferenceGroups,
   ladderPercentages,
   queueLadderSections,
+  queueTopologyModel,
   routeFromHash,
   rungLadderPercentages,
   rungPercentages,
@@ -56,6 +58,7 @@ const elements = {
   invalidPolicies: document.querySelector("#invalidPolicies"),
   policyNotice: document.querySelector("#policyNotice"),
   policyView: document.querySelector("#policyView"),
+  queueTopology: document.querySelector("#queueTopology"),
   primaryNav: document.querySelector("#primaryNav"),
   referencePopover: document.querySelector("#referencePopover"),
   confirmPolicyActivation: document.querySelector("#confirmPolicyActivation"),
@@ -645,11 +648,86 @@ function renderPolicy() {
   state.referenceId = 0;
   if (!state.inspection) {
     elements.slotComparison.replaceChildren();
+    elements.queueTopology.replaceChildren();
+    elements.queueTopology.classList.add("hidden");
     return;
   }
   elements.slotComparison.innerHTML = state.inspection.slots
     .map(renderSlot)
     .join("");
+  renderResolvedQueueTopology();
+}
+
+function renderResolvedQueueTopology() {
+  const model = queueTopologyModel(
+    state.inspection.fairness,
+    state.inspection.queue_topology,
+  );
+  elements.queueTopology.classList.remove("hidden");
+  const summary = `
+    <dl class="queue-topology-summary">
+      <div><dt>Fairness</dt><dd>${escapeHtml(model.mode)}</dd></div>
+      <div><dt>Clock model</dt><dd>${escapeHtml(model.clockModel)}</dd></div>
+      <div><dt>Layout</dt><dd>${escapeHtml(model.layout || "None")}</dd></div>
+      <div><dt>Affinity DSQs</dt><dd>${formatCount(model.affinityQueueCount)}</dd></div>
+    </dl>`;
+  if (!model.layout) {
+    elements.queueTopology.innerHTML = `
+      <header class="queue-topology-heading">
+        <div><h3>Scheduler execution model</h3><p>Fairness and attachment-time queue topology</p></div>
+      </header>
+      ${summary}
+      <p class="queue-topology-empty">No resolved cell queue topology is installed.</p>`;
+    return;
+  }
+  const cells = model.cells.map((cell) => `
+    <tr>
+      <th scope="row">${escapeHtml(cell.label)}</th>
+      <td>${formatCount(cell.index)}</td>
+      <td>${formatCount(cell.cpu_weight)}</td>
+      <td><code>cell:${formatCount(cell.clock_index)}</code></td>
+      <td class="cpu-mask">${escapeHtml(compactCpuList(cell.primary_cpus))}</td>
+      <td class="cpu-mask">${escapeHtml(compactCpuList(cell.borrowable_cpus))}</td>
+    </tr>`).join("");
+  const queues = model.normalQueues.map((queue) => `
+    <tr>
+      <th scope="row"><code>${escapeHtml(queue.dsq)}</code></th>
+      <td>Cell ${formatCount(queue.cell_id)} <small>index ${formatCount(queue.cell_index)}</small></td>
+      <td>${queue.llc_id == null ? "All" : formatCount(queue.llc_id)}</td>
+      <td><code>cell:${formatCount(queue.clock_index)}</code></td>
+      <td class="cpu-mask">${escapeHtml(compactCpuList(queue.consumer_cpus))}</td>
+    </tr>`).join("");
+  const routes = model.cpuRoutes.map((route) => `
+    <tr>
+      <th scope="row">${formatCount(route.cpu)}</th>
+      <td>Cell ${formatCount(route.owner_cell_id)} <small>index ${formatCount(route.owner_cell_index)}</small></td>
+      <td>${formatCount(route.llc_id)}</td>
+      <td><code>${escapeHtml(route.normalDsq)}</code></td>
+      <td><code>${escapeHtml(route.affinityDsq)}</code></td>
+    </tr>`).join("");
+  elements.queueTopology.innerHTML = `
+    <header class="queue-topology-heading">
+      <div><h3>Resolved queue topology</h3><p>Attachment-time CPU ownership, DSQs, and clock domains</p></div>
+    </header>
+    ${summary}
+    <section class="queue-topology-table-section">
+      <h4>Cell allocation</h4>
+      <div class="queue-topology-table-wrap">
+        <table><thead><tr><th>Cell</th><th>Dense</th><th>Weight</th><th>Clock</th><th>Primary CPUs</th><th>Borrowable CPUs</th></tr></thead><tbody>${cells}</tbody></table>
+      </div>
+    </section>
+    <details class="queue-topology-details">
+      <summary>Normal DSQs (${formatCount(model.normalQueues.length)})</summary>
+      <div class="queue-topology-table-wrap">
+        <table><thead><tr><th>DSQ</th><th>Cell</th><th>LLC</th><th>Clock</th><th>Consumer CPUs</th></tr></thead><tbody>${queues}</tbody></table>
+      </div>
+    </details>
+    <details class="queue-topology-details">
+      <summary>Per-CPU routing (${formatCount(model.cpuRoutes.length)} CPUs)</summary>
+      <div class="queue-topology-table-wrap queue-route-table-wrap">
+        <table><thead><tr><th>CPU</th><th>Owner</th><th>LLC</th><th>Normal DSQ</th><th>Affinity DSQ</th></tr></thead><tbody>${routes}</tbody></table>
+      </div>
+    </details>`;
 }
 
 function renderSlot(slot) {

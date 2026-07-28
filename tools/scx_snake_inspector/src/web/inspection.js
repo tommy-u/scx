@@ -131,3 +131,63 @@ export function selectionRungHitFlow(rung, queues) {
     ? "Hit → direct dispatch"
     : "Hit → enqueue ladder";
 }
+
+function formatDsqId(value) {
+  const number = Number(value);
+  return Number.isSafeInteger(number) && number >= 0
+    ? `0x${number.toString(16).padStart(8, "0")}`
+    : "unknown";
+}
+
+export function compactCpuList(cpus) {
+  const values = [...new Set((cpus || []).map(Number).filter(Number.isSafeInteger))]
+    .sort((left, right) => left - right);
+  if (values.length === 0) {
+    return "None";
+  }
+  const ranges = [];
+  let start = values[0];
+  let end = start;
+  for (const cpu of values.slice(1)) {
+    if (cpu === end + 1) {
+      end = cpu;
+      continue;
+    }
+    ranges.push(start === end ? String(start) : `${start}-${end}`);
+    start = cpu;
+    end = cpu;
+  }
+  ranges.push(start === end ? String(start) : `${start}-${end}`);
+  return ranges.join(", ");
+}
+
+export function queueTopologyModel(fairness, topology) {
+  const model = {
+    mode: String(fairness?.mode_name || "unknown").toUpperCase(),
+    clockModel: fairness?.clock_model || "Unknown clock model",
+    layout: topology?.layout || null,
+    affinityQueueCount: Number(topology?.affinity_queue_count) || 0,
+    cells: [],
+    normalQueues: [],
+    cpuRoutes: [],
+  };
+  if (!topology) {
+    return model;
+  }
+  model.cells = (topology.cells || []).map((cell) => ({
+    ...cell,
+    label: cell.synthetic
+      ? `Cell ${cell.external_id} (synthetic)`
+      : `Cell ${cell.external_id}`,
+  }));
+  model.normalQueues = (topology.normal_queues || []).map((queue) => ({
+    ...queue,
+    dsq: formatDsqId(queue.dsq_id),
+  }));
+  model.cpuRoutes = (topology.cpu_routes || []).map((route) => ({
+    ...route,
+    normalDsq: formatDsqId(route.normal_dsq_id),
+    affinityDsq: formatDsqId(route.affinity_dsq_id),
+  }));
+  return model;
+}

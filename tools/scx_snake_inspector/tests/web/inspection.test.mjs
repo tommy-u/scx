@@ -8,9 +8,11 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
+  compactCpuList,
   decorateCells,
   fieldReferenceGroups,
   ladderPercentages,
+  queueTopologyModel,
   queueLadderSections,
   queueRungFlow,
   routeFromHash,
@@ -173,4 +175,54 @@ test("idle selection hits flow into the configured queue path", () => {
     selectionRungHitFlow({ scope: "task_cell_borrowable" }, { layout: "cell" }),
     "Hit → direct dispatch",
   );
+});
+
+test("resolved queue topology model labels cells and DSQs for display", () => {
+  const model = queueTopologyModel(
+    {
+      mode_name: "vtime",
+      clock_model: "per-cell normal clocks; one shared global affinity clock",
+    },
+    {
+      layout: "cell_llc",
+      affinity_queue_count: 2,
+      cells: [
+        {
+          external_id: 0,
+          index: 0,
+          synthetic: true,
+          cpu_weight: 1,
+          clock_index: 0,
+          primary_cpus: [0],
+          borrowable_cpus: [1],
+        },
+        {
+          external_id: 7,
+          index: 1,
+          synthetic: false,
+          cpu_weight: 2,
+          clock_index: 1,
+          primary_cpus: [1],
+          borrowable_cpus: [0],
+        },
+      ],
+      normal_queues: [
+        { index: 0, dsq_id: 536870912, cell_index: 0, clock_index: 0, llc_id: 10, consumer_cpus: [0] },
+      ],
+      cpu_routes: [
+        { cpu: 0, owner_cell_id: 0, owner_cell_index: 0, llc_id: 10, normal_queue_index: 0, normal_dsq_id: 536870912, affinity_dsq_id: 268435456 },
+      ],
+    },
+  );
+
+  assert.equal(model.mode, "VTIME");
+  assert.equal(model.cells[0].label, "Cell 0 (synthetic)");
+  assert.equal(model.cells[1].label, "Cell 7");
+  assert.equal(model.normalQueues[0].dsq, "0x20000000");
+  assert.equal(model.cpuRoutes[0].affinityDsq, "0x10000000");
+});
+
+test("CPU masks are compacted into readable ranges", () => {
+  assert.equal(compactCpuList([]), "None");
+  assert.equal(compactCpuList([0, 1, 2, 4, 6, 7]), "0-2, 4, 6-7");
 });
