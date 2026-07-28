@@ -5,9 +5,14 @@ existing task-cell annotations. They are experimental, require
 `--fairness vtime`, and leave FIFO as the scheduler default.
 
 See [`../examples/cell-queues.toml`](../examples/cell-queues.toml),
-[`../examples/cell-llc-queues.toml`](../examples/cell-llc-queues.toml), and
+[`../examples/cell-llc-queues.toml`](../examples/cell-llc-queues.toml),
+[`../examples/cell-min-vtime.toml`](../examples/cell-min-vtime.toml), and
 [`../examples/cell-borrowing.toml`](../examples/cell-borrowing.toml) for
 complete policies.
+
+This document is the configuration and resource-topology reference. See
+[`FAIRNESS.md`](FAIRNESS.md) for the VTIME accounting model and
+[`CELL_POLICY.md`](CELL_POLICY.md) for live task annotations.
 
 ## Configuration
 
@@ -102,12 +107,13 @@ Snake creates all queue-policy DSQs when the scheduler attaches.
 | `cell` | One per cell | One per cell |
 | `cell_llc` | One for each cell/LLC pair that owns at least one CPU | One per cell, shared by all of that cell's LLC shards |
 
-Both layouts also create exactly one affinity escape DSQ per online CPU. These
-queues share one global affinity clock. Snake does not create a cell-by-CPU
-matrix of DSQs. In particular, `cell_llc` creates only populated ownership
-pairs, not the Cartesian product of all cells and LLCs. Every normal queue owns
-at least one CPU, so there are never more normal queues than online CPUs. CPU
-IDs may be sparse; descriptors remain keyed by the real CPU IDs.
+Both layouts also create exactly one affinity escape DSQ per online CPU. Each
+affinity DSQ uses the clock of the cell that owns its CPU. Snake does not create
+a cell-by-CPU matrix of DSQs or any per-CPU clocks. In particular, `cell_llc`
+creates only populated ownership pairs, not the Cartesian product of all cells
+and LLCs. Every normal queue owns at least one CPU, so there are never more
+normal queues than online CPUs. CPU IDs may be sparse; descriptors remain keyed
+by the real CPU IDs.
 
 The affinity queues exist because a task whose affinity excludes any CPU in
 its cell's primary mask cannot safely sit on a normal DSQ consumed by all of
@@ -130,13 +136,24 @@ policy that enqueues to `cell` must also dispatch from `cell`.
 
 ## Dispatch ladder
 
-The dispatch ladder lists `cell` and `affinity` sources. It always contains
-`affinity`, and contains `cell` exactly when the enqueue ladder does.
+The dispatch ladder either lists `cell` and `affinity` sources or contains the
+single combined operation:
 
-The list is not a stable-priority order. Each CPU keeps a generation-aware
-cursor, starts its next dispatch search at that cursor, and advances past the
-source that supplied work. This cyclic round robin prevents a continuously
-non-empty first source from starving the other source.
+```toml
+[[queues.dispatch]]
+operation = "min_vtime"
+```
+
+`min_vtime` requires both enqueue targets and must be the sole dispatch rung.
+It peeks the CPU owner's normal cell queue and that CPU's affinity queue, then
+dispatches the earlier VTIME head. Exact ties alternate per CPU, beginning with
+the cell queue. Both heads use the CPU owner's cell clock, so the raw comparison
+is within one clock domain.
+
+For source rungs, the list is not a stable-priority order. Each CPU keeps a
+generation-aware cursor, starts its next dispatch search at that cursor, and
+advances past the source that supplied work. This cyclic round robin prevents a
+continuously non-empty first source from starving the other source.
 
 For a `cell` source, a CPU first checks its local cell or cell/LLC shard. If
 that shard is empty, it may take the earliest VTIME head from another shard of
@@ -149,19 +166,19 @@ Normal queues use one VTIME clock per cell. All `cell_llc` shards for a cell
 share that clock, so changing LLC storage does not create a new entitlement
 domain.
 
-Affinity queues use one global affinity clock. A task keeps two coordinates:
+An affinity queue uses its CPU owner's cell clock. A task keeps two coordinates:
 
 - cell vruntime, charged against its task cell's clock;
-- affinity vruntime, used only while ordered through an affinity escape queue.
+- affinity vruntime, translated into the clock of the cell owning its target
+  CPU.
 
-Runtime on an affinity queue advances both coordinates. Returning to a normal
-queue therefore cannot erase service received while affinity-constrained. When
-a task changes cells, Snake translates its cell vruntime by preserving lag
-relative to the old and new cell clocks, clamped to one VTIME slice. It does
-not compare raw vruntime values from unrelated cell clocks.
-
-This global affinity clock is an intentional exception to the per-cell clock
-rule. It solves affinity forward progress without creating per-CPU clocks.
+Runtime on an affinity queue advances both coordinates. It advances the task
+cell coordinate so returning to a normal queue cannot erase service, and the
+CPU-owner coordinate so it competes fairly with normal work consuming that CPU.
+When either coordinate changes cell domains, Snake preserves its lag relative
+to the old and new cell clocks, clamped to one VTIME slice. Raw values are
+compared only after both candidates are in the same CPU-owner cell domain.
+[`FAIRNESS.md`](FAIRNESS.md) gives the charging and bounded-lag equations.
 
 ## Borrowing rung
 
@@ -212,11 +229,12 @@ borrowable masks, normal queues, and affinity queues. Restart Snake to change
 any of them.
 
 Callback ladders are part of the double-buffered policy generation. Dispatch
-sources may be reordered, and a previously unused cell target/source pair may
-be added when the attachment-time topology already contains its queues. The
-enqueue ladder must still keep `affinity` terminal. A live update may not
-remove an active enqueue target or dispatch source: work queued by the old
-generation could otherwise be stranded. Placement-rung changes remain
+sources may be reordered, a full source pair may switch to or from `min_vtime`,
+and a previously unused cell target/source pair may be added when the
+attachment-time topology already contains its queues. The enqueue ladder must
+still keep `affinity` terminal. A live update may not
+remove an active enqueue target or represented dispatch class: work queued by
+the old generation could otherwise be stranded. Placement-rung changes remain
 live-updateable when the queue topology is unchanged.
 
 A live task-cell assignment is different from a topology update. If the task
@@ -230,9 +248,11 @@ annotation changes. If the old cell dequeues it first, Snake preserves that
 queue decision for one execution: runtime and vruntime remain charged to the
 old cell. The pending-rehome check prevents slice renewal, and the following
 enqueue translates the task to its requested cell clock, or synthetic cell 0
-after a clear. Affinity DSQs are not owned by one cell, so a task dequeued there
-may adopt the new cell identity in `running` while retaining its global
-affinity coordinate.
+after a clear. An affinity DSQ is keyed by CPU and ordered in that CPU owner's
+cell clock. A task dequeued there may adopt the requested task-cell identity in
+`running`; its affinity coordinate remains relative to the executing CPU
+owner's clock and is translated if a later target belongs to another owner
+cell.
 
 ## Accounting and inspection
 
@@ -257,5 +277,9 @@ classification follows the actual CPU owner, not the queue class.
 instead of being renewed or compared across cell clocks.
 
 The compiled-policy dump includes the resolved queue topology. The web
-inspector currently shows placement ladders and declared task-cell membership,
-but not callback ladders or resolved primary, borrowable, and DSQ topology.
+inspector shows the placement, enqueue, and dispatch ladders; fairness and clock
+model; synthetic cell 0 and dense cell indices; weights and resolved primary and
+borrowable masks; normal DSQ/LLC consumers; and each CPU's owner cell, normal
+DSQ, and affinity DSQ. Per-queue depth and per-cell enqueue, dispatch,
+borrowing, lending, and clock-transition metrics remain available through
+`--stats` rather than the topology tables.

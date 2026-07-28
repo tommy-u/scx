@@ -9,17 +9,18 @@ The embedded interface has three views:
 - **Activity** counts a migration when a Snake task executes on a different
   CPU than its previous execution slice. It also shows aligned per-CPU runtime.
 - **Policy** shows both BPF placement-ladder slots, their rung data, live or
-  frozen counters, contextual references for the displayed encoded fields, and
-  a catalog of validated TOML policies that can be activated after
-  confirmation.
+  frozen counters, configured enqueue and dispatch ladders, contextual
+  references for encoded fields, resolved queue topology, and a catalog of
+  validated TOML policies that can be activated after confirmation.
 - **Cells** shows declared cell CPU membership, overlaps, and expandable
   current task mappings.
 
-The current inspection schema does not expose queue callback ladders or the
-resolved queue topology. In queue mode, the page therefore does not show
-synthetic cell 0, allocated primary and borrowable masks, cell/LLC DSQ shards,
-or per-CPU affinity queues. Use `scx_snake --dump-compiled-policy` and scheduler
-statistics for that information.
+In queue mode, the Policy view shows fairness and clock mode, synthetic cell 0,
+dense cell indices, allocated primary and borrowable masks, cell/LLC normal DSQ
+shards, and every CPU's owner, normal DSQ, and affinity DSQ. It does not yet
+attach runtime queue depth, enqueue/dispatch, borrowing/lending, or clock
+transition metrics to those topology rows; use scheduler statistics for those
+counters.
 
 An aligned strip below the matrix shows per-CPU utilization reported by
 Snake's stats socket. The strip always covers all Snake tasks; TGID and cgroup

@@ -9,6 +9,11 @@ Snake separates CPU placement from CPU-time fairness. The policy ladder and
 task cells choose where a task may run. The startup `--fairness` option chooses
 which runnable task runs when tasks contend for CPU time.
 
+This document is the service-ordering and clock reference. See
+[`QUEUE_POLICY.md`](QUEUE_POLICY.md) for queue configuration and resource
+ownership, and [`POLICY_LOWERING.md`](POLICY_LOWERING.md) for the userspace/BPF
+ABI.
+
 Three disciplines are implemented:
 
 ```bash
@@ -111,22 +116,22 @@ task weight continues to control service order among tasks using a cell clock.
 
 ### Affinity escape queues and dual coordinates
 
-Snake creates one affinity escape DSQ per online CPU. All escape DSQs share one
-global affinity clock, not per-CPU clocks. A task whose affinity excludes any
-CPU in its cell's primary mask uses one of these queues so an incompatible
-normal-queue consumer cannot block it.
+Snake creates one affinity escape DSQ per online CPU. Each escape DSQ uses its
+CPU owner's cell clock; there are no per-CPU clocks. A task whose affinity
+excludes any CPU in its cell's primary mask uses one of these queues so an
+incompatible normal-queue consumer cannot block it.
 
 A queue-mode task keeps two virtual-runtime coordinates:
 
 ```text
 cell_vruntime       service relative to the task cell clock
-affinity_vruntime   service relative to the global affinity clock
+affinity_vruntime   service relative to the target CPU owner's cell clock
 ```
 
 Normal execution advances `cell_vruntime`. Affinity execution advances both
-coordinates by the same weight-scaled runtime. The cell coordinate therefore
-remembers service received through the escape path when the task later returns
-to a normal queue.
+coordinates by the same weight-scaled runtime. The task-cell coordinate
+remembers service received through the escape path, while the owner-cell
+coordinate orders the task against normal work consuming that CPU.
 
 When a task changes cells, raw cell vruntimes cannot be compared because the
 clocks are independent. Snake preserves the task's lag relative to the old
@@ -137,27 +142,22 @@ lag = clamp(task.vruntime - old_cell_now, -5 ms, 5 ms)
 task.vruntime = new_cell_now + lag
 ```
 
-The global affinity coordinate persists independently across cell changes.
+When an affinity target changes to a CPU owned by another cell, Snake translates
+the affinity coordinate with the same bounded-lag rule.
 
 ### Enqueue, dispatch, and borrowing
 
-An ordinary successful placement rung records a CPU hint and proceeds through
-the queue enqueue ladder. Its `cell` target tries normal storage and its
-required terminal `affinity` target guarantees an affinity-safe escape. The
-dispatch ladder visits its configured sources with a per-CPU cyclic cursor;
-source order is not permanent priority.
+The enqueue ladder chooses normal cell storage or an affinity-safe escape. A
+source-based dispatch ladder rotates classes without comparing their clocks;
+`min_vtime` instead compares normal and affinity heads after both are expressed
+in the CPU owner's cell clock, alternating exact ties per CPU.
 
-The explicit `task_cell_borrowable` rung is the only direct-dispatch exception.
-It may claim an allowed idle CPU owned by another cell. This bypasses ordered
-queue comparison for that dispatch, so borrowing is work-conserving placement,
-not strict cross-cell VTIME ordering. It also does not steal work that is
-already queued.
-
-Task identity and resource consumption remain separate. Runtime always advances
-the task cell's VTIME state. Counters classify the execution as primary when it
-runs on a CPU owned by that cell, or as borrowed for the task cell and lent for
-the CPU-owner cell otherwise. See [`QUEUE_POLICY.md`](QUEUE_POLICY.md) for the
-complete topology and callback rules.
+The `task_cell_borrowable` placement rung is the direct-dispatch exception. It
+may use an idle CPU owned by another cell, bypassing ordered comparison for one
+slice without stealing already queued work. Runtime still advances the task
+cell's VTIME state, while resource counters classify foreign-CPU execution as
+borrowed and lent. [`QUEUE_POLICY.md`](QUEUE_POLICY.md) owns the complete
+callback, borrowing, and accounting rules.
 
 ## Global EEVDF
 
@@ -303,7 +303,7 @@ Additional VM-only contracts cover the remaining queue boundaries:
 | Test | Contract |
 | --- | --- |
 | `fifo_fallback.sh` | Shared FIFO fallback is explicitly drained. |
-| `vtime_queue_ladders.sh` | Callback ladders activate, live reorder, and select the configured first ready source. |
+| `vtime_queue_ladders.sh` | Callback ladders activate, live reorder, switch to `min_vtime`, and dispatch both queue classes. |
 | `vtime_max_cells.sh` | 31 declared cells plus cell 0 run under `cell` and `cell_llc`. |
 | `vtime_single_runner_rehome.sh` | A running task cannot retain an obsolete cell indefinitely. |
 | `vtime_queued_rehome.sh` | An old normal-DSQ run is preserved once, then translated on re-enqueue. |
@@ -322,9 +322,10 @@ sudo scheds/rust/scx_snake/tests/eevdf_affinity_future.sh \
 ## Current scope
 
 Global VTIME and EEVDF each use one global fairness clock. Queue-mode VTIME uses
-one normal clock per cell plus one global clock for all affinity escape queues;
-it deliberately has no per-CPU clocks. Cell CPU weights allocate primary CPUs
-but do not provide hierarchical group fairness. There are no per-NUMA clocks,
-live fairness-mode changes, queued-work borrowing, or cross-cell normal-queue
-stealing. The clocks use BPF spin locks, so scalability under large runnable
-sets remains an explicit experiment rather than a production claim.
+one clock per cell for both its normal work and affinity work targeting its
+CPUs; it has neither a global affinity clock nor per-CPU clocks. Cell CPU
+weights allocate primary CPUs but do not provide hierarchical group fairness.
+There are no per-NUMA clocks, live fairness-mode changes, queued-work borrowing,
+or cross-cell normal-queue stealing. The clocks use BPF spin locks, so
+scalability under large runnable sets remains an explicit experiment rather
+than a production claim.

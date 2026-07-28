@@ -1,13 +1,58 @@
 # Policy Lowering and BPF Data Flow
 
 Snake policy files are semantic userspace configuration. The BPF scheduler does
-not parse TOML, know topology names such as `previous_llc`, or understand
-application concepts such as gallery images. Userspace lowers those concepts
-into a small mechanical instruction ABI, generic CPU-mask tables, and optional
+not parse TOML, know topology names such as `previous_llc`, or interpret the
+application-specific meaning of a cell ID. Userspace lowers those concepts into
+a small mechanical instruction ABI, generic CPU-mask tables, and optional
 attachment-time queue descriptors.
 
 This document describes that boundary, the opcode encoding, the data available
 to the BPF hot path, and the information returned to userspace.
+
+## Policy and mechanism boundary
+
+```mermaid
+flowchart LR
+    subgraph US["Userspace policy and control"]
+        INPUT["CLI and TOML"] --> COMPILE["Parse, lower, and validate"]
+        TOPO["CPU, LLC, and NUMA topology"] --> COMPILE
+        COMPILE --> PUBLISH["Publish ladders, masks, and queue descriptors"]
+        OBSERVE["Statistics and inspection"]
+    end
+
+    subgraph BPF["BPF hot-path mechanism"]
+        CONFIG["Read active configuration"] --> PLACE["Place and enqueue tasks"]
+        PLACE --> ORDER["Apply FIFO, VTIME, or EEVDF ordering"]
+        ORDER --> DISPATCH["Dispatch to CPU-local DSQs"]
+        ACCOUNT["Runtime and queue accounting"] --> OBSERVE
+    end
+
+    subgraph KERNEL["sched_ext and kernel state"]
+        CALLBACKS["select_cpu, enqueue, dispatch, running, stopping"]
+        TASK["Task affinity, weight, and runtime"]
+        DSQS["Custom and CPU-local DSQs"]
+    end
+
+    PUBLISH --> CONFIG
+    CALLBACKS --> PLACE
+    CALLBACKS --> ACCOUNT
+    TASK --> PLACE
+    TASK --> ACCOUNT
+    DISPATCH --> DSQS
+```
+
+The boundary follows five rules:
+
+- Userspace owns semantic policy, topology discovery, static validation, and
+  atomic publication.
+- BPF owns decisions that depend on the current task, CPU, runtime, idle state,
+  or DSQ contents and therefore cannot tolerate a userspace round trip.
+- Userspace resolves queue and clock domains; BPF creates and operates the
+  corresponding custom DSQs when the scheduler attaches.
+- Queue storage and fairness clocks are separate concepts. For example,
+  cell/LLC shards and per-CPU affinity queues can use the same owner-cell clock.
+- BPF still enforces live affinity, idle claims, fallbacks, and forward progress
+  after userspace validates the static configuration.
 
 ## End-to-end pipeline
 
@@ -78,7 +123,7 @@ layout = "cell_llc"
 cell0_cpu_weight = 1
 
 enqueue = [{ target = "cell" }, { target = "affinity" }]
-dispatch = [{ source = "affinity" }, { source = "cell" }]
+dispatch = [{ operation = "min_vtime" }]
 
 [[cell]]
 id = 7
@@ -87,8 +132,10 @@ cpu_weight = 2
 ```
 
 Userspace enforces a maximum of 31 declared queue cells plus synthetic cell 0,
-positive weights, a valid layout, and complete callback pairs. Queue policies
-are accepted at runtime only with `--fairness vtime`.
+positive weights, a valid layout, and complete callback pairs. `min_vtime` is a
+single dispatch opcode that consumes both queue classes in the CPU owner's cell
+clock domain. Queue policies are accepted at runtime only with
+`--fairness vtime`.
 
 ## Stage 2: lower to mechanical instructions
 
@@ -174,17 +221,22 @@ the `PICK_RANDOM` flag rather than a separate opcode.
 ### Queue callback instructions
 
 `snake_compiled_ladder` also contains up to eight fixed-size enqueue rungs and
-eight dispatch rungs. These have a smaller ABI because they select only a queue
-class:
+eight dispatch rungs. These have a smaller ABI because they operate on queue
+classes:
 
-| Callback | Opcode 1 | Opcode 2 |
-| --- | --- | --- |
-| enqueue | `CELL` target | `AFFINITY` target |
-| dispatch | `CELL` source | `AFFINITY` source |
+| Callback | Opcode | Value | BPF behavior |
+| --- | --- | ---: | --- |
+| enqueue | `CELL` | 1 | Insert into the task cell's normal queue. |
+| enqueue | `AFFINITY` | 2 | Insert into one allowed CPU's affinity queue. |
+| dispatch | `CELL` | 1 | Consume the CPU owner's normal queue class. |
+| dispatch | `AFFINITY` | 2 | Consume that CPU's affinity queue. |
+| dispatch | `MIN_VTIME` | 3 | Compare both heads in the owner-cell clock domain. |
 
-Enqueue is first-success and requires terminal `AFFINITY`. Dispatch uses the
-configured sources cyclically, advancing a per-CPU cursor after a source
-supplies work. A policy contains `CELL` in both callback ladders or neither.
+Enqueue is first-success and requires terminal `AFFINITY`. Source-based
+dispatch advances a per-CPU cyclic cursor after a source supplies work.
+`MIN_VTIME` must be the sole dispatch rung, represents both dispatch classes,
+and alternates exact ties per CPU. A policy exposes `CELL` through both callback
+directions or through neither.
 
 ## Stage 3: resolve semantic scopes into masks
 
@@ -202,10 +254,6 @@ Tables with the same semantic name are interned and reused by multiple rungs.
 Each CPU set is serialized as `snake_mask_data`, written into the inactive
 slot's `mask_data` map, and materialized by BPF as an immutable
 `bpf_cpumask`. BPF only sees a table number, key, and mask.
-
-For the cell-art gallery, the flower, heart, cat, and cobra exist only in the
-userspace generator. BPF sees ordinary two-CPU cell masks and thread-local cell
-IDs.
 
 Queue-mode cell masks do not consume one of the four generic mask tables.
 Userspace adds cell 0, resolves all online CPUs to one primary owner, derives
@@ -225,7 +273,7 @@ Userspace encodes the lowered rungs into `snake_compiled_ladder` with:
 - at most eight fixed-size placement rungs;
 - enqueue and dispatch callback rung counts and arrays.
 
-ABI version 15 limits each ladder to eight rungs, generic placement to four
+ABI version 16 limits each ladder to eight rungs, generic placement to four
 mask tables, CPU and mask keys to 1024, queue cells to 32 including cell 0, and
 policy storage to two ladder slots. Userspace and BPF share definitions from
 [`src/bpf/intf.h`](../src/bpf/intf.h); an ABI-version mismatch is rejected.
@@ -261,8 +309,9 @@ queue, CPU queue, and external-ID lookup descriptors before BPF attachment;
 BPF validates them, materializes cell masks, and creates the DSQs from
 `init()`. A live replacement must resolve to exactly the same topology. The
 callback arrays still publish through the inactive ladder slot, but an active
-enqueue target or dispatch source cannot be removed because an old generation
-may have left work in that source.
+enqueue target or represented dispatch class cannot be removed because an old
+generation may have left work in that queue class. `MIN_VTIME` represents both
+the cell and affinity dispatch classes for this compatibility check.
 
 ## Map ownership and data direction
 
@@ -280,7 +329,7 @@ may have left work in that source.
 | `queue_cell_masks` | BPF `init()` | BPF hot path | Materialized primary and borrowable `bpf_cpumask` pointers. |
 | `normal_queues`, `cpu_queues` | Userspace before attach | BPF | Normal DSQ descriptors and CPU ownership/affinity routing. |
 | `queue_cell_lookup` | Userspace before attach | BPF | External cell ID to dense queue-cell index. |
-| `cell_vtime_domains` | BPF callbacks | BPF callbacks | One normal VTIME clock per queue cell. |
+| `cell_vtime_domains` | BPF callbacks | BPF callbacks | One VTIME clock per queue cell, shared by its normal and affinity queues. |
 | `cell_stats` | BPF callbacks | Userspace | Runtime, borrowing/lending, queue, and clock-transition counters. |
 
 Policy instructions and masks flow from userspace to BPF. Statistics, reader
@@ -306,8 +355,9 @@ did not enter through a normal wakeup. Queue mode instead runs its compiled
 enqueue callback ladder; an ordinary select result is only a preferred CPU
 hint for that ladder.
 
-`dispatch` receives the CPU and previous task. In queue mode it runs the cyclic
-dispatch source ladder when the CPU's local DSQ is empty.
+`dispatch` receives the CPU and previous task. In queue mode it runs either the
+cyclic source ladder or the single `MIN_VTIME` operation when the CPU's local
+DSQ is empty.
 
 ### Live kernel and task state
 
@@ -361,7 +411,7 @@ through maps and program return values:
 | BPF information | Userspace use |
 | --- | --- |
 | Per-rung attempts, hits, misses, and errors | Explains which ladder stages make decisions. |
-| Global callback, FIFO shared-DSQ, fallback, dispatch, latency, and invalid-error counters | Scheduler health and behavior. |
+| Global callback, FIFO shared-DSQ, fallback, dispatch, equal-head tie, latency, and invalid-error counters | Scheduler health and behavior. |
 | Per-CPU runtime counters | Shows where Snake tasks actually ran. |
 | Cell rehome, deferred-rehome, queue-preemption, and stale-run counters | Tracks convergence after live cell changes, including one old normal-DSQ execution. |
 | Per-cell runtime, primary, borrowed, and lent counters | Separates task fairness identity from CPU-owner resource consumption. |

@@ -13,6 +13,9 @@ Cell annotations have two policy interpretations:
   `task_cell_borrowable` means the remainder of that cell's claim.
 
 The annotation format and pidfd control path are identical in both modes.
+This document is the control-path and annotation-lifecycle reference. See
+[`QUEUE_POLICY.md`](QUEUE_POLICY.md) for queue allocation and
+[`FAIRNESS.md`](FAIRNESS.md) for service-ordering clocks.
 
 ## Who writes what
 

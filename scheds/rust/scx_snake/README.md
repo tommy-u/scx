@@ -9,6 +9,16 @@ that the userspace-to-BPF policy interface is the part under study.
 This is an experimental mechanism, not a general-purpose scheduler. Do not use
 it for production workloads.
 
+The focused references are:
+
+- [Task Cell Annotations](docs/CELL_POLICY.md): pidfd updates, task storage, and
+  annotation lifetime.
+- [Cell Queue Policy](docs/QUEUE_POLICY.md): cell allocation, DSQs, callback
+  ladders, borrowing, and live-update rules.
+- [Fairness](docs/FAIRNESS.md): FIFO, VTIME, EEVDF, clocks, and accounting.
+- [Policy Lowering and BPF Data Flow](docs/POLICY_LOWERING.md): compiler stages,
+  ABI records, map ownership, and the userspace/BPF boundary.
+
 ## Policies
 
 A policy is an ordered ladder of rungs. Each rung combines an operation, such
@@ -151,14 +161,14 @@ Userspace resolves overlapping claims and positive CPU weights into disjoint
 primary masks. It adds synthetic cell 0 for unannotated tasks and creates
 either one normal DSQ per cell or one per populated cell/LLC pair. All LLC
 shards of a cell share one cell clock. Exactly one affinity escape DSQ is
-created per online CPU, and all escape queues share one global affinity clock;
-Snake never creates a cell-by-CPU DSQ matrix.
+created per online CPU, and each escape queue uses the clock of the cell that
+owns its CPU. Snake never creates a cell-by-CPU DSQ matrix or per-CPU clocks.
 
 Queue enqueue and dispatch callbacks are themselves short TOML ladders. Cell
 CPU borrowing is an explicit placement rung that directly claims an idle CPU
 owned by another cell. It does not steal already queued work. See
 [Cell Queue Policy](docs/QUEUE_POLICY.md) for syntax, clocks, update rules, and
-resource accounting. The three queue examples under [`examples/`](examples/)
+resource accounting. The four queue examples under [`examples/`](examples/)
 require `--fairness vtime`.
 
 Queue CPU weights assign real dequeue capacity. Borrowing helps tasks at wakeup
@@ -205,10 +215,11 @@ global future and eligible DSQs with an aggregate clock.
 
 With `[queues]`, an ordinary selection records a CPU hint and still flows
 through the configured enqueue ladder. The enqueue ladder chooses a cell
-normal DSQ or a per-CPU affinity escape DSQ, while the dispatch ladder consumes
-those sources cyclically. A successful `task_cell_borrowable` rung is the
-exception: it verifies the foreign owner and directly dispatches to the idle
-CPU. All-rung exhaustion remains an affinity-safe enqueue hint in both modes.
+normal DSQ or a per-CPU affinity escape DSQ. Dispatch can consume those sources
+cyclically or compare them with `operation = "min_vtime"`. A successful
+`task_cell_borrowable` rung is the exception: it verifies the foreign owner and
+directly dispatches to the idle CPU. All-rung exhaustion remains an
+affinity-safe enqueue hint in both modes.
 
 See [Policy Lowering and BPF Data Flow](docs/POLICY_LOWERING.md) for the complete
 TOML-to-opcode pipeline, runtime BPF inputs, map exchange, and update protocol.
@@ -314,15 +325,14 @@ the generation and starts fresh counters with the new rung labels. Also watch
 last should remain zero. FIFO also reports shared-DSQ enqueues and explicit
 dispatches. VTIME reports ordered enqueues and dispatches, the
 per-CPU subset of each, direct/queued runtime, sleeper-credit clamps, and
-accounting errors. Queue mode additionally reports each cell's total, primary,
+accounting errors. `min_vtime` dispatch also reports exact head ties resolved by
+per-CPU alternation. Queue mode additionally reports each cell's total, primary,
 borrowed, and lent runtime, normal and affinity enqueues and execution
-selections, and clock
-transitions, plus keep-running suppressions and unavoidable old-queue runs for
-pending live rehomes. Direct-borrow yield counts confirm that foreign CPUs are
-reconsidered after one slice. EEVDF
-also reports its two queue insertion counts,
-promotions, forced advances, direct/queued runtime, lag clamps, and accounting
-errors.
+selections, and clock transitions, plus keep-running suppressions and
+unavoidable old-queue runs for pending live rehomes. Direct-borrow yield counts
+confirm that foreign CPUs are reconsidered after one slice. EEVDF also reports
+its two queue insertion counts, promotions, forced advances, direct/queued
+runtime, lag clamps, and accounting errors.
 
 Use `--stats-format json` for NDJSON, `--help-stats` for counter definitions, or
 monitor an already running scheduler without a policy:
