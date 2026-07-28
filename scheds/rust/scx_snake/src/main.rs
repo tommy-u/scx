@@ -819,6 +819,8 @@ fn aggregate_raw_stats(
         fallback_any: value(bpf_intf::snake_stat_SNAKE_STAT_FALLBACK_ANY),
         invalid_errors: value(bpf_intf::snake_stat_SNAKE_STAT_INVALID_ERRORS),
         enqueues: value(bpf_intf::snake_stat_SNAKE_STAT_ENQUEUES),
+        fifo_shared_enqueues: value(bpf_intf::snake_stat_SNAKE_STAT_FIFO_SHARED_ENQUEUES),
+        fifo_shared_dispatches: value(bpf_intf::snake_stat_SNAKE_STAT_FIFO_SHARED_DISPATCHES),
         running: value(bpf_intf::snake_stat_SNAKE_STAT_RUNNING),
         stopping: value(bpf_intf::snake_stat_SNAKE_STAT_STOPPING),
         quiescent: value(bpf_intf::snake_stat_SNAKE_STAT_QUIESCENT),
@@ -826,6 +828,9 @@ fn aggregate_raw_stats(
         select_latency_max_ns: value(bpf_intf::snake_stat_SNAKE_STAT_SELECT_LATENCY_MAX_NS),
         cell_rehomes: value(bpf_intf::snake_stat_SNAKE_STAT_CELL_REHOMES),
         cell_rehome_misses: value(bpf_intf::snake_stat_SNAKE_STAT_CELL_REHOME_MISSES),
+        queue_rehome_preemptions: value(bpf_intf::snake_stat_SNAKE_STAT_QUEUE_REHOME_PREEMPTIONS),
+        queue_stale_rehome_runs: value(bpf_intf::snake_stat_SNAKE_STAT_QUEUE_STALE_REHOME_RUNS),
+        queue_borrow_yields: value(bpf_intf::snake_stat_SNAKE_STAT_QUEUE_BORROW_YIELDS),
         vtime_enqueues: value(bpf_intf::snake_stat_SNAKE_STAT_VTIME_ENQUEUES),
         vtime_dispatches: value(bpf_intf::snake_stat_SNAKE_STAT_VTIME_DISPATCHES),
         vtime_cpu_enqueues: value(bpf_intf::snake_stat_SNAKE_STAT_VTIME_CPU_ENQUEUES),
@@ -1159,7 +1164,7 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
         Ok(ThreadCellResponse {
             tid,
             cell_id: None,
-            rehome_requested: false,
+            rehome_requested: self.queue_topology.is_some(),
         })
     }
 

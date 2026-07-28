@@ -3,8 +3,10 @@
 
 set -euo pipefail
 
-snake_bin=${1:-target/debug/scx_snake}
-policy=${2:-scheds/rust/scx_snake/examples/kernel-default-sim.toml}
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+repo=${SNAKE_REPO:-$(cd -- "${script_dir}/../../../.." && pwd)}
+snake_bin=${1:-${repo}/target/release/scx_snake}
+policy=${2:-${repo}/scheds/rust/scx_snake/examples/kernel-default-sim.toml}
 duration=${VTIME_AFFINITY_DURATION:-10}
 tmpdir=$(mktemp -d)
 snake_log=${tmpdir}/snake.log
@@ -13,17 +15,42 @@ snake_pid=
 hot_pid=
 wide_pid=
 
-cleanup() {
-    for pid in "${hot_pid}" "${wide_pid}"; do
-        if [[ -n ${pid} ]]; then
-            kill "${pid}" 2>/dev/null || true
+pid_done() {
+    local pid=$1 state
+
+    [[ -r /proc/${pid}/stat ]] || return 0
+    state=$(awk '{print $3}' "/proc/${pid}/stat" 2>/dev/null || true)
+    [[ ${state} == Z || -z ${state} ]]
+}
+
+stop_pid() {
+    local pid=$1 signal=${2:-TERM} attempt
+
+    [[ -n ${pid} ]] || return 0
+    kill "-${signal}" "${pid}" 2>/dev/null || true
+    for ((attempt = 0; attempt < 30; attempt++)); do
+        if pid_done "${pid}"; then
             wait "${pid}" 2>/dev/null || true
+            return 0
         fi
+        sleep 0.1
     done
-    if [[ -n ${snake_pid} ]]; then
-        kill -INT "${snake_pid}" 2>/dev/null || true
-        wait "${snake_pid}" 2>/dev/null || true
-    fi
+    kill -KILL "${pid}" 2>/dev/null || true
+    for ((attempt = 0; attempt < 10; attempt++)); do
+        if pid_done "${pid}"; then
+            wait "${pid}" 2>/dev/null || true
+            return 0
+        fi
+        sleep 0.1
+    done
+}
+
+cleanup() {
+    kill "${hot_pid}" "${wide_pid}" 2>/dev/null || true
+    kill -INT "${snake_pid}" 2>/dev/null || true
+    stop_pid "${hot_pid}"
+    stop_pid "${wide_pid}"
+    stop_pid "${snake_pid}" INT
     rm -rf "${tmpdir}"
 }
 trap cleanup EXIT INT TERM
@@ -55,6 +82,7 @@ cpus=$(nproc)
     fail "sched_ext must be disabled before the test"
 command -v stress-ng >/dev/null || fail "stress-ng is required"
 command -v taskset >/dev/null || fail "taskset is required"
+command -v timeout >/dev/null || fail "timeout is required"
 dmesg_lines=$(dmesg | wc -l)
 
 narrow_cpus=$((cpus / 16))
@@ -77,21 +105,29 @@ scheduler_enabled || fail "scheduler did not attach"
 
 # Before per-CPU VTIME queues, wide CPUs repeatedly walked past every task in
 # the narrow group and the sched_ext watchdog missed its five-second check-in.
-taskset -c "0-${hot_last}" stress-ng --cpu "${hot_workers}" \
+timeout --signal=TERM --kill-after=2s "$((duration + 5))s" \
+    taskset -c "0-${hot_last}" stress-ng --cpu "${hot_workers}" \
     --cpu-method loop --timeout "${duration}s" >"${tmpdir}/hot.log" 2>&1 &
 hot_pid=$!
-taskset -c "${wide_first}-${wide_last}" stress-ng --cpu "${wide_workers}" \
+timeout --signal=TERM --kill-after=2s "$((duration + 5))s" \
+    taskset -c "${wide_first}-${wide_last}" stress-ng --cpu "${wide_workers}" \
     --cpu-method loop --timeout "${duration}s" >"${tmpdir}/wide.log" 2>&1 &
 wide_pid=$!
 
-while kill -0 "${hot_pid}" 2>/dev/null || kill -0 "${wide_pid}" 2>/dev/null; do
+deadline=$((SECONDS + duration + 8))
+while ! pid_done "${hot_pid}" || ! pid_done "${wide_pid}"; do
     scheduler_enabled || fail "scheduler exited during mixed-affinity load"
+    ((SECONDS < deadline)) || fail "mixed-affinity workloads did not finish"
     sleep 0.1
 done
-wait "${hot_pid}"
+hot_rc=0
+wait "${hot_pid}" || hot_rc=$?
 hot_pid=
-wait "${wide_pid}"
+wide_rc=0
+wait "${wide_pid}" || wide_rc=$?
 wide_pid=
+((hot_rc == 0 && wide_rc == 0)) ||
+    fail "mixed-affinity workloads failed: hot=${hot_rc} wide=${wide_rc}"
 scheduler_enabled || fail "scheduler exited after mixed-affinity load"
 
 grep -Eq 'VTIME enqueues: [0-9]+ \(per-CPU: [1-9][0-9]*\)' "${snake_log}" ||

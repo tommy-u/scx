@@ -394,6 +394,27 @@ queue_fairness_move(struct snake_ladder_ctx *ctx, u64 dsq_id, u32 class)
 	return true;
 }
 
+static __always_inline bool
+queue_fairness_rehome_pending(struct task_struct *p,
+			      struct snake_task_runtime *runtime)
+{
+	struct snake_task_cell *annotation;
+
+	if (!runtime || !runtime->cell_initialized)
+		return false;
+	annotation = bpf_task_storage_get(&task_cells, p, NULL, 0);
+	if (annotation && READ_ONCE(annotation->needs_rehome))
+		return true;
+	return queue_task_cell_index(p) != runtime->cell_index;
+}
+
+static __always_inline bool
+queue_fairness_direct_borrowed(struct snake_task_runtime *runtime)
+{
+	return runtime && runtime->run_direct &&
+	       runtime->run_cell_index != runtime->run_owner_cell_index;
+}
+
 static __always_inline s32
 queue_fairness_keep_running(struct snake_ladder_ctx *ctx,
 			    struct task_struct *prev, u32 class,
@@ -408,6 +429,14 @@ queue_fairness_keep_running(struct snake_ladder_ctx *ctx,
 	runtime = fairness_task(ctx, prev, false);
 	if (!runtime || !runtime->runtime_valid)
 		return -EINVAL;
+	if (queue_fairness_direct_borrowed(runtime)) {
+		stat_inc(ctx, SNAKE_STAT_QUEUE_BORROW_YIELDS);
+		return 0;
+	}
+	if (queue_fairness_rehome_pending(prev, runtime)) {
+		stat_inc(ctx, SNAKE_STAT_QUEUE_REHOME_PREEMPTIONS);
+		return 0;
+	}
 	if (runtime->run_queue_class != class)
 		return 0;
 	current = prev->se.sum_exec_runtime;
@@ -470,11 +499,26 @@ queue_fairness_dispatch_source(struct snake_ladder_ctx *ctx,
 	return queue_fairness_move(ctx, dsq_id, class) ? 1 : 0;
 }
 
-static __always_inline void
-queue_fairness_replenish(struct task_struct *prev)
+static __always_inline int
+queue_fairness_replenish(struct snake_ladder_ctx *ctx, struct task_struct *prev)
 {
-	if (prev && (prev->scx.flags & SCX_TASK_QUEUED))
-		prev->scx.slice = SNAKE_VTIME_SLICE_NS;
+	struct snake_task_runtime *runtime;
+
+	if (!prev || !(prev->scx.flags & SCX_TASK_QUEUED))
+		return 0;
+	runtime = fairness_task(ctx, prev, false);
+	if (!runtime)
+		return -EINVAL;
+	if (queue_fairness_direct_borrowed(runtime)) {
+		stat_inc(ctx, SNAKE_STAT_QUEUE_BORROW_YIELDS);
+		return 0;
+	}
+	if (queue_fairness_rehome_pending(prev, runtime)) {
+		stat_inc(ctx, SNAKE_STAT_QUEUE_REHOME_PREEMPTIONS);
+		return 0;
+	}
+	prev->scx.slice = SNAKE_VTIME_SLICE_NS;
+	return 0;
 }
 
 static __always_inline int
@@ -494,6 +538,11 @@ queue_fairness_running(struct snake_ladder_ctx *ctx, struct task_struct *p)
 			return -EINVAL;
 		queue_clear_rehome_if_cell(p, direct_cell_index);
 		runtime->direct_cell_valid = 0;
+	} else if (runtime && runtime->cell_initialized &&
+		   runtime->queue_class == SNAKE_QUEUE_CLASS_NORMAL &&
+		   queue_task_cell_index(p) != runtime->cell_index) {
+		/* Charge an already-queued execution to the cell which queued it. */
+		stat_inc(ctx, SNAKE_STAT_QUEUE_STALE_REHOME_RUNS);
 	} else {
 		runtime = queue_fairness_prepare_task(ctx, p);
 		if (!runtime)

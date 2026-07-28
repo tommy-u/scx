@@ -169,7 +169,7 @@ s32 BPF_STRUCT_OPS(snake_select_cpu, struct task_struct *p, s32 prev_cpu,
 void BPF_STRUCT_OPS(snake_enqueue, struct task_struct *p, u64 enq_flags)
 {
 	struct snake_ladder_ctx ladder_ctx = {};
-	s32			 cell_enqueued;
+	s32			 cell_enqueued, ret;
 	u64			 slice;
 
 	if (acquire_active_ladder(&ladder_ctx)) {
@@ -187,16 +187,20 @@ void BPF_STRUCT_OPS(snake_enqueue, struct task_struct *p, u64 enq_flags)
 	cell_enqueued = try_enqueue_task_cell(&ladder_ctx, p, enq_flags, slice);
 	if (cell_enqueued)
 		goto out;
-	fairness_enqueue(&ladder_ctx, p, enq_flags);
+	ret = fairness_enqueue(&ladder_ctx, p, enq_flags);
 out:
 	release_active_ladder(&ladder_ctx);
 	if (cell_enqueued)
 		return;
+	if (ret)
+		scx_bpf_error("snake fairness enqueue failed for pid %d: %d",
+			      p->pid, ret);
 }
 
 void BPF_STRUCT_OPS(snake_dispatch, s32 cpu, struct task_struct *prev)
 {
 	struct snake_ladder_ctx ladder_ctx = {};
+	s32			 ret;
 
 	if (acquire_active_ladder(&ladder_ctx)) {
 		scx_bpf_error("snake failed to acquire active ladder in dispatch");
@@ -208,8 +212,11 @@ void BPF_STRUCT_OPS(snake_dispatch, s32 cpu, struct task_struct *prev)
 		release_active_ladder(&ladder_ctx);
 		return;
 	}
-	fairness_dispatch(&ladder_ctx, cpu, prev);
+	ret = fairness_dispatch(&ladder_ctx, cpu, prev);
 	release_active_ladder(&ladder_ctx);
+	if (ret)
+		scx_bpf_error("snake fairness dispatch failed on CPU %d: %d", cpu,
+			      ret);
 }
 
 void BPF_STRUCT_OPS(snake_runnable, struct task_struct *p, u64 enq_flags)

@@ -313,9 +313,9 @@ static __noinline u64 fairness_dispatch_slice(struct snake_ladder_ctx *ctx,
 					       SNAKE_EEVDF_SLICE_NS;
 }
 
-static __always_inline void fairness_enqueue(struct snake_ladder_ctx *ctx,
-					     struct task_struct	     *p,
-					     u64		      enq_flags)
+static __always_inline int fairness_enqueue(struct snake_ladder_ctx *ctx,
+					    struct task_struct	    *p,
+					    u64			     enq_flags)
 {
 	struct snake_task_runtime *runtime;
 	struct snake_eevdf_domain *domain;
@@ -324,8 +324,19 @@ static __always_inline void fairness_enqueue(struct snake_ladder_ctx *ctx,
 	u64			   dsq_id;
 
 	if (fairness_mode == SNAKE_FAIRNESS_FIFO) {
-		scx_bpf_dsq_insert(p, SCX_DSQ_GLOBAL, SCX_SLICE_DFL, enq_flags);
-		return;
+		flags = enq_flags & ~SCX_ENQ_PREEMPT;
+		if (!scx_bpf_dsq_insert(p, SNAKE_FIFO_DSQ, SCX_SLICE_DFL,
+					    flags)) {
+			stat_inc(ctx, SNAKE_STAT_INVALID_ERRORS);
+			return -EINVAL;
+		}
+		stat_inc(ctx, SNAKE_STAT_FIFO_SHARED_ENQUEUES);
+		target_cpu = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
+		if (target_cpu < 0)
+			target_cpu = scx_bpf_task_cpu(p);
+		if (target_cpu >= 0 && target_cpu < nr_cpu_ids)
+			scx_bpf_kick_cpu(target_cpu, SCX_KICK_IDLE);
+		return 0;
 	}
 	if (fairness_is_vtime()) {
 		target_cpu = -1;
@@ -333,9 +344,8 @@ static __always_inline void fairness_enqueue(struct snake_ladder_ctx *ctx,
 		fairness_vtime_prepare_runnable(ctx, p);
 		runtime = fairness_prepare_task(ctx, p);
 		if (!runtime) {
-			scx_bpf_dsq_insert(p, SCX_DSQ_GLOBAL,
-					   SNAKE_VTIME_SLICE_NS, enq_flags);
-			return;
+			stat_inc(ctx, SNAKE_STAT_INVALID_ERRORS);
+			return -EINVAL;
 		}
 		runtime->run_direct = 0;
 		flags = enq_flags & ~SCX_ENQ_PREEMPT;
@@ -343,31 +353,28 @@ static __always_inline void fairness_enqueue(struct snake_ladder_ctx *ctx,
 			target_cpu = fairness_vtime_distribute_cpu(p);
 			if (target_cpu < 0) {
 				stat_inc(ctx, SNAKE_STAT_INVALID_ERRORS);
-				scx_bpf_error(
-					"snake found no VTIME queue target for pid %d",
-					p->pid);
-				scx_bpf_dsq_insert(p, SCX_DSQ_GLOBAL,
-						   SNAKE_VTIME_SLICE_NS, flags);
-				return;
+				return target_cpu;
 			}
 			dsq_id = fairness_vtime_cpu_dsq(target_cpu);
 			stat_inc(ctx, SNAKE_STAT_VTIME_CPU_ENQUEUES);
 		}
-		scx_bpf_dsq_insert_vtime(p, dsq_id,
-					 SNAKE_VTIME_SLICE_NS,
-					 runtime->vruntime, flags);
+		if (!scx_bpf_dsq_insert_vtime(p, dsq_id,
+					       SNAKE_VTIME_SLICE_NS,
+					       runtime->vruntime, flags)) {
+			stat_inc(ctx, SNAKE_STAT_INVALID_ERRORS);
+			return -EINVAL;
+		}
 		stat_inc(ctx, SNAKE_STAT_VTIME_ENQUEUES);
 		if (target_cpu >= 0)
 			scx_bpf_kick_cpu(target_cpu, SCX_KICK_IDLE);
-		return;
+		return 0;
 	}
 	fairness_runnable(ctx, p);
 	runtime = fairness_prepare_task(ctx, p);
 	domain	= fairness_domain();
 	if (!runtime || !domain) {
-		scx_bpf_dsq_insert(p, SCX_DSQ_GLOBAL, SNAKE_EEVDF_SLICE_NS,
-				   enq_flags);
-		return;
+		stat_inc(ctx, SNAKE_STAT_INVALID_ERRORS);
+		return -EINVAL;
 	}
 
 	bpf_spin_lock(&domain->lock);
@@ -377,14 +384,21 @@ static __always_inline void fairness_enqueue(struct snake_ladder_ctx *ctx,
 	flags		    = enq_flags & ~SCX_ENQ_PREEMPT;
 	slice = runtime->request_remaining_ns ?: SNAKE_EEVDF_SLICE_NS;
 	if (fairness_eligible(runtime->vruntime, virtual_time)) {
-		scx_bpf_dsq_insert_vtime(p, SNAKE_EEVDF_ELIGIBLE_DSQ, slice,
-					 runtime->deadline, flags);
+		if (!scx_bpf_dsq_insert_vtime(p, SNAKE_EEVDF_ELIGIBLE_DSQ,
+					       slice, runtime->deadline, flags)) {
+			stat_inc(ctx, SNAKE_STAT_INVALID_ERRORS);
+			return -EINVAL;
+		}
 		stat_inc(ctx, SNAKE_STAT_EEVDF_ELIGIBLE_ENQUEUES);
 	} else {
-		scx_bpf_dsq_insert_vtime(p, SNAKE_EEVDF_FUTURE_DSQ, slice,
-					 runtime->vruntime, flags);
+		if (!scx_bpf_dsq_insert_vtime(p, SNAKE_EEVDF_FUTURE_DSQ,
+					       slice, runtime->vruntime, flags)) {
+			stat_inc(ctx, SNAKE_STAT_INVALID_ERRORS);
+			return -EINVAL;
+		}
 		stat_inc(ctx, SNAKE_STAT_EEVDF_FUTURE_ENQUEUES);
 	}
+	return 0;
 }
 
 static __always_inline u32 fairness_promote(struct snake_ladder_ctx *ctx,
@@ -576,32 +590,41 @@ keep_running:
 	return false;
 }
 
-static __always_inline void fairness_dispatch(struct snake_ladder_ctx *ctx,
-					      s32		       cpu,
-					      struct task_struct *prev)
+static __always_inline int fairness_dispatch(struct snake_ladder_ctx *ctx,
+					     s32		      cpu,
+					     struct task_struct *prev)
 {
 	struct snake_eevdf_domain *domain;
 	u64			   virtual_time;
+	s32			   local_queued;
 
 	if (fairness_is_vtime()) {
 		/* Local DSQs are FIFO; pre-filling one would discard VTIME order. */
-		if (scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | cpu))
-			return;
+		local_queued = scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | cpu);
+		if (local_queued < 0)
+			return local_queued;
+		if (local_queued > 0)
+			return 0;
 		fairness_dispatch_vtime(ctx, cpu, prev);
-		return;
+		return 0;
+	}
+	if (fairness_mode == SNAKE_FAIRNESS_FIFO) {
+		if (scx_bpf_dsq_move_to_local(SNAKE_FIFO_DSQ, 0))
+			stat_inc(ctx, SNAKE_STAT_FIFO_SHARED_DISPATCHES);
+		return 0;
 	}
 	if (!fairness_is_eevdf())
-		return;
+		return -EINVAL;
 	domain = fairness_domain();
 	if (!domain)
-		return;
+		return -EINVAL;
 
 	bpf_spin_lock(&domain->lock);
 	virtual_time = domain->virtual_time;
 	bpf_spin_unlock(&domain->lock);
 	fairness_promote(ctx, virtual_time);
 	if (fairness_dispatch_eligible(ctx, cpu))
-		return;
+		return 0;
 	/*
 	 * The global eligible DSQ may contain only tasks which cannot run on
 	 * this CPU. Advance to this CPU's first compatible future task instead
@@ -614,6 +637,7 @@ static __always_inline void fairness_dispatch(struct snake_ladder_ctx *ctx,
 		fairness_promote(ctx, virtual_time);
 		fairness_dispatch_eligible(ctx, cpu);
 	}
+	return 0;
 }
 
 static __always_inline void fairness_running(struct snake_ladder_ctx *ctx,
@@ -777,7 +801,7 @@ static __always_inline int fairness_init(void)
 	int ret;
 
 	if (fairness_mode == SNAKE_FAIRNESS_FIFO)
-		return 0;
+		return scx_bpf_create_dsq(SNAKE_FIFO_DSQ, -1);
 	if (fairness_is_vtime()) {
 		if (queue_topology_enabled())
 			return 0;

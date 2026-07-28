@@ -166,8 +166,7 @@ queue_ladder_dispatch(struct snake_ladder_ctx *ctx, s32 cpu,
 		state->next_dispatch_rung = index;
 		return 0;
 	}
-	queue_fairness_replenish(prev);
-	return 0;
+	return queue_fairness_replenish(ctx, prev);
 }
 
 #endif /* __SCX_SNAKE_QUEUE_LADDER_H */

@@ -3,8 +3,10 @@
 
 set -euo pipefail
 
-snake_bin=${1:-target/debug/scx_snake}
-policy=${2:-scheds/rust/scx_snake/examples/kernel-default-sim.toml}
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+repo=${SNAKE_REPO:-$(cd -- "${script_dir}/../../../.." && pwd)}
+snake_bin=${1:-${repo}/target/debug/scx_snake}
+policy=${2:-${repo}/scheds/rust/scx_snake/examples/kernel-default-sim.toml}
 tmpdir=$(mktemp -d)
 snake_log=${tmpdir}/snake.log
 cpu0_log=${tmpdir}/cpu0.log
@@ -13,23 +15,56 @@ snake_pid=
 cpu0_stress=
 cpu1_worker=
 
-cleanup() {
-    for pid in "${cpu0_stress}" "${cpu1_worker}"; do
-        if [[ -n ${pid} ]]; then
-            kill "${pid}" 2>/dev/null || true
+pid_done() {
+    local pid=$1 state
+
+    [[ -r /proc/${pid}/stat ]] || return 0
+    state=$(awk '{print $3}' "/proc/${pid}/stat" 2>/dev/null || true)
+    [[ ${state} == Z || -z ${state} ]]
+}
+
+stop_pid() {
+    local pid=$1 signal=${2:-TERM} attempt
+
+    [[ -n ${pid} ]] || return 0
+    kill "-${signal}" "${pid}" 2>/dev/null || true
+    for ((attempt = 0; attempt < 30; attempt++)); do
+        if pid_done "${pid}"; then
             wait "${pid}" 2>/dev/null || true
+            return 0
         fi
+        sleep 0.1
     done
-    if [[ -n ${snake_pid} ]]; then
-        kill -INT "${snake_pid}" 2>/dev/null || true
-        wait "${snake_pid}" 2>/dev/null || true
-    fi
+    kill -KILL "${pid}" 2>/dev/null || true
+    for ((attempt = 0; attempt < 10; attempt++)); do
+        if pid_done "${pid}"; then
+            wait "${pid}" 2>/dev/null || true
+            return 0
+        fi
+        sleep 0.1
+    done
+}
+
+cleanup() {
+    kill "${cpu0_stress}" "${cpu1_worker}" 2>/dev/null || true
+    kill -INT "${snake_pid}" 2>/dev/null || true
+    stop_pid "${cpu0_stress}"
+    stop_pid "${cpu1_worker}"
+    stop_pid "${snake_pid}" INT
     rm -rf "${tmpdir}"
 }
 trap cleanup EXIT INT TERM
 
 fail() {
     echo "eevdf affinity test: $*" >&2
+    echo "sched_ext state: $(cat /sys/kernel/sched_ext/state 2>/dev/null || true)" >&2
+    if [[ -n ${snake_pid} ]]; then
+        ps -o pid=,ppid=,stat=,comm= -p "${snake_pid}" >&2 || true
+    fi
+    if [[ -s ${cpu0_log} ]]; then
+        tail -n 40 "${cpu0_log}" >&2
+    fi
+    dmesg | tail -n +$((dmesg_lines + 1)) >&2 || true
     if [[ -s ${snake_log} ]]; then
         tail -n 200 "${snake_log}" >&2
     fi
@@ -66,7 +101,7 @@ workers_ready() {
     local count
 
     count=$(pgrep -P "${cpu0_stress}" -c stress-ng-cpu 2>/dev/null || true)
-    (( count >= 16 ))
+    (( count >= 4 ))
 }
 
 cpu1_named() {
@@ -103,10 +138,10 @@ dmesg_lines=$(dmesg | wc -l)
 snake_pid=$!
 wait_for "Snake to attach" 10 scheduler_enabled
 
-# These CPU-0-only workers keep the global eligible DSQ non-empty and slow the
-# global virtual clock. Their service interval remains well below the 5-second
-# watchdog, so they do not create an overload-induced stall.
-taskset -c 0 nice -n -10 stress-ng --cpu 16 --cpu-method loop --timeout 15s \
+# These CPU-0-only workers keep the global eligible DSQ non-empty. Normal
+# priority avoids turning the fixture itself into a CPU-0 kworker starvation
+# test while still leaving multiple eligible tasks queued at all times.
+taskset -c 0 stress-ng --cpu 4 --cpu-method loop --timeout 15s \
     >"${cpu0_log}" 2>&1 &
 cpu0_stress=$!
 wait_for "CPU-0 stress workers" 10 workers_ready

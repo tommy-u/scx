@@ -155,6 +155,10 @@ pub struct Metrics {
     pub invalid_errors: u64,
     #[stat(desc = "Number of enqueue callback invocations")]
     pub enqueues: u64,
+    #[stat(desc = "Tasks inserted into the explicitly drained shared FIFO DSQ")]
+    pub fifo_shared_enqueues: u64,
+    #[stat(desc = "Tasks dispatched from the explicitly drained shared FIFO DSQ")]
+    pub fifo_shared_dispatches: u64,
     #[stat(desc = "Number of running callback invocations")]
     pub running: u64,
     #[stat(desc = "Number of stopping callback invocations")]
@@ -169,6 +173,12 @@ pub struct Metrics {
     pub cell_rehomes: u64,
     #[stat(desc = "Cell rehome attempts deferred because no task-cell rung selected a CPU")]
     pub cell_rehome_misses: u64,
+    #[stat(desc = "Keep-running replenishments suppressed for pending queue-cell rehomes")]
+    pub queue_rehome_preemptions: u64,
+    #[stat(desc = "Old-cell normal-queue executions preserved across live cell rehomes")]
+    pub queue_stale_rehome_runs: u64,
+    #[stat(desc = "Directly borrowed slices forced back through enqueue")]
+    pub queue_borrow_yields: u64,
     #[stat(desc = "Tasks inserted into the VTIME ordered queue")]
     pub vtime_enqueues: u64,
     #[stat(desc = "Tasks dispatched from the VTIME ordered queue")]
@@ -235,6 +245,12 @@ impl Metrics {
             fallback_any: self.fallback_any.saturating_sub(previous.fallback_any),
             invalid_errors: self.invalid_errors.saturating_sub(previous.invalid_errors),
             enqueues: self.enqueues.saturating_sub(previous.enqueues),
+            fifo_shared_enqueues: self
+                .fifo_shared_enqueues
+                .saturating_sub(previous.fifo_shared_enqueues),
+            fifo_shared_dispatches: self
+                .fifo_shared_dispatches
+                .saturating_sub(previous.fifo_shared_dispatches),
             running: self.running.saturating_sub(previous.running),
             stopping: self.stopping.saturating_sub(previous.stopping),
             quiescent: self.quiescent.saturating_sub(previous.quiescent),
@@ -246,6 +262,15 @@ impl Metrics {
             cell_rehome_misses: self
                 .cell_rehome_misses
                 .saturating_sub(previous.cell_rehome_misses),
+            queue_rehome_preemptions: self
+                .queue_rehome_preemptions
+                .saturating_sub(previous.queue_rehome_preemptions),
+            queue_stale_rehome_runs: self
+                .queue_stale_rehome_runs
+                .saturating_sub(previous.queue_stale_rehome_runs),
+            queue_borrow_yields: self
+                .queue_borrow_yields
+                .saturating_sub(previous.queue_borrow_yields),
             vtime_enqueues: self.vtime_enqueues.saturating_sub(previous.vtime_enqueues),
             vtime_dispatches: self
                 .vtime_dispatches
@@ -330,8 +355,9 @@ impl Metrics {
                 "  select calls: {} | direct dispatches: {} | ladder exhausted: {}\n",
                 "  fallback previous CPU: {} | fallback any allowed CPU: {} | invalid/errors: {}\n",
                 "  callbacks enqueue: {} | running: {} | stopping: {} | quiescent: {}\n",
+                "  FIFO shared enqueues/dispatches: {}/{}\n",
                 "  select latency ns total: {} | average: {} | cumulative max: {}\n",
-                "  cell rehomes: {} | deferred rehomes: {}\n",
+                "  cell rehomes: {} | deferred rehomes: {} | queue preemptions/stale runs: {}/{} | borrow yields: {}\n",
                 "  VTIME enqueues: {} (per-CPU: {}) | dispatches: {} (per-CPU: {}) | strict sync queues: {}\n",
                 "  VTIME direct/queued runtime ns: {}/{} | credit clamps: {} | accounting errors: {}\n",
                 "  EEVDF eligible/future enqueues: {}/{} | promotions: {} | forced advances: {} | dispatches: {}\n",
@@ -350,11 +376,16 @@ impl Metrics {
             self.running,
             self.stopping,
             self.quiescent,
+            self.fifo_shared_enqueues,
+            self.fifo_shared_dispatches,
             self.select_latency_ns,
             average_latency_ns,
             self.select_latency_max_ns,
             self.cell_rehomes,
             self.cell_rehome_misses,
+            self.queue_rehome_preemptions,
+            self.queue_stale_rehome_runs,
+            self.queue_borrow_yields,
             self.vtime_enqueues,
             self.vtime_cpu_enqueues,
             self.vtime_dispatches,
@@ -634,10 +665,15 @@ mod tests {
             fallback_any: 5,
             invalid_errors: 4,
             enqueues: 30,
+            fifo_shared_enqueues: 22,
+            fifo_shared_dispatches: 21,
             running: 29,
             stopping: 28,
             quiescent: 3,
             select_latency_ns: 2_000,
+            queue_rehome_preemptions: 8,
+            queue_stale_rehome_runs: 6,
+            queue_borrow_yields: 4,
             vtime_cpu_enqueues: 20,
             vtime_cpu_dispatches: 19,
             ..Default::default()
@@ -650,10 +686,15 @@ mod tests {
             fallback_any: 0,
             invalid_errors: 0,
             enqueues: 3,
+            fifo_shared_enqueues: 2,
+            fifo_shared_dispatches: 1,
             running: 2,
             stopping: 1,
             quiescent: 0,
             select_latency_ns: 100,
+            queue_rehome_preemptions: 1,
+            queue_stale_rehome_runs: 0,
+            queue_borrow_yields: 0,
             vtime_cpu_enqueues: 2,
             vtime_cpu_dispatches: 1,
             ..Default::default()
@@ -668,10 +709,15 @@ mod tests {
         assert_eq!(delta.fallback_any, 0);
         assert_eq!(delta.invalid_errors, 0);
         assert_eq!(delta.enqueues, 0);
+        assert_eq!(delta.fifo_shared_enqueues, 0);
+        assert_eq!(delta.fifo_shared_dispatches, 0);
         assert_eq!(delta.running, 0);
         assert_eq!(delta.stopping, 0);
         assert_eq!(delta.quiescent, 0);
         assert_eq!(delta.select_latency_ns, 0);
+        assert_eq!(delta.queue_rehome_preemptions, 0);
+        assert_eq!(delta.queue_stale_rehome_runs, 0);
+        assert_eq!(delta.queue_borrow_yields, 0);
         assert_eq!(delta.vtime_cpu_enqueues, 0);
         assert_eq!(delta.vtime_cpu_dispatches, 0);
     }

@@ -86,6 +86,11 @@ impl fmt::Display for ThreadCellResponse {
                 "thread {} assigned to cell {}; placement update requested",
                 self.tid, cell_id
             ),
+            None if self.rehome_requested => write!(
+                formatter,
+                "thread {} cell annotation cleared; placement update requested",
+                self.tid
+            ),
             None => write!(formatter, "thread {} cell annotation cleared", self.tid),
         }
     }
@@ -263,6 +268,17 @@ mod tests {
         assert!("4812".parse::<ThreadCellAssignment>().is_err());
         assert!("0:7".parse::<ThreadCellAssignment>().is_err());
         assert!("4812:1024".parse::<ThreadCellAssignment>().is_err());
+    }
+
+    #[test]
+    fn cleared_queue_assignment_reports_requested_rehome() {
+        let response = ThreadCellResponse {
+            tid: 4812,
+            cell_id: None,
+            rehome_requested: true,
+        };
+
+        assert!(response.to_string().contains("placement update requested"));
     }
 
     #[test]

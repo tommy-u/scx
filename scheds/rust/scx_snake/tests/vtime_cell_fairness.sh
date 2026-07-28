@@ -3,7 +3,8 @@
 
 set -euo pipefail
 
-repo=${SNAKE_REPO:-/home/tommyu/scx-snake}
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+repo=${SNAKE_REPO:-$(cd -- "${script_dir}/../../../.." && pwd)}
 snake_bin=${1:-${repo}/target/release/scx_snake}
 tmpdir=$(mktemp -d)
 policy=${tmpdir}/policy.toml
@@ -11,11 +12,38 @@ snake_log=${tmpdir}/snake.log
 snake_pid=
 dmesg_lines=0
 
+pid_done() {
+    local pid=$1 state
+
+    [[ -r /proc/${pid}/stat ]] || return 0
+    state=$(awk '{print $3}' "/proc/${pid}/stat" 2>/dev/null || true)
+    [[ ${state} == Z || -z ${state} ]]
+}
+
+stop_pid() {
+    local pid=$1 signal=${2:-TERM} attempt
+
+    [[ -n ${pid} ]] || return 0
+    kill "-${signal}" "${pid}" 2>/dev/null || true
+    for ((attempt = 0; attempt < 30; attempt++)); do
+        if pid_done "${pid}"; then
+            wait "${pid}" 2>/dev/null || true
+            return 0
+        fi
+        sleep 0.1
+    done
+    kill -KILL "${pid}" 2>/dev/null || true
+    for ((attempt = 0; attempt < 10; attempt++)); do
+        if pid_done "${pid}"; then
+            wait "${pid}" 2>/dev/null || true
+            return 0
+        fi
+        sleep 0.1
+    done
+}
+
 cleanup() {
-    if [[ -n ${snake_pid} ]]; then
-        kill -INT "${snake_pid}" 2>/dev/null || true
-        wait "${snake_pid}" 2>/dev/null || true
-    fi
+    stop_pid "${snake_pid}" INT
     rm -rf "${tmpdir}"
 }
 trap cleanup EXIT INT TERM
@@ -42,6 +70,7 @@ fi
 [[ -x ${snake_bin} ]] || fail "scheduler binary is not executable: ${snake_bin}"
 [[ -x ${repo}/scheds/rust/scx_snake/interactive/fairness-demo.sh ]] ||
     fail "fairness demo is not executable"
+command -v timeout >/dev/null || fail "timeout is required"
 [[ $(cat /sys/kernel/sched_ext/state 2>/dev/null || true) == disabled ]] ||
     fail "sched_ext must be disabled before the test"
 dmesg_lines=$(dmesg | wc -l)
@@ -65,8 +94,13 @@ scheduler_enabled || fail "scheduler did not attach"
 
 # All demo workers are pinned to CPU 0. In queue mode this places them in the
 # same per-CPU affinity DSQ and validates weighted ordering within that class.
-FAIRNESS_CPU=0 FAIRNESS_DURATION=${SNAKE_FAIRNESS_DURATION:-5} \
-    "${repo}/scheds/rust/scx_snake/interactive/fairness-demo.sh"
+fairness_duration=${SNAKE_FAIRNESS_DURATION:-5}
+[[ ${fairness_duration} =~ ^[1-9][0-9]*$ ]] ||
+    fail "SNAKE_FAIRNESS_DURATION must be a positive integer"
+timeout --signal=TERM --kill-after=3s "$((fairness_duration * 3 + 15))s" \
+    env FAIRNESS_CPU=0 FAIRNESS_DURATION="${fairness_duration}" \
+    "${repo}/scheds/rust/scx_snake/interactive/fairness-demo.sh" ||
+    fail "fairness demo failed or timed out"
 scheduler_enabled || fail "scheduler exited during fairness test"
 
 grep -Eq 'invalid/errors: [1-9][0-9]*' "${snake_log}" &&

@@ -3,7 +3,8 @@
 
 set -euo pipefail
 
-repo=${SNAKE_REPO:-/home/tommyu/scx-snake}
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+repo=${SNAKE_REPO:-$(cd -- "${script_dir}/../../../.." && pwd)}
 snake_bin=${1:-${repo}/target/release/scx_snake}
 layout=${SNAKE_QUEUE_LAYOUT:-cell}
 duration=${SNAKE_BORROW_DURATION:-8}
@@ -26,18 +27,45 @@ if [[ ${SNAKE_VERBOSE:-0} == 1 ]]; then
     verbose_args+=(--verbose)
 fi
 
+pid_done() {
+    local pid=$1 state
+
+    [[ -r /proc/${pid}/stat ]] || return 0
+    state=$(awk '{print $3}' "/proc/${pid}/stat" 2>/dev/null || true)
+    [[ ${state} == Z || -z ${state} ]]
+}
+
+stop_pid() {
+    local pid=$1 signal=${2:-TERM} attempt
+
+    [[ -n ${pid} ]] || return 0
+    kill "-${signal}" "${pid}" 2>/dev/null || true
+    for ((attempt = 0; attempt < 30; attempt++)); do
+        if pid_done "${pid}"; then
+            wait "${pid}" 2>/dev/null || true
+            return 0
+        fi
+        sleep 0.1
+    done
+    kill -KILL "${pid}" 2>/dev/null || true
+    for ((attempt = 0; attempt < 10; attempt++)); do
+        if pid_done "${pid}"; then
+            wait "${pid}" 2>/dev/null || true
+            return 0
+        fi
+        sleep 0.1
+    done
+}
+
 cleanup() {
+    kill "${cpu_pid}" "${pipe_pid}" "${rehome_pid}" \
+        "${cell1_pid}" "${cell2_pid}" "${pinned_pid}" 2>/dev/null || true
+    kill -INT "${snake_pid}" 2>/dev/null || true
     for pid in "${cpu_pid}" "${pipe_pid}" "${rehome_pid}" \
         "${cell1_pid}" "${cell2_pid}" "${pinned_pid}"; do
-        if [[ -n ${pid} ]]; then
-            kill "${pid}" 2>/dev/null || true
-            wait "${pid}" 2>/dev/null || true
-        fi
+        stop_pid "${pid}"
     done
-    if [[ -n ${snake_pid} ]]; then
-        kill -INT "${snake_pid}" 2>/dev/null || true
-        wait "${snake_pid}" 2>/dev/null || true
-    fi
+    stop_pid "${snake_pid}" INT
     rm -rf "${tmpdir}"
 }
 
@@ -96,6 +124,7 @@ fi
 command -v python3 >/dev/null || fail "python3 is required"
 command -v stress-ng >/dev/null || fail "stress-ng is required"
 command -v taskset >/dev/null || fail "taskset is required"
+command -v timeout >/dev/null || fail "timeout is required"
 [[ $(cat /sys/kernel/sched_ext/state 2>/dev/null || true) == disabled ]] ||
     fail "sched_ext must be disabled before the test"
 
@@ -146,37 +175,48 @@ grep -q 'activated policy generation 2' "${update_log}" ||
 
 # Repeated assignment changes race with wakeup placement. A cell change after
 # the idle CPU claim must be handled by the selection snapshot, not ejection.
-(
+# shellcheck disable=SC2016 # Variables expand in the child shell from $1/$2.
+timeout --signal=TERM --kill-after=2s 20s bash -c '
+    snake_bin=$1
+    pid=$2
     for _ in $(seq 1 40); do
-        "${snake_bin}" --set-thread-cell "${cell1_pid}:2" >/dev/null
-        "${snake_bin}" --set-thread-cell "${cell1_pid}:1" >/dev/null
+        "${snake_bin}" --set-thread-cell "${pid}:2" >/dev/null
+        "${snake_bin}" --set-thread-cell "${pid}:1" >/dev/null
     done
-) &
+' _ "${snake_bin}" "${cell1_pid}" &
 rehome_pid=$!
 sleep 1
 scheduler_enabled || fail "scheduler exited during cell reassignment race"
 
 # CPU workers cover the requested oversubscription case. Pipe workers add
 # repeated wakeups after the random/core policy is active.
-stress-ng --cpu $((cpus * 2)) --cpu-method loop --timeout "${duration}s" \
+timeout --signal=TERM --kill-after=2s "$((duration + 5))s" \
+    stress-ng --cpu $((cpus * 2)) --cpu-method loop --timeout "${duration}s" \
     >/dev/null 2>&1 &
 cpu_pid=$!
-stress-ng --pipe "${cpus}" --timeout "${duration}s" >/dev/null 2>&1 &
+timeout --signal=TERM --kill-after=2s "$((duration + 5))s" \
+    stress-ng --pipe "${cpus}" --timeout "${duration}s" >/dev/null 2>&1 &
 pipe_pid=$!
-while kill -0 "${cpu_pid}" 2>/dev/null || kill -0 "${pipe_pid}" 2>/dev/null; do
+deadline=$((SECONDS + duration + 8))
+while ! pid_done "${cpu_pid}" || ! pid_done "${pipe_pid}"; do
     scheduler_enabled || fail "scheduler exited during borrowing stress"
+    ((SECONDS < deadline)) || fail "borrowing stress did not finish"
     sleep 0.1
 done
-wait "${cpu_pid}"
+cpu_rc=0
+wait "${cpu_pid}" || cpu_rc=$?
 cpu_pid=
-wait "${pipe_pid}"
+pipe_rc=0
+wait "${pipe_pid}" || pipe_rc=$?
 pipe_pid=
-wait "${rehome_pid}"
+rehome_rc=0
+wait "${rehome_pid}" || rehome_rc=$?
 rehome_pid=
-kill "${cell1_pid}" "${cell2_pid}" "${pinned_pid}" 2>/dev/null || true
-wait "${cell1_pid}" 2>/dev/null || true
-wait "${cell2_pid}" 2>/dev/null || true
-wait "${pinned_pid}" 2>/dev/null || true
+((cpu_rc == 0 && pipe_rc == 0 && rehome_rc == 0)) ||
+    fail "borrowing workers failed: cpu=${cpu_rc} pipe=${pipe_rc} rehome=${rehome_rc}"
+stop_pid "${cell1_pid}"
+stop_pid "${cell2_pid}"
+stop_pid "${pinned_pid}"
 cell1_pid=
 cell2_pid=
 pinned_pid=
@@ -208,11 +248,13 @@ active_cpus = set()
 borrowed_by_cell = {}
 random_borrow_hits = 0
 plain_borrow_hits = 0
+borrow_yields = 0
 for record in records:
     if record.get("invalid_errors", 0) or record.get("vtime_accounting_errors", 0):
         raise SystemExit("Snake reported invalid or accounting errors")
     direct += record.get("direct_dispatches", 0)
     direct_runtime += record.get("vtime_direct_runtime_ns", 0)
+    borrow_yields += record.get("queue_borrow_yields", 0)
     rung0 = record.get("rungs", {}).get("0", {})
     hits = rung0.get("hits", 0)
     borrow_hits += hits
@@ -235,6 +277,8 @@ if direct == 0 or direct_runtime == 0 or borrow_hits == 0:
     raise SystemExit(
         f"borrowing was not exercised: direct={direct} runtime={direct_runtime} hits={borrow_hits}"
     )
+if borrow_yields == 0:
+    raise SystemExit("direct borrowers never took the forced-yield path")
 # Per-cell percpu maps are sampled independently while system tasks continue
 # running, so the observed halves of one charge can straddle two records.
 skew = abs(borrowed - lent)

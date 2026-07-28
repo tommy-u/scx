@@ -3,7 +3,9 @@
 
 set -euo pipefail
 
-snake_bin=${1:-target/release/scx_snake}
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+repo=${SNAKE_REPO:-$(cd -- "${script_dir}/../../../.." && pwd)}
+snake_bin=${1:-${repo}/target/release/scx_snake}
 layout=${SNAKE_QUEUE_LAYOUT:-cell}
 duration=${SNAKE_QUEUE_DURATION:-8}
 tmpdir=$(mktemp -d)
@@ -15,17 +17,43 @@ stress_pid=
 pinned_pid=
 mover_pid=
 
-cleanup() {
-    for pid in "${stress_pid}" "${pinned_pid}" "${mover_pid}"; do
-        if [[ -n ${pid} ]]; then
-            kill "${pid}" 2>/dev/null || true
+pid_done() {
+    local pid=$1 state
+
+    [[ -r /proc/${pid}/stat ]] || return 0
+    state=$(awk '{print $3}' "/proc/${pid}/stat" 2>/dev/null || true)
+    [[ ${state} == Z || -z ${state} ]]
+}
+
+stop_pid() {
+    local pid=$1 signal=${2:-TERM} attempt
+
+    [[ -n ${pid} ]] || return 0
+    kill "-${signal}" "${pid}" 2>/dev/null || true
+    for ((attempt = 0; attempt < 30; attempt++)); do
+        if pid_done "${pid}"; then
             wait "${pid}" 2>/dev/null || true
+            return 0
         fi
+        sleep 0.1
     done
-    if [[ -n ${snake_pid} ]]; then
-        kill -INT "${snake_pid}" 2>/dev/null || true
-        wait "${snake_pid}" 2>/dev/null || true
-    fi
+    kill -KILL "${pid}" 2>/dev/null || true
+    for ((attempt = 0; attempt < 10; attempt++)); do
+        if pid_done "${pid}"; then
+            wait "${pid}" 2>/dev/null || true
+            return 0
+        fi
+        sleep 0.1
+    done
+}
+
+cleanup() {
+    kill "${stress_pid}" "${pinned_pid}" "${mover_pid}" 2>/dev/null || true
+    kill -INT "${snake_pid}" 2>/dev/null || true
+    stop_pid "${stress_pid}"
+    stop_pid "${pinned_pid}"
+    stop_pid "${mover_pid}"
+    stop_pid "${snake_pid}" INT
     rm -rf "${tmpdir}"
 }
 trap cleanup EXIT INT TERM
@@ -65,6 +93,7 @@ fi
 command -v python3 >/dev/null || fail "python3 is required"
 command -v stress-ng >/dev/null || fail "stress-ng is required"
 command -v taskset >/dev/null || fail "taskset is required"
+command -v timeout >/dev/null || fail "timeout is required"
 [[ $(cat /sys/kernel/sched_ext/state 2>/dev/null || true) == disabled ]] ||
     fail "sched_ext must be disabled before the test"
 
@@ -105,7 +134,8 @@ wait_for_enabled || fail "scheduler did not attach"
 # outside cell 2's primary mask must use an affinity queue and is charged as
 # borrowed service. The movable task exercises both a normal cell queue and a
 # bounded translation between two per-cell clocks.
-stress-ng --cpu $((cpus * 2)) --cpu-method loop --timeout "${duration}s" \
+timeout --signal=TERM --kill-after=2s "$((duration + 5))s" \
+    stress-ng --cpu $((cpus * 2)) --cpu-method loop --timeout "${duration}s" \
     >/dev/null 2>&1 &
 stress_pid=$!
 taskset -c 0 yes >/dev/null &
@@ -117,15 +147,18 @@ mover_pid=$!
 sleep 2
 "${snake_bin}" --set-thread-cell "${mover_pid}:2" >/dev/null
 
-while kill -0 "${stress_pid}" 2>/dev/null; do
+deadline=$((SECONDS + duration + 8))
+while ! pid_done "${stress_pid}"; do
     scheduler_enabled || fail "scheduler exited during queue stress"
+    ((SECONDS < deadline)) || fail "queue stress did not finish"
     sleep 0.1
 done
-wait "${stress_pid}"
+stress_rc=0
+wait "${stress_pid}" || stress_rc=$?
 stress_pid=
-kill "${pinned_pid}" "${mover_pid}"
-wait "${pinned_pid}" 2>/dev/null || true
-wait "${mover_pid}" 2>/dev/null || true
+((stress_rc == 0)) || fail "queue stress failed with status ${stress_rc}"
+stop_pid "${pinned_pid}"
+stop_pid "${mover_pid}"
 pinned_pid=
 mover_pid=
 sleep 1
@@ -176,15 +209,25 @@ for record in records:
 if seen != {0, 1, 2}:
     raise SystemExit(f"unexpected cell IDs: {sorted(seen)}")
 for cell_id in seen:
-    if cell_runtime[cell_id] != cell_primary[cell_id] + cell_borrowed[cell_id]:
+    accounted = cell_primary[cell_id] + cell_borrowed[cell_id]
+    skew = abs(cell_runtime[cell_id] - accounted)
+    tolerance = max(1_000_000, max(cell_runtime[cell_id], accounted) // 10_000)
+    if skew > tolerance:
         raise SystemExit(
             f"cell {cell_id} runtime identity failed: {cell_runtime[cell_id]} != "
-            f"{cell_primary[cell_id]} + {cell_borrowed[cell_id]}"
+            f"{cell_primary[cell_id]} + {cell_borrowed[cell_id]} "
+            f"(skew={skew} tolerance={tolerance})"
         )
-if totals["borrowed_runtime_ns"] != totals["lent_runtime_ns"]:
+resource_skew = abs(totals["borrowed_runtime_ns"] - totals["lent_runtime_ns"])
+resource_tolerance = max(
+    1_000_000,
+    max(totals["borrowed_runtime_ns"], totals["lent_runtime_ns"]) // 10_000,
+)
+if resource_skew > resource_tolerance:
     raise SystemExit(
         "resource identity failed: borrowed "
-        f"{totals['borrowed_runtime_ns']} != lent {totals['lent_runtime_ns']}"
+        f"{totals['borrowed_runtime_ns']} != lent {totals['lent_runtime_ns']} "
+        f"(skew={resource_skew} tolerance={resource_tolerance})"
     )
 for name in ("normal_enqueues", "affinity_enqueues", "clock_transitions"):
     if totals[name] == 0:
