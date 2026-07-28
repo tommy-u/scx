@@ -4,6 +4,9 @@
 // GNU General Public License version 2.
 
 const ROUTES = new Set(["activity", "policy", "cells", "callbacks"]);
+const callbackDurationFormat = new Intl.NumberFormat("en-US", {
+  maximumFractionDigits: 0,
+});
 
 export function routeFromHash(hash) {
   const route = String(hash || "").replace(/^#\/?/, "");
@@ -14,17 +17,14 @@ export function formatCallbackDuration(value) {
   if (value == null || !Number.isFinite(Number(value)) || Number(value) < 0) {
     return "—";
   }
+  return `${callbackDurationFormat.format(Math.round(Number(value)))} ns`;
+}
+
+export function callbackDurationClass(value) {
   const nanoseconds = Number(value);
-  if (nanoseconds < 1_000) {
-    return `${Math.round(nanoseconds)} ns`;
-  }
-  if (nanoseconds < 1_000_000) {
-    return `${(nanoseconds / 1_000).toFixed(2)} µs`;
-  }
-  if (nanoseconds < 1_000_000_000) {
-    return `${(nanoseconds / 1_000_000).toFixed(2)} ms`;
-  }
-  return `${(nanoseconds / 1_000_000_000).toFixed(2)} s`;
+  return Number.isFinite(nanoseconds) && nanoseconds > 1_000
+    ? "callback-duration-warning"
+    : "";
 }
 
 export function fieldReferenceGroups(reference) {

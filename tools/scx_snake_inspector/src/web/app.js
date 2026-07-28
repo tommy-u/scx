@@ -14,6 +14,7 @@ import {
   topologyGroups,
 } from "/assets/heatmap.js";
 import {
+  callbackDurationClass,
   compactCpuList,
   decorateCells,
   fieldReferenceGroups,
@@ -764,10 +765,10 @@ function renderCallbackTiming() {
       <tr>
         <th scope="row"><code>${escapeHtml(row.callback)}</code></th>
         <td>${formatCount(row.samples)}</td>
-        <td>${escapeHtml(formatCallbackDuration(row.mean_ns))}</td>
-        <td>${escapeHtml(formatCallbackDuration(row.p50_ns))}</td>
-        <td>${escapeHtml(formatCallbackDuration(row.p95_ns))}</td>
-        <td>${escapeHtml(formatCallbackDuration(row.p99_ns))}</td>
+        <td class="${callbackDurationClass(row.mean_ns)}">${escapeHtml(formatCallbackDuration(row.mean_ns))}</td>
+        <td class="${callbackDurationClass(row.p50_ns)}">${escapeHtml(formatCallbackDuration(row.p50_ns))}</td>
+        <td class="${callbackDurationClass(row.p95_ns)}">${escapeHtml(formatCallbackDuration(row.p95_ns))}</td>
+        <td class="${callbackDurationClass(row.p99_ns)}">${escapeHtml(formatCallbackDuration(row.p99_ns))}</td>
       </tr>`).join("");
 }
 

@@ -8,6 +8,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
+  callbackDurationClass,
   compactCpuList,
   decorateCells,
   fieldReferenceGroups,
@@ -31,12 +32,18 @@ test("inspection routes default to activity and accept policy, cells, and callba
   assert.equal(routeFromHash("#/unknown"), "activity");
 });
 
-test("callback durations select readable nanosecond units", () => {
+test("callback durations consistently use nanoseconds", () => {
   assert.equal(formatCallbackDuration(null), "—");
   assert.equal(formatCallbackDuration(420), "420 ns");
-  assert.equal(formatCallbackDuration(1_500), "1.50 µs");
-  assert.equal(formatCallbackDuration(2_500_000), "2.50 ms");
-  assert.equal(formatCallbackDuration(3_000_000_000), "3.00 s");
+  assert.equal(formatCallbackDuration(1_500), "1,500 ns");
+  assert.equal(formatCallbackDuration(2_500_000), "2,500,000 ns");
+  assert.equal(formatCallbackDuration(3_000_000_000), "3,000,000,000 ns");
+});
+
+test("callback durations over one thousand nanoseconds are warnings", () => {
+  assert.equal(callbackDurationClass(null), "");
+  assert.equal(callbackDurationClass(1_000), "");
+  assert.equal(callbackDurationClass(1_001), "callback-duration-warning");
 });
 
 test("field references keep context-valid and other ABI choices separate", () => {

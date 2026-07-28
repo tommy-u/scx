@@ -576,6 +576,12 @@ button:focus-visible {
   font-size: 0.74rem;
 }
 
+.callback-table-wrap td.callback-duration-warning {
+  color: #805000;
+  background: #fff3da;
+  font-weight: 720;
+}
+
 .callback-table-wrap .callback-empty {
   height: 100px;
   color: var(--muted);
