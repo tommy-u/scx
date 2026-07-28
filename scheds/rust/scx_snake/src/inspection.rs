@@ -144,6 +144,8 @@ pub struct TaskMappingInspectionView {
     pub allowed_cpus: String,
     pub cgroup: String,
     pub needs_rehome: bool,
+    pub source: String,
+    pub membership: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -264,7 +266,7 @@ impl Inspector {
         let active_cells = self.slots[self.active_slot as usize]
             .as_ref()
             .map(|slot| &slot.compiled.cells);
-        let cells = active_cells
+        let mut cells = active_cells
             .into_iter()
             .flat_map(|cells| cells.iter())
             .map(|(&id, cpus)| CellInspectionView {
@@ -275,7 +277,22 @@ impl Inspector {
                     .filter(|mapping| mapping.cell_id == id)
                     .count(),
             })
-            .collect();
+            .collect::<Vec<_>>();
+        if let Some(cell0) = self
+            .queue_topology
+            .as_ref()
+            .and_then(|topology| topology.cells.iter().find(|cell| cell.external_id == 0))
+        {
+            cells.push(CellInspectionView {
+                id: 0,
+                cpus: cell0.primary_cpus.clone(),
+                task_count: task_mappings
+                    .iter()
+                    .filter(|mapping| mapping.cell_id == 0)
+                    .count(),
+            });
+            cells.sort_by_key(|cell| cell.id);
+        }
         let slots = (0..2)
             .map(|slot| match &self.slots[slot] {
                 Some(policy) => {

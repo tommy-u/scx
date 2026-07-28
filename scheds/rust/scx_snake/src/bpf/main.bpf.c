@@ -249,6 +249,7 @@ void BPF_STRUCT_OPS(snake_running, struct task_struct *p)
 	}
 	if (queue_topology_enabled()) {
 		stat_inc(&ladder_ctx, SNAKE_STAT_RUNNING);
+		queue_account_task_membership(&ladder_ctx, p);
 		if (queue_fairness_running(&ladder_ctx, p))
 			scx_bpf_error("snake queue running accounting failed for pid %d",
 				      p->pid);

@@ -111,7 +111,7 @@ queue_clear_rehome_if_cell(struct task_struct *p, u32 cell_index)
 	if (!cell)
 		return;
 	external_id = READ_ONCE(cell->external_id);
-	annotation = bpf_task_storage_get(&task_cells, p, NULL, 0);
+	annotation = snake_task_cell_annotation(p);
 	if (!annotation || READ_ONCE(annotation->cell_id) != external_id)
 		return;
 	WRITE_ONCE(annotation->needs_rehome, 0);
@@ -153,7 +153,7 @@ queue_fairness_prepare_task_for_cell(struct snake_ladder_ctx *ctx,
 		runtime->cell_index = cell_index;
 		cell_stat_inc(ctx, cell_index, SNAKE_CELL_STAT_CLOCK_TRANSITIONS);
 	}
-	annotation = bpf_task_storage_get(&task_cells, p, NULL, 0);
+	annotation = snake_task_cell_annotation(p);
 	if (clear_rehome && annotation)
 		WRITE_ONCE(annotation->needs_rehome, 0);
 	runtime->active_weight  = fairness_task_weight(p);
@@ -473,7 +473,7 @@ queue_fairness_rehome_pending(struct task_struct *p,
 
 	if (!runtime || !runtime->cell_initialized)
 		return false;
-	annotation = bpf_task_storage_get(&task_cells, p, NULL, 0);
+	annotation = snake_task_cell_annotation(p);
 	if (annotation && READ_ONCE(annotation->needs_rehome))
 		return true;
 	return queue_task_cell_index(p) != runtime->cell_index;

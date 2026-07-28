@@ -13,6 +13,8 @@ Cell annotations have two policy interpretations:
   `task_cell_borrowable` means the remainder of that cell's claim.
 
 The annotation format and pidfd control path are identical in both modes.
+Queue mode may additionally populate the managed layer from a cgroup-v2 policy
+described in [`CGROUP_MEMBERSHIP_PROPOSAL.md`](CGROUP_MEMBERSHIP_PROPOSAL.md).
 This document is the control-path and annotation-lifecycle reference. See
 [`QUEUE_POLICY.md`](QUEUE_POLICY.md) for queue allocation and
 [`FAIRNESS.md`](FAIRNESS.md) for service-ordering clocks.
@@ -105,6 +107,8 @@ rehome flag used to converge live updates:
 struct snake_task_cell {
     __u32 cell_id;
     __u32 needs_rehome;
+    __u32 managed_cell_id;
+    __u32 flags;
 };
 
 struct {
@@ -118,8 +122,8 @@ struct {
 The cell rung receives `struct task_struct *p` and reads `task_cells` with
 `bpf_task_storage_get(&task_cells, p, NULL, 0)`. Placement-only mode uses
 `cell_id` directly as a generic mask-table key. Queue mode translates it to a
-dense queue-cell index; a missing or unknown annotation resolves to synthetic
-cell 0. In both modes, BPF intersects the chosen mask with live `p->cpus_ptr`
+dense queue-cell index; a missing annotation is the `NoCell` marker and resolves
+to synthetic cell 0. In both modes, BPF intersects the chosen mask with live `p->cpus_ptr`
 before selecting an idle CPU.
 
 Missing placement-only annotations, missing definitions, no idle CPU, and empty
@@ -223,7 +227,7 @@ operation = "pick_idle"
 scope = "task_cell_borrowable"
 ```
 
-Queue mode reserves ID 0 for unannotated tasks and permits at most 31 declared
+Queue mode reserves ID 0 for `NoCell` tasks and permits at most 31 declared
 cells. Userspace creates synthetic cell 0, resolves overlapping declarations
 into dense cells with disjoint primary masks, and derives borrowable masks.
 These masks do not consume generic placement mask-table slots.

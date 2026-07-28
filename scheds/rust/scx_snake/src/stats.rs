@@ -161,6 +161,10 @@ pub struct Metrics {
     pub fifo_shared_dispatches: u64,
     #[stat(desc = "Number of running callback invocations")]
     pub running: u64,
+    #[stat(desc = "Running callbacks for tasks intentionally assigned to no cell")]
+    pub membership_no_cell_runs: u64,
+    #[stat(desc = "Running callbacks for tasks carrying an invalid cell assignment")]
+    pub membership_invalid_runs: u64,
     #[stat(desc = "Number of stopping callback invocations")]
     pub stopping: u64,
     #[stat(desc = "Number of quiescent callback invocations")]
@@ -254,6 +258,12 @@ impl Metrics {
                 .fifo_shared_dispatches
                 .saturating_sub(previous.fifo_shared_dispatches),
             running: self.running.saturating_sub(previous.running),
+            membership_no_cell_runs: self
+                .membership_no_cell_runs
+                .saturating_sub(previous.membership_no_cell_runs),
+            membership_invalid_runs: self
+                .membership_invalid_runs
+                .saturating_sub(previous.membership_invalid_runs),
             stopping: self.stopping.saturating_sub(previous.stopping),
             quiescent: self.quiescent.saturating_sub(previous.quiescent),
             select_latency_ns: self
@@ -360,6 +370,7 @@ impl Metrics {
                 "  select calls: {} | direct dispatches: {} | ladder exhausted: {}\n",
                 "  fallback previous CPU: {} | fallback any allowed CPU: {} | invalid/errors: {}\n",
                 "  callbacks enqueue: {} | running: {} | stopping: {} | quiescent: {}\n",
+                "  membership runs no-cell: {} | invalid: {}\n",
                 "  FIFO shared enqueues/dispatches: {}/{}\n",
                 "  select latency ns total: {} | average: {} | cumulative max: {}\n",
                 "  cell rehomes: {} | deferred rehomes: {} | queue preemptions/stale runs: {}/{} | borrow yields: {}\n",
@@ -381,6 +392,8 @@ impl Metrics {
             self.running,
             self.stopping,
             self.quiescent,
+            self.membership_no_cell_runs,
+            self.membership_invalid_runs,
             self.fifo_shared_enqueues,
             self.fifo_shared_dispatches,
             self.select_latency_ns,
@@ -853,6 +866,8 @@ mod tests {
         let metrics = Metrics {
             select_calls: 12,
             direct_dispatches: 9,
+            membership_no_cell_runs: 6,
+            membership_invalid_runs: 1,
             rungs: BTreeMap::from([(0, rung(0, "claim_idle", "previous_cpu", 12, 9, 3, 0))]),
             ..Default::default()
         };
@@ -860,6 +875,7 @@ mod tests {
         let report = metrics.format_text();
 
         assert!(report.contains("direct dispatches: 9"));
+        assert!(report.contains("membership runs no-cell: 6 | invalid: 1"));
         assert!(report.contains("rung 0 claim_idle(previous_cpu)"));
     }
 

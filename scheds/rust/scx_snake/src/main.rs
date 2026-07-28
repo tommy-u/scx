@@ -6,6 +6,7 @@ mod cell_allocation;
 mod control;
 mod inspection;
 mod mask_tables;
+mod membership;
 mod policy;
 mod queue_topology;
 mod runtime_policy;
@@ -30,6 +31,7 @@ use inspection::{InspectionView, Inspector, SlotPolicy};
 use libbpf_rs::{MapCore as _, MapFlags, OpenObject, ProgramInput};
 use log::{debug, info, warn};
 use mask_tables::{dump_mask_tables, resolve_mask_tables, ResolvedMaskTable};
+use membership::MembershipManager;
 use policy::{
     CompiledPolicy, CompiledRung, InputSource, Opcode, QueueDispatchSource, QueueEnqueueTarget,
 };
@@ -834,6 +836,8 @@ fn aggregate_raw_stats(
         fifo_shared_enqueues: value(bpf_intf::snake_stat_SNAKE_STAT_FIFO_SHARED_ENQUEUES),
         fifo_shared_dispatches: value(bpf_intf::snake_stat_SNAKE_STAT_FIFO_SHARED_DISPATCHES),
         running: value(bpf_intf::snake_stat_SNAKE_STAT_RUNNING),
+        membership_no_cell_runs: value(bpf_intf::snake_stat_SNAKE_STAT_MEMBERSHIP_NO_CELL_RUNS),
+        membership_invalid_runs: value(bpf_intf::snake_stat_SNAKE_STAT_MEMBERSHIP_INVALID_RUNS),
         stopping: value(bpf_intf::snake_stat_SNAKE_STAT_STOPPING),
         quiescent: value(bpf_intf::snake_stat_SNAKE_STAT_QUIESCENT),
         select_latency_ns: value(bpf_intf::snake_stat_SNAKE_STAT_SELECT_LATENCY_NS),
@@ -978,6 +982,7 @@ struct Scheduler<'object, 'policy> {
     runtime: &'policy mut RuntimePolicy,
     fairness: FairnessMode,
     queue_topology: Option<queue_topology::QueueTopology>,
+    membership: Option<MembershipManager>,
 }
 
 impl<'object, 'policy> Scheduler<'object, 'policy> {
@@ -1012,6 +1017,20 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
         )?;
         set_active_ladder(&mut skel, 0)?;
         runtime.active_slot = 0;
+        let membership = if let Some(policy) = &runtime.compiled.membership {
+            let mut manager =
+                MembershipManager::new(policy).context("initializing userspace task membership")?;
+            let report = manager
+                .reconcile(&skel.maps.task_cells)
+                .context("applying initial userspace task membership")?;
+            info!(
+                "classified {} of {} discovered threads before scheduler attach ({} transient)",
+                report.updated, report.discovered, report.transient
+            );
+            Some(manager)
+        } else {
+            None
+        };
         let struct_ops = Some(scx_ops_attach!(skel, snake_ops)?);
         let stats_server = StatsServer::new(stats::server_data()).launch()?;
         info!(
@@ -1041,6 +1060,7 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
             runtime,
             fairness: opts.fairness,
             queue_topology: queue_topology.cloned(),
+            membership,
         })
     }
 
@@ -1079,6 +1099,11 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
                 if candidate != active_queue_topology {
                     bail!(
                         "replacement changes the attachment-time queue topology; restart Snake to apply it"
+                    );
+                }
+                if policy.membership != previous_policy.membership {
+                    bail!(
+                        "replacement changes attachment-time task membership; restart Snake to apply it"
                     );
                 }
                 validate_queue_callback_replacement(&previous_policy, policy)?;
@@ -1145,6 +1170,9 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
                 "candidate changes the attachment-time queue topology; restart Snake to apply it"
             );
         }
+        if policy.membership != self.runtime.compiled.membership {
+            bail!("candidate changes attachment-time task membership; restart Snake to apply it");
+        }
         validate_queue_callback_replacement(&self.runtime.compiled, &policy)?;
         resolve_mask_tables(&policy).context("resolving candidate policy mask tables")?;
         Ok(runtime_policy::PolicyValidationResponse::from_policy(
@@ -1158,6 +1186,7 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
             .compiled
             .cells
             .contains_key(&assignment.cell_id)
+            && !(assignment.cell_id == 0 && self.queue_topology.is_some())
         {
             bail!(
                 "active policy generation {} does not define cell {}",
@@ -1165,13 +1194,13 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
                 assignment.cell_id
             );
         }
-        task_cells::set_thread_cell(&self.skel.maps.task_cells, assignment)?;
+        let rehome_requested = task_cells::set_thread_cell(&self.skel.maps.task_cells, assignment)?;
         self.inspector
             .set_assignment(assignment.tid, assignment.cell_id);
         Ok(ThreadCellResponse {
             tid: assignment.tid,
             cell_id: Some(assignment.cell_id),
-            rehome_requested: true,
+            rehome_requested,
         })
     }
 
@@ -1190,10 +1219,10 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
     }
 
     fn inspection(&mut self) -> Result<InspectionView> {
-        let assignments = self.inspector.assignments().collect::<Vec<_>>();
+        let assignments = self.inspector.assignments().collect::<BTreeMap<_, _>>();
         let mut stale = Vec::new();
         let mut task_mappings = Vec::new();
-        for (tid, _) in assignments {
+        for (&tid, _) in &assignments {
             match task_cells::inspect_thread_cell(&self.skel.maps.task_cells, tid)? {
                 Some(task) => task_mappings.push(inspection::TaskMappingInspectionView {
                     tid: task.tid,
@@ -1202,10 +1231,13 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
                     state: task.state,
                     current_cpu: task.current_cpu,
                     cell_id: task.cell_id,
-                    cell_defined: self.runtime.compiled.cells.contains_key(&task.cell_id),
+                    cell_defined: task.cell_id == 0
+                        || self.runtime.compiled.cells.contains_key(&task.cell_id),
                     allowed_cpus: task.allowed_cpus,
                     cgroup: task.cgroup,
                     needs_rehome: task.needs_rehome,
+                    source: "manual".into(),
+                    membership: if task.cell_id == 0 { "no_cell" } else { "cell" }.into(),
                 }),
                 None => stale.push(tid),
             }
@@ -1213,13 +1245,45 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
         for tid in stale {
             self.inspector.clear_assignment(tid);
         }
+        if let Some(manager) = &self.membership {
+            for (tid, _) in manager.assignments() {
+                if assignments.contains_key(&tid) {
+                    continue;
+                }
+                let Some(task) = task_cells::inspect_thread_cell(&self.skel.maps.task_cells, tid)?
+                else {
+                    continue;
+                };
+                task_mappings.push(inspection::TaskMappingInspectionView {
+                    tid: task.tid,
+                    tgid: task.tgid,
+                    name: task.name,
+                    state: task.state,
+                    current_cpu: task.current_cpu,
+                    cell_id: task.cell_id,
+                    cell_defined: task.cell_id == 0
+                        || self.runtime.compiled.cells.contains_key(&task.cell_id),
+                    allowed_cpus: task.allowed_cpus,
+                    cgroup: task.cgroup,
+                    needs_rehome: task.needs_rehome,
+                    source: "managed".into(),
+                    membership: "cell".into(),
+                });
+            }
+        }
         Ok(self.inspector.snapshot(self.metrics()?, task_mappings))
     }
 
     fn run(&mut self, shutdown: Arc<AtomicBool>) -> Result<UserExitInfo> {
         let (response_channel, request_channel) = self.stats_server.channels();
         while !shutdown.load(Ordering::Relaxed) && !self.exited() {
-            match request_channel.recv_timeout(Duration::from_secs(1)) {
+            let timeout = self
+                .membership
+                .as_ref()
+                .map(MembershipManager::time_until_reconcile)
+                .unwrap_or(Duration::from_secs(1))
+                .min(Duration::from_secs(1));
+            match request_channel.recv_timeout(timeout) {
                 Ok(SchedulerRequest::Metrics) => {
                     response_channel.send(SchedulerResponse::Metrics(self.metrics()?))?
                 }
@@ -1253,6 +1317,16 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => {
                     bail!("statistics server request channel disconnected")
+                }
+            }
+            if let Some(manager) = &mut self.membership {
+                match manager.reconcile_if_due(&self.skel.maps.task_cells) {
+                    Ok(Some(report)) if report.updated != 0 || report.transient != 0 => debug!(
+                        "membership reconciliation discovered {}, updated {}, transient {}",
+                        report.discovered, report.updated, report.transient
+                    ),
+                    Ok(_) => {}
+                    Err(error) => warn!("task membership reconciliation failed: {error:#}"),
                 }
             }
         }
@@ -1470,7 +1544,7 @@ scope = "task_allowed"
         let policy = policy::compile_policy(policy_source()).expect("policy should compile");
         let encoded = encode_ladder(&policy, 42).expect("ladder should encode");
 
-        assert_eq!(bpf_intf::SNAKE_ABI_VERSION, 16);
+        assert_eq!(bpf_intf::SNAKE_ABI_VERSION, 17);
         assert_eq!(size_of::<bpf_intf::snake_compiled_ladder>(), 352);
         assert_eq!(offset_of!(bpf_intf::snake_compiled_ladder, generation), 0);
         assert_eq!(
@@ -1953,7 +2027,7 @@ scope = "task_cell"
         );
         assert_eq!(encoded.flags, bpf_intf::SNAKE_RUNG_F_INTERSECT_TASK_ALLOWED);
         assert_eq!(encoded.data, 0);
-        assert_eq!(size_of::<bpf_intf::snake_task_cell>(), 8);
+        assert_eq!(size_of::<bpf_intf::snake_task_cell>(), 16);
         assert_eq!(policy::MAX_CELL_IDS, bpf_intf::SNAKE_MAX_CPUS);
     }
 
@@ -2152,6 +2226,16 @@ scope = "task_cell_borrowable"
         );
         set_stat(
             &mut raw,
+            bpf_intf::snake_stat_SNAKE_STAT_MEMBERSHIP_NO_CELL_RUNS,
+            &[7, 11],
+        );
+        set_stat(
+            &mut raw,
+            bpf_intf::snake_stat_SNAKE_STAT_MEMBERSHIP_INVALID_RUNS,
+            &[0, 1],
+        );
+        set_stat(
+            &mut raw,
             bpf_intf::snake_stat_SNAKE_STAT_RUNG_ATTEMPT_BASE,
             &[4, 6],
         );
@@ -2170,6 +2254,8 @@ scope = "task_cell_borrowable"
         assert_eq!(metrics.select_latency_max_ns, 900);
         assert_eq!(metrics.vtime_cpu_enqueues, 30);
         assert_eq!(metrics.vtime_cpu_dispatches, 30);
+        assert_eq!(metrics.membership_no_cell_runs, 18);
+        assert_eq!(metrics.membership_invalid_runs, 1);
         assert_eq!(metrics.cpus[&0].runtime_ns, 25_000);
         assert_eq!(metrics.cpus[&1].runtime_ns, 75_000);
         assert_eq!(metrics.rungs[&0].attempts, 10);

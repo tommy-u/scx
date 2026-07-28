@@ -8,7 +8,7 @@ typedef unsigned int	   u32;
 typedef unsigned long long u64;
 #endif
 
-#define SNAKE_ABI_VERSION 16
+#define SNAKE_ABI_VERSION 17
 #define SNAKE_MAX_RUNGS 8
 #define SNAKE_MAX_QUEUE_RUNGS 8
 #define SNAKE_LADDER_SLOTS 2
@@ -36,6 +36,8 @@ typedef unsigned long long u64;
 #define SNAKE_FIFO_DSQ 0x30000000ULL
 #define SNAKE_VTIME_SLICE_NS 5000000ULL
 #define SNAKE_BASE_WEIGHT 100
+#define SNAKE_TASK_CELL_F_MANUAL (1U << 0)
+#define SNAKE_TASK_CELL_F_MANAGED (1U << 1)
 
 enum snake_fairness_mode {
 	SNAKE_FAIRNESS_INVALID = 0,
@@ -95,6 +97,8 @@ enum snake_dispatch_opcode {
 struct snake_task_cell {
 	u32 cell_id;
 	u32 needs_rehome;
+	u32 managed_cell_id;
+	u32 flags;
 };
 
 /* Serialized userspace CPU mask stored in immutable queue descriptors. */
@@ -194,6 +198,8 @@ enum snake_stat {
 	SNAKE_STAT_FIFO_SHARED_ENQUEUES,
 	SNAKE_STAT_FIFO_SHARED_DISPATCHES,
 	SNAKE_STAT_RUNNING,
+	SNAKE_STAT_MEMBERSHIP_NO_CELL_RUNS,
+	SNAKE_STAT_MEMBERSHIP_INVALID_RUNS,
 	SNAKE_STAT_STOPPING,
 	SNAKE_STAT_QUIESCENT,
 	SNAKE_STAT_RUNTIME_NS,

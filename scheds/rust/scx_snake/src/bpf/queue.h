@@ -7,6 +7,12 @@
 #define SNAKE_SELECT_F_BORROWED (1ULL << 63)
 #define SNAKE_QUEUE_CELL_NONE 0xffffffffU
 
+enum snake_membership_kind {
+	SNAKE_MEMBERSHIP_NO_CELL = 0,
+	SNAKE_MEMBERSHIP_CELL,
+	SNAKE_MEMBERSHIP_INVALID,
+};
+
 struct snake_queue_cpu_state {
 	u64 generation;
 	u32 next_dispatch_rung;
@@ -73,7 +79,7 @@ static __always_inline u32 queue_task_cell_index(struct task_struct *p)
 
 	if (!header || !header->nr_cells)
 		return 0;
-	annotation = bpf_task_storage_get(&task_cells, p, NULL, 0);
+	annotation = snake_task_cell_annotation(p);
 	if (!annotation)
 		return 0;
 	cell_id = READ_ONCE(annotation->cell_id);
@@ -84,6 +90,43 @@ static __always_inline u32 queue_task_cell_index(struct task_struct *p)
 		return 0;
 	index = *encoded - 1;
 	return index < header->nr_cells ? index : 0;
+}
+
+static __always_inline u32 queue_task_membership_kind(struct task_struct *p)
+{
+	struct snake_queue_header *header = queue_config();
+	struct snake_task_cell    *annotation;
+	u32			   *encoded;
+	u32			    cell_id;
+
+	annotation = snake_task_cell_annotation(p);
+	if (!annotation)
+		return SNAKE_MEMBERSHIP_NO_CELL;
+	cell_id = READ_ONCE(annotation->cell_id);
+	if (!cell_id)
+		return SNAKE_MEMBERSHIP_NO_CELL;
+	if (!header || !header->nr_cells || cell_id >= SNAKE_MAX_CPUS)
+		return SNAKE_MEMBERSHIP_INVALID;
+	encoded = bpf_map_lookup_elem(&queue_cell_lookup, &cell_id);
+	if (!encoded || !*encoded || *encoded - 1 >= header->nr_cells)
+		return SNAKE_MEMBERSHIP_INVALID;
+	return SNAKE_MEMBERSHIP_CELL;
+}
+
+static __always_inline void
+queue_account_task_membership(const struct snake_ladder_ctx *ctx,
+			      struct task_struct *p)
+{
+	switch (queue_task_membership_kind(p)) {
+	case SNAKE_MEMBERSHIP_NO_CELL:
+		stat_inc(ctx, SNAKE_STAT_MEMBERSHIP_NO_CELL_RUNS);
+		break;
+	case SNAKE_MEMBERSHIP_INVALID:
+		stat_inc(ctx, SNAKE_STAT_MEMBERSHIP_INVALID_RUNS);
+		break;
+	default:
+		break;
+	}
 }
 
 static __always_inline bool

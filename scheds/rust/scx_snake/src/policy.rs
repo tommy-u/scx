@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::path::{Component, Path};
 
 use serde::Deserialize;
 
@@ -59,6 +60,14 @@ pub struct CompiledPolicy {
     pub cells: BTreeMap<u32, BTreeSet<u32>>,
     pub cell_cpu_weights: BTreeMap<u32, u32>,
     pub queues: Option<QueuePolicy>,
+    pub membership: Option<MembershipPolicy>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MembershipPolicy {
+    pub parent: String,
+    pub reconcile_ms: u64,
+    pub assignments: BTreeMap<String, u32>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -132,6 +141,19 @@ impl CompiledPolicy {
                     .dispatch
                     .iter()
                     .map(|source| source.as_str())
+                    .collect::<Vec<_>>()
+                    .join(","),
+            ));
+        }
+        if let Some(membership) = &self.membership {
+            output.push_str(&format!(
+                "membership: parent={} reconcile_ms={} assignments={}\n",
+                membership.parent,
+                membership.reconcile_ms,
+                membership
+                    .assignments
+                    .iter()
+                    .map(|(child, cell)| format!("{child}:{cell}"))
                     .collect::<Vec<_>>()
                     .join(","),
             ));
@@ -234,12 +256,34 @@ impl std::error::Error for PolicyError {}
 struct SemanticPolicy {
     fallback: Option<String>,
     queues: Option<SemanticQueuePolicy>,
+    membership: Option<SemanticMembershipPolicy>,
     #[serde(default)]
     cell: Vec<SemanticCell>,
     #[serde(default)]
     partition: Vec<SemanticPartition>,
     #[serde(default)]
     rung: Vec<SemanticRung>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SemanticMembershipPolicy {
+    parent: String,
+    #[serde(default = "default_membership_reconcile_ms")]
+    reconcile_ms: u64,
+    #[serde(default)]
+    assignment: Vec<SemanticMembershipAssignment>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SemanticMembershipAssignment {
+    child: String,
+    cell: u32,
+}
+
+const fn default_membership_reconcile_ms() -> u64 {
+    1_000
 }
 
 #[derive(Deserialize)]
@@ -330,6 +374,7 @@ pub fn compile_policy(source: &str) -> Result<CompiledPolicy, PolicyError> {
 
     let queues = compile_queue_policy(policy.queues.as_ref(), policy.cell.len())?;
     let (cells, cell_cpu_weights) = compile_cells(&policy.cell, queues.is_some())?;
+    let membership = compile_membership(policy.membership.as_ref(), queues.is_some(), &cells)?;
     let partitions = compile_partitions(&policy.partition)?;
     let mut mask_tables = Vec::new();
     let mut rungs = Vec::with_capacity(policy.rung.len());
@@ -351,7 +396,66 @@ pub fn compile_policy(source: &str) -> Result<CompiledPolicy, PolicyError> {
         cells,
         cell_cpu_weights,
         queues,
+        membership,
     })
+}
+
+fn compile_membership(
+    membership: Option<&SemanticMembershipPolicy>,
+    queue_mode: bool,
+    cells: &BTreeMap<u32, BTreeSet<u32>>,
+) -> Result<Option<MembershipPolicy>, PolicyError> {
+    let Some(membership) = membership else {
+        return Ok(None);
+    };
+    if !queue_mode {
+        return Err(PolicyError(
+            "userspace membership requires a [queues] policy".into(),
+        ));
+    }
+    let parent = Path::new(&membership.parent);
+    if !parent.is_absolute() {
+        return Err(PolicyError(
+            "membership parent must be an absolute path".into(),
+        ));
+    }
+    if membership.reconcile_ms < 50 {
+        return Err(PolicyError(
+            "membership reconcile_ms must be at least 50".into(),
+        ));
+    }
+
+    let mut assignments = BTreeMap::new();
+    for assignment in &membership.assignment {
+        let mut components = Path::new(&assignment.child).components();
+        if !matches!(components.next(), Some(Component::Normal(_))) || components.next().is_some() {
+            return Err(PolicyError(format!(
+                "membership child must be one path component: `{}`",
+                assignment.child
+            )));
+        }
+        if !cells.contains_key(&assignment.cell) {
+            return Err(PolicyError(format!(
+                "membership child `{}` references undefined cell {}",
+                assignment.child, assignment.cell
+            )));
+        }
+        if assignments
+            .insert(assignment.child.clone(), assignment.cell)
+            .is_some()
+        {
+            return Err(PolicyError(format!(
+                "membership has duplicate child `{}`",
+                assignment.child
+            )));
+        }
+    }
+
+    Ok(Some(MembershipPolicy {
+        parent: membership.parent.clone(),
+        reconcile_ms: membership.reconcile_ms,
+        assignments,
+    }))
 }
 
 fn compile_queue_policy(
@@ -2085,5 +2189,131 @@ scope = "task_allowed"
                 "rung 1: opcode=pick_idle input=mask_task_allowed flags=0x00000000 data=0x0000000000000000\n",
             )
         );
+    }
+
+    #[test]
+    fn compiles_userspace_membership_policy() {
+        let policy = compile_policy(
+            r#"
+[queues]
+layout = "cell"
+
+[membership]
+parent = "/sys/fs/cgroup/workloads"
+reconcile_ms = 250
+
+[[membership.assignment]]
+child = "batch"
+cell = 1
+
+[[cell]]
+id = 1
+cpus = "0-3"
+
+[[rung]]
+operation = "pick_idle"
+scope = "task_cell"
+"#,
+        )
+        .expect("membership policy should compile");
+
+        let membership = policy.membership.expect("membership should be present");
+        assert_eq!(membership.parent, "/sys/fs/cgroup/workloads");
+        assert_eq!(membership.reconcile_ms, 250);
+        assert_eq!(membership.assignments.get("batch"), Some(&1));
+    }
+
+    #[test]
+    fn membership_requires_queue_mode_and_defined_cells() {
+        let without_queues = error_for(
+            r#"
+[membership]
+parent = "/sys/fs/cgroup/workloads"
+[[membership.assignment]]
+child = "batch"
+cell = 1
+[[rung]]
+operation = "pick_idle"
+scope = "task_allowed"
+"#,
+        );
+        assert!(without_queues.contains("membership requires a [queues] policy"));
+
+        let unknown_cell = error_for(
+            r#"
+[queues]
+layout = "cell"
+[membership]
+parent = "/sys/fs/cgroup/workloads"
+[[membership.assignment]]
+child = "batch"
+cell = 7
+[[rung]]
+operation = "pick_idle"
+scope = "task_allowed"
+"#,
+        );
+        assert!(unknown_cell.contains("undefined cell 7"));
+    }
+
+    #[test]
+    fn membership_rejects_ambiguous_paths_and_duplicate_children() {
+        for (parent, child, expected) in [
+            ("workloads", "batch", "parent must be an absolute path"),
+            (
+                "/sys/fs/cgroup/workloads",
+                "batch/subgroup",
+                "child must be one path component",
+            ),
+            (
+                "/sys/fs/cgroup/workloads",
+                "..",
+                "child must be one path component",
+            ),
+        ] {
+            let error = error_for(&format!(
+                r#"
+[queues]
+layout = "cell"
+[membership]
+parent = "{parent}"
+[[membership.assignment]]
+child = "{child}"
+cell = 1
+[[cell]]
+id = 1
+cpus = "0"
+[[rung]]
+operation = "pick_idle"
+scope = "task_cell"
+"#
+            ));
+            assert!(error.contains(expected), "{error}");
+        }
+
+        let duplicate = error_for(
+            r#"
+[queues]
+layout = "cell"
+[membership]
+parent = "/sys/fs/cgroup/workloads"
+[[membership.assignment]]
+child = "batch"
+cell = 1
+[[membership.assignment]]
+child = "batch"
+cell = 2
+[[cell]]
+id = 1
+cpus = "0"
+[[cell]]
+id = 2
+cpus = "1"
+[[rung]]
+operation = "pick_idle"
+scope = "task_cell"
+"#,
+        );
+        assert!(duplicate.contains("duplicate child `batch`"));
     }
 }

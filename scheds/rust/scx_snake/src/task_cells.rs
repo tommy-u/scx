@@ -108,23 +108,112 @@ fn open_thread(tid: i32) -> Result<OwnedFd> {
     Ok(unsafe { OwnedFd::from_raw_fd(fd as i32) })
 }
 
-pub fn set_thread_cell(map: &impl MapCore, assignment: ThreadCellAssignment) -> Result<()> {
-    let pidfd = open_thread(assignment.tid)?;
-    let value = bpf_intf::snake_task_cell {
-        cell_id: assignment.cell_id,
-        needs_rehome: 1,
+pub fn set_thread_cell(map: &impl MapCore, assignment: ThreadCellAssignment) -> Result<bool> {
+    update_task_cell(map, assignment.tid, |value| {
+        apply_manual_cell(value, assignment.cell_id)
+    })
+}
+
+pub(crate) fn set_managed_task_cell(map: &impl MapCore, tid: i32, cell_id: u32) -> Result<OwnedFd> {
+    let pidfd = open_thread(tid)?;
+    update_task_cell_with_pidfd(map, tid, &pidfd, |value| apply_managed_cell(value, cell_id))?;
+    Ok(pidfd)
+}
+
+pub(crate) fn clear_managed_task_cell(map: &impl MapCore, tid: i32, pidfd: &OwnedFd) -> Result<()> {
+    let Some(mut value) = lookup_task_cell(map, pidfd, tid)? else {
+        return Ok(());
     };
+    if clear_managed_cell(&mut value) {
+        map.update(
+            &pidfd.as_raw_fd().to_ne_bytes(),
+            bytes_of(&value),
+            MapFlags::ANY,
+        )
+        .with_context(|| format!("clearing managed cell assignment for TID {tid}"))
+    } else {
+        map.delete(&pidfd.as_raw_fd().to_ne_bytes())
+            .with_context(|| format!("returning TID {tid} to no-cell policy"))
+    }
+}
+
+fn empty_task_cell() -> bpf_intf::snake_task_cell {
+    bpf_intf::snake_task_cell {
+        cell_id: 0,
+        needs_rehome: 0,
+        managed_cell_id: 0,
+        flags: 0,
+    }
+}
+
+fn apply_manual_cell(value: &mut bpf_intf::snake_task_cell, cell_id: u32) -> bool {
+    let previous = value.cell_id;
+    value.cell_id = cell_id;
+    value.flags |= bpf_intf::SNAKE_TASK_CELL_F_MANUAL;
+    let changed = previous != value.cell_id;
+    if changed {
+        value.needs_rehome = 1;
+    }
+    changed
+}
+
+fn apply_managed_cell(value: &mut bpf_intf::snake_task_cell, cell_id: u32) -> bool {
+    let previous = value.cell_id;
+    value.managed_cell_id = cell_id;
+    value.flags |= bpf_intf::SNAKE_TASK_CELL_F_MANAGED;
+    if value.flags & bpf_intf::SNAKE_TASK_CELL_F_MANUAL == 0 {
+        value.cell_id = cell_id;
+    }
+    let changed = previous != value.cell_id;
+    if changed {
+        value.needs_rehome = 1;
+    }
+    changed
+}
+
+fn clear_manual_cell(value: &mut bpf_intf::snake_task_cell) -> bool {
+    let previous = value.cell_id;
+    value.flags &= !bpf_intf::SNAKE_TASK_CELL_F_MANUAL;
+    if value.flags & bpf_intf::SNAKE_TASK_CELL_F_MANAGED == 0 {
+        return false;
+    }
+    value.cell_id = value.managed_cell_id;
+    if previous != value.cell_id {
+        value.needs_rehome = 1;
+    }
+    true
+}
+
+fn clear_managed_cell(value: &mut bpf_intf::snake_task_cell) -> bool {
+    value.flags &= !bpf_intf::SNAKE_TASK_CELL_F_MANAGED;
+    value.managed_cell_id = 0;
+    value.flags & bpf_intf::SNAKE_TASK_CELL_F_MANUAL != 0
+}
+
+fn update_task_cell<T>(
+    map: &impl MapCore,
+    tid: i32,
+    update: impl FnOnce(&mut bpf_intf::snake_task_cell) -> T,
+) -> Result<T> {
+    let pidfd = open_thread(tid)?;
+    update_task_cell_with_pidfd(map, tid, &pidfd, update)
+}
+
+fn update_task_cell_with_pidfd<T>(
+    map: &impl MapCore,
+    tid: i32,
+    pidfd: &OwnedFd,
+    update: impl FnOnce(&mut bpf_intf::snake_task_cell) -> T,
+) -> Result<T> {
+    let mut value = lookup_task_cell(map, pidfd, tid)?.unwrap_or_else(empty_task_cell);
+    let result = update(&mut value);
     map.update(
         &pidfd.as_raw_fd().to_ne_bytes(),
         bytes_of(&value),
         MapFlags::ANY,
     )
-    .with_context(|| {
-        format!(
-            "assigning TID {} to cell {}",
-            assignment.tid, assignment.cell_id
-        )
-    })
+    .with_context(|| format!("updating cell assignment for TID {tid}"))?;
+    Ok(result)
 }
 
 pub fn clear_thread_cell(map: &impl MapCore, tid: i32) -> Result<()> {
@@ -132,11 +221,69 @@ pub fn clear_thread_cell(map: &impl MapCore, tid: i32) -> Result<()> {
         bail!("TID must be positive");
     }
     let pidfd = open_thread(tid)?;
-    map.delete(&pidfd.as_raw_fd().to_ne_bytes())
-        .with_context(|| format!("clearing cell annotation for TID {tid}"))
+    let Some(mut value) = lookup_task_cell(map, &pidfd, tid)? else {
+        return Ok(());
+    };
+    if clear_manual_cell(&mut value) {
+        map.update(
+            &pidfd.as_raw_fd().to_ne_bytes(),
+            bytes_of(&value),
+            MapFlags::ANY,
+        )
+        .with_context(|| format!("revealing managed cell assignment for TID {tid}"))
+    } else {
+        map.delete(&pidfd.as_raw_fd().to_ne_bytes())
+            .with_context(|| format!("clearing cell annotation for TID {tid}"))
+    }
+}
+
+fn lookup_task_cell(
+    map: &impl MapCore,
+    pidfd: &OwnedFd,
+    tid: i32,
+) -> Result<Option<bpf_intf::snake_task_cell>> {
+    let Some(value) = map
+        .lookup(&pidfd.as_raw_fd().to_ne_bytes(), MapFlags::ANY)
+        .with_context(|| format!("reading cell assignment for TID {tid}"))?
+    else {
+        return Ok(None);
+    };
+    if value.len() != std::mem::size_of::<bpf_intf::snake_task_cell>() {
+        bail!(
+            "cell assignment for TID {tid} has {} bytes, expected {}",
+            value.len(),
+            std::mem::size_of::<bpf_intf::snake_task_cell>()
+        );
+    }
+    let mut decoded = std::mem::MaybeUninit::<bpf_intf::snake_task_cell>::uninit();
+    // SAFETY: the length was checked and snake_task_cell contains only integer fields.
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            value.as_ptr(),
+            decoded.as_mut_ptr().cast::<u8>(),
+            value.len(),
+        );
+        Ok(Some(decoded.assume_init()))
+    }
 }
 
 pub fn inspect_thread_cell(map: &impl MapCore, tid: i32) -> Result<Option<ThreadCellSnapshot>> {
+    let pidfd = match open_thread(tid) {
+        Ok(pidfd) => pidfd,
+        Err(error) if task_is_gone(&error) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let Some(value) = lookup_task_cell(map, &pidfd, tid)? else {
+        return Ok(None);
+    };
+    inspect_thread(tid, value.cell_id, value.needs_rehome != 0)
+}
+
+pub(crate) fn inspect_thread(
+    tid: i32,
+    cell_id: u32,
+    needs_rehome: bool,
+) -> Result<Option<ThreadCellSnapshot>> {
     let status = match fs::read_to_string(format!("/proc/{tid}/status")) {
         Ok(status) => status,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -144,27 +291,6 @@ pub fn inspect_thread_cell(map: &impl MapCore, tid: i32) -> Result<Option<Thread
     };
     let status =
         parse_task_status(&status).with_context(|| format!("parsing status for TID {tid}"))?;
-    let pidfd = match open_thread(tid) {
-        Ok(pidfd) => pidfd,
-        Err(error) if task_is_gone(&error) => return Ok(None),
-        Err(error) => return Err(error),
-    };
-    let Some(value) = map
-        .lookup(&pidfd.as_raw_fd().to_ne_bytes(), MapFlags::ANY)
-        .with_context(|| format!("reading cell annotation for TID {tid}"))?
-    else {
-        return Ok(None);
-    };
-    if value.len() != std::mem::size_of::<bpf_intf::snake_task_cell>() {
-        bail!(
-            "cell annotation for TID {tid} has {} bytes, expected {}",
-            value.len(),
-            std::mem::size_of::<bpf_intf::snake_task_cell>()
-        );
-    }
-    let cell_id = u32::from_ne_bytes(value[0..4].try_into().expect("cell ID has four bytes"));
-    let needs_rehome =
-        u32::from_ne_bytes(value[4..8].try_into().expect("rehome flag has four bytes")) != 0;
     let current_cpu = fs::read_to_string(format!("/proc/{tid}/stat"))
         .ok()
         .and_then(|stat| parse_task_cpu(&stat).ok());
@@ -218,7 +344,7 @@ fn parse_task_cpu(stat: &str) -> Result<u32> {
         .context("task stat has an invalid processor field")
 }
 
-fn parse_task_cgroup(cgroup: &str) -> String {
+pub(crate) fn parse_task_cgroup(cgroup: &str) -> String {
     cgroup
         .lines()
         .find_map(|line| line.strip_prefix("0::"))
@@ -232,7 +358,7 @@ fn parse_task_cgroup(cgroup: &str) -> String {
         .into()
 }
 
-fn task_is_gone(error: &anyhow::Error) -> bool {
+pub(crate) fn task_is_gone(error: &anyhow::Error) -> bool {
     error.chain().any(|source| {
         source
             .downcast_ref::<std::io::Error>()
@@ -308,5 +434,51 @@ mod tests {
         let stat = format!("4812 (worker pool 1) {}", fields.join(" "));
 
         assert_eq!(parse_task_cpu(&stat).unwrap(), 23);
+    }
+
+    #[test]
+    fn explicit_no_cell_does_not_rehome_implicit_cell_zero() {
+        let mut value = empty_task_cell();
+
+        apply_managed_cell(&mut value, 0);
+
+        assert_eq!(value.cell_id, 0);
+        assert_eq!(value.needs_rehome, 0);
+        assert_ne!(value.flags & bpf_intf::SNAKE_TASK_CELL_F_MANAGED, 0);
+    }
+
+    #[test]
+    fn managed_updates_rehome_only_when_the_effective_cell_changes() {
+        let mut value = empty_task_cell();
+        apply_managed_cell(&mut value, 1);
+        assert_eq!(value.needs_rehome, 1);
+
+        value.needs_rehome = 0;
+        apply_manual_cell(&mut value, 2);
+        assert_eq!(value.needs_rehome, 1);
+
+        value.needs_rehome = 0;
+        apply_managed_cell(&mut value, 3);
+        assert_eq!(value.cell_id, 2);
+        assert_eq!(value.needs_rehome, 0);
+
+        assert!(clear_manual_cell(&mut value));
+        assert_eq!(value.cell_id, 3);
+        assert_eq!(value.needs_rehome, 1);
+    }
+
+    #[test]
+    fn clearing_managed_membership_preserves_only_a_manual_override() {
+        let mut managed_only = empty_task_cell();
+        apply_managed_cell(&mut managed_only, 1);
+        assert!(!clear_managed_cell(&mut managed_only));
+
+        let mut overridden = empty_task_cell();
+        apply_managed_cell(&mut overridden, 1);
+        apply_manual_cell(&mut overridden, 2);
+        overridden.needs_rehome = 0;
+        assert!(clear_managed_cell(&mut overridden));
+        assert_eq!(overridden.cell_id, 2);
+        assert_eq!(overridden.needs_rehome, 0);
     }
 }

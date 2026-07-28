@@ -14,13 +14,19 @@ struct snake_ladder_ctx {
 	const struct snake_compiled_ladder *ladder;
 };
 
-/* Thread annotations are updated synchronously from the userspace control path. */
+/* Userspace stores the resolved assignment and its independent policy layers. */
 struct {
 	__uint(type, BPF_MAP_TYPE_TASK_STORAGE);
 	__uint(map_flags, BPF_F_NO_PREALLOC);
 	__type(key, int);
 	__type(value, struct snake_task_cell);
 } task_cells SEC(".maps");
+
+static __always_inline struct snake_task_cell *
+snake_task_cell_annotation(struct task_struct *p)
+{
+	return bpf_task_storage_get(&task_cells, p, NULL, 0);
+}
 
 struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);

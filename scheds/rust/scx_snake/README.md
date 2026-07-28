@@ -134,6 +134,22 @@ sudo ./target/release/scx_snake --clear-thread-cell 4812
 See [Task Cell Annotations](docs/CELL_POLICY.md) for the control and scheduling
 data flow.
 
+Queue policies may also derive assignments from cgroup-v2 child trees entirely
+in userspace:
+
+```toml
+[membership]
+parent = "/sys/fs/cgroup/workloads"
+
+[[membership.assignment]]
+child = "batch"
+cell = 7
+```
+
+Only assigned child trees are scanned. Threads outside them use synthetic cell
+0 without a task-storage record. Manual thread assignments override managed
+membership. See [Userspace Cgroup Cell Membership](docs/CGROUP_MEMBERSHIP_PROPOSAL.md).
+
 ### Cell queue policies
 
 Experimental VTIME policies may turn cell declarations into resource domains
@@ -158,7 +174,7 @@ scope = "task_cell_borrowable"
 ```
 
 Userspace resolves overlapping claims and positive CPU weights into disjoint
-primary masks. It adds synthetic cell 0 for unannotated tasks and creates
+primary masks. It adds synthetic cell 0 for `NoCell` tasks and creates
 either one normal DSQ per cell or one per populated cell/LLC pair. All LLC
 shards of a cell share one cell clock. Exactly one affinity escape DSQ is
 created per online CPU, and each escape queue uses the clock of the cell that
@@ -348,6 +364,8 @@ unavoidable old-queue runs for pending live rehomes. Direct-borrow yield counts
 confirm that foreign CPUs are reconsidered after one slice. EEVDF also reports
 its two queue insertion counts, promotions, forced advances, direct/queued
 runtime, lag clamps, and accounting errors.
+Queue mode also publishes `membership_no_cell_runs` and
+`membership_invalid_runs`; the latter must remain zero.
 
 Use `--stats-format json` for NDJSON, `--help-stats` for counter definitions, or
 monitor an already running scheduler without a policy:
