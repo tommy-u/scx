@@ -1,0 +1,42 @@
+# Overlapping claims give each declared cell primary CPUs and borrowable CPUs.
+# Borrowing claims an idle CPU directly; it does not steal queued work.
+# This example assumes CPUs 0-7 are online.
+fallback = "any_allowed"
+
+[queues]
+layout = "cell"
+cell0_cpu_weight = 1
+
+[[queues.enqueue]]
+target = "cell"
+
+[[queues.enqueue]]
+target = "affinity"
+
+[[queues.dispatch]]
+source = "affinity"
+
+[[queues.dispatch]]
+source = "cell"
+
+[[cell]]
+id = 1
+cpus = "0-7"
+cpu_weight = 1
+
+[[cell]]
+id = 2
+cpus = "0-7"
+cpu_weight = 1
+
+[[rung]]
+operation = "pick_idle"
+scope = "task_cell"
+
+[[rung]]
+operation = "pick_idle"
+scope = "task_cell_borrowable"
+
+[[rung]]
+operation = "pick_idle"
+scope = "task_allowed"

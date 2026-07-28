@@ -93,8 +93,8 @@ targets a non-idle CPU, using a preemptive handoff.
 
 ### Task cells
 
-Policies can define arbitrary, overlapping CPU cells and use a thread's live
-cell annotation as another ladder scope:
+Placement-only policies can define arbitrary, overlapping CPU cells and use a
+thread's live cell annotation as another ladder scope:
 
 ```toml
 [[cell]]
@@ -111,9 +111,10 @@ scope = "task_cell"
 ```
 
 The scheduler writes assignments synchronously to BPF task storage through a
-thread pidfd. Sleeping tasks use the new cell at their next wake; continuously
-runnable tasks also evaluate task-cell rungs from `enqueue`, keeping placement
-inside the cell whenever an eligible cell CPU is idle:
+thread pidfd. Sleeping tasks use the new cell at their next wake. Without a
+`[queues]` section, continuously runnable tasks also evaluate task-cell rungs
+from `enqueue`, keeping placement inside the declared cell whenever an eligible
+CPU is idle:
 
 ```bash
 sudo ./target/release/scx_snake --set-thread-cell 4812:7
@@ -122,6 +123,48 @@ sudo ./target/release/scx_snake --clear-thread-cell 4812
 
 See [Task Cell Annotations](docs/CELL_POLICY.md) for the control and scheduling
 data flow.
+
+### Cell queue policies
+
+Experimental VTIME policies may turn cell declarations into resource domains
+and custom DSQs:
+
+```toml
+[queues]
+layout = "cell_llc"
+
+[[cell]]
+id = 7
+cpus = "0-7"
+cpu_weight = 2
+
+[[rung]]
+operation = "pick_idle"
+scope = "task_cell"
+
+[[rung]]
+operation = "pick_idle"
+scope = "task_cell_borrowable"
+```
+
+Userspace resolves overlapping claims and positive CPU weights into disjoint
+primary masks. It adds synthetic cell 0 for unannotated tasks and creates
+either one normal DSQ per cell or one per populated cell/LLC pair. All LLC
+shards of a cell share one cell clock. Exactly one affinity escape DSQ is
+created per online CPU, and all escape queues share one global affinity clock;
+Snake never creates a cell-by-CPU DSQ matrix.
+
+Queue enqueue and dispatch callbacks are themselves short TOML ladders. Cell
+CPU borrowing is an explicit placement rung that directly claims an idle CPU
+owned by another cell. It does not steal already queued work. See
+[Cell Queue Policy](docs/QUEUE_POLICY.md) for syntax, clocks, update rules, and
+resource accounting. The three queue examples under [`examples/`](examples/)
+require `--fairness vtime`.
+
+Queue CPU weights assign real dequeue capacity. Borrowing helps tasks at wakeup
+but cannot drain work already waiting in an undersized cell's normal DSQ; such
+a policy can still hit the sched_ext runnable-task watchdog while other cells'
+CPUs are idle. Size weights for the workload's sustained runnable demand.
 
 ## How scheduling works
 
@@ -145,21 +188,27 @@ previous_llc_table_id)`. The words LLC and NUMA never reach BPF; they have
 already become table IDs and masks.
 
 The backend command set is deliberately small: `claim_idle`, `pick_idle`,
-`pick_idle_mask_table`, `pick_random_idle`, `kernel_default`, and
-`sync_wake_affine`. Inputs select either `cpu_prev` or the task's allowed mask;
-flags refine the operation, and `data` carries mask-table IDs. Userspace writes
-the compiled ladder and masks into an inactive BPF map slot, asks BPF to
-validate it, then atomically makes that slot active.
+`pick_idle_mask_table`, `pick_random_idle`, `pick_idle_queue_mask`,
+`kernel_default`, and `sync_wake_affine`. Inputs select a CPU, the task's
+allowed mask, a placement-only cell, or a dense queue cell. Flags refine the
+operation, and `data` carries table IDs or a primary/borrowable selector.
+Userspace writes the compiled ladder and masks into an inactive BPF map slot,
+asks BPF to validate it, then atomically makes that slot active.
 
-A successful `select_cpu` rung dispatches directly to the selected CPU's local
-DSQ and skips `enqueue`. If all rungs miss, Snake returns an affinity-safe
-fallback CPU hint; `enqueue` then uses the selected fairness discipline. FIFO
-uses the built-in global DSQ. VTIME uses one global vruntime-ordered DSQ and a
-set of per-CPU vruntime-ordered DSQs for affinity-restricted work, all sharing
-one maximum-task frontier. EEVDF uses global future and eligible ordered DSQs
-with an aggregate virtual clock. An annotated runnable task is the explicit
-placement exception: `enqueue` re-evaluates its configured task-cell rungs
-before using the fairness queue.
+Without `[queues]`, a successful idle-CPU rung dispatches directly to the
+selected CPU's local DSQ and skips `enqueue`. Placement-only annotated tasks
+also re-evaluate cell rungs from `enqueue`. FIFO puts remaining work on one
+scheduler-owned shared DSQ, explicitly drains it from `dispatch`, and kicks an
+idle allowed CPU. It does not depend on the built-in global DSQ. Global VTIME
+uses one normal DSQ plus per-CPU affinity DSQs under one clock; EEVDF uses
+global future and eligible DSQs with an aggregate clock.
+
+With `[queues]`, an ordinary selection records a CPU hint and still flows
+through the configured enqueue ladder. The enqueue ladder chooses a cell
+normal DSQ or a per-CPU affinity escape DSQ, while the dispatch ladder consumes
+those sources cyclically. A successful `task_cell_borrowable` rung is the
+exception: it verifies the foreign owner and directly dispatches to the idle
+CPU. All-rung exhaustion remains an affinity-safe enqueue hint in both modes.
 
 See [Policy Lowering and BPF Data Flow](docs/POLICY_LOWERING.md) for the complete
 TOML-to-opcode pipeline, runtime BPF inputs, map exchange, and update protocol.
@@ -185,6 +234,15 @@ but its nice-level weighted-share validation is not yet correct. See
 [Fairness in scx_snake](docs/FAIRNESS.md) for the clocks, queues, task
 accounting, placement interaction, and current limitations.
 
+Run a cell queue policy only with VTIME:
+
+```bash
+sudo ./target/release/scx_snake \
+  --policy scheds/rust/scx_snake/examples/cell-borrowing.toml \
+  --fairness vtime \
+  --stats 1
+```
+
 Replace the complete ladder without restarting the scheduler:
 
 ```bash
@@ -194,7 +252,10 @@ sudo ./target/release/scx_snake \
 
 The running process compiles and resolves the new file, prepares it in an
 inactive ladder slot, then publishes it with one atomic switch. A rejected
-update leaves the current ladder running.
+update leaves the current ladder running. Queue topology is attachment-time
+state; a live update may reorder dispatch sources or add the cell callback pair,
+but may not change the resolved topology or remove a target/source that may
+still contain queued work.
 
 The interactive cell demo generates three cells from the host's online CPUs,
 including one overlapping cell, and moves two bursty tasks between them. Run
@@ -250,9 +311,16 @@ The text output from `--stats 1` shows the active policy generation plus
 attempts, hits, misses, and errors for each rung. A successful update advances
 the generation and starts fresh counters with the new rung labels. Also watch
 `direct_dispatches`, `ladder_exhaustions`, `enqueues`, and `invalid_errors`; the
-last should remain zero. VTIME reports ordered enqueues and dispatches, the
+last should remain zero. FIFO also reports shared-DSQ enqueues and explicit
+dispatches. VTIME reports ordered enqueues and dispatches, the
 per-CPU subset of each, direct/queued runtime, sleeper-credit clamps, and
-accounting errors. EEVDF also reports its two queue insertion counts,
+accounting errors. Queue mode additionally reports each cell's total, primary,
+borrowed, and lent runtime, normal and affinity enqueues and execution
+selections, and clock
+transitions, plus keep-running suppressions and unavoidable old-queue runs for
+pending live rehomes. Direct-borrow yield counts confirm that foreign CPUs are
+reconsidered after one slice. EEVDF
+also reports its two queue insertion counts,
 promotions, forced advances, direct/queued runtime, lag clamps, and accounting
 errors.
 
@@ -271,9 +339,11 @@ stress-ng --pipe 4 --futex 4 --timeout 30s --metrics-brief
 
 ## Limits
 
-Topology is resolved when a policy is attached or updated. The kernel-default
-simulation does not implement distance-ordered remote NUMA search. FIFO has no
-topology-aware enqueue, stealing, or draining policy; VTIME and EEVDF are global
-clock domains rather than cell or NUMA hierarchies. VTIME's per-CPU queues are
-an affinity-forward-progress mechanism, not a configurable queue policy or a
-separate entitlement domain. The ABI remains experimental.
+Topology is resolved before a policy is attached or updated. The kernel-default
+simulation does not implement distance-ordered remote NUMA search. FIFO
+explicitly drains one shared DSQ but has no topology-aware enqueue or stealing
+policy. Global VTIME and EEVDF
+remain global-clock experiments; only VTIME with `[queues]` provides per-cell
+clocks and configurable cell or cell/LLC storage. Queue mode supports at most
+31 declared cells plus synthetic cell 0, does not steal queued work across
+cells, and cannot change its DSQ topology live. The ABI remains experimental.

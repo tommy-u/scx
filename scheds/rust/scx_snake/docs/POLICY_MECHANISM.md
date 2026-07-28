@@ -17,8 +17,8 @@ flowchart LR
 
         PLACE["Placement plan<br/>ladder, masks, borrowing"]
         FAIR["Fairness plan<br/>FIFO, VTIME, EEVDF"]
-        QUEUES["Queue-target plan<br/>global, CPU, cell, cell x LLC"]
-        CLOCKS["Clock-target plan<br/>global, CPU, cell"]
+        QUEUES["Queue-target plan<br/>global, per-CPU affinity,<br/>cell, cell x LLC"]
+        CLOCKS["Clock-target plan<br/>global, per-cell,<br/>global affinity escape"]
 
         VALIDATE["Validate topology, IDs,<br/>capacity, and references"]
         PUBLISH["Publish configuration<br/>rodata and double-buffered maps"]
@@ -43,7 +43,7 @@ flowchart LR
         CONFIG["Read active compiled configuration"]
         INIT["Create declared custom DSQs<br/>during scheduler attachment"]
         SELECT["Execute placement ladder"]
-        TARGET["Resolve queue key<br/>and clock key"]
+        TARGET["Resolve cell, queue,<br/>and clock keys"]
         ACCOUNT["Track task runtime, weight,<br/>vruntime, and sleeper credit"]
         ORDER["Apply ordering mechanism<br/>FIFO insert, vtime insert, EEVDF"]
         DISPATCH["Dispatch eligible work<br/>from custom DSQ to local DSQ"]
@@ -90,7 +90,7 @@ flowchart LR
     ORDER -->|enqueue| DSQS
     DSQS --> DISPATCH
     DISPATCH --> LOCAL
-    SELECT -->|Idle CPU direct dispatch| LOCAL
+    SELECT -->|Direct placement or borrowing| LOCAL
     LOCAL --> RUN
 
     METRICS --> OBSERVE
@@ -110,17 +110,49 @@ flowchart LR
   configuration before publishing it.
 - BPF performs operations that depend on the current task, CPU, runtime, or DSQ
   state and therefore cannot tolerate a userspace round trip.
-- Userspace declares custom queues and clock domains, while BPF creates and
-  operates the corresponding kernel DSQs.
+- Userspace resolves custom queues and clock domains, while BPF creates and
+  operates the corresponding kernel DSQs at attachment.
 - Queue placement and clock ownership remain separate. For example, cell x LLC
   queues can share one per-cell clock.
 - Policy updates use prepared, validated state and an atomic publication step;
   the BPF hot path never consumes a partially updated configuration.
-- BPF retains affinity checks, kicks, fallback behavior, and forward-progress
-  guarantees even when userspace has already validated the policy.
+- BPF retains live affinity checks, idle claims, kicks, fallback behavior, and
+  forward-progress mechanisms even when userspace has validated static policy.
 
-The initial VTIME implementation uses one global queue for unrestricted work
-and per-CPU queues for affinity-restricted work, all sharing one global clock.
-The per-CPU queues prevent large affinity-incompatible scans and preserve VTIME
-ordering for pinned tasks. Later user-selected queue targets can add per-cell
-and cell x LLC layouts without changing the policy/mechanism boundary.
+## Implemented queue boundary
+
+Without `[queues]`, VTIME uses one global normal queue plus per-CPU affinity
+queues under one global clock. With `[queues]`, userspace performs the semantic
+work before BPF loads:
+
+1. Add synthetic cell 0 for unannotated tasks.
+2. Resolve overlapping claims and weights into disjoint primary CPU owners and
+   per-cell borrowable masks.
+3. Choose one normal DSQ per cell or one per populated cell/LLC ownership pair.
+4. Assign every normal DSQ to its cell clock and every online CPU to one
+   affinity escape DSQ.
+5. Compile placement, enqueue, and dispatch ladders into topology-blind numeric
+   records.
+
+BPF receives dense cell indices, masks, queue descriptors, clock indices, and
+callback opcodes. It does not allocate CPU ownership or interpret LLC policy.
+At runtime it reads the task annotation and live affinity, maintains two VTIME
+coordinates when affinity escape is needed, and moves work through the declared
+DSQs.
+
+There is one normal clock per cell even under `cell_llc`; all LLC shards of a
+cell share it. The per-CPU affinity DSQs share one global affinity clock. This
+is an intentional storage/clock separation and avoids per-CPU fairness clocks.
+
+## Update boundary
+
+Placement and queue callback ladders live in the double-buffered policy slots
+and publish atomically. Queue descriptors and DSQs are attachment-time state, so
+a live policy replacement must resolve to the same complete queue topology.
+Dispatch sources may be reordered and the cell target/source pair may be added,
+but an active target or source may not be removed because the old generation
+may have left work in its DSQ. Changing the layout, cells, weights, allocation,
+or queue set requires restarting Snake.
+
+See [`QUEUE_POLICY.md`](QUEUE_POLICY.md) for the user-facing rules and
+[`POLICY_LOWERING.md`](POLICY_LOWERING.md) for the shared ABI.

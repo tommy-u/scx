@@ -24,19 +24,22 @@ scx_snake --policy policy.toml --fairness eevdf
 
 The mode is immutable BPF read-only configuration and requires a scheduler
 restart to change. Runtime policy updates and task-to-cell changes do not reset
-fairness state.
+fairness state. A policy with `[queues]` requires VTIME.
 
 ## FIFO control
 
-FIFO preserves Snake's original behavior. A successful idle-CPU placement is
-inserted directly into that CPU's local DSQ with `SCX_SLICE_DFL` (20 ms). A task
-that reaches `enqueue` and cannot be placed by a task-cell rung goes to the
-built-in global FIFO DSQ with the same slice.
+FIFO is Snake's default control discipline. A successful idle-CPU placement is
+inserted directly into that CPU's local DSQ with `SCX_SLICE_DFL` (20 ms). Any
+task that reaches `enqueue` goes to one scheduler-owned shared FIFO DSQ with
+the same slice. Enqueue claims and kicks an idle allowed CPU when possible, and
+`dispatch` explicitly drains the shared DSQ. This preserves stealable fallback
+work without depending on the kernel's built-in global DSQ for forward
+progress.
 
 FIFO does not provide weighted fairness. It remains available as the control
 for placement experiments and compatibility comparisons.
 
-## Global-clock VTIME
+## Global-clock VTIME without `[queues]`
 
 VTIME uses one global custom DSQ for unrestricted tasks and one custom DSQ per
 CPU for affinity-restricted tasks. Every queue is ordered by task virtual
@@ -80,8 +83,81 @@ Successful idle-CPU ladder placement can still use the direct local path;
 direct and queued execution use the same runtime accounting.
 
 This policy deliberately has no EEVDF eligibility, virtual requests, deadlines,
-or future queue. It is the smaller weighted-fairness control and the initial
-foundation for later user-selected per-cell queue domains.
+or future queue. It is the smaller weighted-fairness control used both directly
+and as the ordering mechanism inside cell queue policies.
+
+## VTIME with cell queues
+
+A policy with `[queues]` replaces the global VTIME queue topology. It still
+uses 5 ms physical slices and the same per-task weight scaling, but separates
+normal cell work from affinity-constrained escape work.
+
+### Normal queues and cell clocks
+
+Each cell has one VTIME clock. The `cell` layout creates one normal ordered DSQ
+per cell. The `cell_llc` layout creates one ordered DSQ for each cell/LLC pair
+that owns at least one CPU, but every shard for a cell uses that same cell
+clock. It does not create an independent fairness domain per LLC.
+
+Only CPUs owned by a cell consume its normal queues. A normal enqueue is safe
+only when the task may run on every CPU in the cell's primary mask. In
+`cell_llc` mode, a CPU first checks its local shard and may then dispatch the
+earliest head from another shard of the same cell. There is no cross-cell
+normal-queue stealing.
+
+The cell's `cpu_weight` controls how overlapping CPU claims are resolved into
+primary ownership. It is resource allocation, not a VTIME weight. The kernel
+task weight continues to control service order among tasks using a cell clock.
+
+### Affinity escape queues and dual coordinates
+
+Snake creates one affinity escape DSQ per online CPU. All escape DSQs share one
+global affinity clock, not per-CPU clocks. A task whose affinity excludes any
+CPU in its cell's primary mask uses one of these queues so an incompatible
+normal-queue consumer cannot block it.
+
+A queue-mode task keeps two virtual-runtime coordinates:
+
+```text
+cell_vruntime       service relative to the task cell clock
+affinity_vruntime   service relative to the global affinity clock
+```
+
+Normal execution advances `cell_vruntime`. Affinity execution advances both
+coordinates by the same weight-scaled runtime. The cell coordinate therefore
+remembers service received through the escape path when the task later returns
+to a normal queue.
+
+When a task changes cells, raw cell vruntimes cannot be compared because the
+clocks are independent. Snake preserves the task's lag relative to the old
+clock, clamps it to one VTIME slice, and applies that lag to the new clock:
+
+```text
+lag = clamp(task.vruntime - old_cell_now, -5 ms, 5 ms)
+task.vruntime = new_cell_now + lag
+```
+
+The global affinity coordinate persists independently across cell changes.
+
+### Enqueue, dispatch, and borrowing
+
+An ordinary successful placement rung records a CPU hint and proceeds through
+the queue enqueue ladder. Its `cell` target tries normal storage and its
+required terminal `affinity` target guarantees an affinity-safe escape. The
+dispatch ladder visits its configured sources with a per-CPU cyclic cursor;
+source order is not permanent priority.
+
+The explicit `task_cell_borrowable` rung is the only direct-dispatch exception.
+It may claim an allowed idle CPU owned by another cell. This bypasses ordered
+queue comparison for that dispatch, so borrowing is work-conserving placement,
+not strict cross-cell VTIME ordering. It also does not steal work that is
+already queued.
+
+Task identity and resource consumption remain separate. Runtime always advances
+the task cell's VTIME state. Counters classify the execution as primary when it
+runs on a CPU owned by that cell, or as borrowed for the task cell and lent for
+the CPU-owner cell otherwise. See [`QUEUE_POLICY.md`](QUEUE_POLICY.md) for the
+complete topology and callback rules.
 
 ## Global EEVDF
 
@@ -168,14 +244,16 @@ create a separate fairness domain or entitlement; fairness is global per task.
 
 ## Data ownership
 
-Userspace supplies startup mode, compiled placement policy, resolved CPU masks,
-and live task-to-cell annotations. BPF reads the kernel task weight and runtime,
-maintains VTIME or EEVDF clocks and per-task state, and performs ordering and
-dispatch decisions. Picture/gallery shapes and cell meanings remain entirely
-in userspace.
+Userspace supplies startup mode, compiled placement and callback ladders,
+resolved CPU masks, attachment-time queue topology, and live task-to-cell
+annotations. BPF reads the kernel task weight and runtime, maintains VTIME or
+EEVDF clocks and per-task state, and performs ordering, accounting, and dispatch
+decisions. Cell meanings remain entirely in userspace.
 
-The BPF implementation is isolated in [`src/bpf/fairness.h`](../src/bpf/fairness.h).
-Placement execution remains in [`src/bpf/ladder.h`](../src/bpf/ladder.h).
+Global fairness is implemented in
+[`src/bpf/fairness.h`](../src/bpf/fairness.h); queue-mode VTIME is in
+[`src/bpf/queue_fairness.h`](../src/bpf/queue_fairness.h). Placement execution
+remains in [`src/bpf/ladder.h`](../src/bpf/ladder.h).
 
 ## Validation demo
 
@@ -197,7 +275,10 @@ the measured seconds per case. The demo checks:
 
 `--stats 1` also exports the active mode, eligible/future enqueues, promotions,
 forced clock advances, ordered dispatches, strict sync queues, direct and queued
-runtime, lag clamps, and accounting errors.
+runtime, lag clamps, and accounting errors. Queue mode adds per-cell total,
+primary, borrowed, and lent runtime, normal/affinity enqueues and execution
+selections, clock transitions, and live-rehome convergence counters. FIFO
+reports shared-DSQ enqueues and explicit dispatches.
 
 The VM-only VTIME regression combines a heavily oversubscribed narrow affinity
 group with wide work. It must survive beyond the watchdog interval and report
@@ -208,6 +289,29 @@ sudo scheds/rust/scx_snake/tests/vtime_mixed_affinity.sh \
   target/release/scx_snake
 ```
 
+Cell queue and direct-borrowing regressions are also VM-only:
+
+```bash
+sudo scheds/rust/scx_snake/tests/vtime_cell_queues.sh \
+  target/release/scx_snake
+sudo scheds/rust/scx_snake/tests/vtime_cell_borrowing.sh \
+  target/release/scx_snake
+```
+
+Additional VM-only contracts cover the remaining queue boundaries:
+
+| Test | Contract |
+| --- | --- |
+| `fifo_fallback.sh` | Shared FIFO fallback is explicitly drained. |
+| `vtime_queue_ladders.sh` | Callback ladders activate, live reorder, and select the configured first ready source. |
+| `vtime_max_cells.sh` | 31 declared cells plus cell 0 run under `cell` and `cell_llc`. |
+| `vtime_single_runner_rehome.sh` | A running task cannot retain an obsolete cell indefinitely. |
+| `vtime_queued_rehome.sh` | An old normal-DSQ run is preserved once, then translated on re-enqueue. |
+| `vtime_cell_borrowing.sh` | Direct borrowers yield after one slice before any owner-cell comparison. |
+
+Run queue-layout tests with `SNAKE_QUEUE_LAYOUT=cell_llc` to cover populated
+cell/LLC shards sharing one per-cell clock.
+
 The VM-only affinity regression exercises this forward-progress rule:
 
 ```bash
@@ -217,9 +321,10 @@ sudo scheds/rust/scx_snake/tests/eevdf_affinity_future.sh \
 
 ## Current scope
 
-Each ordered implementation currently has one global per-task fairness clock.
-VTIME shards affinity-restricted queue storage by CPU for forward progress, but
-does not assign per-CPU entitlements. Neither policy provides cell-level
-weights, hierarchical group fairness, per-NUMA clocks, or live mode switching.
-Their global clocks use BPF spin locks; scalability under large runnable sets is
-an explicit experiment rather than a production claim.
+Global VTIME and EEVDF each use one global fairness clock. Queue-mode VTIME uses
+one normal clock per cell plus one global clock for all affinity escape queues;
+it deliberately has no per-CPU clocks. Cell CPU weights allocate primary CPUs
+but do not provide hierarchical group fairness. There are no per-NUMA clocks,
+live fairness-mode changes, queued-work borrowing, or cross-cell normal-queue
+stealing. The clocks use BPF spin locks, so scalability under large runnable
+sets remains an explicit experiment rather than a production claim.

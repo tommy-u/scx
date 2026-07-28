@@ -4,6 +4,16 @@ This interface lets userspace assign an integer cell to an individual thread.
 A policy separately maps each cell ID to an arbitrary CPU set; cell CPU sets
 may overlap. BPF sees only a task-local integer and generic CPU masks.
 
+Cell annotations have two policy interpretations:
+
+- Without `[queues]`, `task_cell` uses the declared CPU set as a generic
+  placement mask.
+- With `[queues]`, userspace converts declarations into disjoint primary CPU
+  ownership and borrowable masks. `task_cell` means the allocated primary mask;
+  `task_cell_borrowable` means the remainder of that cell's claim.
+
+The annotation format and pidfd control path are identical in both modes.
+
 ## Who writes what
 
 ```mermaid
@@ -32,8 +42,8 @@ sequenceDiagram
     Task->>BPF: A later wakeup invokes select_cpu(task)
     BPF->>Store: bpf_task_storage_get(task)
     Store-->>BPF: cell_id=7
-    BPF->>BPF: cell 7 mask & task affinity & idle CPUs
-    BPF-->>Task: Dispatch inside cell, or miss into the next rung
+    BPF->>BPF: resolve cell mask & task affinity & idle CPUs
+    BPF-->>Task: Return a placement hit, or miss into the next rung
     Task->>Kernel: Task exits
     Kernel->>Store: Automatically free the annotation
 ```
@@ -84,8 +94,9 @@ write; scheduler BPF reads the resulting value later.
 
 ## BPF representation
 
-The presence of a task-storage entry is the validity marker, so its value needs
-only a cell ID:
+The presence of a task-storage entry is the validity marker, so the value does
+not need a separate validity field. It carries the requested cell ID and a
+rehome flag used to converge live updates:
 
 ```c
 struct snake_task_cell {
@@ -101,13 +112,24 @@ struct {
 } task_cells SEC(".maps");
 ```
 
-The cell rung receives `struct task_struct *p`, reads `task_cells` with
-`bpf_task_storage_get(&task_cells, p, NULL, 0)`, and uses `cell_id` to look up a
-generic cell mask. It intersects that mask with `p->cpus_ptr` before selecting
-an idle CPU. Missing annotations, missing cell definitions, and empty
-intersections are normal rung misses so later policy rungs remain authoritative.
-`needs_rehome` is set by a live userspace update and cleared after a cell rung
-places the task successfully.
+The cell rung receives `struct task_struct *p` and reads `task_cells` with
+`bpf_task_storage_get(&task_cells, p, NULL, 0)`. Placement-only mode uses
+`cell_id` directly as a generic mask-table key. Queue mode translates it to a
+dense queue-cell index; a missing or unknown annotation resolves to synthetic
+cell 0. In both modes, BPF intersects the chosen mask with live `p->cpus_ptr`
+before selecting an idle CPU.
+
+Missing placement-only annotations, missing definitions, no idle CPU, and empty
+intersections are normal rung misses, so later policy rungs remain
+authoritative. `needs_rehome` is set by a live userspace update. Placement-only
+mode clears it on a successful cell placement; queue mode clears it after a
+scheduling callback has adopted and translated the requested identity. Queue
+dispatch will not replenish an expired running task while its annotation
+targets another cell, so even an otherwise isolated CPU-bound task returns
+through enqueue to complete the clock translation. A normal task already
+linked on its old cell DSQ cannot be removed by the annotation update. If it is
+dispatched before re-enqueue, Snake charges that one execution to the old cell,
+suppresses renewal, and adopts the new cell on its next enqueue.
 
 ## Userspace updates
 
@@ -118,9 +140,10 @@ running scheduler owns the task-storage map FD and performs the update:
 set-thread-cell(tid=4812, cell=7)
   1. Confirm that cell 7 exists in the active policy.
   2. Call pidfd_open(4812, PIDFD_THREAD) to get a stable task handle.
-  3. Call bpf_map_update_elem(task_cells_fd, &pidfd, &cell, BPF_ANY).
+  3. Build task_cell = { cell_id: 7, needs_rehome: 1 }.
+  4. Call bpf_map_update_elem(task_cells_fd, &pidfd, &task_cell, BPF_ANY).
      This wrapper issues the bpf(BPF_MAP_UPDATE_ELEM) syscall that writes.
-  4. Close pidfd and acknowledge the update.
+  5. Close pidfd and acknowledge the update.
 
 clear-thread-cell(tid=4812)
   1. Call pidfd_open(4812, PIDFD_THREAD).
@@ -133,7 +156,8 @@ Using a pidfd as the userspace map key binds the update to the exact live
 thread, avoiding TID-reuse races. Closing the pidfd does not remove the
 annotation. Thread exit removes its task-local storage automatically. The map
 update is synchronous: after it returns successfully, the next BPF lookup sees
-the new cell ID without polling or an asynchronous propagation step.
+the new cell ID, or no annotation after a clear, without polling or an
+asynchronous propagation step.
 
 This direct path requires a kernel with `PIDFD_THREAD`; older kernels return an
 error. A future compatibility path could use a small BPF control program that
@@ -146,10 +170,10 @@ sudo scx_snake --set-thread-cell 4812:7
 sudo scx_snake --clear-thread-cell 4812
 ```
 
-The initial interface updates one TID per request. Batch assignment remains a
-possible control-protocol extension.
+The interface updates one TID per request. New threads do not inherit this
+task-storage entry and therefore begin unannotated.
 
-## Policy shape
+## Placement-only policy shape
 
 The userspace policy syntax is:
 
@@ -172,8 +196,40 @@ scope = "task_allowed"
 ```
 
 Userspace parses the CPU lists, validates CPU IDs, and installs the cell masks.
-The BPF ABI remains topology-blind: the new rung means only "read this task's
-integer key and use the corresponding generic mask."
+The BPF ABI remains topology-blind: the rung means only "read this task's
+integer key and use the corresponding generic mask." Placement-only policies
+allow cell ID 0 and up to 1024 cell IDs in the mask-key space.
+
+## Queue-mode policy shape
+
+```toml
+[queues]
+layout = "cell_llc"
+
+[[cell]]
+id = 7
+cpus = "0-7"
+cpu_weight = 2
+
+[[rung]]
+operation = "pick_idle"
+scope = "task_cell"
+
+[[rung]]
+operation = "pick_idle"
+scope = "task_cell_borrowable"
+```
+
+Queue mode reserves ID 0 for unannotated tasks and permits at most 31 declared
+cells. Userspace creates synthetic cell 0, resolves overlapping declarations
+into dense cells with disjoint primary masks, and derives borrowable masks.
+These masks do not consume generic placement mask-table slots.
+
+A `task_cell` hit records a preferred primary CPU and still enters the queue
+enqueue ladder. A `task_cell_borrowable` hit is the direct-dispatch exception:
+it verifies that another cell owns the idle CPU before dispatching. See
+[`QUEUE_POLICY.md`](QUEUE_POLICY.md) for allocation, DSQ, clock, and accounting
+rules.
 
 ## Why not a TID hash map?
 
@@ -186,19 +242,24 @@ stable task identity, and automatic lifetime management.
 ## Placement timing
 
 The map value is current as soon as the update syscall returns. A sleeping task
-uses it from `select_cpu` at its next wakeup. `enqueue` also evaluates configured
-task-cell rungs for annotated runnable tasks, keeping them in the cell whenever
-an eligible cell CPU is idle. `needs_rehome` records convergence after a live
-update and is cleared on the first successful cell placement. If every eligible
-cell CPU is busy, normal enqueue continues and the cell placement is retried
-later.
+uses it from `select_cpu` at its next wakeup. In placement-only mode, `enqueue`
+also evaluates configured task-cell rungs for annotated runnable tasks. If all
+eligible cell CPUs are busy, normal fairness enqueue continues and cell
+placement is retried later.
 
-## Open decisions
+Queue mode does not re-run placement rungs from `enqueue`. The queue callback
+ladder uses the current cell identity directly. Normal-cell enqueue requires
+the task to be allowed on the complete primary mask; otherwise its terminal
+affinity target provides forward progress. A live annotation change translates
+the task's vruntime between cell clocks when a scheduling callback adopts the
+new identity. A task already linked on an old normal DSQ retains that identity
+for its next execution, then must return through enqueue before translation.
 
-- Whether new threads inherit their parent's cell or start unannotated.
-- Whether cell annotations survive a policy replacement when the new policy
-  does not define that cell ID. The safest behavior is to retain the integer
-  annotation but make the cell rung miss until the ID is defined again.
-- Authorization for annotating another process's threads. The initial CLI can
-  require root while the control protocol keeps room for finer checks later.
-- Whether batch assignment is best-effort per TID or atomic with rollback.
+For the lifetime of the running Snake instance, annotations remain attached
+until explicitly cleared or the thread exits. Restarting or unloading Snake
+destroys its task-storage map and all annotations with it.
+Placement-only policy replacement does not rewrite them; an ID absent from the
+new policy simply makes its cell rung miss. Queue topology, including its cell
+IDs, cannot change during live replacement. The control path requires the
+privileges needed to update BPF task storage and currently has no batch or
+inheritance operation.
