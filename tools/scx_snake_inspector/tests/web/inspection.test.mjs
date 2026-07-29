@@ -41,7 +41,93 @@ test("inspection routes default to activity and accept every inspector view", ()
   assert.equal(routeFromHash("#/cells"), "cells");
   assert.equal(routeFromHash("#/callbacks"), "callbacks");
   assert.equal(routeFromHash("#/control"), "control");
+  assert.equal(routeFromHash("#/feedback"), "feedback");
   assert.equal(routeFromHash("#/unknown"), "activity");
+});
+
+test("feedback entries keep first-entry order and one draft per element", () => {
+  assert.equal(typeof inspectionState.updateFeedbackEntries, "function");
+  if (typeof inspectionState.updateFeedbackEntries !== "function") {
+    return;
+  }
+
+  let entries = inspectionState.updateFeedbackEntries(
+    [],
+    "Callbacks:Fine-grained-timing:Select-CPU",
+    "Show the active stage more clearly.",
+  );
+  entries = inspectionState.updateFeedbackEntries(
+    entries,
+    "Policy:Slot-0",
+    "Make the active slot easier to scan.",
+  );
+  entries = inspectionState.updateFeedbackEntries(
+    entries,
+    "Callbacks:Fine-grained-timing:Select-CPU",
+    "Show both active and historical stages.",
+  );
+
+  assert.deepEqual(entries, [
+    {
+      key: "Callbacks:Fine-grained-timing:Select-CPU",
+      text: "Show both active and historical stages.",
+    },
+    { key: "Policy:Slot-0", text: "Make the active slot easier to scan." },
+  ]);
+});
+
+test("empty feedback removes the element draft", () => {
+  assert.equal(typeof inspectionState.updateFeedbackEntries, "function");
+  if (typeof inspectionState.updateFeedbackEntries !== "function") {
+    return;
+  }
+
+  assert.deepEqual(
+    inspectionState.updateFeedbackEntries(
+      [{ key: "Activity:Controls", text: "Tighten spacing." }],
+      "Activity:Controls",
+      "  \n ",
+    ),
+    [],
+  );
+});
+
+test("feedback transcript preserves multiline text and separates elements", () => {
+  assert.equal(typeof inspectionState.formatFeedbackTranscript, "function");
+  if (typeof inspectionState.formatFeedbackTranscript !== "function") {
+    return;
+  }
+
+  assert.equal(
+    inspectionState.formatFeedbackTranscript([
+      {
+        key: "Callbacks:Fine-grained-timing:Select-CPU",
+        text: "First thought\nSecond thought",
+      },
+      { key: "Policy:Slot-0", text: "Another request" },
+    ]),
+    "[Callbacks:Fine-grained-timing:Select-CPU] First thought\nSecond thought\n\n"
+      + "[Policy:Slot-0] Another request",
+  );
+});
+
+test("feedback storage parser ignores malformed or duplicate entries", () => {
+  assert.equal(typeof inspectionState.parseFeedbackEntries, "function");
+  if (typeof inspectionState.parseFeedbackEntries !== "function") {
+    return;
+  }
+
+  assert.deepEqual(inspectionState.parseFeedbackEntries("not json"), []);
+  assert.deepEqual(
+    inspectionState.parseFeedbackEntries(JSON.stringify([
+      { key: "Activity:Controls", text: "First" },
+      { key: "", text: "Missing key" },
+      { key: "Activity:Controls", text: "Latest" },
+      { key: "Cells:Cell-detail", text: "  " },
+      null,
+    ])),
+    [{ key: "Activity:Controls", text: "Latest" }],
+  );
 });
 
 test("scheduler launch requests include only checkbox-enabled optional flags", () => {
@@ -886,6 +972,43 @@ test("keyed render state restores disclosure, scrolling, and focus only for matc
   assert.equal(changedGeneration.open, false);
 });
 
+test("keyed render state restores textarea selection after polling replacement", () => {
+  const oldTextarea = {
+    dataset: { renderKey: "feedback:Policy:Slot-0:textarea" },
+    scrollTop: 18,
+    scrollLeft: 0,
+    selectionStart: 6,
+    selectionEnd: 12,
+    selectionDirection: "forward",
+  };
+  const snapshot = inspectionState.captureKeyedRenderState([oldTextarea], oldTextarea);
+  const newTextarea = {
+    dataset: { renderKey: "feedback:Policy:Slot-0:textarea" },
+    scrollTop: 0,
+    scrollLeft: 0,
+    selectionStart: 0,
+    selectionEnd: 0,
+    selectionDirection: "none",
+    focusCalls: 0,
+    focus() {
+      this.focusCalls += 1;
+    },
+    setSelectionRange(start, end, direction) {
+      this.selectionStart = start;
+      this.selectionEnd = end;
+      this.selectionDirection = direction;
+    },
+  };
+
+  inspectionState.restoreKeyedRenderState([newTextarea], snapshot);
+
+  assert.equal(newTextarea.focusCalls, 1);
+  assert.equal(newTextarea.selectionStart, 6);
+  assert.equal(newTextarea.selectionEnd, 12);
+  assert.equal(newTextarea.selectionDirection, "forward");
+  assert.equal(newTextarea.scrollTop, 18);
+});
+
 test("callback sample-rate synchronization preserves drafts and accepts pristine server updates", () => {
   assert.equal(typeof inspectionState.syncCallbackSampleRateControl, "function");
   if (typeof inspectionState.syncCallbackSampleRateControl !== "function") {
@@ -956,4 +1079,73 @@ test("polling renderers use stable keys and avoid synchronous hidden-popover rer
   assert.match(script, /requestAnimationFrame\(\(\) =>/);
   assert.match(script, /referencePopover\.classList\.contains\("hidden"\)/);
   assert.match(script, /callbackRateDirty/);
+});
+
+test("feedback view exposes copy and global clear controls", () => {
+  const page = readFileSync(
+    new URL("../../src/web/index.html", import.meta.url),
+    "utf8",
+  );
+
+  for (const fragment of [
+    'href="#/feedback"',
+    'data-route="feedback"',
+    'id="feedbackView"',
+    'id="feedbackTranscript"',
+    'id="copyFeedback"',
+    'id="clearFeedback"',
+    'id="feedbackNotice"',
+  ]) {
+    assert.match(page, new RegExp(fragment), `missing ${fragment}`);
+  }
+  assert.match(page, /id="feedbackTranscript"[^>]*readonly/);
+});
+
+test("every planned feedback target has a stable semantic key", () => {
+  const page = readFileSync(
+    new URL("../../src/web/index.html", import.meta.url),
+    "utf8",
+  );
+  const script = readFileSync(
+    new URL("../../src/web/app.js", import.meta.url),
+    "utf8",
+  );
+  const source = `${page}\n${script}`;
+  for (const key of [
+    "Activity:Controls",
+    "Activity:Migration-summary",
+    "Activity:CPU-migration-matrix",
+    "Callbacks:Timing-controls",
+    "Callbacks:Timing-summary",
+    "Callbacks:Callback-percentiles",
+    "Callbacks:Fine-grained-timing:",
+    "Policy:Policy-library",
+    "Policy:Slot-",
+    "Policy:Resolved-queue-topology",
+    "Cells:Workload-assignment",
+    "Cells:Cell-browser",
+    "Cells:Cell-detail",
+    "Control:Launch-configuration",
+    "Control:Command-preview",
+    "Control:Change-behavior",
+  ]) {
+    assert.match(source, new RegExp(key), `missing feedback target ${key}`);
+  }
+});
+
+test("feedback client mirrors inline edits and can copy or clear the whole batch", () => {
+  const script = readFileSync(
+    new URL("../../src/web/app.js", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(script, /scx-snake-inspector-feedback-v1/);
+  assert.match(script, /sessionStorage/);
+  assert.match(script, /expandedFeedbackKeys/);
+  assert.match(script, /closest\("\[data-feedback-toggle\]"\)/);
+  assert.match(script, /closest\("\[data-feedback-input\]"\)/);
+  assert.match(script, /navigator\.clipboard\.writeText/);
+  assert.match(script, /document\.execCommand\("copy"\)/);
+  assert.match(script, /data-lucide="ear"/);
+  assert.match(script, /confirm\("Clear all collected feedback\?"\)/);
 });

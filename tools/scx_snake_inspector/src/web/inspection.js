@@ -3,7 +3,7 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 
-const ROUTES = new Set(["activity", "policy", "cells", "callbacks", "control"]);
+const ROUTES = new Set(["activity", "policy", "cells", "callbacks", "control", "feedback"]);
 const callbackDurationFormat = new Intl.NumberFormat("en-US", {
   maximumFractionDigits: 0,
 });
@@ -25,6 +25,11 @@ export function captureKeyedRenderState(nodes, activeElement = null) {
       open: typeof node.open === "boolean" ? node.open : null,
       scrollTop: Number.isFinite(node.scrollTop) ? node.scrollTop : 0,
       scrollLeft: Number.isFinite(node.scrollLeft) ? node.scrollLeft : 0,
+      selectionStart: Number.isInteger(node.selectionStart) ? node.selectionStart : null,
+      selectionEnd: Number.isInteger(node.selectionEnd) ? node.selectionEnd : null,
+      selectionDirection: typeof node.selectionDirection === "string"
+        ? node.selectionDirection
+        : null,
     });
     if (node === activeElement) {
       focusedKey = key;
@@ -58,6 +63,69 @@ export function restoreKeyedRenderState(nodes, snapshot) {
     }
   }
   focusTarget?.focus({ preventScroll: true });
+  const focusEntry = snapshot.focusedKey
+    ? snapshot.entries.get(snapshot.focusedKey)
+    : null;
+  if (
+    focusTarget
+    && focusEntry?.selectionStart !== null
+    && focusEntry?.selectionEnd !== null
+    && typeof focusTarget.setSelectionRange === "function"
+  ) {
+    focusTarget.setSelectionRange(
+      focusEntry.selectionStart,
+      focusEntry.selectionEnd,
+      focusEntry.selectionDirection || "none",
+    );
+  }
+}
+
+export function updateFeedbackEntries(entries, key, text) {
+  const normalizedKey = String(key || "").trim();
+  if (!normalizedKey) {
+    return [...(entries || [])];
+  }
+  const normalizedText = String(text ?? "").replace(/\r\n?/g, "\n");
+  const next = (entries || []).map((entry) => ({ ...entry }));
+  const index = next.findIndex((entry) => entry.key === normalizedKey);
+  if (!normalizedText.trim()) {
+    if (index >= 0) {
+      next.splice(index, 1);
+    }
+    return next;
+  }
+  const entry = { key: normalizedKey, text: normalizedText };
+  if (index >= 0) {
+    next[index] = entry;
+  } else {
+    next.push(entry);
+  }
+  return next;
+}
+
+export function parseFeedbackEntries(serialized) {
+  let parsed;
+  try {
+    parsed = JSON.parse(String(serialized || "[]"));
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(parsed)) {
+    return [];
+  }
+  return parsed.reduce((entries, entry) => {
+    if (!entry || typeof entry.key !== "string" || typeof entry.text !== "string") {
+      return entries;
+    }
+    return updateFeedbackEntries(entries, entry.key, entry.text);
+  }, []);
+}
+
+export function formatFeedbackTranscript(entries) {
+  return (entries || [])
+    .filter((entry) => entry?.key && String(entry.text || "").trim())
+    .map((entry) => `[${String(entry.key).trim()}] ${String(entry.text).trim()}`)
+    .join("\n\n");
 }
 
 export function syncCallbackSampleRateControl(

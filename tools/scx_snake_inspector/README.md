@@ -4,7 +4,7 @@
 activity, installed policy state, cells, and task mappings in one local web
 application instead of splitting them across separate tools.
 
-The embedded interface has five views:
+The embedded interface has six views:
 
 - **Activity** counts a migration when a Snake task executes on a different
   CPU than its previous execution slice. It also shows aligned per-CPU runtime.
@@ -25,6 +25,9 @@ The embedded interface has five views:
 - **Control** starts, stops, or restarts the attached Snake process, shows the
   exact launch command, and distinguishes changes that can be applied
   dynamically from settings that require a scheduler reload.
+- **Feedback** collects UI change requests from section-level ear controls and
+  formats them as one copyable transcript. Notes remain in browser session
+  storage for the current tab and are never sent to the inspector backend.
 
 The Control view accepts only typed launch options. A policy from the
 configured allowlist is required; fairness, callback sampling, exit dump

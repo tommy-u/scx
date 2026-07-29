@@ -22,7 +22,9 @@ import {
   fieldReferenceGroups,
   fineTimingCaptureModels,
   formatCallbackDuration,
+  formatFeedbackTranscript,
   ladderPercentages,
+  parseFeedbackEntries,
   policyLibraryModels,
   queueLadderSections,
   queueTopologyModel,
@@ -35,6 +37,7 @@ import {
   schedulerSettingModels,
   statsResetDisabled,
   syncCallbackSampleRateControl,
+  updateFeedbackEntries,
   rungLadderPercentages,
   rungPercentages,
   selectionRungHitFlow,
@@ -42,6 +45,7 @@ import {
 } from "/assets/inspection.js";
 
 const numberFormat = new Intl.NumberFormat();
+const FEEDBACK_STORAGE_KEY = "scx-snake-inspector-feedback-v1";
 const POLICY_FAIRNESS_OPTIONS = [
   {
     id: "fifo",
@@ -81,6 +85,11 @@ const elements = {
   callbackTimingRows: document.querySelector("#callbackTimingRows"),
   fineTimingNotice: document.querySelector("#fineTimingNotice"),
   fineTimingPanels: document.querySelector("#fineTimingPanels"),
+  feedbackNotice: document.querySelector("#feedbackNotice"),
+  feedbackTranscript: document.querySelector("#feedbackTranscript"),
+  feedbackView: document.querySelector("#feedbackView"),
+  copyFeedback: document.querySelector("#copyFeedback"),
+  clearFeedback: document.querySelector("#clearFeedback"),
   cgroupField: document.querySelector("#cgroupField"),
   cgroupInput: document.querySelector("#cgroupInput"),
   cellsFreshness: document.querySelector("#cellsFreshness"),
@@ -158,6 +167,8 @@ const state = {
   fineTimingError: null,
   fineTimingLoading: false,
   fineTimingPending: new Set(),
+  feedbackEntries: loadFeedbackEntries(),
+  expandedFeedbackKeys: new Set(),
   eventSource: null,
   geometry: null,
   inspection: null,
@@ -200,6 +211,8 @@ configureCallbackRangeSelector();
 configureCallbackSampleRateSelector();
 configureSchedulerSampleRateSelector();
 bindControls();
+decorateFeedbackTargets(document);
+renderFeedback();
 renderWorkloadTargetField();
 renderSchedulerControl();
 start().catch((error) => {
@@ -364,6 +377,20 @@ function bindControls() {
   elements.restartScheduler.addEventListener("click", restartScheduler);
   elements.stopScheduler.addEventListener("click", stopScheduler);
   elements.resetAllStats.addEventListener("click", resetAllStats);
+  elements.copyFeedback.addEventListener("click", copyFeedback);
+  elements.clearFeedback.addEventListener("click", clearFeedback);
+  document.addEventListener("click", (event) => {
+    const toggle = event.target.closest("[data-feedback-toggle]");
+    if (toggle) {
+      toggleFeedbackComposer(toggle.dataset.feedbackToggle);
+    }
+  });
+  document.addEventListener("input", (event) => {
+    const input = event.target.closest("[data-feedback-input]");
+    if (input) {
+      updateFeedback(input.dataset.feedbackInput, input.value);
+    }
+  });
   elements.cellDetail.addEventListener("click", (event) => {
     const select = event.target.closest("[data-workload-tid]");
     if (select) {
@@ -434,6 +461,195 @@ function bindControls() {
     }
   });
   new ResizeObserver(() => renderHeatmap()).observe(elements.viewport);
+}
+
+function loadFeedbackEntries() {
+  try {
+    return parseFeedbackEntries(sessionStorage.getItem(FEEDBACK_STORAGE_KEY));
+  } catch {
+    return [];
+  }
+}
+
+function persistFeedbackEntries() {
+  try {
+    if (state.feedbackEntries.length === 0) {
+      sessionStorage.removeItem(FEEDBACK_STORAGE_KEY);
+    } else {
+      sessionStorage.setItem(FEEDBACK_STORAGE_KEY, JSON.stringify(state.feedbackEntries));
+    }
+    return true;
+  } catch {
+    showElementNotice(elements.feedbackNotice, "Feedback could not be saved for this tab.");
+    return false;
+  }
+}
+
+function feedbackEntry(key) {
+  return state.feedbackEntries.find((entry) => entry.key === key) || null;
+}
+
+function updateFeedback(key, text) {
+  state.feedbackEntries = updateFeedbackEntries(state.feedbackEntries, key, text);
+  hideElementNotice(elements.feedbackNotice);
+  persistFeedbackEntries();
+  renderFeedback();
+}
+
+function renderFeedback() {
+  const transcript = formatFeedbackTranscript(state.feedbackEntries);
+  elements.feedbackTranscript.value = transcript;
+  elements.copyFeedback.disabled = !transcript;
+  elements.clearFeedback.disabled = !transcript && state.expandedFeedbackKeys.size === 0;
+  decorateFeedbackTargets(document);
+}
+
+function toggleFeedbackComposer(key) {
+  if (!key) {
+    return;
+  }
+  const opening = !state.expandedFeedbackKeys.has(key);
+  if (opening) {
+    state.expandedFeedbackKeys.add(key);
+  } else {
+    state.expandedFeedbackKeys.delete(key);
+  }
+  renderFeedback();
+  if (opening) {
+    window.requestAnimationFrame(() => {
+      const input = [...document.querySelectorAll("[data-feedback-input]")]
+        .find((candidate) => candidate.dataset.feedbackInput === key);
+      if (input) {
+        input.focus();
+        input.setSelectionRange(input.value.length, input.value.length);
+      }
+    });
+  }
+}
+
+function decorateFeedbackTargets(root) {
+  const targets = [];
+  if (root?.matches?.("[data-feedback-key]")) {
+    targets.push(root);
+  }
+  targets.push(...(root?.querySelectorAll?.("[data-feedback-key]") || []));
+  for (const target of targets) {
+    decorateFeedbackTarget(target);
+  }
+}
+
+function decorateFeedbackTarget(target) {
+  const key = target.dataset.feedbackKey;
+  if (!key) {
+    return;
+  }
+  target.classList.add("feedback-target");
+  const heading = [...target.children].find((child) => child.matches(
+    "header, .matrix-heading, .fine-timing-panel-heading, .cell-detail-heading",
+  ));
+  let button = [...target.querySelectorAll("[data-feedback-toggle]")]
+    .find((candidate) => candidate.dataset.feedbackToggle === key);
+  if (!button) {
+    button = document.createElement("button");
+    button.type = "button";
+    button.className = "feedback-button";
+    button.dataset.feedbackToggle = key;
+    button.innerHTML = `
+      <svg data-lucide="ear" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+        stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M6 8.5a6.5 6.5 0 1 1 13 0c0 6-6 6-6 10a3.5 3.5 0 1 1-7 0"></path>
+        <path d="M15 8.5a2.5 2.5 0 0 0-5 0v1a2 2 0 1 1 0 4"></path>
+      </svg>`;
+    button.title = "Leave feedback";
+    button.setAttribute("aria-label", "Leave feedback");
+    if (heading) {
+      heading.classList.add("feedback-heading");
+      heading.append(button);
+    } else {
+      button.classList.add("floating");
+      target.prepend(button);
+    }
+  }
+
+  const composerId = feedbackComposerId(key);
+  const expanded = state.expandedFeedbackKeys.has(key);
+  const entry = feedbackEntry(key);
+  button.classList.toggle("has-feedback", Boolean(entry));
+  button.setAttribute("aria-expanded", String(expanded));
+  button.setAttribute("aria-controls", composerId);
+
+  let composer = [...target.querySelectorAll(".feedback-composer")]
+    .find((candidate) => candidate.dataset.feedbackComposer === key);
+  if (!expanded) {
+    composer?.remove();
+    return;
+  }
+  if (!composer) {
+    composer = document.createElement("div");
+    composer.className = "feedback-composer";
+    composer.id = composerId;
+    composer.dataset.feedbackComposer = key;
+    const input = document.createElement("textarea");
+    input.rows = 3;
+    input.placeholder = "Feedback";
+    input.value = entry?.text || "";
+    input.dataset.feedbackInput = key;
+    input.dataset.renderKey = `feedback:${key}:textarea`;
+    input.setAttribute("aria-label", "UI feedback");
+    composer.append(input);
+    if (heading) {
+      heading.after(composer);
+    } else {
+      button.after(composer);
+    }
+  }
+}
+
+function feedbackComposerId(key) {
+  return `feedback-composer-${key.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
+}
+
+async function copyFeedback() {
+  const transcript = elements.feedbackTranscript.value;
+  if (!transcript) {
+    return;
+  }
+  let copied = false;
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(transcript);
+      copied = true;
+    }
+  } catch {
+    copied = false;
+  }
+  if (!copied) {
+    elements.feedbackTranscript.focus();
+    elements.feedbackTranscript.select();
+    try {
+      copied = document.execCommand("copy");
+    } catch {
+      copied = false;
+    }
+  }
+  if (copied) {
+    showElementNotice(elements.feedbackNotice, "Feedback copied.", "success");
+  } else {
+    elements.feedbackTranscript.focus();
+    elements.feedbackTranscript.select();
+    showElementNotice(elements.feedbackNotice, "Copy failed. The feedback text is selected.");
+  }
+}
+
+function clearFeedback() {
+  if (!window.confirm("Clear all collected feedback?")) {
+    return;
+  }
+  state.feedbackEntries = [];
+  state.expandedFeedbackKeys.clear();
+  persistFeedbackEntries();
+  renderFeedback();
+  showElementNotice(elements.feedbackNotice, "Feedback cleared.", "success");
 }
 
 function renderScopeFields() {
@@ -788,6 +1004,7 @@ function renderRoute() {
     elements.policyView,
     elements.cellsView,
     elements.schedulerControlView,
+    elements.feedbackView,
   ]) {
     view.classList.toggle("hidden", view.dataset.view !== state.route);
   }
@@ -803,6 +1020,8 @@ function renderRoute() {
     window.requestAnimationFrame(renderHeatmap);
   } else if (state.route === "control") {
     renderSchedulerControl();
+  } else if (state.route === "feedback") {
+    renderFeedback();
   } else {
     renderInspectionViews();
   }
@@ -1351,7 +1570,7 @@ function renderFineTiming() {
     hideElementNotice(elements.fineTimingNotice);
   }
 
-  elements.fineTimingPanels.innerHTML = fineTimingCaptureModels(timing)
+  replaceKeyedHtml(elements.fineTimingPanels, fineTimingCaptureModels(timing)
     .map((capture) => {
       const pending = state.fineTimingPending.has(capture.callback);
       const availabilityId = `fine-${capture.callback}-availability`;
@@ -1373,7 +1592,8 @@ function renderFineTiming() {
             </tr>`).join("")
         : '<tr><td class="callback-empty" colspan="6">No captured samples.</td></tr>';
       return `
-        <section class="fine-timing-panel" aria-labelledby="fine-${capture.callback}">
+        <section class="fine-timing-panel" aria-labelledby="fine-${capture.callback}"
+          data-feedback-key="Callbacks:Fine-grained-timing:${escapeHtml(capture.label.replaceAll(" ", "-"))}">
           <header class="fine-timing-panel-heading">
             <div>
               <h4 id="fine-${capture.callback}">${escapeHtml(capture.label)}</h4>
@@ -1404,7 +1624,7 @@ function renderFineTiming() {
           </div>
         </section>`;
     })
-    .join("");
+    .join(""));
 }
 
 function fineTimingDurationCell(value) {
@@ -1512,7 +1732,8 @@ function renderSlot(slot) {
       : "Empty";
   if (!slot.policy) {
     return `
-      <section class="slot-panel empty-slot" aria-label="Ladder slot ${slot.slot}, empty">
+      <section class="slot-panel empty-slot" aria-label="Ladder slot ${slot.slot}, empty"
+        data-feedback-key="Policy:Slot-${slot.slot}">
         <header class="slot-heading">
           <h3>Slot ${slot.slot}</h3>
           <span class="slot-state empty">${stateLabel}</span>
@@ -1541,7 +1762,8 @@ function renderSlot(slot) {
         </li>`).join("")
     : "<li>None</li>";
   return `
-    <section class="slot-panel" aria-label="Ladder slot ${slot.slot}, ${stateLabel}">
+    <section class="slot-panel" aria-label="Ladder slot ${slot.slot}, ${stateLabel}"
+      data-feedback-key="Policy:Slot-${slot.slot}">
       <header class="slot-heading">
         <div>
           <h3>Slot ${slot.slot}</h3>
@@ -1916,6 +2138,7 @@ function replaceKeyedHtml(container, html) {
     document.activeElement,
   );
   container.innerHTML = html;
+  decorateFeedbackTargets(container);
   restoreKeyedRenderState(
     container.querySelectorAll("[data-render-key]"),
     snapshot,
