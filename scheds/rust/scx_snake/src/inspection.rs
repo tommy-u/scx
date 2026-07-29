@@ -13,7 +13,7 @@ use crate::policy::{
     RUNG_FLAG_INTERSECT_TASK_ALLOWED, RUNG_FLAG_PICK_IDLE_CORE, RUNG_FLAG_PICK_RANDOM,
 };
 use crate::queue_topology::QueueTopology;
-use crate::stats::{Metrics, RungMetrics};
+use crate::stats::{CallbackTimingMetrics, Metrics, RungMetrics};
 
 #[derive(Clone, Debug)]
 pub struct SlotPolicy {
@@ -153,11 +153,37 @@ pub struct InspectionView {
     pub schema_version: u32,
     pub active_slot: u32,
     pub callback_timing_sample_rate: u32,
+    pub fine_timing: FineTimingInspectionView,
     pub fairness: FairnessInspectionView,
     pub queue_topology: Option<QueueTopologyInspectionView>,
     pub slots: Vec<SlotInspectionView>,
     pub cells: Vec<CellInspectionView>,
     pub task_mappings: Vec<TaskMappingInspectionView>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FineTimingCaptureState {
+    Inactive,
+    Collecting,
+    Historical,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct FineTimingCaptureInspectionView {
+    pub callback: String,
+    pub state: FineTimingCaptureState,
+    pub session_id: Option<u64>,
+    pub policy_generation: Option<u64>,
+    pub started_at_ms: Option<u64>,
+    pub stopped_at_ms: Option<u64>,
+    pub stages: BTreeMap<String, CallbackTimingMetrics>,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct FineTimingInspectionView {
+    pub sample_rate: u32,
+    pub captures: Vec<FineTimingCaptureInspectionView>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -332,6 +358,7 @@ impl Inspector {
             schema_version: 1,
             active_slot: self.active_slot,
             callback_timing_sample_rate: self.callback_timing_sample_rate,
+            fine_timing: FineTimingInspectionView::default(),
             fairness: self.fairness.clone(),
             queue_topology: self.queue_topology.clone(),
             slots,

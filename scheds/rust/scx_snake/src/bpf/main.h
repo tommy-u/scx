@@ -8,11 +8,18 @@
 
 static u32 nr_cpu_ids;
 const volatile u32 callback_timing_sample_rate = 64;
+extern u64 select_fine_timing_session_id;
 
 struct snake_ladder_ctx {
 	u32				 slot;
 	u32				 *readers;
 	const struct snake_compiled_ladder *ladder;
+};
+
+struct snake_fine_timing_ctx {
+	u64 session_id;
+	u32 callback;
+	u32 active;
 };
 
 /* Userspace stores the resolved assignment and its independent policy layers. */
@@ -112,6 +119,19 @@ struct {
 	__type(value, struct snake_callback_timing);
 	__uint(max_entries, SNAKE_LADDER_SLOTS * SNAKE_NR_CALLBACKS);
 } callback_timing SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__type(key, u32);
+	__type(value, struct snake_fine_timing_config);
+	__uint(max_entries, 1);
+} fine_timing_config SEC(".maps");
+
+/* Userspace folds sampled stage events into fixed-size histograms. */
+struct {
+	__uint(type, BPF_MAP_TYPE_RINGBUF);
+	__uint(max_entries, 1024 * 1024);
+} fine_timing_events SEC(".maps");
 
 struct {
 	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
@@ -230,12 +250,103 @@ callback_timing_finish(const struct snake_ladder_ctx *ctx, u32 callback,
 	timing->buckets[bucket]++;
 }
 
-static __always_inline void
+static __noinline void
 release_timed_callback(struct snake_ladder_ctx *ctx, u32 callback,
 		       u64 started_at)
 {
 	callback_timing_finish(ctx, callback, started_at);
 	release_active_ladder(ctx);
+}
+
+static __always_inline struct snake_fine_timing_ctx
+fine_timing_begin(u32 callback, u64 callback_started_at)
+{
+	struct snake_fine_timing_ctx ctx = {};
+	struct snake_fine_timing_config *config;
+	u32 key = 0, mask;
+
+	if (!callback_started_at || callback >= SNAKE_NR_FINE_TIMING_CALLBACKS)
+		return ctx;
+	config = bpf_map_lookup_elem(&fine_timing_config, &key);
+	if (!config)
+		return ctx;
+	if (callback == SNAKE_FINE_TIMING_CALLBACK_SELECT_CPU)
+		mask = SNAKE_FINE_TIMING_SELECT_CPU;
+	else if (callback == SNAKE_FINE_TIMING_CALLBACK_ENQUEUE)
+		mask = SNAKE_FINE_TIMING_ENQUEUE;
+	else
+		mask = SNAKE_FINE_TIMING_DISPATCH;
+	if (!(READ_ONCE(config->enabled_mask) & mask))
+		return ctx;
+	ctx.session_id = READ_ONCE(config->session_ids[callback]);
+	if (!ctx.session_id)
+		return ctx;
+	ctx.callback = callback;
+	ctx.active = 1;
+	return ctx;
+}
+
+static __always_inline u64
+fine_timing_start(const struct snake_fine_timing_ctx *ctx)
+{
+	return ctx && ctx->active ? bpf_ktime_get_ns() : 0;
+}
+
+static __always_inline bool
+fine_timing_stage_valid(const struct snake_fine_timing_ctx *ctx, u32 stage)
+{
+	if (ctx->callback == SNAKE_FINE_TIMING_CALLBACK_SELECT_CPU)
+		return stage <= SNAKE_FINE_TIMING_SELECT_POLICY_LADDER;
+	if (ctx->callback == SNAKE_FINE_TIMING_CALLBACK_ENQUEUE)
+		return stage >= SNAKE_FINE_TIMING_ENQUEUE_ACQUIRE_LADDER &&
+		       stage <= SNAKE_FINE_TIMING_ENQUEUE_FINISH;
+	if (ctx->callback == SNAKE_FINE_TIMING_CALLBACK_DISPATCH)
+		return stage >= SNAKE_FINE_TIMING_DISPATCH_ACQUIRE_LADDER &&
+		       stage <= SNAKE_FINE_TIMING_DISPATCH_FINISH;
+	return false;
+}
+
+static __noinline void
+fine_timing_finish_select(u64 started_at)
+{
+	struct snake_fine_timing_event event = {};
+	u64 session_id = READ_ONCE(select_fine_timing_session_id);
+
+	if (!started_at || !session_id)
+		return;
+	event.session_id = session_id;
+	event.elapsed_ns = bpf_ktime_get_ns() - started_at;
+	event.stage = SNAKE_FINE_TIMING_SELECT_POLICY_LADDER;
+	bpf_ringbuf_output(&fine_timing_events, &event, sizeof(event), 0);
+}
+
+static __noinline void
+fine_timing_finish(const struct snake_fine_timing_ctx *ctx, u32 stage,
+		   u64 started_at)
+{
+	struct snake_fine_timing_config *config;
+	struct snake_fine_timing_event event = {};
+	u32 key = 0, mask;
+
+	if (!started_at || !ctx || !ctx->active ||
+	    !fine_timing_stage_valid(ctx, stage))
+		return;
+	config = bpf_map_lookup_elem(&fine_timing_config, &key);
+	if (!config)
+		return;
+	if (ctx->callback == SNAKE_FINE_TIMING_CALLBACK_SELECT_CPU)
+		mask = SNAKE_FINE_TIMING_SELECT_CPU;
+	else if (ctx->callback == SNAKE_FINE_TIMING_CALLBACK_ENQUEUE)
+		mask = SNAKE_FINE_TIMING_ENQUEUE;
+	else
+		mask = SNAKE_FINE_TIMING_DISPATCH;
+	if (!(READ_ONCE(config->enabled_mask) & mask) ||
+	    READ_ONCE(config->session_ids[ctx->callback]) != ctx->session_id)
+		return;
+	event.session_id = ctx->session_id;
+	event.elapsed_ns = bpf_ktime_get_ns() - started_at;
+	event.stage = stage;
+	bpf_ringbuf_output(&fine_timing_events, &event, sizeof(event), 0);
 }
 
 static __always_inline void
@@ -277,8 +388,8 @@ static __always_inline void stat_max(const struct snake_ladder_ctx *ctx, u32 idx
 }
 
 /* Record total and maximum latency for one select_cpu invocation. */
-static __always_inline void finish_select(const struct snake_ladder_ctx *ctx,
-					  u64 started_at)
+static __noinline void finish_select(const struct snake_ladder_ctx *ctx,
+				     u64 started_at)
 {
 	u64 elapsed = bpf_ktime_get_ns() - started_at;
 

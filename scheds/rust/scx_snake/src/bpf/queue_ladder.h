@@ -78,14 +78,21 @@ validate_queue_ladders(const struct snake_compiled_ladder *ladder)
 
 static __always_inline int
 queue_ladder_enqueue(struct snake_ladder_ctx *ctx, struct task_struct *p,
-		     u64 enq_flags)
+		     u64 enq_flags, const struct snake_fine_timing_ctx *fine)
 {
 	struct snake_task_runtime *runtime;
 	s32			   selected_cpu = -1;
 	u32			   i;
+	u64			   stage_started_at;
 
+	stage_started_at = fine_timing_start(fine);
 	queue_fairness_cancel_direct(ctx, p);
+	fine_timing_finish(fine, SNAKE_FINE_TIMING_ENQUEUE_CANCEL_DIRECT,
+			   stage_started_at);
+	stage_started_at = fine_timing_start(fine);
 	runtime = queue_fairness_prepare_runnable(ctx, p);
+	fine_timing_finish(fine, SNAKE_FINE_TIMING_ENQUEUE_PREPARE_RUNNABLE,
+			   stage_started_at);
 	if (!runtime)
 		return -EINVAL;
 	if (runtime->selected_cpu_valid && runtime->selected_cpu < nr_cpu_ids &&
@@ -105,10 +112,11 @@ queue_ladder_enqueue(struct snake_ladder_ctx *ctx, struct task_struct *p,
 			return -EINVAL;
 		if (rung->opcode == SNAKE_ENQUEUE_OP_CELL)
 			ret = queue_fairness_enqueue_cell(ctx, p, runtime,
-						  selected_cpu, enq_flags);
+						  selected_cpu, enq_flags, fine);
 		else if (rung->opcode == SNAKE_ENQUEUE_OP_AFFINITY)
 			ret = queue_fairness_enqueue_affinity(ctx, p, runtime,
-						      selected_cpu, enq_flags);
+						      selected_cpu, enq_flags,
+						      fine);
 		else
 			return -EINVAL;
 		if (!ret)
@@ -121,24 +129,36 @@ queue_ladder_enqueue(struct snake_ladder_ctx *ctx, struct task_struct *p,
 
 static __always_inline int
 queue_ladder_dispatch(struct snake_ladder_ctx *ctx, s32 cpu,
-		      struct task_struct *prev)
+		      struct task_struct *prev,
+		      const struct snake_fine_timing_ctx *fine)
 {
 	struct snake_queue_cpu_state *state;
 	struct snake_cpu_queue       *cpuq;
 	u32			      key = 0, step, start;
 	s32			      local_queued;
+	u64			      stage_started_at;
 
+	stage_started_at = fine_timing_start(fine);
 	cpuq = queue_cpu(cpu);
+	fine_timing_finish(fine, SNAKE_FINE_TIMING_DISPATCH_ROUTE_LOOKUP,
+			   stage_started_at);
 	if (!cpuq)
 		return -EINVAL;
+	stage_started_at = fine_timing_start(fine);
 	local_queued = scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | cpu);
+	fine_timing_finish(fine, SNAKE_FINE_TIMING_DISPATCH_LOCAL_DSQ_CHECK,
+			   stage_started_at);
 	if (local_queued < 0)
 		return local_queued;
 	if (local_queued > 0)
 		return 0;
+	stage_started_at = fine_timing_start(fine);
 	state = bpf_map_lookup_elem(&queue_cpu_states, &key);
-	if (!state)
+	if (!state) {
+		fine_timing_finish(fine, SNAKE_FINE_TIMING_DISPATCH_STATE_LOOKUP,
+				   stage_started_at);
 		return -EINVAL;
+	}
 	if (!state->initialized || state->generation != ctx->ladder->generation ||
 	    state->next_dispatch_rung >= ctx->ladder->nr_dispatch_rungs) {
 		state->generation = ctx->ladder->generation;
@@ -146,6 +166,8 @@ queue_ladder_dispatch(struct snake_ladder_ctx *ctx, s32 cpu,
 		state->next_equal_class = SNAKE_QUEUE_CLASS_NORMAL;
 		state->initialized = 1;
 	}
+	fine_timing_finish(fine, SNAKE_FINE_TIMING_DISPATCH_STATE_LOOKUP,
+			   stage_started_at);
 	if (ctx->ladder->nr_dispatch_rungs == 1) {
 		const struct snake_queue_rung *only =
 			MEMBER_VPTR(ctx->ladder->dispatch_rungs, [0]);
@@ -155,10 +177,18 @@ queue_ladder_dispatch(struct snake_ladder_ctx *ctx, s32 cpu,
 			return -EINVAL;
 		if (only->opcode == SNAKE_DISPATCH_OP_MIN_VTIME) {
 			result = queue_fairness_dispatch_min(
-				ctx, cpuq, cpu, prev, &state->next_equal_class);
+				ctx, cpuq, cpu, prev, &state->next_equal_class,
+				fine);
 			if (result < 0)
 				return result;
-			return result ? 0 : queue_fairness_replenish(ctx, cpuq, prev);
+			if (result)
+				return 0;
+			stage_started_at = fine_timing_start(fine);
+			result = queue_fairness_replenish(ctx, cpuq, prev);
+			fine_timing_finish(fine,
+					   SNAKE_FINE_TIMING_DISPATCH_REPLENISH,
+					   stage_started_at);
+			return result;
 		}
 	}
 	start = state->next_dispatch_rung;
@@ -178,7 +208,7 @@ queue_ladder_dispatch(struct snake_ladder_ctx *ctx, s32 cpu,
 		if (!rung)
 			return -EINVAL;
 		result = queue_fairness_dispatch_source(ctx, cpuq, cpu, prev,
-							 rung->opcode);
+							 rung->opcode, fine);
 		if (result < 0)
 			return result;
 		if (!result)
@@ -189,7 +219,11 @@ queue_ladder_dispatch(struct snake_ladder_ctx *ctx, s32 cpu,
 		state->next_dispatch_rung = index;
 		return 0;
 	}
-	return queue_fairness_replenish(ctx, cpuq, prev);
+	stage_started_at = fine_timing_start(fine);
+	local_queued = queue_fairness_replenish(ctx, cpuq, prev);
+	fine_timing_finish(fine, SNAKE_FINE_TIMING_DISPATCH_REPLENISH,
+			   stage_started_at);
+	return local_queued;
 }
 
 #endif /* __SCX_SNAKE_QUEUE_LADDER_H */

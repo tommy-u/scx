@@ -303,38 +303,64 @@ queue_fairness_direct_borrow(struct snake_ladder_ctx *ctx, struct task_struct *p
 static __always_inline int
 queue_fairness_enqueue_cell(struct snake_ladder_ctx *ctx, struct task_struct *p,
 			    struct snake_task_runtime *runtime,
-			    s32 selected_cpu, u64 enq_flags)
+			    s32 selected_cpu, u64 enq_flags,
+			    const struct snake_fine_timing_ctx *fine)
 {
 	struct snake_queue_cell    *cell;
-	struct snake_cpu_queue     *cpuq;
+	struct snake_cpu_queue     *cpuq = NULL;
 	s32			    target_cpu = selected_cpu;
+	s32			    ret = 0;
 	u64			    flags = enq_flags & ~SCX_ENQ_PREEMPT;
+	u64			    stage_started_at;
 
+	stage_started_at = fine_timing_start(fine);
 	cell = queue_cell(runtime->cell_index);
 	if (!cell)
-		return -EINVAL;
-	if (!queue_primary_subset(cell, p))
-		return -ENOENT;
+		ret = -EINVAL;
+	else if (!queue_primary_subset(cell, p))
+		ret = -ENOENT;
+	fine_timing_finish(fine, SNAKE_FINE_TIMING_ENQUEUE_CELL_VALIDATE,
+			   stage_started_at);
+	if (ret)
+		return ret;
+
+	stage_started_at = fine_timing_start(fine);
 	cpuq = target_cpu >= 0 ? queue_cpu(target_cpu) : NULL;
 	if (!cpuq || cpuq->owner_cell_index != runtime->cell_index) {
 		target_cpu = queue_pick_primary_cpu(cell, p, -1);
-		if (target_cpu < 0)
-			return target_cpu;
-		cpuq = queue_cpu(target_cpu);
+		if (target_cpu >= 0)
+			cpuq = queue_cpu(target_cpu);
 	}
-	if (!cpuq || cpuq->owner_cell_index != runtime->cell_index)
-		return -EINVAL;
+	if (target_cpu < 0)
+		ret = target_cpu;
+	else if (!cpuq || cpuq->owner_cell_index != runtime->cell_index)
+		ret = -EINVAL;
+	fine_timing_finish(fine, SNAKE_FINE_TIMING_ENQUEUE_PICK_TARGET,
+			   stage_started_at);
+	if (ret)
+		return ret;
+
 	runtime->queue_class = SNAKE_QUEUE_CLASS_NORMAL;
 	runtime->run_direct = 0;
 	runtime->direct_cell_valid = 0;
+	stage_started_at = fine_timing_start(fine);
 	if (!scx_bpf_dsq_insert_vtime(p,
 				       queue_normal_dsq(cpuq->normal_queue_index),
 				       SNAKE_VTIME_SLICE_NS, runtime->vruntime,
-				       flags))
+				       flags)) {
+		fine_timing_finish(fine,
+				   SNAKE_FINE_TIMING_ENQUEUE_NORMAL_DSQ_INSERT,
+				   stage_started_at);
 		return -EINVAL;
+	}
+	fine_timing_finish(fine, SNAKE_FINE_TIMING_ENQUEUE_NORMAL_DSQ_INSERT,
+			   stage_started_at);
+	stage_started_at = fine_timing_start(fine);
 	stat_inc(ctx, SNAKE_STAT_VTIME_ENQUEUES);
 	cell_stat_inc(ctx, runtime->cell_index, SNAKE_CELL_STAT_NORMAL_ENQUEUES);
 	scx_bpf_kick_cpu(target_cpu, SCX_KICK_IDLE);
+	fine_timing_finish(fine, SNAKE_FINE_TIMING_ENQUEUE_NORMAL_ACCOUNT_KICK,
+			   stage_started_at);
 	return 0;
 }
 
@@ -342,31 +368,43 @@ static __always_inline int
 queue_fairness_enqueue_affinity(struct snake_ladder_ctx *ctx,
 				struct task_struct *p,
 				struct snake_task_runtime *runtime,
-				s32 selected_cpu, u64 enq_flags)
+				s32 selected_cpu, u64 enq_flags,
+				const struct snake_fine_timing_ctx *fine)
 {
 	struct snake_cpu_queue *cpuq;
 	s32 target_cpu = queue_pick_allowed_cpu(p, selected_cpu);
+	s32 ret = 0;
 	u64 flags = enq_flags & ~SCX_ENQ_PREEMPT;
+	u64 stage_started_at = fine_timing_start(fine);
 
-	if (target_cpu < 0)
-		return target_cpu;
+	if (target_cpu < 0) {
+		ret = target_cpu;
+		goto out;
+	}
 	cpuq = queue_cpu(target_cpu);
 	if (!cpuq || queue_fairness_prepare_affinity(
-			     ctx, runtime, cpuq->owner_cell_index))
-		return -EINVAL;
+			     ctx, runtime, cpuq->owner_cell_index)) {
+		ret = -EINVAL;
+		goto out;
+	}
 	runtime->queue_class = SNAKE_QUEUE_CLASS_AFFINITY;
 	runtime->run_direct = 0;
 	runtime->direct_cell_valid = 0;
 	if (!scx_bpf_dsq_insert_vtime(p, queue_affinity_dsq(target_cpu),
 				       SNAKE_VTIME_SLICE_NS,
-				       runtime->affinity_vruntime, flags))
-		return -EINVAL;
+				       runtime->affinity_vruntime, flags)) {
+		ret = -EINVAL;
+		goto out;
+	}
 	stat_inc(ctx, SNAKE_STAT_VTIME_ENQUEUES);
 	stat_inc(ctx, SNAKE_STAT_VTIME_CPU_ENQUEUES);
 	cell_stat_inc(ctx, runtime->cell_index,
 		      SNAKE_CELL_STAT_AFFINITY_ENQUEUES);
 	scx_bpf_kick_cpu(target_cpu, SCX_KICK_IDLE);
-	return 0;
+out:
+	fine_timing_finish(fine, SNAKE_FINE_TIMING_ENQUEUE_AFFINITY_PATH,
+			   stage_started_at);
+	return ret;
 }
 
 static __always_inline bool queue_fairness_head(u64 dsq_id, u64 *vtime)
@@ -426,10 +464,13 @@ struct snake_queue_candidate {
 
 static __always_inline int
 queue_fairness_normal_candidate(struct snake_cpu_queue *cpuq,
-				struct snake_queue_candidate *candidate)
+				struct snake_queue_candidate *candidate,
+				const struct snake_fine_timing_ctx *fine)
 {
 	struct snake_queue_cell *cell;
 	u32 normal_index;
+	u64 stage_started_at;
+	bool found;
 
 	if (!cpuq || !candidate)
 		return -EINVAL;
@@ -439,9 +480,19 @@ queue_fairness_normal_candidate(struct snake_cpu_queue *cpuq,
 		return -EINVAL;
 	normal_index = cpuq->normal_queue_index;
 	candidate->dsq_id = queue_normal_dsq(normal_index);
-	if (!queue_fairness_head(candidate->dsq_id, &candidate->vtime)) {
-		if (!queue_fairness_remote_normal(cell, normal_index, &normal_index,
-						  &candidate->vtime))
+	stage_started_at = fine_timing_start(fine);
+	found = queue_fairness_head(candidate->dsq_id, &candidate->vtime);
+	fine_timing_finish(fine, SNAKE_FINE_TIMING_DISPATCH_NORMAL_HEAD_PEEK,
+			   stage_started_at);
+	if (!found) {
+		stage_started_at = fine_timing_start(fine);
+		found = queue_fairness_remote_normal(cell, normal_index,
+						     &normal_index,
+						     &candidate->vtime);
+		fine_timing_finish(fine,
+				   SNAKE_FINE_TIMING_DISPATCH_REMOTE_NORMAL_SCAN,
+				   stage_started_at);
+		if (!found)
 			return 0;
 		candidate->dsq_id = queue_normal_dsq(normal_index);
 	}
@@ -594,22 +645,31 @@ queue_fairness_keep_running_min(struct snake_ladder_ctx *ctx,
 static __always_inline s32
 queue_fairness_dispatch_min(struct snake_ladder_ctx *ctx,
 			    struct snake_cpu_queue *cpuq, s32 cpu,
-			    struct task_struct *prev, u32 *equal_preference)
+			    struct task_struct *prev, u32 *equal_preference,
+			    const struct snake_fine_timing_ctx *fine)
 {
 	struct snake_queue_candidate normal = {}, affinity = {};
 	struct snake_queue_candidate *winner, *loser;
 	s32 keep, ret;
+	u64 stage_started_at;
 
 	if (!equal_preference)
 		return -EINVAL;
-	ret = queue_fairness_normal_candidate(cpuq, &normal);
+	ret = queue_fairness_normal_candidate(cpuq, &normal, fine);
 	if (ret)
 		return ret;
+	stage_started_at = fine_timing_start(fine);
 	ret = queue_fairness_affinity_candidate(cpu, &affinity);
+	fine_timing_finish(fine, SNAKE_FINE_TIMING_DISPATCH_AFFINITY_HEAD_PEEK,
+			   stage_started_at);
 	if (ret)
 		return ret;
-	if (!normal.valid && !affinity.valid)
+	stage_started_at = fine_timing_start(fine);
+	if (!normal.valid && !affinity.valid) {
+		fine_timing_finish(fine, SNAKE_FINE_TIMING_DISPATCH_ARBITRATE,
+				   stage_started_at);
 		return 0;
+	}
 	if (!affinity.valid ||
 	    (normal.valid && time_before(normal.vtime, affinity.vtime))) {
 		winner = &normal;
@@ -629,33 +689,52 @@ queue_fairness_dispatch_min(struct snake_ladder_ctx *ctx,
 			*equal_preference = SNAKE_QUEUE_CLASS_AFFINITY;
 		}
 	}
+	fine_timing_finish(fine, SNAKE_FINE_TIMING_DISPATCH_ARBITRATE,
+			   stage_started_at);
 
+	stage_started_at = fine_timing_start(fine);
 	keep = queue_fairness_keep_running_min(ctx, cpuq, prev, winner->vtime);
+	fine_timing_finish(fine, SNAKE_FINE_TIMING_DISPATCH_KEEP_RUNNING,
+			   stage_started_at);
 	if (keep < 0)
 		return keep;
 	if (keep)
 		return 1;
-	if (queue_fairness_move(ctx, winner->dsq_id, winner->class))
+	stage_started_at = fine_timing_start(fine);
+	ret = queue_fairness_move(ctx, winner->dsq_id, winner->class);
+	fine_timing_finish(fine, SNAKE_FINE_TIMING_DISPATCH_MOVE_TO_LOCAL,
+			   stage_started_at);
+	if (ret)
 		return 1;
 	if (!loser)
 		return 0;
+	stage_started_at = fine_timing_start(fine);
 	keep = queue_fairness_keep_running_min(ctx, cpuq, prev, loser->vtime);
+	fine_timing_finish(fine, SNAKE_FINE_TIMING_DISPATCH_KEEP_RUNNING,
+			   stage_started_at);
 	if (keep < 0)
 		return keep;
 	if (keep)
 		return 1;
-	return queue_fairness_move(ctx, loser->dsq_id, loser->class) ? 1 : 0;
+	stage_started_at = fine_timing_start(fine);
+	ret = queue_fairness_move(ctx, loser->dsq_id, loser->class);
+	fine_timing_finish(fine, SNAKE_FINE_TIMING_DISPATCH_MOVE_TO_LOCAL,
+			   stage_started_at);
+	return ret ? 1 : 0;
 }
 
 static __always_inline s32
 queue_fairness_dispatch_source(struct snake_ladder_ctx *ctx,
 			       struct snake_cpu_queue *cpuq, s32 cpu,
-			       struct task_struct *prev, u32 opcode)
+			       struct task_struct *prev, u32 opcode,
+			       const struct snake_fine_timing_ctx *fine)
 {
 	struct snake_queue_cell *cell;
 	u64 dsq_id, candidate_vtime = 0;
+	u64 stage_started_at;
 	u32 class, normal_index;
 	s32 keep;
+	bool found;
 
 	if (!cpuq)
 		return -EINVAL;
@@ -665,30 +744,50 @@ queue_fairness_dispatch_source(struct snake_ladder_ctx *ctx,
 			return -EINVAL;
 		normal_index = cpuq->normal_queue_index;
 		dsq_id = queue_normal_dsq(normal_index);
-		if (!queue_fairness_head(dsq_id, &candidate_vtime)) {
-			if (!queue_fairness_remote_normal(cell, normal_index,
-						  &normal_index,
-						  &candidate_vtime))
+		stage_started_at = fine_timing_start(fine);
+		found = queue_fairness_head(dsq_id, &candidate_vtime);
+		fine_timing_finish(fine,
+				   SNAKE_FINE_TIMING_DISPATCH_NORMAL_HEAD_PEEK,
+				   stage_started_at);
+		if (!found) {
+			stage_started_at = fine_timing_start(fine);
+			found = queue_fairness_remote_normal(
+				cell, normal_index, &normal_index, &candidate_vtime);
+			fine_timing_finish(
+				fine, SNAKE_FINE_TIMING_DISPATCH_REMOTE_NORMAL_SCAN,
+				stage_started_at);
+			if (!found)
 				return 0;
 			dsq_id = queue_normal_dsq(normal_index);
 		}
 		class = SNAKE_QUEUE_CLASS_NORMAL;
 	} else if (opcode == SNAKE_DISPATCH_OP_AFFINITY) {
 		dsq_id = queue_affinity_dsq(cpu);
-		if (!queue_fairness_head(dsq_id, &candidate_vtime))
+		stage_started_at = fine_timing_start(fine);
+		found = queue_fairness_head(dsq_id, &candidate_vtime);
+		fine_timing_finish(fine,
+				   SNAKE_FINE_TIMING_DISPATCH_AFFINITY_HEAD_PEEK,
+				   stage_started_at);
+		if (!found)
 			return 0;
 		class = SNAKE_QUEUE_CLASS_AFFINITY;
 	} else {
 		return -EINVAL;
 	}
 
-	keep = queue_fairness_keep_running(ctx, cpuq, prev, class,
-					   candidate_vtime);
+	stage_started_at = fine_timing_start(fine);
+	keep = queue_fairness_keep_running(ctx, cpuq, prev, class, candidate_vtime);
+	fine_timing_finish(fine, SNAKE_FINE_TIMING_DISPATCH_KEEP_RUNNING,
+			   stage_started_at);
 	if (keep < 0)
 		return keep;
 	if (keep)
 		return 1;
-	return queue_fairness_move(ctx, dsq_id, class) ? 1 : 0;
+	stage_started_at = fine_timing_start(fine);
+	keep = queue_fairness_move(ctx, dsq_id, class);
+	fine_timing_finish(fine, SNAKE_FINE_TIMING_DISPATCH_MOVE_TO_LOCAL,
+			   stage_started_at);
+	return keep ? 1 : 0;
 }
 
 static __always_inline int

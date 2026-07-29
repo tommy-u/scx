@@ -18,6 +18,7 @@ import {
   compactCpuList,
   decorateCells,
   fieldReferenceGroups,
+  fineTimingCaptureModels,
   formatCallbackDuration,
   ladderPercentages,
   queueLadderSections,
@@ -46,6 +47,8 @@ const elements = {
   callbacksNotice: document.querySelector("#callbacksNotice"),
   callbacksView: document.querySelector("#callbacksView"),
   callbackTimingRows: document.querySelector("#callbackTimingRows"),
+  fineTimingNotice: document.querySelector("#fineTimingNotice"),
+  fineTimingPanels: document.querySelector("#fineTimingPanels"),
   cgroupField: document.querySelector("#cgroupField"),
   cgroupInput: document.querySelector("#cgroupInput"),
   cellsFreshness: document.querySelector("#cellsFreshness"),
@@ -92,6 +95,10 @@ const state = {
   callbackTiming: null,
   callbackTimingError: null,
   callbackTimingLoading: false,
+  fineTiming: null,
+  fineTimingError: null,
+  fineTimingLoading: false,
+  fineTimingPending: new Set(),
   eventSource: null,
   geometry: null,
   inspection: null,
@@ -138,9 +145,11 @@ async function start() {
   renderHeatmap();
   await loadInspection();
   await loadCallbackTiming();
+  await loadFineTiming();
   await loadPolicyCatalog();
   window.setInterval(loadInspection, 1_000);
   window.setInterval(loadCallbackTiming, 1_000);
+  window.setInterval(loadFineTiming, 1_000);
   window.setInterval(loadPolicyCatalog, 5_000);
 }
 
@@ -188,6 +197,12 @@ function bindControls() {
   elements.callbackRangeSelect.addEventListener("change", () => {
     state.callbackRange = elements.callbackRangeSelect.value;
     loadCallbackTiming();
+  });
+  elements.fineTimingPanels.addEventListener("change", (event) => {
+    const control = event.target.closest("[data-fine-timing-callback]");
+    if (control) {
+      setFineTiming(control.dataset.fineTimingCallback, control.checked);
+    }
   });
   document.querySelectorAll('input[name="cpuOrder"]').forEach((control) => {
     control.addEventListener("change", () => {
@@ -660,6 +675,62 @@ async function loadCallbackTiming() {
   }
 }
 
+async function loadFineTiming() {
+  if (state.fineTimingLoading) {
+    return;
+  }
+  state.fineTimingLoading = true;
+  try {
+    const response = await fetch("/api/fine-timing", { cache: "no-store" });
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      throw new Error(body.error || `Fine timing request failed (${response.status})`);
+    }
+    state.fineTiming = await response.json();
+    state.fineTimingError = null;
+  } catch (error) {
+    state.fineTimingError = error.message;
+  } finally {
+    state.fineTimingLoading = false;
+  }
+  if (state.route === "callbacks") {
+    renderFineTiming();
+  }
+}
+
+async function setFineTiming(callback, enabled) {
+  if (state.fineTimingPending.has(callback)) {
+    return;
+  }
+  state.fineTimingPending.add(callback);
+  state.fineTimingError = null;
+  renderFineTiming();
+  try {
+    const response = await fetch("/api/fine-timing", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-snake-token": token,
+      },
+      body: JSON.stringify({ callback, enabled }),
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(payload.error || `Fine timing update failed (${response.status})`);
+    }
+    const capture = state.fineTiming?.captures?.find((item) => item.callback === callback);
+    if (capture) {
+      capture.state = enabled ? "collecting" : "historical";
+      capture.session_id = payload.session_id;
+    }
+  } catch (error) {
+    state.fineTimingError = error.message;
+  } finally {
+    state.fineTimingPending.delete(callback);
+    renderFineTiming();
+  }
+}
+
 async function loadInspection() {
   if (state.inspectionLoading) {
     return;
@@ -770,6 +841,72 @@ function renderCallbackTiming() {
         <td class="${callbackDurationClass(row.p95_ns)}">${escapeHtml(formatCallbackDuration(row.p95_ns))}</td>
         <td class="${callbackDurationClass(row.p99_ns)}">${escapeHtml(formatCallbackDuration(row.p99_ns))}</td>
       </tr>`).join("");
+  renderFineTiming();
+}
+
+function renderFineTiming() {
+  const timing = state.fineTiming;
+  const message = state.fineTimingError
+    || timing?.error
+    || (timing?.status === "unsupported"
+      ? "The active Snake scheduler does not support fine-grained timing."
+      : timing?.status === "unavailable"
+        ? "Fine-grained timing is unavailable."
+        : null);
+  if (message) {
+    showElementNotice(elements.fineTimingNotice, message);
+  } else {
+    hideElementNotice(elements.fineTimingNotice);
+  }
+
+  const controlsEnabled = timing?.status === "ready" && timing?.sample_rate > 0;
+  elements.fineTimingPanels.innerHTML = fineTimingCaptureModels(timing)
+    .map((capture) => {
+      const pending = state.fineTimingPending.has(capture.callback);
+      const metadata = capture.session_id == null
+        ? "No capture"
+        : `Session ${formatCount(capture.session_id)} · generation ${formatCount(capture.policy_generation)}`;
+      const stages = capture.stages?.length
+        ? capture.stages.map((stage) => `
+            <tr>
+              <th scope="row"><code>${escapeHtml(stage.stage)}</code></th>
+              <td>${formatCount(stage.samples)}</td>
+              ${fineTimingDurationCell(stage.mean_ns)}
+              ${fineTimingDurationCell(stage.p50_ns)}
+              ${fineTimingDurationCell(stage.p95_ns)}
+              ${fineTimingDurationCell(stage.p99_ns)}
+            </tr>`).join("")
+        : '<tr><td class="callback-empty" colspan="6">No captured samples.</td></tr>';
+      return `
+        <section class="fine-timing-panel" aria-labelledby="fine-${capture.callback}">
+          <header class="fine-timing-panel-heading">
+            <div>
+              <h4 id="fine-${capture.callback}">${escapeHtml(capture.label)}</h4>
+              <p>${escapeHtml(metadata)}</p>
+            </div>
+            <div class="fine-timing-actions">
+              <span class="fine-timing-state ${capture.state}">${escapeHtml(capture.stateLabel)}</span>
+              <label class="fine-timing-toggle">
+                <input type="checkbox" data-fine-timing-callback="${capture.callback}"
+                  ${capture.checked ? "checked" : ""}
+                  ${!controlsEnabled || pending ? "disabled" : ""}>
+                <span>Collect Fine-grain Timestamps</span>
+              </label>
+            </div>
+          </header>
+          <div class="fine-timing-table-wrap">
+            <table>
+              <thead><tr><th>Stage</th><th>Samples</th><th>Mean (ns)</th><th>p50 approx. (ns)</th><th>p95 approx. (ns)</th><th>p99 approx. (ns)</th></tr></thead>
+              <tbody>${stages}</tbody>
+            </table>
+          </div>
+        </section>`;
+    })
+    .join("");
+}
+
+function fineTimingDurationCell(value) {
+  return `<td class="${callbackDurationClass(value)}">${escapeHtml(formatCallbackDuration(value))}</td>`;
 }
 
 function renderPolicy() {

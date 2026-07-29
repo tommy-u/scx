@@ -4,6 +4,7 @@ mod bpf_intf;
 mod bpf_skel;
 mod cell_allocation;
 mod control;
+mod fine_timing;
 mod inspection;
 mod mask_tables;
 mod membership;
@@ -19,7 +20,7 @@ use std::io::Write;
 use std::mem::{size_of, MaybeUninit};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -51,6 +52,7 @@ use task_cells::{ThreadCellAssignment, ThreadCellResponse};
 const SCHEDULER_NAME: &str = "scx_snake";
 const SLOT_QUIESCENCE_TIMEOUT: Duration = Duration::from_secs(5);
 const SLOT_QUIESCENCE_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const FINE_TIMING_DRAIN_BATCH: usize = 4096;
 
 fn unix_time_ms() -> u64 {
     u64::try_from(
@@ -326,6 +328,82 @@ fn encode_ladder(
 fn bytes_of<T>(value: &T) -> &[u8] {
     // SAFETY: map updates copy exactly size_of::<T>() bytes before this borrow ends.
     unsafe { std::slice::from_raw_parts(value as *const T as *const u8, std::mem::size_of::<T>()) }
+}
+
+#[derive(Debug, Default)]
+struct FineTimingAccumulator {
+    sessions: [Option<u64>; 3],
+    active: [bool; 3],
+    metrics: BTreeMap<(u64, u32), CallbackTimingMetrics>,
+}
+
+impl FineTimingAccumulator {
+    fn reset(&mut self, callback: fine_timing::FineTimingCallback, session_id: u64) {
+        if let Some(previous) = self.sessions[callback.index()].replace(session_id) {
+            self.metrics.retain(|(session, _), _| *session != previous);
+        }
+        self.active[callback.index()] = true;
+        for stage in fine_timing::stages(callback) {
+            self.metrics.insert(
+                (session_id, stage.id),
+                CallbackTimingMetrics {
+                    total_ns: 0,
+                    buckets: vec![0; bpf_intf::SNAKE_FINE_TIMING_BUCKETS as usize],
+                },
+            );
+        }
+    }
+
+    fn record(&mut self, session_id: u64, stage: u32, elapsed_ns: u64) {
+        let Some(callback_index) = self
+            .sessions
+            .iter()
+            .position(|session| *session == Some(session_id))
+        else {
+            return;
+        };
+        if !self.active[callback_index] {
+            return;
+        }
+        let Some(metrics) = self.metrics.get_mut(&(session_id, stage)) else {
+            return;
+        };
+        let bucket = if elapsed_ns > 1 {
+            (u64::BITS - 1 - elapsed_ns.leading_zeros()) as usize
+        } else {
+            0
+        }
+        .min(metrics.buckets.len() - 1);
+        metrics.total_ns = metrics.total_ns.saturating_add(elapsed_ns);
+        metrics.buckets[bucket] = metrics.buckets[bucket].saturating_add(1);
+    }
+
+    fn stop(&mut self, callback: fine_timing::FineTimingCallback) {
+        self.active[callback.index()] = false;
+    }
+
+    fn metrics(&self, session_id: u64, stage: u32) -> CallbackTimingMetrics {
+        self.metrics
+            .get(&(session_id, stage))
+            .cloned()
+            .unwrap_or_else(|| CallbackTimingMetrics {
+                total_ns: 0,
+                buckets: vec![0; bpf_intf::SNAKE_FINE_TIMING_BUCKETS as usize],
+            })
+    }
+}
+
+fn relay_fine_timing(data: &[u8], accumulator: &Mutex<FineTimingAccumulator>) -> i32 {
+    if data.len() != size_of::<bpf_intf::snake_fine_timing_event>() {
+        return 0;
+    }
+    let session_id = u64::from_ne_bytes(data[0..8].try_into().unwrap());
+    let elapsed_ns = u64::from_ne_bytes(data[8..16].try_into().unwrap());
+    let stage = u32::from_ne_bytes(data[16..20].try_into().unwrap());
+    if let Ok(mut accumulator) = accumulator.lock() {
+        accumulator.record(session_id, stage, elapsed_ns);
+    }
+    0
 }
 
 struct EncodedQueueTopology {
@@ -1083,15 +1161,30 @@ fn read_raw_cell_stats(
 struct Scheduler<'object, 'policy> {
     skel: BpfSkel<'object>,
     struct_ops: Option<libbpf_rs::Link>,
+    fine_timing_ring: libbpf_rs::RingBuffer<'static>,
+    fine_timing_accumulator: Arc<Mutex<FineTimingAccumulator>>,
     stats_server: StatsServer<SchedulerRequest, SchedulerResponse>,
     inspector: Inspector,
     runtime: &'policy mut RuntimePolicy,
     fairness: FairnessMode,
     queue_topology: Option<queue_topology::QueueTopology>,
     membership: Option<MembershipManager>,
+    callback_timing_sample_rate: u32,
+    fine_timing_state: fine_timing::FineTimingState,
 }
 
 impl<'object, 'policy> Scheduler<'object, 'policy> {
+    fn drain_fine_timing_events(&self) -> Result<()> {
+        let consumed = self.fine_timing_ring.consume_raw_n(FINE_TIMING_DRAIN_BATCH);
+        if consumed < 0 {
+            bail!(
+                "draining fine timing events failed with errno {}",
+                -consumed
+            );
+        }
+        Ok(())
+    }
+
     fn init(
         opts: &Opts,
         runtime: &'policy mut RuntimePolicy,
@@ -1163,16 +1256,31 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
             queue_topology.cloned(),
         )
         .with_callback_timing_sample_rate(opts.callback_timing_sample_rate);
+        let fine_timing_accumulator = Arc::new(Mutex::new(FineTimingAccumulator::default()));
+        let relay_accumulator = Arc::clone(&fine_timing_accumulator);
+        let mut ring_builder = libbpf_rs::RingBufferBuilder::new();
+        ring_builder
+            .add(&skel.maps.fine_timing_events, move |data| {
+                relay_fine_timing(data, &relay_accumulator)
+            })
+            .context("registering fine timing ring buffer")?;
+        let fine_timing_ring = ring_builder
+            .build()
+            .context("building fine timing ring buffer")?;
 
         Ok(Self {
             skel,
             struct_ops,
+            fine_timing_ring,
+            fine_timing_accumulator,
             stats_server,
             inspector,
             runtime,
             fairness: opts.fairness,
             queue_topology: queue_topology.cloned(),
             membership,
+            callback_timing_sample_rate: opts.callback_timing_sample_rate,
+            fine_timing_state: fine_timing::FineTimingState::default(),
         })
     }
 
@@ -1197,6 +1305,7 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
     }
 
     fn replace_policy(&mut self, source: String) -> Result<runtime_policy::PolicyUpdateResponse> {
+        self.stop_all_fine_timing()?;
         let previous_slot = self.runtime.active_slot;
         let previous_generation = self.runtime.generation;
         let previous_policy = self.runtime.compiled.clone();
@@ -1333,6 +1442,169 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
         })
     }
 
+    fn publish_fine_timing_state(&mut self, state: &fine_timing::FineTimingState) -> Result<()> {
+        let key = 0_u32;
+        let config = state.bpf_config();
+        self.skel
+            .maps
+            .fine_timing_config
+            .update(&key.to_ne_bytes(), bytes_of(&config), MapFlags::ANY)
+            .context("updating fine timing configuration")?;
+        self.skel
+            .maps
+            .bss_data
+            .as_mut()
+            .context("BPF bss map is not memory mapped")?
+            .select_fine_timing_session_id =
+            if state.is_enabled(fine_timing::FineTimingCallback::SelectCpu) {
+                state
+                    .session(fine_timing::FineTimingCallback::SelectCpu)
+                    .map_or(0, |session| session.session_id)
+            } else {
+                0
+            };
+        Ok(())
+    }
+
+    fn set_fine_timing(
+        &mut self,
+        callback: fine_timing::FineTimingCallback,
+        enabled: bool,
+    ) -> Result<fine_timing::FineTimingControlResponse> {
+        self.drain_fine_timing_events()?;
+        if enabled && self.callback_timing_sample_rate == 0 {
+            bail!("fine timing requires callback timing sampling to be enabled");
+        }
+        if enabled
+            && callback != fine_timing::FineTimingCallback::SelectCpu
+            && self.queue_topology.is_none()
+        {
+            bail!("enqueue and dispatch fine timing require queue topology mode");
+        }
+        if self.fine_timing_state.is_enabled(callback) == enabled {
+            return Ok(fine_timing::FineTimingControlResponse {
+                callback,
+                enabled,
+                session_id: self
+                    .fine_timing_state
+                    .session(callback)
+                    .map(|session| session.session_id),
+            });
+        }
+
+        let mut next = self.fine_timing_state.clone();
+        if enabled {
+            let session = next.start(callback, self.runtime.generation, unix_time_ms());
+            self.fine_timing_accumulator
+                .lock()
+                .map_err(|_| anyhow!("fine timing accumulator lock poisoned"))?
+                .reset(callback, session.session_id);
+        } else {
+            next.stop(callback, unix_time_ms());
+        }
+        self.publish_fine_timing_state(&next)?;
+        if !enabled {
+            self.fine_timing_accumulator
+                .lock()
+                .map_err(|_| anyhow!("fine timing accumulator lock poisoned"))?
+                .stop(callback);
+        }
+        self.fine_timing_state = next;
+        Ok(fine_timing::FineTimingControlResponse {
+            callback,
+            enabled,
+            session_id: self
+                .fine_timing_state
+                .session(callback)
+                .map(|session| session.session_id),
+        })
+    }
+
+    fn stop_all_fine_timing(&mut self) -> Result<()> {
+        if !fine_timing::FineTimingCallback::ALL
+            .iter()
+            .copied()
+            .any(|callback| self.fine_timing_state.is_enabled(callback))
+        {
+            return Ok(());
+        }
+        let mut next = self.fine_timing_state.clone();
+        let stopped_at_ms = unix_time_ms();
+        for callback in fine_timing::FineTimingCallback::ALL {
+            next.stop(callback, stopped_at_ms);
+        }
+        self.publish_fine_timing_state(&next)?;
+        let mut accumulator = self
+            .fine_timing_accumulator
+            .lock()
+            .map_err(|_| anyhow!("fine timing accumulator lock poisoned"))?;
+        for callback in fine_timing::FineTimingCallback::ALL {
+            accumulator.stop(callback);
+        }
+        drop(accumulator);
+        self.fine_timing_state = next;
+        Ok(())
+    }
+
+    fn fine_timing_inspection(&self) -> Result<inspection::FineTimingInspectionView> {
+        self.drain_fine_timing_events()?;
+        let captures = fine_timing::FineTimingCallback::ALL
+            .into_iter()
+            .map(|callback| {
+                let session = self.fine_timing_state.session(callback);
+                let state = match session {
+                    Some(session) if session.stopped_at_ms.is_none() => {
+                        inspection::FineTimingCaptureState::Collecting
+                    }
+                    Some(_) => inspection::FineTimingCaptureState::Historical,
+                    None => inspection::FineTimingCaptureState::Inactive,
+                };
+                let stages = match session {
+                    Some(session) => {
+                        let accumulator = self
+                            .fine_timing_accumulator
+                            .lock()
+                            .map_err(|_| anyhow!("fine timing accumulator lock poisoned"))?;
+                        fine_timing::stages(callback)
+                            .iter()
+                            .map(|stage| {
+                                (
+                                    stage.name.to_owned(),
+                                    accumulator.metrics(session.session_id, stage.id),
+                                )
+                            })
+                            .collect()
+                    }
+                    None => fine_timing::stages(callback)
+                        .iter()
+                        .map(|stage| {
+                            (
+                                stage.name.to_owned(),
+                                CallbackTimingMetrics {
+                                    total_ns: 0,
+                                    buckets: vec![0; bpf_intf::SNAKE_FINE_TIMING_BUCKETS as usize],
+                                },
+                            )
+                        })
+                        .collect(),
+                };
+                Ok(inspection::FineTimingCaptureInspectionView {
+                    callback: callback.as_str().to_owned(),
+                    state,
+                    session_id: session.map(|session| session.session_id),
+                    policy_generation: session.map(|session| session.policy_generation),
+                    started_at_ms: session.map(|session| session.started_at_ms),
+                    stopped_at_ms: session.and_then(|session| session.stopped_at_ms),
+                    stages,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(inspection::FineTimingInspectionView {
+            sample_rate: self.callback_timing_sample_rate,
+            captures,
+        })
+    }
+
     fn exited(&self) -> bool {
         uei_exited!(&self.skel, uei)
     }
@@ -1390,7 +1662,9 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
                 });
             }
         }
-        Ok(self.inspector.snapshot(self.metrics()?, task_mappings))
+        let mut snapshot = self.inspector.snapshot(self.metrics()?, task_mappings);
+        snapshot.fine_timing = self.fine_timing_inspection()?;
+        Ok(snapshot)
     }
 
     fn run(&mut self, shutdown: Arc<AtomicBool>) -> Result<UserExitInfo> {
@@ -1402,6 +1676,14 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
                 .map(MembershipManager::time_until_reconcile)
                 .unwrap_or(Duration::from_secs(1))
                 .min(Duration::from_secs(1));
+            let timeout = if fine_timing::FineTimingCallback::ALL
+                .into_iter()
+                .any(|callback| self.fine_timing_state.is_enabled(callback))
+            {
+                timeout.min(Duration::from_millis(50))
+            } else {
+                timeout
+            };
             match request_channel.recv_timeout(timeout) {
                 Ok(SchedulerRequest::Metrics) => {
                     response_channel.send(SchedulerResponse::Metrics(self.metrics()?))?
@@ -1433,11 +1715,18 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
                         .map_err(|error| format!("{error:#}"));
                     response_channel.send(SchedulerResponse::ThreadCell(response))?;
                 }
+                Ok(SchedulerRequest::SetFineTiming { callback, enabled }) => {
+                    let response = self
+                        .set_fine_timing(callback, enabled)
+                        .map_err(|error| format!("{error:#}"));
+                    response_channel.send(SchedulerResponse::FineTiming(response))?;
+                }
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => {
                     bail!("statistics server request channel disconnected")
                 }
             }
+            self.drain_fine_timing_events()?;
             if let Some(manager) = &mut self.membership {
                 match manager.reconcile_if_due(&self.skel.maps.task_cells) {
                     Ok(Some(report)) if report.updated != 0 || report.transient != 0 => debug!(
@@ -1712,8 +2001,10 @@ scope = "task_allowed"
         let policy = policy::compile_policy(policy_source()).expect("policy should compile");
         let encoded = encode_ladder(&policy, 42).expect("ladder should encode");
 
-        assert_eq!(bpf_intf::SNAKE_ABI_VERSION, 18);
+        assert_eq!(bpf_intf::SNAKE_ABI_VERSION, 19);
         assert_eq!(size_of::<bpf_intf::snake_callback_timing>(), 520);
+        assert_eq!(size_of::<bpf_intf::snake_fine_timing_config>(), 32);
+        assert_eq!(size_of::<bpf_intf::snake_fine_timing_event>(), 24);
         assert_eq!(size_of::<bpf_intf::snake_compiled_ladder>(), 352);
         assert_eq!(offset_of!(bpf_intf::snake_compiled_ladder, generation), 0);
         assert_eq!(
@@ -2559,5 +2850,90 @@ scope = "task_allowed"
 
         assert_eq!(metrics.rungs[&0].operation, "sync_wake_affine");
         assert_eq!(metrics.rungs[&0].scope, "task_allowed");
+    }
+
+    #[test]
+    fn fine_timing_sessions_are_independent_per_callback() {
+        use crate::fine_timing::{FineTimingCallback, FineTimingState};
+
+        let mut state = FineTimingState::default();
+        let select = state.start(FineTimingCallback::SelectCpu, 7, 900);
+        let enqueue = state.start(FineTimingCallback::Enqueue, 7, 1_000);
+        let dispatch = state.start(FineTimingCallback::Dispatch, 7, 1_100);
+
+        assert_ne!(select.session_id, enqueue.session_id);
+        assert_ne!(enqueue.session_id, dispatch.session_id);
+        assert!(state.is_enabled(FineTimingCallback::SelectCpu));
+        assert!(state.is_enabled(FineTimingCallback::Enqueue));
+        assert!(state.is_enabled(FineTimingCallback::Dispatch));
+
+        state.stop(FineTimingCallback::Enqueue, 2_000);
+        assert!(!state.is_enabled(FineTimingCallback::Enqueue));
+        assert!(state.is_enabled(FineTimingCallback::Dispatch));
+        assert_eq!(
+            state
+                .session(FineTimingCallback::Enqueue)
+                .and_then(|session| session.stopped_at_ms),
+            Some(2_000)
+        );
+        assert_eq!(
+            state
+                .session(FineTimingCallback::Dispatch)
+                .and_then(|session| session.stopped_at_ms),
+            None
+        );
+    }
+
+    #[test]
+    fn fine_timing_accumulator_filters_sessions_and_buckets_samples() {
+        use crate::fine_timing::{stages, FineTimingCallback};
+
+        let mut accumulator = FineTimingAccumulator::default();
+        let stage = stages(FineTimingCallback::SelectCpu)[0].id;
+        accumulator.reset(FineTimingCallback::SelectCpu, 7);
+        accumulator.record(6, stage, 1_024);
+        accumulator.record(7, stage, 1_024);
+        accumulator.record(7, stage, 1_500);
+
+        let metrics = accumulator.metrics(7, stage);
+        assert_eq!(metrics.total_ns, 2_524);
+        assert_eq!(metrics.buckets.iter().sum::<u64>(), 2);
+        assert_eq!(metrics.buckets[10], 2);
+        assert_eq!(accumulator.metrics(8, stage).buckets.iter().sum::<u64>(), 0);
+
+        accumulator.stop(FineTimingCallback::SelectCpu);
+        accumulator.record(7, stage, 2_000);
+        assert_eq!(accumulator.metrics(7, stage), metrics);
+    }
+
+    #[test]
+    fn fine_timing_stage_inventory_covers_enqueue_and_dispatch_hotspots() {
+        use crate::fine_timing::{stages, FineTimingCallback};
+
+        let select = stages(FineTimingCallback::SelectCpu);
+        let enqueue = stages(FineTimingCallback::Enqueue);
+        let dispatch = stages(FineTimingCallback::Dispatch);
+        let names = |inventory: &[crate::fine_timing::FineTimingStage]| {
+            inventory.iter().map(|stage| stage.name).collect::<Vec<_>>()
+        };
+
+        assert!(names(select).contains(&"acquire_and_policy_ladder"));
+        assert!(names(enqueue).contains(&"normal_dsq_insert"));
+        assert!(names(enqueue).contains(&"affinity_path"));
+        assert!(names(dispatch).contains(&"remote_normal_scan"));
+        assert!(names(dispatch).contains(&"move_to_local"));
+        assert!(select
+            .iter()
+            .all(|left| enqueue.iter().all(|right| left.id != right.id)));
+        assert!(select
+            .iter()
+            .all(|left| dispatch.iter().all(|right| left.id != right.id)));
+        assert!(enqueue
+            .iter()
+            .all(|left| dispatch.iter().all(|right| left.id != right.id)));
+        assert_eq!(
+            select.len() + enqueue.len() + dispatch.len(),
+            bpf_intf::snake_fine_timing_stage_SNAKE_NR_FINE_TIMING_STAGES as usize
+        );
     }
 }

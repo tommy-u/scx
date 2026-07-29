@@ -12,6 +12,7 @@ import {
   compactCpuList,
   decorateCells,
   fieldReferenceGroups,
+  fineTimingCaptureModels,
   formatCallbackDuration,
   ladderPercentages,
   queueTopologyModel,
@@ -44,6 +45,34 @@ test("callback durations over one thousand nanoseconds are warnings", () => {
   assert.equal(callbackDurationClass(null), "");
   assert.equal(callbackDurationClass(1_000), "");
   assert.equal(callbackDurationClass(1_001), "callback-duration-warning");
+});
+
+test("fine timing controls preserve independent collecting and historical states", () => {
+  const captures = fineTimingCaptureModels({
+    captures: [
+      { callback: "select_cpu", state: "collecting", session_id: 3, stages: [] },
+      { callback: "enqueue", state: "historical", session_id: 2, stages: [] },
+      { callback: "dispatch", state: "inactive", session_id: null, stages: [] },
+    ],
+  });
+
+  assert.deepEqual(
+    captures.map(({ callback, checked, stateLabel }) => ({ callback, checked, stateLabel })),
+    [
+      { callback: "select_cpu", checked: true, stateLabel: "Collecting" },
+      { callback: "enqueue", checked: false, stateLabel: "Historical" },
+      { callback: "dispatch", checked: false, stateLabel: "Inactive" },
+    ],
+  );
+});
+
+test("callback page contains the fine timing panel host", () => {
+  const page = readFileSync(
+    new URL("../../src/web/index.html", import.meta.url),
+    "utf8",
+  );
+  assert.match(page, /id="fineTimingPanels"/);
+  assert.match(page, /id="fineTimingNotice"/);
 });
 
 test("field references keep context-valid and other ABI choices separate", () => {

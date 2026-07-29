@@ -27,6 +27,41 @@ export function callbackDurationClass(value) {
     : "";
 }
 
+const FINE_TIMING_CALLBACKS = [
+  { callback: "select_cpu", label: "Select CPU" },
+  { callback: "enqueue", label: "Enqueue" },
+  { callback: "dispatch", label: "Dispatch" },
+];
+
+export function fineTimingCaptureModels(payload) {
+  const captures = new Map(
+    (payload?.captures || []).map((capture) => [capture.callback, capture]),
+  );
+  return FINE_TIMING_CALLBACKS.map(({ callback, label }) => {
+    const capture = captures.get(callback) || {
+      callback,
+      state: "inactive",
+      session_id: null,
+      policy_generation: null,
+      started_at_ms: null,
+      stopped_at_ms: null,
+      stages: [],
+    };
+    const stateLabel = capture.state === "collecting"
+      ? "Collecting"
+      : capture.state === "historical"
+        ? "Historical"
+        : "Inactive";
+    return {
+      ...capture,
+      callback,
+      label,
+      checked: capture.state === "collecting",
+      stateLabel,
+    };
+  });
+}
+
 export function fieldReferenceGroups(reference) {
   return {
     selected: reference?.selected || {

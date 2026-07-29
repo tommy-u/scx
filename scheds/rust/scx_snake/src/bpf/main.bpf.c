@@ -11,6 +11,7 @@ char _license[] SEC("license") = "GPL";
 UEI_DEFINE(uei);
 
 u32 staging_ladder_slot;
+u64 select_fine_timing_session_id;
 
 static __always_inline int
 validate_compiled_ladder(const struct snake_compiled_ladder *ladder)
@@ -93,6 +94,7 @@ s32 BPF_STRUCT_OPS(snake_select_cpu, struct task_struct *p, s32 prev_cpu,
 
 	cpu = walk_policy_ladder(&ladder_ctx, p, prev_cpu, wake_flags,
 				 &dispatch_flags, &queue_cell_index);
+	fine_timing_finish_select(callback_started_at);
 	if (cpu >= 0) {
 		if (queue_topology_enabled()) {
 			if (dispatch_flags & SNAKE_SELECT_F_BORROWED) {
@@ -170,18 +172,35 @@ s32 BPF_STRUCT_OPS(snake_select_cpu, struct task_struct *p, s32 prev_cpu,
 void BPF_STRUCT_OPS(snake_enqueue, struct task_struct *p, u64 enq_flags)
 {
 	struct snake_ladder_ctx ladder_ctx = {};
+	struct snake_fine_timing_ctx fine_timing;
 	s32			 cell_enqueued, ret;
 	u64			 callback_started_at = callback_timing_start();
+	u64			 stage_started_at;
 	u64			 slice;
 
+	fine_timing = fine_timing_begin(SNAKE_FINE_TIMING_CALLBACK_ENQUEUE,
+					callback_started_at);
+	stage_started_at = fine_timing_start(&fine_timing);
 	if (acquire_active_ladder(&ladder_ctx)) {
+		fine_timing_finish(&fine_timing,
+				   SNAKE_FINE_TIMING_ENQUEUE_ACQUIRE_LADDER,
+				   stage_started_at);
 		scx_bpf_error("snake failed to acquire active ladder in enqueue");
 		return;
 	}
+	fine_timing_finish(&fine_timing,
+			   SNAKE_FINE_TIMING_ENQUEUE_ACQUIRE_LADDER,
+			   stage_started_at);
 	stat_inc(&ladder_ctx, SNAKE_STAT_ENQUEUES);
 	if (queue_topology_enabled()) {
-		if (queue_ladder_enqueue(&ladder_ctx, p, enq_flags))
+		ret = queue_ladder_enqueue(&ladder_ctx, p, enq_flags,
+					   &fine_timing);
+		stage_started_at = fine_timing_start(&fine_timing);
+		if (ret)
 			scx_bpf_error("snake queue enqueue failed for pid %d", p->pid);
+		fine_timing_finish(&fine_timing,
+				   SNAKE_FINE_TIMING_ENQUEUE_FINISH,
+				   stage_started_at);
 		release_timed_callback(&ladder_ctx, SNAKE_CALLBACK_ENQUEUE, callback_started_at);
 		return;
 	}
@@ -202,16 +221,32 @@ out:
 void BPF_STRUCT_OPS(snake_dispatch, s32 cpu, struct task_struct *prev)
 {
 	struct snake_ladder_ctx ladder_ctx = {};
+	struct snake_fine_timing_ctx fine_timing;
 	s32			 ret;
 	u64			 callback_started_at = callback_timing_start();
+	u64			 stage_started_at;
 
+	fine_timing = fine_timing_begin(SNAKE_FINE_TIMING_CALLBACK_DISPATCH,
+					callback_started_at);
+	stage_started_at = fine_timing_start(&fine_timing);
 	if (acquire_active_ladder(&ladder_ctx)) {
+		fine_timing_finish(&fine_timing,
+				   SNAKE_FINE_TIMING_DISPATCH_ACQUIRE_LADDER,
+				   stage_started_at);
 		scx_bpf_error("snake failed to acquire active ladder in dispatch");
 		return;
 	}
+	fine_timing_finish(&fine_timing,
+			   SNAKE_FINE_TIMING_DISPATCH_ACQUIRE_LADDER,
+			   stage_started_at);
 	if (queue_topology_enabled()) {
-		if (queue_ladder_dispatch(&ladder_ctx, cpu, prev))
+		ret = queue_ladder_dispatch(&ladder_ctx, cpu, prev, &fine_timing);
+		stage_started_at = fine_timing_start(&fine_timing);
+		if (ret)
 			scx_bpf_error("snake queue dispatch failed on CPU %d", cpu);
+		fine_timing_finish(&fine_timing,
+				   SNAKE_FINE_TIMING_DISPATCH_FINISH,
+				   stage_started_at);
 		release_timed_callback(&ladder_ctx, SNAKE_CALLBACK_DISPATCH, callback_started_at);
 		return;
 	}

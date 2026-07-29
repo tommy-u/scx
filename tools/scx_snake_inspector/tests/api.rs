@@ -82,6 +82,50 @@ fn callback_timing_snapshot(
     })
 }
 
+fn fine_timing_snapshot() -> Value {
+    let mut snapshot = callback_timing_snapshot(7, 0, 0);
+    let mut dispatch_buckets = vec![0_u64; 32];
+    let empty_buckets = vec![0_u64; 32];
+    dispatch_buckets[5] = 100;
+    snapshot["fine_timing"] = json!({
+        "sample_rate": 64,
+        "captures": [
+            {
+                "callback": "select_cpu",
+                "state": "inactive",
+                "session_id": null,
+                "policy_generation": null,
+                "started_at_ms": null,
+                "stopped_at_ms": null,
+                "stages": {}
+            },
+            {
+                "callback": "enqueue",
+                "state": "collecting",
+                "session_id": 10,
+                "policy_generation": 7,
+                "started_at_ms": 1000,
+                "stopped_at_ms": null,
+                "stages": {
+                    "normal_dsq_insert": {"total_ns": 0, "buckets": empty_buckets}
+                }
+            },
+            {
+                "callback": "dispatch",
+                "state": "historical",
+                "session_id": 9,
+                "policy_generation": 7,
+                "started_at_ms": 500,
+                "stopped_at_ms": 900,
+                "stages": {
+                    "remote_normal_scan": {"total_ns": 6300, "buckets": dispatch_buckets}
+                }
+            }
+        ]
+    });
+    snapshot
+}
+
 #[tokio::test]
 async fn snapshot_endpoint_returns_the_requested_rolling_window() {
     let dashboard = dashboard();
@@ -294,6 +338,82 @@ async fn callback_timing_endpoint_returns_window_and_lifetime_percentiles() {
     assert_eq!(json["scope"], "lifetime");
     assert_eq!(json["window_ms"], Value::Null);
     assert_eq!(json["observed_ms"], Value::Null);
+}
+
+#[tokio::test]
+async fn fine_timing_endpoint_summarizes_stages_and_controls_callbacks_independently() {
+    use scx_snake_inspector::collector::{FineTimingCallback, FineTimingControlResponse};
+
+    let dashboard = dashboard();
+    dashboard.set_inspection(Some(fine_timing_snapshot()), None);
+    let (tx, rx) = mpsc::channel();
+    let root = tempfile::tempdir().unwrap();
+    let context = ApiContext::new(dashboard, tx, "secret", root.path().to_path_buf());
+
+    let response = router(context.clone())
+        .oneshot(
+            Request::builder()
+                .uri("/api/fine-timing")
+                .header("host", "127.0.0.1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let body: Value = serde_json::from_slice(&body).unwrap();
+    let dispatch = body["captures"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|capture| capture["callback"] == "dispatch")
+        .unwrap();
+    assert_eq!(body["status"], "ready");
+    assert_eq!(dispatch["state"], "historical");
+    assert_eq!(dispatch["stages"][0]["stage"], "remote_normal_scan");
+    assert_eq!(dispatch["stages"][0]["samples"], 100);
+    assert_eq!(dispatch["stages"][0]["mean_ns"], 63);
+
+    let responder = std::thread::spawn(move || {
+        let CollectorCommand::SetFineTiming {
+            callback,
+            enabled,
+            response,
+        } = rx.recv().unwrap()
+        else {
+            panic!("expected fine timing command");
+        };
+        assert_eq!(callback, FineTimingCallback::SelectCpu);
+        assert!(enabled);
+        response
+            .send(Ok(FineTimingControlResponse {
+                callback,
+                enabled,
+                session_id: Some(11),
+            }))
+            .unwrap();
+    });
+    let response = router(context)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/fine-timing")
+                .header("host", "127.0.0.1")
+                .header("content-type", "application/json")
+                .header(CSRF_HEADER, "secret")
+                .body(Body::from(r#"{"callback":"select_cpu","enabled":true}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let body: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(body["callback"], "select_cpu");
+    assert_eq!(body["enabled"], true);
+    assert_eq!(body["session_id"], 11);
+    responder.join().unwrap();
 }
 
 #[tokio::test]

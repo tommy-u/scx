@@ -10,7 +10,9 @@ The embedded interface has four views:
   CPU than its previous execution slice. It also shows aligned per-CPU runtime.
 - **Callbacks** shows sampled execution-time mean, approximate p50, p95, and
   p99 for Snake's seven hot scheduler callbacks over a rolling window or the
-  active policy generation's lifetime.
+  active policy generation's lifetime. It also provides independent
+  fine-grained capture controls for `select_cpu`, queue enqueue, and queue
+  dispatch.
 - **Policy** shows both BPF placement-ladder slots, their rung data, live or
   frozen counters, configured enqueue and dispatch ladders, contextual
   references for encoded fields, resolved queue topology, and a catalog of
@@ -33,13 +35,19 @@ Snake build that exports the versioned `inspect` stats target; Activity remains
 available with older compatible schedulers. The Callbacks view reports an
 unsupported state when the active Snake build predates callback histograms.
 
-Callback timing is read-only in the inspector. Snake chooses the launch-time
-sample rate with `--callback-timing-sample-rate` and defaults to 1/64. The
+High-level callback timing is read-only. Snake chooses the launch-time sample
+rate with `--callback-timing-sample-rate` and defaults to 1/64. The
 inspector retains up to `--max-window` of one-second histogram deltas, resets
 the rolling baseline on scheduler restarts or policy-generation changes, and
 keeps the scheduler's cumulative histogram for the Lifetime selection. Values
 are upper bounds of base-2 nanosecond buckets; p95 is withheld below 20 samples
 and p99 below 100.
+
+Each fine-grained callback switch starts and stops an independent capture using
+the same sample decision. Snake folds bounded ring-buffer samples into fixed
+per-stage histograms and does not retain individual events. An unchecked
+capture remains visible as **Historical**; a policy update freezes every active
+capture before activating the next generation.
 
 ## Build and run
 

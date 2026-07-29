@@ -14,7 +14,7 @@ use anyhow::{Context, Result};
 use libbpf_rs::skel::{OpenSkel, SkelBuilder};
 use libbpf_rs::{MapCore, MapFlags};
 use scx_stats::StatsClient;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::bpf_skel::BpfSkelBuilder;
 use crate::dashboard::Dashboard;
@@ -171,12 +171,43 @@ pub fn find_symbol_address(kallsyms: &str, symbol: &str) -> anyhow::Result<u64> 
     Ok(address)
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FineTimingCallback {
+    SelectCpu,
+    Enqueue,
+    Dispatch,
+}
+
+impl FineTimingCallback {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::SelectCpu => "select_cpu",
+            Self::Enqueue => "enqueue",
+            Self::Dispatch => "dispatch",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct FineTimingControlResponse {
+    pub callback: FineTimingCallback,
+    pub enabled: bool,
+    pub session_id: Option<u64>,
+}
+
 #[derive(Debug)]
 pub enum CollectorCommand {
     SetScope(TaskScope),
     ActivatePolicy {
         policy_id: String,
         response: std::sync::mpsc::SyncSender<std::result::Result<PolicyActivation, String>>,
+    },
+    SetFineTiming {
+        callback: FineTimingCallback,
+        enabled: bool,
+        response:
+            std::sync::mpsc::SyncSender<std::result::Result<FineTimingControlResponse, String>>,
     },
     Shutdown,
 }
@@ -193,6 +224,18 @@ impl PartialEq for CollectorCommand {
                     policy_id: right, ..
                 },
             ) => left == right,
+            (
+                Self::SetFineTiming {
+                    callback: left_callback,
+                    enabled: left_enabled,
+                    ..
+                },
+                Self::SetFineTiming {
+                    callback: right_callback,
+                    enabled: right_enabled,
+                    ..
+                },
+            ) => left_callback == right_callback && left_enabled == right_enabled,
             (Self::Shutdown, Self::Shutdown) => true,
             _ => false,
         }
@@ -312,6 +355,18 @@ pub fn run_collector(
                 let _ = response.send(result);
                 next_inspection_at = Instant::now();
                 next_policy_scan_at = Instant::now();
+                continue;
+            }
+            Ok(CollectorCommand::SetFineTiming {
+                callback,
+                enabled,
+                response,
+            }) => {
+                let result =
+                    set_fine_timing(&mut stats_client, &options.stats_path, callback, enabled)
+                        .map_err(|error| format!("{error:#}"));
+                let _ = response.send(result);
+                next_inspection_at = Instant::now();
                 continue;
             }
             Ok(CollectorCommand::Shutdown) => return Ok(()),
@@ -482,6 +537,33 @@ fn activate_policy(
             vec![
                 ("target".into(), "policy_update".into()),
                 ("source".into(), source),
+            ],
+        )
+}
+
+fn set_fine_timing(
+    client: &mut Option<StatsClient>,
+    stats_path: &Path,
+    callback: FineTimingCallback,
+    enabled: bool,
+) -> Result<FineTimingControlResponse> {
+    if client.is_none() {
+        *client = Some(
+            StatsClient::new()
+                .set_path(stats_path)
+                .connect(Some(STATS_TIMEOUT_MS))
+                .with_context(|| format!("connecting to {}", stats_path.display()))?,
+        );
+    }
+    client
+        .as_mut()
+        .context("Snake stats client is unavailable")?
+        .request(
+            "stats",
+            vec![
+                ("target".into(), "fine_timing_set".into()),
+                ("callback".into(), callback.as_str().into()),
+                ("enabled".into(), enabled.to_string()),
             ],
         )
 }

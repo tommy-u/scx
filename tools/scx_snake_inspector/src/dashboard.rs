@@ -85,6 +85,52 @@ pub struct CallbackTimingView {
     pub callbacks: Vec<CallbackTimingRowView>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FineTimingStatus {
+    Unavailable,
+    Unsupported,
+    Ready,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FineTimingCaptureState {
+    Inactive,
+    Collecting,
+    Historical,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct FineTimingStageView {
+    pub stage: String,
+    pub samples: u64,
+    pub mean_ns: Option<u64>,
+    pub p50_ns: Option<u64>,
+    pub p95_ns: Option<u64>,
+    pub p99_ns: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct FineTimingCaptureView {
+    pub callback: String,
+    pub state: FineTimingCaptureState,
+    pub session_id: Option<u64>,
+    pub policy_generation: Option<u64>,
+    pub started_at_ms: Option<u64>,
+    pub stopped_at_ms: Option<u64>,
+    pub stages: Vec<FineTimingStageView>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct FineTimingView {
+    pub sequence: u64,
+    pub status: FineTimingStatus,
+    pub error: Option<String>,
+    pub sample_rate: u32,
+    pub captures: Vec<FineTimingCaptureView>,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct SnapshotView {
     pub sequence: u64,
@@ -399,6 +445,62 @@ impl Dashboard {
         )
     }
 
+    pub fn fine_timing(&self) -> FineTimingView {
+        let live = self.live.read().expect("dashboard lock poisoned");
+        if let Some(error) = &live.inspection_error {
+            return empty_fine_timing_view(
+                &live,
+                FineTimingStatus::Unavailable,
+                Some(error.clone()),
+            );
+        }
+        let Some(snapshot) = &live.inspection else {
+            return empty_fine_timing_view(&live, FineTimingStatus::Unavailable, None);
+        };
+        let Some(payload) = snapshot.get("fine_timing") else {
+            return empty_fine_timing_view(&live, FineTimingStatus::Unsupported, None);
+        };
+        match serde_json::from_value::<FineTimingPayload>(payload.clone())
+            .map_err(|error| format!("invalid fine timing data: {error}"))
+            .and_then(validate_fine_timing)
+        {
+            Ok(payload) => FineTimingView {
+                sequence: live.inspection_sequence,
+                status: FineTimingStatus::Ready,
+                error: None,
+                sample_rate: payload.sample_rate,
+                captures: payload
+                    .captures
+                    .into_iter()
+                    .map(|capture| FineTimingCaptureView {
+                        callback: capture.callback,
+                        state: capture.state,
+                        session_id: capture.session_id,
+                        policy_generation: capture.policy_generation,
+                        started_at_ms: capture.started_at_ms,
+                        stopped_at_ms: capture.stopped_at_ms,
+                        stages: capture
+                            .stages
+                            .into_iter()
+                            .map(|(stage, counters)| {
+                                let summary = summarize_callback_timing(&counters);
+                                FineTimingStageView {
+                                    stage,
+                                    samples: summary.samples,
+                                    mean_ns: summary.mean_ns,
+                                    p50_ns: summary.p50_ns,
+                                    p95_ns: summary.p95_ns,
+                                    p99_ns: summary.p99_ns,
+                                }
+                            })
+                            .collect(),
+                    })
+                    .collect(),
+            },
+            Err(error) => empty_fine_timing_view(&live, FineTimingStatus::Unavailable, Some(error)),
+        }
+    }
+
     pub fn snapshot(&self, window_ms: u64) -> Result<SnapshotView, WindowError> {
         let live = self.live.read().expect("dashboard lock poisoned");
         let view = live.history.view(live.now_ms, window_ms)?;
@@ -456,6 +558,64 @@ impl Dashboard {
 
     pub fn subscribe(&self) -> watch::Receiver<u64> {
         self.updates.subscribe()
+    }
+}
+
+const FINE_TIMING_CALLBACKS: [&str; 3] = ["select_cpu", "enqueue", "dispatch"];
+const FINE_TIMING_BUCKETS: usize = 32;
+
+#[derive(Deserialize)]
+struct FineTimingPayload {
+    sample_rate: u32,
+    captures: Vec<FineTimingCapturePayload>,
+}
+
+#[derive(Deserialize)]
+struct FineTimingCapturePayload {
+    callback: String,
+    state: FineTimingCaptureState,
+    session_id: Option<u64>,
+    policy_generation: Option<u64>,
+    started_at_ms: Option<u64>,
+    stopped_at_ms: Option<u64>,
+    stages: BTreeMap<String, CallbackTimingCounters>,
+}
+
+fn validate_fine_timing(payload: FineTimingPayload) -> Result<FineTimingPayload, String> {
+    if payload.captures.len() != FINE_TIMING_CALLBACKS.len()
+        || !FINE_TIMING_CALLBACKS.iter().all(|callback| {
+            payload
+                .captures
+                .iter()
+                .any(|capture| capture.callback == *callback)
+        })
+    {
+        return Err("fine timing data must contain select_cpu, enqueue, and dispatch".into());
+    }
+    if payload.captures.iter().any(|capture| {
+        capture
+            .stages
+            .values()
+            .any(|stage| stage.buckets.len() != FINE_TIMING_BUCKETS)
+    }) {
+        return Err(format!(
+            "fine timing histograms must contain {FINE_TIMING_BUCKETS} buckets"
+        ));
+    }
+    Ok(payload)
+}
+
+fn empty_fine_timing_view(
+    live: &LiveData,
+    status: FineTimingStatus,
+    error: Option<String>,
+) -> FineTimingView {
+    FineTimingView {
+        sequence: live.inspection_sequence,
+        status,
+        error,
+        sample_rate: 0,
+        captures: Vec::new(),
     }
 }
 

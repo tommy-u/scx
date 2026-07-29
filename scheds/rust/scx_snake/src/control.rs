@@ -6,6 +6,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use scx_stats::StatsClient;
 
+use crate::fine_timing::{FineTimingCallback, FineTimingControlResponse};
 use crate::inspection::InspectionView;
 use crate::runtime_policy::{PolicyUpdateResponse, PolicyValidationResponse};
 use crate::stats::Metrics;
@@ -18,10 +19,20 @@ const UPDATE_TIMEOUT_MS: u64 = 15_000;
 pub enum SchedulerRequest {
     Metrics,
     Inspect,
-    ValidatePolicy { source: String },
-    ReplacePolicy { source: String },
+    ValidatePolicy {
+        source: String,
+    },
+    ReplacePolicy {
+        source: String,
+    },
     SetThreadCell(ThreadCellAssignment),
-    ClearThreadCell { tid: i32 },
+    ClearThreadCell {
+        tid: i32,
+    },
+    SetFineTiming {
+        callback: FineTimingCallback,
+        enabled: bool,
+    },
 }
 
 /// Typed responses routed back through the shared stats socket.
@@ -32,6 +43,23 @@ pub enum SchedulerResponse {
     PolicyValidation(std::result::Result<PolicyValidationResponse, String>),
     ReplacePolicy(std::result::Result<PolicyUpdateResponse, String>),
     ThreadCell(std::result::Result<ThreadCellResponse, String>),
+    FineTiming(std::result::Result<FineTimingControlResponse, String>),
+}
+
+#[cfg(test)]
+pub fn request_fine_timing(
+    client: &mut StatsClient,
+    callback: FineTimingCallback,
+    enabled: bool,
+) -> Result<FineTimingControlResponse> {
+    client.request(
+        "stats",
+        vec![
+            ("target".into(), "fine_timing_set".into()),
+            ("callback".into(), callback.as_str().into()),
+            ("enabled".into(), enabled.to_string()),
+        ],
+    )
 }
 
 pub fn request_set_thread_cell(
@@ -192,6 +220,49 @@ scope = "task_allowed"
     }
 
     #[test]
+    fn fine_timing_control_round_trips_callback_and_enabled_state() {
+        use crate::fine_timing::{FineTimingCallback, FineTimingControlResponse};
+
+        let path = socket_path("fine-timing");
+        let server = StatsServer::new(stats::server_data())
+            .set_path(&path)
+            .launch()
+            .expect("test server should launch");
+        let (responses, requests) = server.channels();
+        let worker = thread::spawn(move || {
+            let SchedulerRequest::SetFineTiming { callback, enabled } =
+                requests.recv().expect("request should arrive")
+            else {
+                panic!("expected a fine timing request");
+            };
+            assert_eq!(callback, FineTimingCallback::SelectCpu);
+            assert!(enabled);
+            responses
+                .send(SchedulerResponse::FineTiming(Ok(
+                    FineTimingControlResponse {
+                        callback,
+                        enabled,
+                        session_id: Some(9),
+                    },
+                )))
+                .expect("response should send");
+        });
+
+        let mut client = StatsClient::new()
+            .set_path(&path)
+            .connect(Some(1_000))
+            .expect("client should connect");
+        let response = request_fine_timing(&mut client, FineTimingCallback::SelectCpu, true)
+            .expect("fine timing update should be acknowledged");
+
+        assert!(response.enabled);
+        assert_eq!(response.session_id, Some(9));
+        worker.join().expect("worker should finish");
+        drop(server);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
     fn thread_cell_assignment_round_trips_through_the_control_socket() {
         let path = socket_path("cell-set");
         let server = StatsServer::new(stats::server_data())
@@ -255,6 +326,7 @@ scope = "task_allowed"
                         schema_version: 1,
                         active_slot: 1,
                         callback_timing_sample_rate: 64,
+                        fine_timing: crate::inspection::FineTimingInspectionView::default(),
                         fairness: crate::inspection::FairnessInspectionView {
                             mode_name: "fifo".into(),
                             clock_model: "no virtual-time clock".into(),

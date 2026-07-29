@@ -588,6 +588,169 @@ button:focus-visible {
   text-align: center;
 }
 
+.fine-timing-section {
+  padding: 0 clamp(12px, 3vw, 40px) 36px;
+}
+
+.fine-timing-heading {
+  padding: 4px 0 12px;
+}
+
+.fine-timing-heading h3,
+.fine-timing-panel-heading h4,
+.fine-timing-panel-heading p {
+  margin: 0;
+}
+
+.fine-timing-heading h3 {
+  font-size: 0.9rem;
+  font-weight: 720;
+}
+
+.fine-timing-panel {
+  margin-bottom: 14px;
+  overflow: hidden;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.fine-timing-panel-heading {
+  min-height: 58px;
+  padding: 10px 14px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  background: var(--surface-muted);
+  border-bottom: 1px solid var(--border);
+}
+
+.fine-timing-panel-heading h4 {
+  font-size: 0.82rem;
+  font-weight: 720;
+}
+
+.fine-timing-panel-heading p {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 0.68rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.fine-timing-actions,
+.fine-timing-toggle {
+  display: flex;
+  align-items: center;
+}
+
+.fine-timing-actions {
+  gap: 14px;
+}
+
+.fine-timing-toggle {
+  gap: 7px;
+  color: var(--ink);
+  font-size: 0.72rem;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.fine-timing-toggle input {
+  width: 15px;
+  height: 15px;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.fine-timing-toggle:has(input:disabled) {
+  color: var(--muted);
+}
+
+.fine-timing-state {
+  padding: 3px 7px;
+  color: var(--muted);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 0.64rem;
+  font-weight: 750;
+  text-transform: uppercase;
+}
+
+.fine-timing-state.collecting {
+  color: #075e4c;
+  background: #e4f5ef;
+  border-color: #80bba8;
+}
+
+.fine-timing-state.historical {
+  color: #805000;
+  background: #fff3da;
+  border-color: #dbbb78;
+}
+
+.fine-timing-table-wrap {
+  overflow: auto;
+}
+
+.fine-timing-table-wrap table {
+  width: 100%;
+  min-width: 680px;
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+
+.fine-timing-table-wrap th,
+.fine-timing-table-wrap td {
+  height: 42px;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.74rem;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.fine-timing-table-wrap tr:last-child th,
+.fine-timing-table-wrap tr:last-child td {
+  border-bottom: 0;
+}
+
+.fine-timing-table-wrap thead th {
+  height: 36px;
+  color: var(--muted);
+  font-size: 0.62rem;
+  font-weight: 720;
+  text-transform: uppercase;
+}
+
+.fine-timing-table-wrap th:first-child,
+.fine-timing-table-wrap td:first-child {
+  width: 24%;
+  text-align: left;
+}
+
+.fine-timing-table-wrap tbody th {
+  font-weight: 650;
+}
+
+.fine-timing-table-wrap code {
+  font-size: 0.7rem;
+}
+
+.fine-timing-table-wrap td.callback-duration-warning {
+  color: #805000;
+  background: #fff3da;
+  font-weight: 720;
+}
+
+.fine-timing-table-wrap .callback-empty {
+  height: 72px;
+  color: var(--muted);
+  text-align: center;
+}
+
 .slot-comparison {
   padding: 20px clamp(12px, 3vw, 40px) 32px;
   display: grid;
@@ -1685,6 +1848,24 @@ button:focus-visible {
 
   .callback-table-section {
     padding: 12px 8px 20px;
+  }
+
+  .fine-timing-section {
+    padding: 0 8px 24px;
+  }
+
+  .fine-timing-panel-heading {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .fine-timing-actions {
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .fine-timing-toggle {
+    white-space: normal;
   }
 
   .slot-comparison,

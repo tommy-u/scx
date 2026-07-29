@@ -269,6 +269,16 @@ or a power of two through 4096. Unsampled calls perform only the sampling
 decision; sampled calls update a per-CPU base-2 nanosecond histogram without
 atomic contention. Changing the rate requires restarting Snake.
 
+The inspector can independently enable fine-grained timing for `select_cpu`,
+queue-mode `enqueue`, and queue-mode `dispatch`. Fine timing reuses the same
+sample decision. Sampled stages emit fixed-size records through a bounded BPF
+ring buffer, and Snake immediately folds them into one fixed histogram per
+stage; individual events are not retained. The select stage covers active
+ladder acquisition plus the policy-ladder walk. Disabling a capture freezes it
+as historical. Starting a new capture resets only that callback's histograms,
+and activating another policy automatically stops active captures before the
+generation changes.
+
 Run a cell queue policy only with VTIME:
 
 ```bash
@@ -379,7 +389,8 @@ The inspection stats target also publishes cumulative sampled callback
 histograms for the active policy generation. `scx_snake_inspector` turns these
 into rolling and policy-lifetime mean, p50, p95, and p99 estimates in its
 Callbacks tab. Percentiles are reported as the upper bound of a base-2 bucket;
-p95 requires at least 20 samples and p99 at least 100.
+p95 requires at least 20 samples and p99 at least 100. The same target publishes
+the current or historical fine-grained capture for each supported callback.
 
 Use `--stats-format json` for NDJSON, `--help-stats` for counter definitions, or
 monitor an already running scheduler without a policy:

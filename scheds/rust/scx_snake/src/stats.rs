@@ -12,6 +12,7 @@ use scx_stats_derive::{stat_doc, Stats};
 use serde::{Deserialize, Serialize};
 
 use crate::control::{SchedulerRequest, SchedulerResponse};
+use crate::fine_timing::FineTimingCallback;
 use crate::task_cells::ThreadCellAssignment;
 
 #[stat_doc]
@@ -620,6 +621,30 @@ pub fn server_data() -> StatsServerData<SchedulerRequest, SchedulerResponse> {
             Ok(read)
         });
 
+    let set_fine_timing: Box<dyn StatsOpener<SchedulerRequest, SchedulerResponse>> =
+        Box::new(move |_| {
+            let read: Box<dyn StatsReader<SchedulerRequest, SchedulerResponse>> =
+                Box::new(move |args, (req_ch, res_ch)| {
+                    let callback = args
+                        .get("callback")
+                        .context("fine_timing_set requires a callback argument")?
+                        .parse::<FineTimingCallback>()
+                        .map_err(anyhow::Error::msg)?;
+                    let enabled = parse_arg::<bool>(args, "enabled", "fine_timing_set")?;
+                    req_ch.send(SchedulerRequest::SetFineTiming { callback, enabled })?;
+                    match res_ch.recv()? {
+                        SchedulerResponse::FineTiming(Ok(response)) => {
+                            Ok(serde_json::to_value(response)?)
+                        }
+                        SchedulerResponse::FineTiming(Err(error)) => bail!(error),
+                        response => {
+                            bail!("unexpected response to fine timing request: {response:?}")
+                        }
+                    }
+                });
+            Ok(read)
+        });
+
     StatsServerData::new()
         .add_meta(Metrics::meta())
         .add_meta(CallbackTimingMetrics::meta())
@@ -659,6 +684,13 @@ pub fn server_data() -> StatsServerData<SchedulerRequest, SchedulerResponse> {
             "thread_cell_clear",
             StatsOps {
                 open: clear_cell,
+                close: None,
+            },
+        )
+        .add_ops(
+            "fine_timing_set",
+            StatsOps {
+                open: set_fine_timing,
                 close: None,
             },
         )
