@@ -295,7 +295,8 @@ queue_fairness_direct_borrow(struct snake_ladder_ctx *ctx, struct task_struct *p
 	runtime->run_direct = 1;
 	runtime->direct_cell_index = cell_index;
 	runtime->direct_cell_valid = 1;
-	if (!scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, SNAKE_VTIME_SLICE_NS, 0))
+	if (!scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL,
+				fairness_vtime_slice(runtime->active_weight), 0))
 		return -EINVAL;
 	return 0;
 }
@@ -346,7 +347,8 @@ queue_fairness_enqueue_cell(struct snake_ladder_ctx *ctx, struct task_struct *p,
 	stage_started_at = fine_timing_start(fine);
 	if (!scx_bpf_dsq_insert_vtime(p,
 				       queue_normal_dsq(cpuq->normal_queue_index),
-				       SNAKE_VTIME_SLICE_NS, runtime->vruntime,
+				       fairness_vtime_slice(runtime->active_weight),
+				       runtime->vruntime,
 				       flags)) {
 		fine_timing_finish(fine,
 				   SNAKE_FINE_TIMING_ENQUEUE_NORMAL_DSQ_INSERT,
@@ -391,7 +393,7 @@ queue_fairness_enqueue_affinity(struct snake_ladder_ctx *ctx,
 	runtime->run_direct = 0;
 	runtime->direct_cell_valid = 0;
 	if (!scx_bpf_dsq_insert_vtime(p, queue_affinity_dsq(target_cpu),
-				       SNAKE_VTIME_SLICE_NS,
+				       fairness_vtime_slice(runtime->active_weight),
 				       runtime->affinity_vruntime, flags)) {
 		ret = -EINVAL;
 		goto out;
@@ -544,7 +546,7 @@ queue_fairness_keep_running(struct snake_ladder_ctx *ctx,
 			    u64 candidate_vtime)
 {
 	struct snake_task_runtime *runtime;
-	u64			   current, delta, projected, vruntime;
+	u64			   current, delta, projected, service, vruntime;
 	u32			   weight;
 
 	if (!prev || !(prev->scx.flags & SCX_TASK_QUEUED))
@@ -582,10 +584,12 @@ queue_fairness_keep_running(struct snake_ladder_ctx *ctx,
 	vruntime = class == SNAKE_QUEUE_CLASS_AFFINITY ?
 			 runtime->affinity_vruntime :
 			 runtime->vruntime;
-	projected = vruntime + fairness_scale_inverse(delta, weight);
+	service = fairness_vtime_service(
+		delta, runtime->service_budget, prev->scx.slice);
+	projected = vruntime + fairness_scale_inverse(service, weight);
 	if (time_before(candidate_vtime, projected))
 		return 0;
-	prev->scx.slice = SNAKE_VTIME_SLICE_NS;
+	fairness_vtime_replenish(runtime, prev, weight);
 	return 1;
 }
 
@@ -595,7 +599,7 @@ queue_fairness_keep_running_min(struct snake_ladder_ctx *ctx,
 				struct task_struct *prev, u64 candidate_vtime)
 {
 	struct snake_task_runtime *runtime;
-	u64 current, delta, projected, vruntime;
+	u64 current, delta, projected, service, vruntime;
 	u32 weight;
 
 	if (!prev || !(prev->scx.flags & SCX_TASK_QUEUED))
@@ -635,10 +639,12 @@ queue_fairness_keep_running_min(struct snake_ladder_ctx *ctx,
 	}
 	delta = current - runtime->started_exec_runtime;
 	weight = runtime->active_weight ?: fairness_task_weight(prev);
-	projected = vruntime + fairness_scale_inverse(delta, weight);
+	service = fairness_vtime_service(
+		delta, runtime->service_budget, prev->scx.slice);
+	projected = vruntime + fairness_scale_inverse(service, weight);
 	if (time_before(candidate_vtime, projected))
 		return 0;
-	prev->scx.slice = SNAKE_VTIME_SLICE_NS;
+	fairness_vtime_replenish(runtime, prev, weight);
 	return 1;
 }
 
@@ -820,7 +826,7 @@ queue_fairness_replenish(struct snake_ladder_ctx *ctx,
 		   runtime->run_cell_index != cpuq->owner_cell_index) {
 		return 0;
 	}
-	prev->scx.slice = SNAKE_VTIME_SLICE_NS;
+	fairness_vtime_replenish(runtime, prev, runtime->active_weight);
 	return 0;
 }
 
@@ -830,7 +836,10 @@ queue_fairness_running(struct snake_ladder_ctx *ctx, struct task_struct *p)
 	struct snake_task_runtime *runtime = fairness_task(ctx, p, false);
 	struct snake_vtime_domain *domain;
 	struct snake_cpu_queue    *cpuq;
-	u32			    cpu;
+	u32			    active_weight, cpu;
+
+	active_weight = runtime && runtime->active_weight ?
+				runtime->active_weight : fairness_task_weight(p);
 
 	if (runtime && runtime->direct_cell_valid) {
 		u32 direct_cell_index = runtime->direct_cell_index;
@@ -859,6 +868,8 @@ queue_fairness_running(struct snake_ladder_ctx *ctx, struct task_struct *p)
 	if (!domain)
 		return -EINVAL;
 	bpf_spin_lock(&domain->lock);
+	runtime->vruntime = fairness_vtime_run_start(
+		runtime->vruntime, domain->vtime_now);
 	if (time_before(domain->vtime_now, runtime->vruntime))
 		domain->vtime_now = runtime->vruntime;
 	bpf_spin_unlock(&domain->lock);
@@ -879,8 +890,9 @@ queue_fairness_running(struct snake_ladder_ctx *ctx, struct task_struct *p)
 	runtime->run_cell_index = runtime->cell_index;
 	runtime->run_owner_cell_index = cpuq ? cpuq->owner_cell_index : 0;
 	runtime->run_queue_class = runtime->queue_class;
-	runtime->active_weight = fairness_task_weight(p);
+	runtime->active_weight = active_weight;
 	runtime->started_exec_runtime = p->se.sum_exec_runtime;
+	runtime->service_budget = p->scx.slice;
 	runtime->runtime_valid = 1;
 	cell_stat_inc(ctx, runtime->run_cell_index,
 		      runtime->run_queue_class == SNAKE_QUEUE_CLASS_AFFINITY ?
@@ -894,7 +906,7 @@ queue_fairness_stopping(struct snake_ladder_ctx *ctx, struct task_struct *p,
 			 u64 *runtime_ns)
 {
 	struct snake_task_runtime *runtime = fairness_task(ctx, p, false);
-	u64 current, delta, scaled;
+	u64 current, delta, scaled, service;
 	u32 weight;
 
 	if (!runtime || !runtime->runtime_valid) {
@@ -909,7 +921,9 @@ queue_fairness_stopping(struct snake_ladder_ctx *ctx, struct task_struct *p,
 	}
 	delta = current - runtime->started_exec_runtime;
 	weight = runtime->active_weight ?: fairness_task_weight(p);
-	scaled = fairness_scale_inverse(delta, weight);
+	service = fairness_vtime_service(
+		delta, runtime->service_budget, p->scx.slice);
+	scaled = fairness_scale_inverse(service, weight);
 	runtime->vruntime += scaled;
 	if (runtime->run_queue_class == SNAKE_QUEUE_CLASS_AFFINITY)
 		runtime->affinity_vruntime += scaled;

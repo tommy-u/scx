@@ -246,9 +246,10 @@ CPU-bound task from remaining indefinitely in the old cell.
 A task already linked on a normal DSQ cannot be atomically removed when its
 annotation changes. If the old cell dequeues it first, Snake preserves that
 queue decision for one execution: runtime and vruntime remain charged to the
-old cell. The pending-rehome check prevents slice renewal, and the following
-enqueue translates the task to its requested cell clock, or synthetic cell 0
-after a clear. An affinity DSQ is keyed by CPU and ordered in that CPU owner's
+old cell. The pending-rehome check prevents slice renewal, and queue mode's
+`SCX_OPS_ENQ_LAST` setting forces even an isolated previous task through the
+following enqueue. That enqueue translates the task to its requested cell
+clock, or synthetic cell 0 after a clear. An affinity DSQ is keyed by CPU and ordered in that CPU owner's
 cell clock. A task dequeued there may adopt the requested task-cell identity in
 `running`; its affinity coordinate remains relative to the executing CPU
 owner's clock and is translated if a later target belongs to another owner

@@ -2,9 +2,10 @@
 
 use scx_snake::fairness::{
     advance_virtual_time, clamp_virtual_lag, clamp_vtime_credit, is_eligible, later_vtime_frontier,
-    min_vtime_dispatch_class, next_dispatch_class, restore_vruntime, scale_inverse_weight,
-    translate_vruntime, virtual_deadline, DispatchClass, FairnessMode, EEVDF_SLICE_NS,
-    VTIME_SLICE_NS,
+    min_vtime_dispatch_class, next_dispatch_class, project_vtime, replenish_vtime_budget,
+    restore_vruntime, scale_inverse_weight, translate_vruntime, virtual_deadline, vtime_run_start,
+    vtime_run_weight, vtime_service_ns, vtime_slice_ns, DispatchClass, FairnessMode, BASE_WEIGHT,
+    EEVDF_SLICE_NS, VTIME_MIN_SLICE_NS, VTIME_SLICE_NS,
 };
 
 #[test]
@@ -18,6 +19,107 @@ fn task_service_scales_inversely_with_weight() {
     assert_eq!(scale_inverse_weight(5_000_000, 50).unwrap(), 10_000_000);
     assert_eq!(scale_inverse_weight(5_000_000, 200).unwrap(), 2_500_000);
     assert!(scale_inverse_weight(5_000_000, 0).is_err());
+}
+
+#[test]
+fn low_weight_vtime_quantum_stays_below_the_watchdog_budget() {
+    const CPUS: u64 = 248;
+    const PEERS: u64 = CPUS * 10;
+    const WATCHDOG_NS: u64 = 5_000_000_000;
+
+    let slice = vtime_slice_ns(1).unwrap();
+    let lead = scale_inverse_weight(slice, 1).unwrap();
+    let catchup = (u128::from(PEERS) * u128::from(lead)).div_ceil(u128::from(CPUS));
+
+    assert_eq!(slice, VTIME_MIN_SLICE_NS);
+    assert_eq!(lead, 100_000_000);
+    assert!(catchup < u128::from(WATCHDOG_NS));
+}
+
+#[test]
+fn weight_scaled_vtime_quanta_preserve_service_ratio() {
+    let low_slice = vtime_slice_ns(1).unwrap();
+    let base_slice = vtime_slice_ns(BASE_WEIGHT).unwrap();
+
+    let low_charge = scale_inverse_weight(low_slice, 1).unwrap();
+    let base_charge = scale_inverse_weight(base_slice, BASE_WEIGHT).unwrap();
+    let base_quanta = low_charge / base_charge;
+
+    assert_eq!(low_charge % base_charge, 0);
+    assert_eq!(low_slice * BASE_WEIGHT, base_slice * base_quanta);
+    assert_eq!(vtime_slice_ns(10_000).unwrap(), base_slice);
+    assert_eq!(vtime_slice_ns(0).unwrap(), base_slice);
+}
+
+#[test]
+fn vtime_service_is_bounded_by_the_assigned_slice() {
+    let low_weight_slice = vtime_slice_ns(1).unwrap();
+    let base_weight_slice = vtime_slice_ns(BASE_WEIGHT).unwrap();
+
+    let overrun = vtime_service_ns(11_213_262, low_weight_slice, 0);
+    assert_eq!(overrun, low_weight_slice);
+    assert_eq!(scale_inverse_weight(overrun, 1).unwrap(), 100_000_000);
+
+    let yielded = vtime_service_ns(1_000, base_weight_slice, 0);
+    assert_eq!(yielded, base_weight_slice);
+
+    let partial = vtime_service_ns(1_000_000, base_weight_slice, 4_000_000);
+    assert_eq!(partial, 1_000_000);
+}
+
+#[test]
+fn retained_vtime_slices_extend_the_service_budget() {
+    let slice = vtime_slice_ns(BASE_WEIGHT).unwrap();
+    let budget = replenish_vtime_budget(slice, 0, slice);
+
+    assert_eq!(budget, 2 * slice);
+    assert_eq!(vtime_service_ns(2 * slice, budget, 0), 2 * slice);
+    assert_eq!(replenish_vtime_budget(slice, 2_000_000, slice), 8_000_000);
+    assert_eq!(replenish_vtime_budget(u64::MAX - 1, 0, slice), u64::MAX);
+}
+
+#[test]
+fn yield_projection_forfeits_the_remaining_vtime_budget() {
+    let slice = vtime_slice_ns(BASE_WEIGHT).unwrap();
+    let candidate_vtime = 1_000_000;
+    let projected = project_vtime(0, 1_000, slice, 0, BASE_WEIGHT).unwrap();
+
+    assert!(projected > candidate_vtime);
+    assert_eq!(projected, slice);
+}
+
+#[test]
+fn queued_weight_change_preserves_the_slice_assignment_weight() {
+    let assigned_weight = BASE_WEIGHT;
+    let live_weight = 1;
+    let slice = vtime_slice_ns(assigned_weight).unwrap();
+    let run_weight = vtime_run_weight(assigned_weight, live_weight);
+
+    assert_eq!(run_weight, assigned_weight);
+    assert_eq!(
+        scale_inverse_weight(slice, run_weight).unwrap(),
+        VTIME_SLICE_NS
+    );
+}
+
+#[test]
+fn run_start_reclamps_vtime_after_a_long_queue_wait() {
+    const STALE_NORMAL: u64 = 3_051_160_894;
+    const AFFINITY_HEAD: u64 = 11_876_096_903;
+    const CELL_FRONTIER: u64 = 22_424_010_766;
+    const WATCHDOG_NS: u64 = 5_000_000_000;
+
+    let slice = vtime_slice_ns(BASE_WEIGHT).unwrap();
+    let stale_projected = project_vtime(STALE_NORMAL, slice, slice, 0, BASE_WEIGHT).unwrap();
+
+    assert_eq!(AFFINITY_HEAD - STALE_NORMAL, 8_824_936_009);
+    assert!(AFFINITY_HEAD - STALE_NORMAL > WATCHDOG_NS);
+    assert!(stale_projected < AFFINITY_HEAD);
+
+    let run_start = vtime_run_start(STALE_NORMAL, CELL_FRONTIER);
+    assert_eq!(run_start, CELL_FRONTIER - VTIME_SLICE_NS);
+    let reclamped_projected = project_vtime(run_start, slice, slice, 0, BASE_WEIGHT).unwrap();
+    assert!(reclamped_projected > AFFINITY_HEAD);
 }
 
 #[test]

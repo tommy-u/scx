@@ -211,7 +211,7 @@ pub struct Metrics {
     pub cell_rehomes: u64,
     #[stat(desc = "Cell rehome attempts deferred because no task-cell rung selected a CPU")]
     pub cell_rehome_misses: u64,
-    #[stat(desc = "Keep-running replenishments suppressed for pending queue-cell rehomes")]
+    #[stat(desc = "Expired running tasks forced through enqueue for pending queue-cell rehomes")]
     pub queue_rehome_preemptions: u64,
     #[stat(desc = "Old-cell normal-queue executions preserved across live cell rehomes")]
     pub queue_stale_rehome_runs: u64,

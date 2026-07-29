@@ -1219,6 +1219,9 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
             .as_mut()
             .context("BPF bss data is unavailable")?
             .callback_timing_sample_rate = opts.callback_timing_sample_rate;
+        if queue_topology.is_some() {
+            skel.struct_ops.snake_ops_mut().flags |= *scx_utils::compat::SCX_OPS_ENQ_LAST;
+        }
         skel.struct_ops.snake_ops_mut().exit_dump_len = opts.exit_dump_len;
         let mut skel = scx_ops_load!(skel, snake_ops, uei)?;
         install_queue_topology(&mut skel, queue_topology)?;
@@ -2198,6 +2201,24 @@ scope = "task_allowed"
         assert_eq!(encoded.dispatch_rungs[1].opcode, 2);
         assert!(encoded.enqueue_rungs.iter().all(|rung| rung.flags == 0));
         assert!(encoded.dispatch_rungs.iter().all(|rung| rung.flags == 0));
+
+        let reversed = policy::compile_policy(
+            r#"
+[queues]
+layout = "cell"
+enqueue = [{ target = "cell" }, { target = "affinity" }]
+dispatch = [{ source = "affinity" }, { source = "cell" }]
+
+[[rung]]
+operation = "pick_idle"
+scope = "task_allowed"
+"#,
+        )
+        .unwrap();
+        let reversed = encode_ladder(&reversed, 8).unwrap();
+
+        assert_eq!(reversed.dispatch_rungs[0].opcode, 2);
+        assert_eq!(reversed.dispatch_rungs[1].opcode, 1);
     }
 
     #[test]
@@ -2284,6 +2305,10 @@ scope = "task_allowed"
         assert_eq!(
             u64::from(bpf_intf::SNAKE_VTIME_SLICE_NS),
             scx_snake::fairness::VTIME_SLICE_NS
+        );
+        assert_eq!(
+            u64::from(bpf_intf::SNAKE_VTIME_MIN_SLICE_NS),
+            scx_snake::fairness::VTIME_MIN_SLICE_NS
         );
         assert_eq!(bpf_intf::SNAKE_VTIME_GLOBAL_DSQ, 2);
         assert_eq!(bpf_intf::SNAKE_VTIME_CPU_DSQ_BASE, 3);

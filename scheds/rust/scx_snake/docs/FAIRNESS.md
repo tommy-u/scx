@@ -48,12 +48,42 @@ for placement experiments and compatibility comparisons.
 
 VTIME uses one global custom DSQ for unrestricted tasks and one custom DSQ per
 CPU for affinity-restricted tasks. Every queue is ordered by task virtual
-runtime and shares the same global clock. VTIME assigns a fixed physical slice
-of 5 ms and charges actual runtime using the kernel-provided task weight:
+runtime and shares the same global clock. VTIME scales its physical slice down
+for weights below the baseline of 100, with a 1 ms floor for scheduler-tick
+granularity, and caps it at 5 ms for larger weights:
 
 ```text
-task.vruntime += runtime_ns * 100 / task.weight
+physical_slice_ns = max(1 ms, 5 ms * min(task.weight, 100) / 100)
 ```
+
+Thus weights 1 through 20 receive 1 ms, weight 50 receives 2.5 ms, and weight
+100 or higher receives 5 ms. A weight below 20 advances farther in virtual time
+per turn and is therefore chosen less frequently; over a complete virtual
+period, physical service remains proportional to task weight. Weights above
+100 advance less per 5 ms turn and are chosen more frequently.
+
+Snake derives virtual service from both measured runtime and the consumed
+sched_ext slice. Initial dispatch establishes a service budget. Each
+keep-running replenishment replaces the current remainder with a new physical
+slice and extends that budget. Stopping bounds virtual service to the total
+budget accumulated during the continuous run:
+
+```text
+service_budget_ns += new_slice_ns - replaced_remaining_slice_ns
+consumed_budget_ns = service_budget_ns - remaining_slice_ns
+service_ns = min(service_budget_ns, max(runtime_ns, consumed_budget_ns))
+task.vruntime += service_ns * 100 / task.weight
+```
+
+This means `sched_yield()` forfeits the remaining slice and a non-preemptible
+overrun cannot create unbounded virtual debt. Runtime statistics still record
+the complete measured runtime, including overruns; only VTIME ordering uses the
+bounded service value.
+
+The task weight used to size a slice is retained for that queued or continuous
+run. A weight change while the task waits does not reinterpret an already
+assigned slice under the new weight; the next enqueue or direct assignment
+adopts the new value.
 
 The global frontier follows the latest virtual runtime observed when a task
 starts running:
@@ -63,11 +93,16 @@ vtime_now = max(vtime_now, task.vruntime)
 ```
 
 Before a runnable task is dispatched or enqueued, Snake limits accumulated
-sleeper credit to one virtual slice:
+sleeper or queue-wait credit to one virtual slice:
 
 ```text
 task.vruntime = max(task.vruntime, vtime_now - 5 ms)
 ```
+
+The clamp is repeated when the task starts running because a shared frontier can
+advance while that task waits in a DSQ. Without the run-start clamp,
+`keep_running` could repeatedly replenish an old task for seconds while it
+caught up to a newer affinity head.
 
 Queued tasks are inserted with `scx_bpf_dsq_insert_vtime()`. A task allowed on
 every possible CPU uses the global DSQ. An affinity-restricted task is
@@ -94,8 +129,8 @@ and as the ordering mechanism inside cell queue policies.
 ## VTIME with cell queues
 
 A policy with `[queues]` replaces the global VTIME queue topology. It still
-uses 5 ms physical slices and the same per-task weight scaling, but separates
-normal cell work from affinity-constrained escape work.
+uses the same weight-scaled physical slices and bounded-service accounting, but
+separates normal cell work from affinity-constrained escape work.
 
 ### Normal queues and cell clocks
 
@@ -289,12 +324,33 @@ sudo scheds/rust/scx_snake/tests/vtime_mixed_affinity.sh \
   target/release/scx_snake
 ```
 
+The VTIME watchdog regression requires at least 128 guest CPUs and preserves its
+artifacts under `/tmp`. It combines a nice-19 `khugepaged` thread, persistent
+normal tasks crossing cell clocks, and repeated affinity/yield-heavy
+oversubscription to verify bounded physical slices, run-start credit, slice
+forfeiture, and watchdog progress:
+
+```bash
+sudo SNAKE_EXPECT_CPUS=256 \
+  scheds/rust/scx_snake/tests/vtime_low_weight_yield.sh \
+  target/release/scx_snake
+```
+
 Cell queue and direct-borrowing regressions are also VM-only:
 
 ```bash
 sudo scheds/rust/scx_snake/tests/vtime_cell_queues.sh \
   target/release/scx_snake
 sudo scheds/rust/scx_snake/tests/vtime_cell_borrowing.sh \
+  target/release/scx_snake
+```
+
+Inside an isolated guest, the combined gauntlet runs the FIFO fallback and all
+applicable VTIME queue tests, adding max-cell coverage at 32 CPUs and the
+low-weight watchdog campaign at 128 CPUs. It never launches EEVDF:
+
+```bash
+sudo scheds/rust/scx_snake/tests/vm_gauntlet.sh \
   target/release/scx_snake
 ```
 
@@ -305,9 +361,10 @@ Additional VM-only contracts cover the remaining queue boundaries:
 | `fifo_fallback.sh` | Shared FIFO fallback is explicitly drained. |
 | `vtime_queue_ladders.sh` | Callback ladders activate, live reorder, switch to `min_vtime`, and dispatch both queue classes. |
 | `vtime_max_cells.sh` | 31 declared cells plus cell 0 run under `cell` and `cell_llc`. |
-| `vtime_single_runner_rehome.sh` | A running task cannot retain an obsolete cell indefinitely. |
+| `vtime_single_runner_rehome.sh` | A sole running task is re-enqueued and cannot retain an obsolete cell indefinitely. |
 | `vtime_queued_rehome.sh` | An old normal-DSQ run is preserved once, then translated on re-enqueue. |
 | `vtime_cell_borrowing.sh` | Direct borrowers yield after one slice before any owner-cell comparison. |
+| `vtime_low_weight_yield.sh` | Weight-1 and stale run-start tasks survive affinity/yield-heavy 256-CPU oversubscription without runnable stalls. |
 
 Run queue-layout tests with `SNAKE_QUEUE_LAYOUT=cell_llc` to cover populated
 cell/LLC shards sharing one per-cell clock.

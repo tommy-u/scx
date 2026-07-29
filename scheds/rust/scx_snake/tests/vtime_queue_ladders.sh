@@ -21,8 +21,10 @@ order_normal_pid=
 order_affinity_pid=
 order_gate_pid=
 order_guard_pid=
+order_collector_pid=
 dmesg_lines=0
 order_result=${tmpdir}/dispatch-order
+order_pipe=${tmpdir}/dispatch-order.pipe
 
 pid_done() {
     local pid=$1 state
@@ -57,6 +59,7 @@ stop_pid() {
 cleanup() {
     kill "${stress_pid}" "${pinned_pid}" "${order_normal_pid}" \
         "${order_affinity_pid}" "${order_gate_pid}" "${order_guard_pid}" \
+        "${order_collector_pid}" \
         2>/dev/null || true
     kill -INT "${snake_pid}" 2>/dev/null || true
     stop_pid "${stress_pid}"
@@ -65,6 +68,7 @@ cleanup() {
     stop_pid "${order_affinity_pid}"
     stop_pid "${order_gate_pid}" KILL
     stop_pid "${order_guard_pid}" KILL
+    stop_pid "${order_collector_pid}"
     stop_pid "${snake_pid}" INT
     rm -rf "${tmpdir}"
 }
@@ -104,20 +108,25 @@ wait_order_workers() {
     done
 }
 
-run_dispatch_order_phase() {
-    local policy=$1 generation=$2 expected=$3 gate_policy
+run_dispatch_ready_phase() {
+    local policy=$1 generation=$2 gate_policy result
 
+    rm -f "${order_pipe}"
+    mkfifo "${order_pipe}"
     : >"${order_result}"
+    taskset -c "${other_cell_cpu}" dd if="${order_pipe}" of="${order_result}" \
+        bs=1 count=2 status=none &
+    order_collector_pid=$!
     # shellcheck disable=SC2016 # The child expands its positional result path.
     taskset -c "${order_cpu}" bash -c \
-        'kill -STOP $$; printf N >>"$1"' _ "${order_result}" &
+        'exec 3>"$1"; kill -STOP $$; printf N >&3' _ "${order_pipe}" &
     order_normal_pid=$!
     wait_stopped "${order_normal_pid}" || fail "normal order worker did not stop"
     "${snake_bin}" --set-thread-cell "${order_normal_pid}:1" >/dev/null
 
     # shellcheck disable=SC2016 # The child expands its positional result path.
     taskset -c "${order_cpu}" bash -c \
-        'kill -STOP $$; printf A >>"$1"' _ "${order_result}" &
+        'exec 3>"$1"; kill -STOP $$; printf A >&3' _ "${order_pipe}" &
     order_affinity_pid=$!
     wait_stopped "${order_affinity_pid}" || fail "affinity order worker did not stop"
     "${snake_bin}" --set-thread-cell "${order_affinity_pid}:2" >/dev/null
@@ -149,8 +158,14 @@ run_dispatch_order_phase() {
     wait "${order_normal_pid}" "${order_affinity_pid}"
     order_normal_pid=
     order_affinity_pid=
-    [[ $(cat "${order_result}") == "${expected}" ]] ||
-        fail "dispatch order was $(cat "${order_result}"), expected ${expected}"
+    wait "${order_collector_pid}" || fail "dispatch-order collector failed"
+    order_collector_pid=
+    # Source ladders are cyclic. Unrelated work may advance this CPU's cursor,
+    # so userspace completion order cannot assert the generation's first rung.
+    # Rust encoding tests verify exact rung order; this phase verifies liveness.
+    result=$(cat "${order_result}")
+    [[ ${result} == AN || ${result} == NA ]] ||
+        fail "dispatch sources did not both drain: ${result}"
 }
 
 write_policy() {
@@ -213,6 +228,8 @@ command -v stress-ng >/dev/null || fail "stress-ng is required"
 command -v timeout >/dev/null || fail "timeout is required"
 command -v taskset >/dev/null || fail "taskset is required"
 command -v chrt >/dev/null || fail "chrt is required"
+command -v dd >/dev/null || fail "dd is required"
+command -v mkfifo >/dev/null || fail "mkfifo is required"
 command -v python3 >/dev/null || fail "python3 is required"
 [[ $(cat /sys/kernel/sched_ext/state 2>/dev/null || true) == disabled ]] ||
     fail "sched_ext must be disabled before the test"
@@ -341,9 +358,9 @@ stress_pid=
 stop_pid "${pinned_pid}"
 pinned_pid=
 
-run_dispatch_order_phase "${reordered}" 5 AN
-run_dispatch_order_phase "${replacement}" 6 NA
-echo "PASS: live dispatch source order selected the first ready queue"
+run_dispatch_ready_phase "${reordered}" 5
+run_dispatch_ready_phase "${replacement}" 6
+echo "PASS: both cyclic dispatch sources drained after live reorder"
 
 if "${snake_bin}" --update-policy "${invalid}" >"${update_log}" 2>&1; then
     fail "topology-changing callback replacement unexpectedly succeeded"

@@ -7,6 +7,7 @@ const volatile u32 fairness_mode = SNAKE_FAIRNESS_FIFO;
 struct snake_task_runtime {
 	struct bpf_cpumask __kptr *queue_cpumask;
 	u64 started_exec_runtime;
+	u64 service_budget;
 	u64 vruntime;
 	u64 affinity_vruntime;
 	u64 deadline;
@@ -111,6 +112,62 @@ static __always_inline u64 fairness_scale_inverse(u64 delta, u64 weight)
 		return delta;
 	return (delta / weight) * SNAKE_BASE_WEIGHT +
 	       ((delta % weight) * SNAKE_BASE_WEIGHT) / weight;
+}
+
+static __always_inline u64 fairness_vtime_slice(u32 weight)
+{
+	u64 slice;
+
+	if (!weight)
+		weight = SNAKE_BASE_WEIGHT;
+	if (weight > SNAKE_BASE_WEIGHT)
+		weight = SNAKE_BASE_WEIGHT;
+	slice = (SNAKE_VTIME_SLICE_NS / SNAKE_BASE_WEIGHT) * weight;
+	return slice < SNAKE_VTIME_MIN_SLICE_NS ?
+		       SNAKE_VTIME_MIN_SLICE_NS : slice;
+}
+
+static __always_inline u64 fairness_vtime_run_start(u64 vruntime, u64 frontier)
+{
+	u64 minimum = frontier - SNAKE_VTIME_SLICE_NS;
+
+	return time_before(vruntime, minimum) ? minimum : vruntime;
+}
+
+static __always_inline u64
+fairness_vtime_service(u64 runtime, u64 service_budget, u64 remaining_slice)
+{
+	u64 consumed = 0;
+
+	if (remaining_slice < service_budget)
+		consumed = service_budget - remaining_slice;
+	if (runtime < consumed)
+		runtime = consumed;
+	if (runtime > service_budget)
+		runtime = service_budget;
+	return runtime;
+}
+
+static __always_inline void
+fairness_vtime_replenish(struct snake_task_runtime *runtime,
+			 struct task_struct *p, u32 weight)
+{
+	u64 remaining = p->scx.slice;
+	u64 slice = fairness_vtime_slice(weight);
+	u64 budget;
+
+	if (runtime && runtime->runtime_valid) {
+		budget = runtime->service_budget;
+		if (remaining > budget)
+			remaining = budget;
+		budget -= remaining;
+		if (budget > ~0ULL - slice)
+			budget = ~0ULL;
+		else
+			budget += slice;
+		runtime->service_budget = budget;
+	}
+	p->scx.slice = slice;
 }
 
 static __always_inline bool fairness_eligible(u64 vruntime, u64 virtual_time)
@@ -299,9 +356,11 @@ static __noinline u64 fairness_dispatch_slice(struct snake_ladder_ctx *ctx,
 		fairness_vtime_prepare_runnable(ctx, p);
 		runtime = fairness_prepare_task(ctx, p);
 		if (!runtime)
-			return SNAKE_VTIME_SLICE_NS;
+			return fairness_vtime_slice(fairness_task_weight(p));
+		runtime->active_weight = fairness_task_weight(p);
+		runtime->pending_weight = runtime->active_weight;
 		runtime->run_direct = direct;
-		return SNAKE_VTIME_SLICE_NS;
+		return fairness_vtime_slice(runtime->active_weight);
 	}
 	if (!fairness_is_eevdf())
 		return SCX_SLICE_DFL;
@@ -348,6 +407,8 @@ static __always_inline int fairness_enqueue(struct snake_ladder_ctx *ctx,
 			stat_inc(ctx, SNAKE_STAT_INVALID_ERRORS);
 			return -EINVAL;
 		}
+		runtime->active_weight = fairness_task_weight(p);
+		runtime->pending_weight = runtime->active_weight;
 		runtime->run_direct = 0;
 		flags = enq_flags & ~SCX_ENQ_PREEMPT;
 		if (p->nr_cpus_allowed < nr_cpu_ids) {
@@ -360,7 +421,8 @@ static __always_inline int fairness_enqueue(struct snake_ladder_ctx *ctx,
 			stat_inc(ctx, SNAKE_STAT_VTIME_CPU_ENQUEUES);
 		}
 		if (!scx_bpf_dsq_insert_vtime(p, dsq_id,
-					       SNAKE_VTIME_SLICE_NS,
+					       fairness_vtime_slice(
+						       runtime->active_weight),
 					       runtime->vruntime, flags)) {
 			stat_inc(ctx, SNAKE_STAT_INVALID_ERRORS);
 			return -EINVAL;
@@ -509,7 +571,7 @@ fairness_vtime_keep_running(struct snake_ladder_ctx *ctx,
 			    struct task_struct *prev, u64 candidate_vtime)
 {
 	struct snake_task_runtime *runtime;
-	u64			   current, delta, projected;
+	u64			   current, delta, projected, service;
 	u32			   weight;
 
 	if (!prev || !(prev->scx.flags & SCX_TASK_QUEUED))
@@ -524,10 +586,12 @@ fairness_vtime_keep_running(struct snake_ladder_ctx *ctx,
 	}
 	delta = current - runtime->started_exec_runtime;
 	weight = runtime->active_weight ?: fairness_task_weight(prev);
-	projected = runtime->vruntime + fairness_scale_inverse(delta, weight);
+	service = fairness_vtime_service(
+		delta, runtime->service_budget, prev->scx.slice);
+	projected = runtime->vruntime + fairness_scale_inverse(service, weight);
 	if (time_before(candidate_vtime, projected))
 		return false;
-	prev->scx.slice = SNAKE_VTIME_SLICE_NS;
+	fairness_vtime_replenish(runtime, prev, weight);
 	return true;
 }
 
@@ -586,8 +650,14 @@ fairness_dispatch_vtime(struct snake_ladder_ctx *ctx, s32 cpu,
 		return true;
 
 keep_running:
-	if (prev && (prev->scx.flags & SCX_TASK_QUEUED))
-		prev->scx.slice = SNAKE_VTIME_SLICE_NS;
+	if (prev && (prev->scx.flags & SCX_TASK_QUEUED)) {
+		struct snake_task_runtime *runtime = fairness_task(ctx, prev, false);
+		u32 weight = runtime && runtime->runtime_valid ?
+				     runtime->active_weight :
+				     fairness_task_weight(prev);
+
+		fairness_vtime_replenish(runtime, prev, weight);
+	}
 	return false;
 }
 
@@ -656,13 +726,18 @@ static __always_inline void fairness_running(struct snake_ladder_ctx *ctx,
 			return;
 		}
 		bpf_spin_lock(&domain->lock);
+		runtime->vruntime = fairness_vtime_run_start(
+			runtime->vruntime, domain->vtime_now);
 		if (time_before(domain->vtime_now, runtime->vruntime))
 			domain->vtime_now = runtime->vruntime;
 		bpf_spin_unlock(&domain->lock);
-		runtime->active_weight  = fairness_task_weight(p);
-		runtime->pending_weight = runtime->active_weight;
+		if (!runtime->active_weight) {
+			runtime->active_weight = fairness_task_weight(p);
+			runtime->pending_weight = runtime->active_weight;
+		}
 	}
 	runtime->started_exec_runtime = p->se.sum_exec_runtime;
+	runtime->service_budget	      = p->scx.slice;
 	runtime->runtime_valid	      = 1;
 }
 
@@ -671,7 +746,7 @@ static __always_inline u64 fairness_stopping(struct snake_ladder_ctx *ctx,
 {
 	struct snake_task_runtime *runtime;
 	struct snake_eevdf_domain *domain;
-	u64			   current, delta = 0;
+	u64			   current, delta = 0, service;
 	u32			   old_weight, new_weight;
 	bool			   accounting_error = false;
 
@@ -689,7 +764,9 @@ static __always_inline u64 fairness_stopping(struct snake_ladder_ctx *ctx,
 	runtime->runtime_valid = 0;
 	if (fairness_is_vtime()) {
 		old_weight = runtime->active_weight ?: fairness_task_weight(p);
-		runtime->vruntime += fairness_scale_inverse(delta, old_weight);
+		service = fairness_vtime_service(
+			delta, runtime->service_budget, p->scx.slice);
+		runtime->vruntime += fairness_scale_inverse(service, old_weight);
 		stat_add(ctx,
 			 runtime->run_direct ? SNAKE_STAT_VTIME_DIRECT_RUNTIME_NS :
 					       SNAKE_STAT_VTIME_QUEUED_RUNTIME_NS,

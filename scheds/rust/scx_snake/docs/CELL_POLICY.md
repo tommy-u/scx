@@ -131,8 +131,9 @@ intersections are normal rung misses, so later policy rungs remain
 authoritative. `needs_rehome` is set by a live userspace update. Placement-only
 mode clears it on a successful cell placement; queue mode clears it after a
 scheduling callback has adopted and translated the requested identity. Queue
-dispatch will not replenish an expired running task while its annotation
-targets another cell, so even an otherwise isolated CPU-bound task returns
+dispatch declines to renew an expired running task while its annotation targets
+another cell. Queue mode enables `SCX_OPS_ENQ_LAST`, so even an otherwise
+isolated CPU-bound task returns
 through enqueue to complete the clock translation. A normal task already
 linked on its old cell DSQ cannot be removed by the annotation update. If it is
 dispatched before re-enqueue, Snake charges that one execution to the old cell,

@@ -5,6 +5,7 @@ use clap::ValueEnum;
 pub const BASE_WEIGHT: u64 = 100;
 pub const EEVDF_SLICE_NS: u64 = 5_000_000;
 pub const VTIME_SLICE_NS: u64 = 5_000_000;
+pub const VTIME_MIN_SLICE_NS: u64 = 1_000_000;
 
 #[repr(u32)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
@@ -51,6 +52,10 @@ pub fn clamp_vtime_credit(vruntime: u64, frontier: u64) -> u64 {
     } else {
         vruntime
     }
+}
+
+pub fn vtime_run_start(vruntime: u64, frontier: u64) -> u64 {
+    clamp_vtime_credit(vruntime, frontier)
 }
 
 pub fn translate_vruntime(vruntime: u64, old_frontier: u64, new_frontier: u64, limit: u64) -> u64 {
@@ -110,6 +115,45 @@ pub fn scale_inverse_weight(delta_ns: u64, weight: u64) -> Result<u64, &'static 
         .checked_mul(BASE_WEIGHT)
         .map(|scaled| scaled / weight)
         .ok_or("weighted duration overflowed")
+}
+
+pub fn vtime_slice_ns(weight: u64) -> Result<u64, &'static str> {
+    let weight = if weight == 0 {
+        BASE_WEIGHT
+    } else {
+        weight.min(BASE_WEIGHT)
+    };
+    Ok((VTIME_SLICE_NS / BASE_WEIGHT * weight).max(VTIME_MIN_SLICE_NS))
+}
+
+pub fn vtime_service_ns(runtime_ns: u64, slice_ns: u64, remaining_ns: u64) -> u64 {
+    let consumed = slice_ns.saturating_sub(remaining_ns);
+    runtime_ns.max(consumed).min(slice_ns)
+}
+
+pub fn replenish_vtime_budget(budget_ns: u64, remaining_ns: u64, slice_ns: u64) -> u64 {
+    budget_ns
+        .saturating_sub(remaining_ns.min(budget_ns))
+        .saturating_add(slice_ns)
+}
+
+pub fn project_vtime(
+    vruntime: u64,
+    runtime_ns: u64,
+    budget_ns: u64,
+    remaining_ns: u64,
+    weight: u64,
+) -> Result<u64, &'static str> {
+    let service_ns = vtime_service_ns(runtime_ns, budget_ns, remaining_ns);
+    Ok(vruntime.wrapping_add(scale_inverse_weight(service_ns, weight)?))
+}
+
+pub fn vtime_run_weight(assigned_weight: u64, live_weight: u64) -> u64 {
+    if assigned_weight == 0 {
+        live_weight
+    } else {
+        assigned_weight
+    }
 }
 
 pub fn advance_virtual_time(
