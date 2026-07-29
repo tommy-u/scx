@@ -296,7 +296,8 @@ static __always_inline bool
 fine_timing_stage_valid(const struct snake_fine_timing_ctx *ctx, u32 stage)
 {
 	if (ctx->callback == SNAKE_FINE_TIMING_CALLBACK_SELECT_CPU)
-		return stage <= SNAKE_FINE_TIMING_SELECT_POLICY_LADDER;
+		return stage >= SNAKE_FINE_TIMING_SELECT_ACQUIRE_LADDER &&
+		       stage <= SNAKE_FINE_TIMING_SELECT_FINISH;
 	if (ctx->callback == SNAKE_FINE_TIMING_CALLBACK_ENQUEUE)
 		return stage >= SNAKE_FINE_TIMING_ENQUEUE_ACQUIRE_LADDER &&
 		       stage <= SNAKE_FINE_TIMING_ENQUEUE_FINISH;
@@ -306,17 +307,26 @@ fine_timing_stage_valid(const struct snake_fine_timing_ctx *ctx, u32 stage)
 	return false;
 }
 
+static __always_inline u64 fine_timing_select_start(u64 callback_started_at)
+{
+	return callback_started_at && READ_ONCE(select_fine_timing_session_id) ?
+		       bpf_ktime_get_ns() :
+		       0;
+}
+
 static __noinline void
-fine_timing_finish_select(u64 started_at)
+fine_timing_finish_select(u32 stage, u64 started_at)
 {
 	struct snake_fine_timing_event event = {};
 	u64 session_id = READ_ONCE(select_fine_timing_session_id);
 
-	if (!started_at || !session_id)
+	if (!started_at || !session_id ||
+	    stage < SNAKE_FINE_TIMING_SELECT_ACQUIRE_LADDER ||
+	    stage > SNAKE_FINE_TIMING_SELECT_FINISH)
 		return;
 	event.session_id = session_id;
 	event.elapsed_ns = bpf_ktime_get_ns() - started_at;
-	event.stage = SNAKE_FINE_TIMING_SELECT_POLICY_LADDER;
+	event.stage = stage;
 	bpf_ringbuf_output(&fine_timing_events, &event, sizeof(event), 0);
 }
 
@@ -389,12 +399,16 @@ static __always_inline void stat_max(const struct snake_ladder_ctx *ctx, u32 idx
 
 /* Record total and maximum latency for one select_cpu invocation. */
 static __noinline void finish_select(const struct snake_ladder_ctx *ctx,
-				     u64 started_at)
+				     u64 started_at,
+				     u64 callback_started_at)
 {
+	u64 fine_started_at = fine_timing_select_start(callback_started_at);
 	u64 elapsed = bpf_ktime_get_ns() - started_at;
 
 	stat_add(ctx, SNAKE_STAT_SELECT_LATENCY_NS, elapsed);
 	stat_max(ctx, SNAKE_STAT_SELECT_LATENCY_MAX_NS, elapsed);
+	fine_timing_finish_select(SNAKE_FINE_TIMING_SELECT_FINISH,
+				  fine_started_at);
 }
 
 /* Choose an affinity-safe CPU after every configured rung misses. */

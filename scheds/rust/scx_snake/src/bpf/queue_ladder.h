@@ -90,7 +90,7 @@ queue_ladder_enqueue(struct snake_ladder_ctx *ctx, struct task_struct *p,
 	fine_timing_finish(fine, SNAKE_FINE_TIMING_ENQUEUE_CANCEL_DIRECT,
 			   stage_started_at);
 	stage_started_at = fine_timing_start(fine);
-	runtime = queue_fairness_prepare_runnable(ctx, p);
+	runtime = queue_fairness_prepare_runnable(ctx, p, fine);
 	fine_timing_finish(fine, SNAKE_FINE_TIMING_ENQUEUE_PREPARE_RUNNABLE,
 			   stage_started_at);
 	if (!runtime)

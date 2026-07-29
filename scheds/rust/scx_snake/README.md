@@ -275,11 +275,15 @@ The inspector can independently enable fine-grained timing for `select_cpu`,
 queue-mode `enqueue`, and queue-mode `dispatch`. Fine timing reuses the same
 sample decision. Sampled stages emit fixed-size records through a bounded BPF
 ring buffer, and Snake immediately folds them into one fixed histogram per
-stage; individual events are not retained. The select stage covers active
-ladder acquisition plus the policy-ladder walk. Disabling a capture freezes it
-as historical. Starting a new capture resets only that callback's histograms,
-and activating another policy automatically stops active captures before the
-generation changes.
+stage; individual events are not retained. Select timing separates active
+ladder acquisition, the policy walk, its queue/direct/fallback outcome, and
+final accounting. Enqueue retains the total runnable-preparation measurement
+and breaks out task storage, cell-clock, and credit-clamp work. Dispatch groups
+remote normal-queue scans by queue fanout without adding work inside the scan
+loop, and measures the kernel move-to-local helper separately from accounting.
+Disabling a capture freezes it as historical. Starting a new capture resets
+only that callback's histograms, and activating another policy automatically
+stops active captures before the generation changes.
 
 Run a cell queue policy only with VTIME:
 

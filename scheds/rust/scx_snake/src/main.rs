@@ -3064,11 +3064,24 @@ scope = "task_allowed"
             inventory.iter().map(|stage| stage.name).collect::<Vec<_>>()
         };
 
-        assert!(names(select).contains(&"acquire_and_policy_ladder"));
+        assert!(names(select).contains(&"acquire_ladder"));
+        assert!(names(select).contains(&"policy_ladder"));
+        assert!(names(select).contains(&"queue_target"));
+        assert!(names(select).contains(&"direct_insert"));
+        assert!(names(select).contains(&"strict_preempt"));
+        assert!(names(select).contains(&"fallback"));
+        assert!(names(select).contains(&"finish"));
+        assert!(names(enqueue).contains(&"prepare_route_lookup"));
+        assert!(names(enqueue).contains(&"prepare_task_storage"));
+        assert!(names(enqueue).contains(&"prepare_cell_clock"));
+        assert!(names(enqueue).contains(&"prepare_credit_clamp"));
         assert!(names(enqueue).contains(&"normal_dsq_insert"));
         assert!(names(enqueue).contains(&"affinity_path"));
-        assert!(names(dispatch).contains(&"remote_normal_scan"));
-        assert!(names(dispatch).contains(&"move_to_local"));
+        assert!(names(dispatch).contains(&"remote_scan_1_queue"));
+        assert!(names(dispatch).contains(&"remote_scan_2_4_queues"));
+        assert!(names(dispatch).contains(&"remote_scan_5_8_queues"));
+        assert!(names(dispatch).contains(&"remote_scan_9_plus_queues"));
+        assert!(names(dispatch).contains(&"move_to_local_helper"));
         assert!(select
             .iter()
             .all(|left| enqueue.iter().all(|right| left.id != right.id)));

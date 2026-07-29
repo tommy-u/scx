@@ -63,10 +63,36 @@ pub struct FineTimingControlResponse {
     pub session_id: Option<u64>,
 }
 
-const SELECT_STAGES: [FineTimingStage; 1] = [FineTimingStage {
-    id: bpf_intf::snake_fine_timing_stage_SNAKE_FINE_TIMING_SELECT_POLICY_LADDER,
-    name: "acquire_and_policy_ladder",
-}];
+const SELECT_STAGES: [FineTimingStage; 7] = [
+    FineTimingStage {
+        id: bpf_intf::snake_fine_timing_stage_SNAKE_FINE_TIMING_SELECT_ACQUIRE_LADDER,
+        name: "acquire_ladder",
+    },
+    FineTimingStage {
+        id: bpf_intf::snake_fine_timing_stage_SNAKE_FINE_TIMING_SELECT_POLICY_LADDER,
+        name: "policy_ladder",
+    },
+    FineTimingStage {
+        id: bpf_intf::snake_fine_timing_stage_SNAKE_FINE_TIMING_SELECT_QUEUE_TARGET,
+        name: "queue_target",
+    },
+    FineTimingStage {
+        id: bpf_intf::snake_fine_timing_stage_SNAKE_FINE_TIMING_SELECT_DIRECT_INSERT,
+        name: "direct_insert",
+    },
+    FineTimingStage {
+        id: bpf_intf::snake_fine_timing_stage_SNAKE_FINE_TIMING_SELECT_STRICT_PREEMPT,
+        name: "strict_preempt",
+    },
+    FineTimingStage {
+        id: bpf_intf::snake_fine_timing_stage_SNAKE_FINE_TIMING_SELECT_FALLBACK,
+        name: "fallback",
+    },
+    FineTimingStage {
+        id: bpf_intf::snake_fine_timing_stage_SNAKE_FINE_TIMING_SELECT_FINISH,
+        name: "finish",
+    },
+];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FineTimingStage {
@@ -74,7 +100,7 @@ pub struct FineTimingStage {
     pub name: &'static str,
 }
 
-const ENQUEUE_STAGES: [FineTimingStage; 9] = [
+const ENQUEUE_STAGES: [FineTimingStage; 13] = [
     FineTimingStage {
         id: bpf_intf::snake_fine_timing_stage_SNAKE_FINE_TIMING_ENQUEUE_ACQUIRE_LADDER,
         name: "acquire_ladder",
@@ -86,6 +112,22 @@ const ENQUEUE_STAGES: [FineTimingStage; 9] = [
     FineTimingStage {
         id: bpf_intf::snake_fine_timing_stage_SNAKE_FINE_TIMING_ENQUEUE_PREPARE_RUNNABLE,
         name: "prepare_runnable",
+    },
+    FineTimingStage {
+        id: bpf_intf::snake_fine_timing_stage_SNAKE_FINE_TIMING_ENQUEUE_PREPARE_ROUTE_LOOKUP,
+        name: "prepare_route_lookup",
+    },
+    FineTimingStage {
+        id: bpf_intf::snake_fine_timing_stage_SNAKE_FINE_TIMING_ENQUEUE_PREPARE_TASK_STORAGE,
+        name: "prepare_task_storage",
+    },
+    FineTimingStage {
+        id: bpf_intf::snake_fine_timing_stage_SNAKE_FINE_TIMING_ENQUEUE_PREPARE_CELL_CLOCK,
+        name: "prepare_cell_clock",
+    },
+    FineTimingStage {
+        id: bpf_intf::snake_fine_timing_stage_SNAKE_FINE_TIMING_ENQUEUE_PREPARE_CREDIT_CLAMP,
+        name: "prepare_credit_clamp",
     },
     FineTimingStage {
         id: bpf_intf::snake_fine_timing_stage_SNAKE_FINE_TIMING_ENQUEUE_CELL_VALIDATE,
@@ -113,7 +155,7 @@ const ENQUEUE_STAGES: [FineTimingStage; 9] = [
     },
 ];
 
-const DISPATCH_STAGES: [FineTimingStage; 12] = [
+const DISPATCH_STAGES: [FineTimingStage; 15] = [
     FineTimingStage {
         id: bpf_intf::snake_fine_timing_stage_SNAKE_FINE_TIMING_DISPATCH_ACQUIRE_LADDER,
         name: "acquire_ladder",
@@ -135,8 +177,20 @@ const DISPATCH_STAGES: [FineTimingStage; 12] = [
         name: "normal_head_peek",
     },
     FineTimingStage {
-        id: bpf_intf::snake_fine_timing_stage_SNAKE_FINE_TIMING_DISPATCH_REMOTE_NORMAL_SCAN,
-        name: "remote_normal_scan",
+        id: bpf_intf::snake_fine_timing_stage_SNAKE_FINE_TIMING_DISPATCH_REMOTE_SCAN_1_QUEUE,
+        name: "remote_scan_1_queue",
+    },
+    FineTimingStage {
+        id: bpf_intf::snake_fine_timing_stage_SNAKE_FINE_TIMING_DISPATCH_REMOTE_SCAN_2_4_QUEUES,
+        name: "remote_scan_2_4_queues",
+    },
+    FineTimingStage {
+        id: bpf_intf::snake_fine_timing_stage_SNAKE_FINE_TIMING_DISPATCH_REMOTE_SCAN_5_8_QUEUES,
+        name: "remote_scan_5_8_queues",
+    },
+    FineTimingStage {
+        id: bpf_intf::snake_fine_timing_stage_SNAKE_FINE_TIMING_DISPATCH_REMOTE_SCAN_9_PLUS_QUEUES,
+        name: "remote_scan_9_plus_queues",
     },
     FineTimingStage {
         id: bpf_intf::snake_fine_timing_stage_SNAKE_FINE_TIMING_DISPATCH_AFFINITY_HEAD_PEEK,
@@ -152,7 +206,7 @@ const DISPATCH_STAGES: [FineTimingStage; 12] = [
     },
     FineTimingStage {
         id: bpf_intf::snake_fine_timing_stage_SNAKE_FINE_TIMING_DISPATCH_MOVE_TO_LOCAL,
-        name: "move_to_local",
+        name: "move_to_local_helper",
     },
     FineTimingStage {
         id: bpf_intf::snake_fine_timing_stage_SNAKE_FINE_TIMING_DISPATCH_REPLENISH,
