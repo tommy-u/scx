@@ -26,6 +26,7 @@ const STOP_TIMEOUT: Duration = Duration::from_secs(8);
 pub enum LaunchFairness {
     Fifo,
     Vtime,
+    Eevdf,
 }
 
 impl LaunchFairness {
@@ -33,6 +34,7 @@ impl LaunchFairness {
         match self {
             Self::Fifo => "fifo",
             Self::Vtime => "vtime",
+            Self::Eevdf => "eevdf",
         }
     }
 }
@@ -530,6 +532,7 @@ fn parse_external_launch(
                 launch.fairness = Some(match value {
                     "fifo" => LaunchFairness::Fifo,
                     "vtime" => LaunchFairness::Vtime,
+                    "eevdf" => LaunchFairness::Eevdf,
                     other => bail!("unsupported fairness mode {other:?} in external Snake command"),
                 });
                 index += consumed;

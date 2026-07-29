@@ -67,7 +67,36 @@ export function fineTimingCaptureModels(payload) {
   });
 }
 
-export function policyLibraryModels(catalog, control, activeSource = null) {
+function restartReasonLabel(reason) {
+  const text = String(reason || "").trim();
+  const lower = text.toLowerCase();
+  if (lower.includes("queue topology")) {
+    return "DSQ topology changes.";
+  }
+  if (lower.includes("task membership")) {
+    return "Task membership changes.";
+  }
+  if (lower.includes("queue enqueue target")) {
+    return "Queue enqueue targets change.";
+  }
+  if (lower.includes("queue dispatch source")) {
+    return "Queue dispatch sources change.";
+  }
+  const withoutRestart = text
+    .replace(/;?\s*restart Snake to apply it\.?$/i, "")
+    .replace(/^candidate\s+/i, "Policy ");
+  if (!withoutRestart) {
+    return "Policy arguments require a new scheduler attachment.";
+  }
+  return /[.!?]$/.test(withoutRestart) ? withoutRestart : `${withoutRestart}.`;
+}
+
+export function policyLibraryModels(
+  catalog,
+  control,
+  activeSource = null,
+  selectedFairness = null,
+) {
   const valid = new Map((catalog?.policies || []).map((policy) => [policy.id, policy]));
   const invalid = new Map((catalog?.invalid || []).map((policy) => [policy.id, policy]));
   const controls = control?.policies?.length
@@ -86,14 +115,25 @@ export function policyLibraryModels(catalog, control, activeSource = null) {
           reload_reasons: [policy.error],
         })),
       ];
+  const activeFairness = control?.launch?.fairness || "fifo";
   return controls.map((entry) => {
     const details = valid.get(entry.id);
     const invalidDetails = invalid.get(entry.id);
-    const changeMode = ["dynamic", "reload", "invalid"].includes(entry.change_mode)
+    const source = details?.source || invalidDetails?.source || null;
+    const fairnessModes = /^\s*\[\s*queues(?:\s*\]|\s*\.)/m.test(source || "")
+      ? ["vtime"]
+      : ["fifo", "vtime", "eevdf"];
+    const configuredChangeMode = ["dynamic", "reload", "invalid"].includes(entry.change_mode)
       ? entry.change_mode
       : "invalid";
-    const active = control?.policy_id === entry.id
-      || Boolean(details?.source && activeSource && details.source.trim() === activeSource.trim());
+    const changeMode = selectedFairness
+      && selectedFairness !== activeFairness
+      && configuredChangeMode !== "invalid"
+      ? "reload"
+      : configuredChangeMode;
+    const active = (!selectedFairness || selectedFairness === activeFairness)
+      && (control?.policy_id === entry.id
+        || Boolean(details?.source && activeSource && details.source.trim() === activeSource.trim()));
     const actionKind = active
       ? "active"
       : changeMode === "dynamic"
@@ -109,11 +149,32 @@ export function policyLibraryModels(catalog, control, activeSource = null) {
           ? (control?.active ? "Select for restart" : "Select to start")
           : "Unavailable";
     const reasons = entry.reload_reasons || [];
+    const restartReasons = [];
+    if (changeMode === "reload" && selectedFairness && selectedFairness !== activeFairness) {
+      restartReasons.push(
+        `Fairness approach changes from ${activeFairness.toUpperCase()} to ${selectedFairness.toUpperCase()}.`,
+      );
+    }
+    if (changeMode === "reload") {
+      restartReasons.push(...reasons.map(restartReasonLabel));
+    }
+    const uniqueRestartReasons = [...new Set(restartReasons)];
+    const hoverDetail = uniqueRestartReasons.length > 0
+      ? `Restart required:\n${uniqueRestartReasons.map((reason) => `• ${reason}`).join("\n")}`
+      : changeMode === "invalid"
+        ? reasons[0] || invalidDetails?.error || "Policy arguments are invalid."
+        : null;
     return {
       ...entry,
-      name: details?.name || entry.name || entry.id,
-      source: details?.source || null,
-      summary: details?.summary || reasons[0] || invalidDetails?.error || "No policy details available.",
+      name: details?.name || invalidDetails?.name || entry.name || entry.id,
+      source,
+      summary: invalidDetails || changeMode === "invalid"
+        ? null
+        : details?.summary || reasons[0] || "No policy details available.",
+      hoverDetail,
+      restartReasons: uniqueRestartReasons,
+      fairnessModes,
+      selectedFairness,
       active,
       changeMode,
       changeLabel: changeMode === "dynamic"
@@ -125,7 +186,7 @@ export function policyLibraryModels(catalog, control, activeSource = null) {
       actionLabel,
       disabled: active || changeMode === "invalid",
     };
-  });
+  }).filter((policy) => !selectedFairness || policy.fairnessModes.includes(selectedFairness));
 }
 
 export function fieldReferenceGroups(reference) {
@@ -314,8 +375,8 @@ export function schedulerLaunchRequest(values) {
   };
   if (values?.fairness_enabled) {
     const fairness = String(values.fairness || "").toLowerCase();
-    if (fairness !== "fifo" && fairness !== "vtime") {
-      throw new Error("Fairness must be FIFO or VTIME.");
+    if (!["fifo", "vtime", "eevdf"].includes(fairness)) {
+      throw new Error("Fairness must be FIFO, VTIME, or EEVDF.");
     }
     request.fairness = fairness;
   }

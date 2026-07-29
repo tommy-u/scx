@@ -175,7 +175,7 @@
             <span id="policyLibraryStatus">Loading policies</span>
           </header>
           <p class="notice hidden" id="policyLibraryNotice" role="status"></p>
-          <div class="policy-choice-list" id="policyChoices"></div>
+          <div class="policy-hierarchy" id="policyChoices"></div>
           <details class="invalid-policy-list hidden" id="invalidPolicies">
             <summary></summary>
             <ul></ul>
@@ -253,6 +253,7 @@
                   <select id="schedulerFairness" aria-label="Fairness mode" disabled>
                     <option value="fifo">FIFO</option>
                     <option value="vtime">VTIME</option>
+                    <option value="eevdf">EEVDF</option>
                   </select>
                   <code>--fairness</code>
                 </div>

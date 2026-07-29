@@ -44,6 +44,18 @@ fn wait_until(timeout: Duration, mut predicate: impl FnMut() -> bool) {
     }
 }
 
+#[test]
+fn launch_request_accepts_eevdf_fairness() {
+    let request: LaunchRequest = serde_json::from_value(serde_json::json!({
+        "policy_id": "basic.toml",
+        "fairness": "eevdf",
+        "verbose": false,
+    }))
+    .unwrap();
+
+    assert_eq!(serde_json::to_value(request).unwrap()["fairness"], "eevdf");
+}
+
 fn external_fixture() -> (tempfile::TempDir, SnakeLauncher, PathBuf, PathBuf) {
     let root = tempfile::tempdir().unwrap();
     let binary = root.path().join("scx_snake");

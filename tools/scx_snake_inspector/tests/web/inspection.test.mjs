@@ -92,8 +92,8 @@ test("scheduler launch requests reject unsafe or unsupported values", () => {
   };
   assert.throws(() => schedulerLaunchRequest({ ...base, policy_id: "" }), /policy/i);
   assert.throws(
-    () => schedulerLaunchRequest({ ...base, fairness_enabled: true, fairness: "eevdf" }),
-    /FIFO or VTIME/,
+    () => schedulerLaunchRequest({ ...base, fairness_enabled: true, fairness: "cfs" }),
+    /FIFO, VTIME, or EEVDF/,
   );
   assert.throws(
     () => schedulerLaunchRequest({
@@ -134,6 +134,15 @@ test("scheduler command preview shows required policy and selected flags", () =>
       ["--stats", "1"],
     ),
     "scx_snake --policy cell-borrowing.toml --fairness vtime --stats 1",
+  );
+  assert.deepEqual(
+    schedulerLaunchRequest({
+      policy_id: "basic.toml",
+      fairness_enabled: true,
+      fairness: "eevdf",
+      verbose: false,
+    }),
+    { policy_id: "basic.toml", fairness: "eevdf", verbose: false },
   );
 });
 
@@ -279,7 +288,7 @@ test("control page exposes managed launch controls and settings table", () => {
   ]) {
     assert.match(page, new RegExp(control), `missing ${control}`);
   }
-  assert.doesNotMatch(page, /value="eevdf"/i);
+  assert.match(page, /value="eevdf"/i);
 });
 
 test("control client uses the scheduler lifecycle endpoints", () => {
@@ -303,8 +312,18 @@ test("policy library separates dynamic, restart-required, and invalid choices", 
         { id: "random.toml", name: "Random", source: "random", summary: "Two rungs" },
       ],
       invalid: [
-        { id: "cell.toml", error: "restart Snake to apply it" },
-        { id: "broken.toml", error: "missing rung" },
+        {
+          id: "cell.toml",
+          name: "Cell",
+          source: "[queues]\nlayout = \"cell\"",
+          error: "restart Snake to apply it",
+        },
+        {
+          id: "broken.toml",
+          name: "Broken",
+          source: "not policy toml",
+          error: "missing rung",
+        },
       ],
     },
     {
@@ -317,7 +336,10 @@ test("policy library separates dynamic, restart-required, and invalid choices", 
           id: "cell.toml",
           name: "Cell",
           change_mode: "reload",
-          reload_reasons: ["restart Snake to apply it"],
+          reload_reasons: [
+            "candidate changes the attachment-time queue topology; restart Snake to apply it",
+            "candidate changes attachment-time task membership; restart Snake to apply it",
+          ],
         },
         {
           id: "broken.toml",
@@ -368,6 +390,100 @@ test("policy library separates dynamic, restart-required, and invalid choices", 
       },
     ],
   );
+
+  const invalid = models.find((model) => model.id === "broken.toml");
+  assert.equal(invalid.summary, null);
+  assert.equal(invalid.hoverDetail, "missing rung");
+  const restartRequired = models.find((model) => model.id === "cell.toml");
+  assert.equal(restartRequired.summary, null);
+  assert.deepEqual(restartRequired.restartReasons, [
+    "DSQ topology changes.",
+    "Task membership changes.",
+  ]);
+  assert.equal(
+    restartRequired.hoverDetail,
+    "Restart required:\n• DSQ topology changes.\n• Task membership changes.",
+  );
+});
+
+test("policy library filters policies beneath the selected fairness approach", () => {
+  const catalog = {
+    policies: [
+      {
+        id: "placement.toml",
+        name: "Placement",
+        source: "[[rung]]\noperation = \"pick_idle\"",
+        summary: "Placement only",
+      },
+    ],
+    invalid: [
+      {
+        id: "cell-queues.toml",
+        name: "Cell queues",
+        source: "[queues]\nlayout = \"cell\"",
+        error: "restart Snake to apply it",
+      },
+    ],
+  };
+  const control = {
+    active: true,
+    policy_id: "placement.toml",
+    launch: { fairness: "fifo" },
+    policies: [
+      {
+        id: "placement.toml",
+        name: "Placement",
+        change_mode: "dynamic",
+        reload_reasons: [],
+      },
+      {
+        id: "cell-queues.toml",
+        name: "Cell queues",
+        change_mode: "reload",
+        reload_reasons: ["restart Snake to apply it"],
+      },
+    ],
+  };
+
+  assert.deepEqual(
+    policyLibraryModels(catalog, control, null, "fifo").map((policy) => policy.id),
+    ["placement.toml"],
+  );
+  assert.deepEqual(
+    policyLibraryModels(catalog, control, null, "eevdf").map((policy) => policy.id),
+    ["placement.toml"],
+  );
+  assert.deepEqual(
+    policyLibraryModels(catalog, control, null, "vtime").map((policy) => policy.id),
+    ["placement.toml", "cell-queues.toml"],
+  );
+  assert.equal(
+    policyLibraryModels(catalog, control, null, "eevdf")[0].actionLabel,
+    "Select for restart",
+  );
+  assert.equal(
+    policyLibraryModels(catalog, control, null, "eevdf")[0].hoverDetail,
+    "Restart required:\n• Fairness approach changes from FIFO to EEVDF.",
+  );
+});
+
+test("policy library renders fairness parents and stacks status over actions", () => {
+  const script = readFileSync(
+    new URL("../../src/web/app.js", import.meta.url),
+    "utf8",
+  );
+  const stylesheet = readFileSync(
+    new URL("../../src/web/style.css", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(script, /data-policy-fairness=/);
+  assert.match(script, /option\.active \? " active"/);
+  assert.match(script, /class="change-mode \$\{policy\.changeMode\}"[^>]*title=/);
+  assert.match(script, /class="policy-choice-actions"/);
+  assert.match(stylesheet, /\.policy-fairness-options\s*\{/);
+  assert.match(stylesheet, /\.policy-fairness-option\.active\s*\{/);
+  assert.match(stylesheet, /\.policy-choice-actions\s*\{/);
 });
 
 test("control layout has bounded launch fields and a responsive narrow mode", () => {

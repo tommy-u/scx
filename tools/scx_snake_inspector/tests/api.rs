@@ -531,11 +531,15 @@ async fn scheduler_control_distinguishes_dynamic_restart_and_invalid_policies() 
             invalid: vec![
                 InvalidPolicy {
                     id: "cell.toml".into(),
+                    name: "cell".into(),
+                    source: "[queues]".into(),
                     error: "candidate changes attachment-time queue topology; restart Snake to apply it"
                         .into(),
                 },
                 InvalidPolicy {
                     id: "broken.toml".into(),
+                    name: "broken".into(),
+                    source: "candidate".into(),
                     error: "compiling candidate policy: missing rung".into(),
                 },
             ],

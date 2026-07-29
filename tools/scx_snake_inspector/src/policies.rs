@@ -51,6 +51,8 @@ pub struct PolicyChoice {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct InvalidPolicy {
     pub id: String,
+    pub name: String,
+    pub source: String,
     pub error: String,
 }
 
@@ -114,6 +116,8 @@ pub fn validate_policy_files(
             }),
             Err(error) => catalog.invalid.push(InvalidPolicy {
                 id: file.id,
+                name: file.name,
+                source: file.source,
                 error: format!("{error:#}"),
             }),
         }

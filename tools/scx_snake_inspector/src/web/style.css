@@ -976,11 +976,88 @@ button:focus-visible {
   font-size: 0.68rem;
 }
 
-.policy-choice-list {
+.policy-hierarchy {
   margin-top: 10px;
+}
+
+.policy-fairness-options {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.policy-fairness-option {
+  min-width: 0;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.policy-fairness-option:hover,
+.policy-fairness-option.selected {
+  border-color: var(--border-strong);
+  background: #eef3f5;
+}
+
+.policy-fairness-option.selected {
+  box-shadow: inset 0 -3px 0 var(--accent);
+}
+
+.policy-fairness-option.active {
+  color: #075e4c;
+  background: #e4f5ef;
+  border-color: #80bba8;
+  box-shadow: inset 0 -3px 0 var(--active);
+}
+
+.policy-fairness-option.active span {
+  color: #287362;
+}
+
+.policy-fairness-option strong {
+  font-size: 0.75rem;
+}
+
+.policy-fairness-option span {
+  color: var(--muted);
+  font-size: 0.62rem;
+}
+
+.policy-fairness-branch {
+  margin-top: 10px;
+}
+
+.policy-fairness-branch > header h4,
+.policy-fairness-branch > header p {
+  margin: 0;
+}
+
+.policy-fairness-branch > header h4 {
+  font-size: 0.74rem;
+}
+
+.policy-fairness-branch > header p {
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 0.65rem;
+}
+
+.policy-choice-list {
+  margin-top: 8px;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(290px, 1fr));
   gap: 8px;
+}
+
+.policy-choice-list > .empty-state {
+  grid-column: 1 / -1;
 }
 
 .policy-choice {
@@ -1005,27 +1082,15 @@ button:focus-visible {
   background: var(--surface-muted);
 }
 
-.policy-choice > div {
+.policy-choice-copy {
   min-width: 0;
 }
 
 .policy-choice h4 {
-  overflow: hidden;
   font-size: 0.76rem;
   font-weight: 700;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.policy-choice-heading {
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  gap: 7px;
-}
-
-.policy-choice-heading .change-mode {
-  flex: 0 0 auto;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
 }
 
 .policy-choice p {
@@ -1036,7 +1101,22 @@ button:focus-visible {
   overflow-wrap: anywhere;
 }
 
-.policy-choice button {
+.policy-choice-actions {
+  min-width: 104px;
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 5px;
+}
+
+.policy-choice-actions .change-mode {
+  align-self: center;
+  white-space: nowrap;
+}
+
+.policy-choice-actions button {
+  width: 100%;
   flex: 0 0 auto;
 }
 
@@ -2075,6 +2155,19 @@ button:focus-visible {
 
   .apply-button {
     flex: 1 1 120px;
+  }
+
+  .policy-fairness-options {
+    grid-template-columns: 1fr;
+  }
+
+  .policy-choice {
+    align-items: flex-start;
+  }
+
+  .policy-choice-actions .apply-button,
+  .policy-choice-actions .secondary-button {
+    flex: 0 0 auto;
   }
 
   .summary-band {

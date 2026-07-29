@@ -49,6 +49,9 @@ fn policy_library_lists_only_direct_regular_toml_files_and_separates_invalid_ent
     assert_eq!(catalog.policies[0].id, "balanced.toml");
     assert_eq!(catalog.invalid.len(), 1);
     assert_eq!(catalog.invalid[0].id, "broken.toml");
+    let serialized = serde_json::to_value(&catalog).unwrap();
+    assert_eq!(serialized["invalid"][0]["name"], "broken");
+    assert_eq!(serialized["invalid"][0]["source"], "not policy toml");
 }
 
 #[test]

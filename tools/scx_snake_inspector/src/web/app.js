@@ -39,6 +39,23 @@ import {
 } from "/assets/inspection.js";
 
 const numberFormat = new Intl.NumberFormat();
+const POLICY_FAIRNESS_OPTIONS = [
+  {
+    id: "fifo",
+    label: "FIFO",
+    description: "First-in, first-out queueing after placement.",
+  },
+  {
+    id: "vtime",
+    label: "VTIME",
+    description: "Virtual-time fairness, including cell queue policies.",
+  },
+  {
+    id: "eevdf",
+    label: "EEVDF",
+    description: "Experimental eligible virtual deadline fairness.",
+  },
+];
 const token = document.querySelector('meta[name="snake-session-token"]').content;
 const initialWindowMs = Number(document.body.dataset.initialWindowMs);
 const maxWindowMs = Number(document.body.dataset.maxWindowMs);
@@ -158,6 +175,8 @@ const state = {
   schedulerControlLoading: false,
   schedulerControlPending: false,
   schedulerFormInitialized: false,
+  selectedPolicyFairness: null,
+  selectedLifecycleFairness: null,
   selectedLifecyclePolicyId: null,
   statsResetPending: false,
   referenceId: 0,
@@ -321,8 +340,13 @@ function bindControls() {
     elements.schedulerVerbose,
   ]) {
     control.addEventListener("change", () => {
-      if (control === elements.schedulerPolicy) {
+      if (
+        control === elements.schedulerPolicy
+        || control === elements.schedulerFairnessEnabled
+        || control === elements.schedulerFairness
+      ) {
         state.selectedLifecyclePolicyId = null;
+        state.selectedLifecycleFairness = null;
       }
       state.schedulerFormInitialized = true;
       renderSchedulerControl();
@@ -348,12 +372,21 @@ function bindControls() {
     }
   });
   elements.policyChoices.addEventListener("click", (event) => {
+    const fairnessControl = event.target.closest("[data-policy-fairness]");
+    if (fairnessControl && !fairnessControl.dataset.policyId) {
+      state.selectedPolicyFairness = fairnessControl.dataset.policyFairness;
+      renderPolicyLibrary();
+      return;
+    }
     const control = event.target.closest("[data-policy-id]");
     if (!control || control.disabled) {
       return;
     }
     if (control.dataset.policyAction === "lifecycle") {
-      selectPolicyForLifecycle(control.dataset.policyId);
+      selectPolicyForLifecycle(
+        control.dataset.policyId,
+        control.dataset.policyFairness,
+      );
     } else {
       openPolicyDialog(control.dataset.policyId);
     }
@@ -981,6 +1014,14 @@ function renderSchedulerControl() {
   ) {
     elements.schedulerPolicy.value = state.selectedLifecyclePolicyId;
   }
+  if (
+    state.selectedLifecycleFairness
+    && [...elements.schedulerFairness.options]
+      .some((option) => option.value === state.selectedLifecycleFairness)
+  ) {
+    elements.schedulerFairnessEnabled.checked = true;
+    elements.schedulerFairness.value = state.selectedLifecycleFairness;
+  }
 
   const active = Boolean(control?.active);
   const managed = Boolean(control?.managed);
@@ -1015,7 +1056,7 @@ function renderSchedulerControl() {
     );
     showElementNotice(
       elements.schedulerControlNotice,
-      `${policy?.name || state.selectedLifecyclePolicyId} is selected. Review the command, then ${control?.active ? "restart" : "start"} Snake.`,
+      `${policy?.name || state.selectedLifecyclePolicyId} with ${state.selectedLifecycleFairness?.toUpperCase() || "the current fairness mode"} is selected. Review the command, then ${control?.active ? "restart" : "start"} Snake.`,
       "info",
     );
   } else {
@@ -1061,7 +1102,7 @@ function hydrateSchedulerLaunchForm(control) {
   }
   const hasFairness = launch.fairness != null;
   elements.schedulerFairnessEnabled.checked = hasFairness;
-  if (hasFairness && ["fifo", "vtime"].includes(launch.fairness)) {
+  if (hasFairness && ["fifo", "vtime", "eevdf"].includes(launch.fairness)) {
     elements.schedulerFairness.value = launch.fairness;
   }
   const hasSampleRate = launch.callback_timing_sample_rate != null;
@@ -1167,6 +1208,7 @@ async function schedulerMutation(path, payload) {
       throw new Error(body.error || `Scheduler control failed (${response.status})`);
     }
     state.selectedLifecyclePolicyId = null;
+    state.selectedLifecycleFairness = null;
     state.schedulerFormInitialized = false;
     await loadSchedulerControl();
   } catch (error) {
@@ -1603,37 +1645,85 @@ function renderPolicyLibrary() {
   const activeSource = state.inspection?.slots
     ?.find((slot) => slot.state === "active")
     ?.policy?.source?.trim();
-  const policies = policyLibraryModels(catalog, state.schedulerControl, activeSource);
-  elements.policyLibraryStatus.textContent = `${numberFormat.format(policies.length)} policies`;
-  if (policies.length === 0) {
-    elements.policyChoices.innerHTML = '<p class="empty-state">No TOML policies were found.</p>';
-  } else {
-    elements.policyChoices.innerHTML = policies.map((policy) => `
-        <article class="policy-choice${policy.active ? " active" : ""}${policy.changeMode === "invalid" ? " invalid" : ""}">
-          <div>
-            <div class="policy-choice-heading">
-              <h4>${escapeHtml(policy.name)}</h4>
-              <span class="change-mode ${policy.changeMode}">${escapeHtml(policy.changeLabel)}</span>
-            </div>
-            <p><code>${escapeHtml(policy.id)}</code> · ${escapeHtml(policy.summary)}</p>
-          </div>
+  const activeFairness = state.schedulerControl?.launch?.fairness
+    || state.inspection?.fairness?.mode_name
+    || "fifo";
+  if (!POLICY_FAIRNESS_OPTIONS.some((option) => option.id === state.selectedPolicyFairness)) {
+    state.selectedPolicyFairness = activeFairness;
+  }
+  const selectedFairness = state.selectedPolicyFairness;
+  const fairnessModels = POLICY_FAIRNESS_OPTIONS.map((option) => ({
+    ...option,
+    active: option.id === activeFairness,
+    policies: policyLibraryModels(
+      catalog,
+      state.schedulerControl,
+      activeSource,
+      option.id,
+    ),
+  }));
+  const selectedModel = fairnessModels.find((option) => option.id === selectedFairness)
+    || fairnessModels[0];
+  const policies = selectedModel.policies;
+  const policyCount = new Set(
+    fairnessModels.flatMap((option) => option.policies.map((policy) => policy.id)),
+  ).size;
+  elements.policyLibraryStatus.textContent = `${numberFormat.format(policyCount)} policies`;
+
+  const fairnessOptions = fairnessModels.map((option) => `
+    <button class="policy-fairness-option${option.id === selectedFairness ? " selected" : ""}${option.active ? " active" : ""}" type="button"
+      role="tab" aria-selected="${option.id === selectedFairness}"
+      data-policy-fairness="${escapeHtml(option.id)}">
+      <strong>${escapeHtml(option.label)}</strong>
+      <span>${numberFormat.format(option.policies.length)} policies${option.active ? " · active" : ""}</span>
+    </button>`).join("");
+  const policyCards = policies.length === 0
+    ? '<p class="empty-state">No policies are available for this fairness approach.</p>'
+    : policies.map((policy) => `
+      <article class="policy-choice${policy.active ? " active" : ""}${policy.changeMode === "invalid" ? " invalid" : ""}"
+        ${policy.hoverDetail ? `title="${escapeHtml(policy.hoverDetail)}"` : ""}>
+        <div class="policy-choice-copy">
+          <h4>${escapeHtml(policy.name)}</h4>
+          <p><code>${escapeHtml(policy.id)}</code>${policy.summary ? ` · ${escapeHtml(policy.summary)}` : ""}</p>
+        </div>
+        <div class="policy-choice-actions">
+          <span class="change-mode ${policy.changeMode}"${policy.hoverDetail ? ` title="${escapeHtml(policy.hoverDetail)}"` : ""}>${escapeHtml(policy.changeLabel)}</span>
           <button class="${policy.actionKind === "activate" || policy.actionKind === "lifecycle" ? "apply-button" : "secondary-button"}" type="button"
             data-policy-id="${escapeHtml(policy.id)}"
+            data-policy-fairness="${escapeHtml(selectedFairness)}"
             data-policy-action="${escapeHtml(policy.actionKind)}" ${policy.disabled ? "disabled" : ""}>
             ${escapeHtml(policy.actionLabel)}
           </button>
-        </article>`).join("");
-  }
+        </div>
+      </article>`).join("");
+  elements.policyChoices.innerHTML = `
+    <div class="policy-fairness-options" role="tablist" aria-label="Fairness approach">
+      ${fairnessOptions}
+    </div>
+    <section class="policy-fairness-branch" role="tabpanel">
+      <header>
+        <div>
+          <h4>${escapeHtml(selectedModel.label)} policies</h4>
+          <p>${escapeHtml(selectedModel.description)}</p>
+        </div>
+      </header>
+      <div class="policy-choice-list">${policyCards}</div>
+    </section>`;
   elements.invalidPolicies.classList.add("hidden");
 }
 
-function selectPolicyForLifecycle(policyId) {
+function selectPolicyForLifecycle(policyId, fairnessMode) {
   const policy = state.schedulerControl?.policies?.find((candidate) => candidate.id === policyId);
-  if (!policy || policy.change_mode !== "reload") {
+  if (
+    !policy
+    || policy.change_mode === "invalid"
+    || !POLICY_FAIRNESS_OPTIONS.some((option) => option.id === fairnessMode)
+  ) {
     showElementNotice(elements.policyLibraryNotice, `Policy ${policyId} is not available for restart.`);
     return;
   }
   state.selectedLifecyclePolicyId = policyId;
+  state.selectedLifecycleFairness = fairnessMode;
   state.schedulerFormInitialized = false;
   window.location.hash = "#/control";
   renderRoute();
