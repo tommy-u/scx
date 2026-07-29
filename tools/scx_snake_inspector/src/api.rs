@@ -24,6 +24,7 @@ use crate::collector::{CollectorCommand, FineTimingCallback, FineTimingControlRe
 use crate::dashboard::Dashboard;
 use crate::policies::PolicyActivation;
 use crate::scope::{resolve_scope, ScopeRequest};
+use crate::workload::{WorkloadCellResponse, WorkloadTarget};
 
 pub const CSRF_HEADER: &str = "x-snake-token";
 const INDEX_HTML: &str = include_str!("web/index.html");
@@ -79,6 +80,7 @@ pub fn router(context: ApiContext) -> Router {
         .route("/api/policies/activate", post(activate_policy))
         .route("/api/events", get(events))
         .route("/api/scope", post(set_scope))
+        .route("/api/cells/assignment", post(set_workload_cell))
         .layer(middleware::from_fn(require_loopback_host))
         .with_state(context)
 }
@@ -328,6 +330,36 @@ async fn set_scope(
         .send(CollectorCommand::SetScope(scope))
         .map_err(|_| ApiError::unavailable("collector is not running"))?;
     Ok(StatusCode::ACCEPTED)
+}
+
+#[derive(Deserialize)]
+struct WorkloadCellRequest {
+    target: WorkloadTarget,
+    cell_id: Option<u32>,
+}
+
+async fn set_workload_cell(
+    State(context): State<ApiContext>,
+    headers: HeaderMap,
+    Json(request): Json<WorkloadCellRequest>,
+) -> Result<Json<WorkloadCellResponse>, ApiError> {
+    require_session_token(&headers, &context.token)?;
+    let (response_tx, response_rx) = std::sync::mpsc::sync_channel(1);
+    context
+        .commands
+        .send(CollectorCommand::SetWorkloadCell {
+            target: request.target,
+            cell_id: request.cell_id,
+            response: response_tx,
+        })
+        .map_err(|_| ApiError::unavailable("collector is not running"))?;
+    let response =
+        tokio::task::spawn_blocking(move || response_rx.recv_timeout(Duration::from_secs(20)))
+            .await
+            .map_err(|_| ApiError::unavailable("workload assignment worker failed"))?
+            .map_err(|_| ApiError::unavailable("workload assignment timed out"))?
+            .map_err(ApiError::bad_request)?;
+    Ok(Json(response))
 }
 
 fn require_session_token(headers: &HeaderMap, token: &str) -> Result<(), ApiError> {

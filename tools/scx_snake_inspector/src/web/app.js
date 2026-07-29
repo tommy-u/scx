@@ -27,6 +27,7 @@ import {
   rungLadderPercentages,
   rungPercentages,
   selectionRungHitFlow,
+  workloadAssignmentRequest,
 } from "/assets/inspection.js";
 
 const numberFormat = new Intl.NumberFormat();
@@ -56,6 +57,13 @@ const elements = {
   cellsView: document.querySelector("#cellsView"),
   cellDetail: document.querySelector("#cellDetail"),
   cellList: document.querySelector("#cellList"),
+  workloadTargetKind: document.querySelector("#workloadTargetKind"),
+  workloadTargetLabel: document.querySelector("#workloadTargetLabel"),
+  workloadTargetValue: document.querySelector("#workloadTargetValue"),
+  workloadCellId: document.querySelector("#workloadCellId"),
+  assignWorkloadCell: document.querySelector("#assignWorkloadCell"),
+  clearWorkloadCell: document.querySelector("#clearWorkloadCell"),
+  workloadAssignmentNotice: document.querySelector("#workloadAssignmentNotice"),
   liveStatus: document.querySelector("#liveStatus"),
   liveStatusText: document.querySelector("#liveStatusText"),
   migrationRate: document.querySelector("#migrationRate"),
@@ -120,6 +128,7 @@ const state = {
   route: routeFromHash(window.location.hash),
   scale: "log",
   selectedCellId: null,
+  workloadAssignmentPending: false,
   snapshot: null,
   topology: null,
   windowMs: initialWindowMs,
@@ -129,6 +138,7 @@ const state = {
 configureWindowSelector();
 configureCallbackRangeSelector();
 bindControls();
+renderWorkloadTargetField();
 start().catch((error) => {
   setStatus("error", "Connection failed");
   showNotice(error.message);
@@ -232,6 +242,23 @@ function bindControls() {
     }
     state.selectedCellId = Number(control.dataset.cellId);
     renderCells();
+  });
+  elements.workloadTargetKind.addEventListener("change", renderWorkloadTargetField);
+  elements.assignWorkloadCell.addEventListener("click", () => setWorkloadCell(false));
+  elements.clearWorkloadCell.addEventListener("click", () => setWorkloadCell(true));
+  elements.cellDetail.addEventListener("click", (event) => {
+    const select = event.target.closest("[data-workload-tid]");
+    if (select) {
+      document.querySelector('input[name="workloadTargetKind"][value="tid"]').checked = true;
+      elements.workloadTargetValue.value = select.dataset.workloadTid;
+      renderWorkloadTargetField();
+      elements.workloadTargetValue.focus();
+      return;
+    }
+    const clear = event.target.closest("[data-clear-workload-tid]");
+    if (clear) {
+      setWorkloadCell(true, clear.dataset.clearWorkloadTid);
+    }
   });
   elements.policyChoices.addEventListener("click", (event) => {
     const control = event.target.closest("[data-policy-id]");
@@ -1343,6 +1370,7 @@ function hideReferencePopover(force) {
 
 function renderCells() {
   renderInspectionStatus(elements.cellsNotice, elements.cellsFreshness);
+  renderWorkloadCellOptions();
   if (!state.inspection || !state.topology) {
     elements.cellList.replaceChildren();
     elements.cellDetail.replaceChildren();
@@ -1373,6 +1401,86 @@ function renderCells() {
     ${cells.map(renderCellRow).join("")}`;
   const selected = cells.find((cell) => cell.id === state.selectedCellId);
   elements.cellDetail.innerHTML = renderCellDetail(selected);
+}
+
+function renderWorkloadTargetField() {
+  const kind = document.querySelector('input[name="workloadTargetKind"]:checked')?.value || "tid";
+  const cgroup = kind === "cgroup";
+  elements.workloadTargetLabel.textContent = cgroup ? "Cgroup subtree" : kind.toUpperCase();
+  elements.workloadTargetValue.inputMode = cgroup ? "text" : "numeric";
+  elements.workloadTargetValue.placeholder = cgroup ? "/workload.slice" : "4812";
+}
+
+function renderWorkloadCellOptions() {
+  const cells = state.inspection?.cells || [];
+  const signature = cells.map((cell) => cell.id).join(",");
+  if (elements.workloadCellId.dataset.signature !== signature) {
+    const selected = elements.workloadCellId.value;
+    elements.workloadCellId.innerHTML = cells
+      .map((cell) => `<option value="${cell.id}">Cell ${cell.id}</option>`)
+      .join("");
+    if ([...elements.workloadCellId.options].some((option) => option.value === selected)) {
+      elements.workloadCellId.value = selected;
+    }
+    elements.workloadCellId.dataset.signature = signature;
+  }
+  const disabled = state.workloadAssignmentPending || cells.length === 0;
+  elements.workloadCellId.disabled = disabled;
+  elements.assignWorkloadCell.disabled = disabled;
+  elements.clearWorkloadCell.disabled = state.workloadAssignmentPending;
+}
+
+async function setWorkloadCell(clear, tidOverride = null) {
+  if (state.workloadAssignmentPending) {
+    return;
+  }
+  const kind = tidOverride === null
+    ? document.querySelector('input[name="workloadTargetKind"]:checked')?.value
+    : "tid";
+  const value = tidOverride ?? elements.workloadTargetValue.value;
+  let request;
+  try {
+    request = workloadAssignmentRequest(kind, value, elements.workloadCellId.value, clear);
+  } catch (error) {
+    showElementNotice(elements.workloadAssignmentNotice, error.message);
+    return;
+  }
+
+  state.workloadAssignmentPending = true;
+  renderWorkloadCellOptions();
+  showElementNotice(
+    elements.workloadAssignmentNotice,
+    clear ? "Clearing workload override…" : "Assigning workload…",
+    "info",
+  );
+  try {
+    const response = await fetch("/api/cells/assignment", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-snake-token": token,
+      },
+      body: JSON.stringify(request),
+    });
+    const payload = await response.json();
+    if (!response.ok) {
+      throw new Error(payload.error || `Workload update failed (${response.status})`);
+    }
+    const transient = payload.transient?.length
+      ? `; ${numberFormat.format(payload.transient.length)} exited during update`
+      : "";
+    showElementNotice(
+      elements.workloadAssignmentNotice,
+      `${payload.target}: ${numberFormat.format(payload.updated)} of ${numberFormat.format(payload.matched)} threads updated${transient}.`,
+      "success",
+    );
+    await loadInspection();
+  } catch (error) {
+    showElementNotice(elements.workloadAssignmentNotice, error.message);
+  } finally {
+    state.workloadAssignmentPending = false;
+    renderWorkloadCellOptions();
+  }
 }
 
 function renderCellRow(cell) {
@@ -1460,6 +1568,10 @@ function renderTaskMapping(task) {
         <div><dt>Membership</dt><dd>${escapeHtml(task.membership || "unknown")} · ${escapeHtml(task.source || "unknown")}</dd></div>
         <div><dt>Placement</dt><dd>${task.needs_rehome ? "Rehome pending" : "Cell placement acknowledged"}</dd></div>
       </dl>
+      <div class="task-mapping-actions">
+        <button class="secondary-button" type="button" data-workload-tid="${task.tid}">Move TID</button>
+        <button class="secondary-button" type="button" data-clear-workload-tid="${task.tid}">Clear override</button>
+      </div>
     </details>`;
 }
 

@@ -24,6 +24,7 @@ use crate::policies::{
 };
 use crate::scheduler::{GateChange, SchedulerGate};
 use crate::scope::TaskScope;
+use crate::workload::{resolve_workload_target, WorkloadCellResponse, WorkloadTarget};
 use crate::{bpf_intf, model::CpuPair};
 
 const DEFAULT_OPS_PATH: &str = "/sys/kernel/sched_ext/root/ops";
@@ -209,6 +210,11 @@ pub enum CollectorCommand {
         response:
             std::sync::mpsc::SyncSender<std::result::Result<FineTimingControlResponse, String>>,
     },
+    SetWorkloadCell {
+        target: WorkloadTarget,
+        cell_id: Option<u32>,
+        response: std::sync::mpsc::SyncSender<std::result::Result<WorkloadCellResponse, String>>,
+    },
     Shutdown,
 }
 
@@ -236,6 +242,18 @@ impl PartialEq for CollectorCommand {
                     ..
                 },
             ) => left_callback == right_callback && left_enabled == right_enabled,
+            (
+                Self::SetWorkloadCell {
+                    target: left_target,
+                    cell_id: left_cell,
+                    ..
+                },
+                Self::SetWorkloadCell {
+                    target: right_target,
+                    cell_id: right_cell,
+                    ..
+                },
+            ) => left_target == right_target && left_cell == right_cell,
             (Self::Shutdown, Self::Shutdown) => true,
             _ => false,
         }
@@ -252,6 +270,8 @@ pub struct CollectorOptions {
     pub kallsyms_path: PathBuf,
     pub stats_path: PathBuf,
     pub policy_dir: PathBuf,
+    pub proc_root: PathBuf,
+    pub cgroup_root: PathBuf,
 }
 
 impl Default for CollectorOptions {
@@ -263,6 +283,8 @@ impl Default for CollectorOptions {
             kallsyms_path: DEFAULT_KALLSYMS_PATH.into(),
             stats_path: DEFAULT_STATS_PATH.into(),
             policy_dir: "scheds/rust/scx_snake/examples".into(),
+            proc_root: "/proc".into(),
+            cgroup_root: "/sys/fs/cgroup".into(),
         }
     }
 }
@@ -365,6 +387,24 @@ pub fn run_collector(
                 let result =
                     set_fine_timing(&mut stats_client, &options.stats_path, callback, enabled)
                         .map_err(|error| format!("{error:#}"));
+                let _ = response.send(result);
+                next_inspection_at = Instant::now();
+                continue;
+            }
+            Ok(CollectorCommand::SetWorkloadCell {
+                target,
+                cell_id,
+                response,
+            }) => {
+                let result = set_workload_cell(
+                    &mut stats_client,
+                    &options.stats_path,
+                    &options.proc_root,
+                    &options.cgroup_root,
+                    &target,
+                    cell_id,
+                )
+                .map_err(|error| format!("{error:#}"));
                 let _ = response.send(result);
                 next_inspection_at = Instant::now();
                 continue;
@@ -566,6 +606,72 @@ fn set_fine_timing(
                 ("enabled".into(), enabled.to_string()),
             ],
         )
+}
+
+#[derive(Deserialize)]
+struct ThreadCellResponse {
+    rehome_requested: bool,
+}
+
+fn set_workload_cell(
+    client: &mut Option<StatsClient>,
+    stats_path: &Path,
+    proc_root: &Path,
+    cgroup_root: &Path,
+    target: &WorkloadTarget,
+    cell_id: Option<u32>,
+) -> Result<WorkloadCellResponse> {
+    let tids = resolve_workload_target(target, proc_root, cgroup_root)?;
+    if client.is_none() {
+        *client = Some(
+            StatsClient::new()
+                .set_path(stats_path)
+                .connect(Some(STATS_TIMEOUT_MS))
+                .with_context(|| format!("connecting to {}", stats_path.display()))?,
+        );
+    }
+    let mut updated = 0;
+    let mut transient = Vec::new();
+    let mut rehome_requested = 0;
+    for tid in &tids {
+        let mut args = vec![(
+            "target".into(),
+            if cell_id.is_some() {
+                "thread_cell_set".into()
+            } else {
+                "thread_cell_clear".into()
+            },
+        )];
+        args.push(("tid".into(), tid.to_string()));
+        if let Some(cell_id) = cell_id {
+            args.push(("cell_id".into(), cell_id.to_string()));
+        }
+        match client
+            .as_mut()
+            .context("Snake stats client is unavailable")?
+            .request::<ThreadCellResponse>("stats", args)
+        {
+            Ok(response) => {
+                updated += 1;
+                rehome_requested += usize::from(response.rehome_requested);
+            }
+            Err(_) => transient.push(*tid),
+        }
+    }
+    if updated == 0 && !transient.is_empty() {
+        anyhow::bail!(
+            "none of the {} resolved threads could be updated",
+            tids.len()
+        );
+    }
+    Ok(WorkloadCellResponse {
+        target: target.label(),
+        cell_id,
+        matched: tids.len(),
+        updated,
+        transient,
+        rehome_requested,
+    })
 }
 
 fn read_inspection(

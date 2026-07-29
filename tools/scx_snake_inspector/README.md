@@ -18,7 +18,10 @@ The embedded interface has four views:
   references for encoded fields, resolved queue topology, and a catalog of
   validated TOML policies that can be activated after confirmation.
 - **Cells** shows declared cell CPU membership, overlaps, and expandable
-  current task mappings.
+  current task mappings. It can assign or clear manual cell overrides for one
+  TID, every current thread in a TGID, or every current thread in a cgroup
+  subtree. TGID and cgroup operations use a bounded snapshot; newly created
+  threads are not assigned automatically.
 
 In queue mode, the Policy view shows fairness and clock mode, synthetic cell 0,
 dense cell indices, allocated primary and borrowable masks, cell/LLC normal DSQ

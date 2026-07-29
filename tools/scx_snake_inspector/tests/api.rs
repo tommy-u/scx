@@ -417,6 +417,73 @@ async fn fine_timing_endpoint_summarizes_stages_and_controls_callbacks_independe
 }
 
 #[tokio::test]
+async fn workload_assignment_requires_token_and_sends_typed_target() {
+    use scx_snake_inspector::workload::{WorkloadCellResponse, WorkloadTarget};
+
+    let (tx, rx) = mpsc::channel();
+    let root = tempfile::tempdir().unwrap();
+    let context = ApiContext::new(dashboard(), tx, "secret", root.path().to_path_buf());
+    let body = r#"{"target":{"kind":"tgid","tgid":42},"cell_id":2}"#;
+
+    let unauthorized = router(context.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/cells/assignment")
+                .header("host", "127.0.0.1")
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+    let responder = std::thread::spawn(move || {
+        let CollectorCommand::SetWorkloadCell {
+            target,
+            cell_id,
+            response,
+        } = rx.recv().unwrap()
+        else {
+            panic!("expected workload cell command");
+        };
+        assert_eq!(target, WorkloadTarget::Tgid { tgid: 42 });
+        assert_eq!(cell_id, Some(2));
+        response
+            .send(Ok(WorkloadCellResponse {
+                target: "TGID 42".into(),
+                cell_id: Some(2),
+                matched: 3,
+                updated: 2,
+                transient: vec![44],
+                rehome_requested: 2,
+            }))
+            .unwrap();
+    });
+    let accepted = router(context)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/cells/assignment")
+                .header("host", "127.0.0.1")
+                .header("content-type", "application/json")
+                .header(CSRF_HEADER, "secret")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(accepted.status(), StatusCode::OK);
+    let response: Value =
+        serde_json::from_slice(&accepted.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(response["target"], "TGID 42");
+    assert_eq!(response["updated"], 2);
+    assert_eq!(response["transient"], json!([44]));
+    responder.join().unwrap();
+}
+
+#[tokio::test]
 async fn scope_endpoint_requires_token_and_sends_validated_command() {
     let (tx, rx) = mpsc::channel();
     let root = tempfile::tempdir().unwrap();
@@ -628,6 +695,11 @@ async fn root_page_embeds_session_configuration_and_local_assets() {
         "id=\"policyLibrary\"",
         "id=\"policyDialog\"",
         "id=\"cellsView\"",
+        "id=\"workloadTargetKind\"",
+        "id=\"workloadTargetValue\"",
+        "id=\"workloadCellId\"",
+        "id=\"assignWorkloadCell\"",
+        "id=\"clearWorkloadCell\"",
         "id=\"referencePopover\"",
         "id=\"windowSelect\"",
         "id=\"orderTopology\"",

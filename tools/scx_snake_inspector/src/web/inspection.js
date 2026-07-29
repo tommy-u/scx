@@ -197,6 +197,34 @@ export function selectionRungHitFlow(rung, queues) {
     : "Hit → enqueue ladder";
 }
 
+export function workloadAssignmentRequest(kind, value, cellId, clear) {
+  const targetValue = String(value ?? "").trim();
+  let target;
+  if (kind === "tid" || kind === "tgid") {
+    const id = Number(targetValue);
+    if (!Number.isSafeInteger(id) || id <= 0) {
+      throw new Error(`${kind.toUpperCase()} must be a positive integer.`);
+    }
+    target = { kind, [kind]: id };
+  } else if (kind === "cgroup") {
+    if (!targetValue) {
+      throw new Error("Cgroup path is required.");
+    }
+    target = { kind, path: targetValue };
+  } else {
+    throw new Error("Unknown workload target type.");
+  }
+
+  let parsedCell = null;
+  if (!clear) {
+    parsedCell = Number(cellId);
+    if (!Number.isSafeInteger(parsedCell) || parsedCell < 0) {
+      throw new Error("Select a valid destination cell.");
+    }
+  }
+  return { target, cell_id: parsedCell };
+}
+
 function formatDsqId(value) {
   const number = Number(value);
   return Number.isSafeInteger(number) && number >= 0

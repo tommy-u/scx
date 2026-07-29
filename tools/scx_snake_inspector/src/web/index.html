@@ -188,6 +188,25 @@
           <span class="view-freshness" id="cellsFreshness">Waiting for Snake</span>
         </header>
         <p class="notice hidden" id="cellsNotice" role="status"></p>
+        <section class="control-band workload-control-band" aria-label="Workload cell assignment">
+          <fieldset class="control-field segmented" id="workloadTargetKind">
+            <legend>Target</legend>
+            <label><input type="radio" name="workloadTargetKind" value="tid" checked><span>TID</span></label>
+            <label><input type="radio" name="workloadTargetKind" value="tgid"><span>TGID</span></label>
+            <label><input type="radio" name="workloadTargetKind" value="cgroup"><span>Cgroup</span></label>
+          </fieldset>
+          <label class="control-field workload-target-field">
+            <span id="workloadTargetLabel">TID</span>
+            <input id="workloadTargetValue" type="text" inputmode="numeric" placeholder="4812" autocomplete="off">
+          </label>
+          <label class="control-field">
+            <span>Destination</span>
+            <select id="workloadCellId" aria-label="Destination cell"></select>
+          </label>
+          <button class="apply-button" id="assignWorkloadCell" type="button">Assign</button>
+          <button class="secondary-button" id="clearWorkloadCell" type="button">Clear override</button>
+          <p class="control-message hidden" id="workloadAssignmentNotice" role="status"></p>
+        </section>
         <div class="cells-layout">
           <section class="cell-browser" aria-label="Configured cells">
             <div class="cell-list" id="cellList"></div>

@@ -14,3 +14,4 @@ pub mod policies;
 pub mod scheduler;
 pub mod scope;
 pub mod topology;
+pub mod workload;

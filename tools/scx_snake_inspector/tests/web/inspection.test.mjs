@@ -22,6 +22,7 @@ import {
   rungLadderPercentages,
   rungPercentages,
   selectionRungHitFlow,
+  workloadAssignmentRequest,
 } from "../../src/web/inspection.js";
 
 test("inspection routes default to activity and accept policy, cells, and callbacks", () => {
@@ -111,6 +112,23 @@ test("cell decoration exposes overlaps and mapped tasks", () => {
   assert.deepEqual(cells[1].overlapIds, [2]);
   assert.equal(cells[0].tasks[0].tid, 41);
   assert.equal(cells[1].tasks[0].tid, 72);
+});
+
+test("workload assignment requests distinguish TID, TGID, and cgroup targets", () => {
+  assert.deepEqual(workloadAssignmentRequest("tid", "41", "2", false), {
+    target: { kind: "tid", tid: 41 },
+    cell_id: 2,
+  });
+  assert.deepEqual(workloadAssignmentRequest("tgid", "40", "7", false), {
+    target: { kind: "tgid", tgid: 40 },
+    cell_id: 7,
+  });
+  assert.deepEqual(workloadAssignmentRequest("cgroup", "/work.slice", "", true), {
+    target: { kind: "cgroup", path: "/work.slice" },
+    cell_id: null,
+  });
+  assert.throws(() => workloadAssignmentRequest("tid", "0", "2", false));
+  assert.throws(() => workloadAssignmentRequest("cgroup", "", "2", false));
 });
 
 test("rung hit and miss percentages use attempts as the denominator", () => {

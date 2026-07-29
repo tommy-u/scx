@@ -282,6 +282,40 @@ button:focus-visible {
   width: min(260px, 100%);
 }
 
+#workloadTargetKind {
+  grid-template-columns: repeat(3, minmax(64px, 1fr));
+}
+
+#workloadTargetKind label:not(:first-of-type) span {
+  margin-left: -1px;
+}
+
+.workload-target-field {
+  width: min(260px, 100%);
+}
+
+.control-message {
+  flex: 1 1 100%;
+  margin: 0;
+  padding: 7px 9px;
+  color: #7d4400;
+  background: #fff5e5;
+  border-left: 3px solid #d89c3c;
+  font-size: 0.75rem;
+}
+
+.control-message.success {
+  color: #075e4c;
+  background: #e4f5ef;
+  border-color: #32866e;
+}
+
+.workload-control-band .notice {
+  flex: 1 1 100%;
+  border-bottom: 0;
+  border-left: 3px solid #d89c3c;
+}
+
 .apply-button {
   height: 34px;
   padding: 5px 13px;
@@ -1722,6 +1756,13 @@ button:focus-visible {
   padding: 0 14px 12px 30px;
   display: grid;
   gap: 8px;
+}
+
+.task-mapping-actions {
+  padding: 0 14px 12px 30px;
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 
 .empty-state {
