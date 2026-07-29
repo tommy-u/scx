@@ -114,6 +114,8 @@ pub struct FineTimingStageView {
 #[derive(Clone, Debug, Serialize)]
 pub struct FineTimingCaptureView {
     pub callback: String,
+    pub available: bool,
+    pub unavailable_reason: Option<String>,
     pub state: FineTimingCaptureState,
     pub session_id: Option<u64>,
     pub policy_generation: Option<u64>,
@@ -480,6 +482,9 @@ impl Dashboard {
         let Some(payload) = snapshot.get("fine_timing") else {
             return empty_fine_timing_view(&live, FineTimingStatus::Unsupported, None);
         };
+        let queue_topology_active = snapshot
+            .get("queue_topology")
+            .is_some_and(|topology| !topology.is_null());
         match serde_json::from_value::<FineTimingPayload>(payload.clone())
             .map_err(|error| format!("invalid fine timing data: {error}"))
             .and_then(validate_fine_timing)
@@ -492,28 +497,42 @@ impl Dashboard {
                 captures: payload
                     .captures
                     .into_iter()
-                    .map(|capture| FineTimingCaptureView {
-                        callback: capture.callback,
-                        state: capture.state,
-                        session_id: capture.session_id,
-                        policy_generation: capture.policy_generation,
-                        started_at_ms: capture.started_at_ms,
-                        stopped_at_ms: capture.stopped_at_ms,
-                        stages: capture
-                            .stages
-                            .into_iter()
-                            .map(|(stage, counters)| {
-                                let summary = summarize_callback_timing(&counters);
-                                FineTimingStageView {
-                                    stage,
-                                    samples: summary.samples,
-                                    mean_ns: summary.mean_ns,
-                                    p50_ns: summary.p50_ns,
-                                    p95_ns: summary.p95_ns,
-                                    p99_ns: summary.p99_ns,
-                                }
-                            })
-                            .collect(),
+                    .map(|capture| {
+                        let unavailable_reason = if payload.sample_rate == 0 {
+                            Some(
+                                "Enable callback sampling to collect fine-grained timestamps."
+                                    .to_owned(),
+                            )
+                        } else if capture.callback != "select_cpu" && !queue_topology_active {
+                            Some("Requires queue topology mode.".to_owned())
+                        } else {
+                            None
+                        };
+                        FineTimingCaptureView {
+                            callback: capture.callback,
+                            available: unavailable_reason.is_none(),
+                            unavailable_reason,
+                            state: capture.state,
+                            session_id: capture.session_id,
+                            policy_generation: capture.policy_generation,
+                            started_at_ms: capture.started_at_ms,
+                            stopped_at_ms: capture.stopped_at_ms,
+                            stages: capture
+                                .stages
+                                .into_iter()
+                                .map(|(stage, counters)| {
+                                    let summary = summarize_callback_timing(&counters);
+                                    FineTimingStageView {
+                                        stage,
+                                        samples: summary.samples,
+                                        mean_ns: summary.mean_ns,
+                                        p50_ns: summary.p50_ns,
+                                        p95_ns: summary.p95_ns,
+                                        p99_ns: summary.p99_ns,
+                                    }
+                                })
+                                .collect(),
+                        }
                     })
                     .collect(),
             },

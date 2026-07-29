@@ -94,6 +94,7 @@ pub fn router(context: ApiContext) -> Router {
         .route("/api/policies/activate", post(activate_policy))
         .route("/api/scheduler/control", get(scheduler_control))
         .route("/api/scheduler/start", post(start_scheduler))
+        .route("/api/scheduler/restart", post(restart_scheduler))
         .route("/api/scheduler/stop", post(stop_scheduler))
         .route("/api/stats/reset", post(reset_stats))
         .route("/api/events", get(events))
@@ -318,8 +319,11 @@ struct SchedulerSettingControl {
 #[derive(Clone, Debug, Serialize)]
 struct SchedulerControl {
     managed: bool,
+    controllable: bool,
+    control_error: Option<String>,
     active: bool,
     scheduler_name: Option<String>,
+    pid: Option<u32>,
     policy_id: Option<String>,
     last_exit: Option<String>,
     launch: LaunchOptions,
@@ -344,6 +348,25 @@ async fn start_scheduler(
         .clone()
         .ok_or_else(|| ApiError::unavailable("managed scheduler launching is unavailable"))?;
     tokio::task::spawn_blocking(move || launcher.start(request))
+        .await
+        .map_err(|_| ApiError::unavailable("scheduler launcher worker failed"))?
+        .map_err(|error| ApiError::bad_request(format!("{error:#}")))?;
+    scheduler_control_response(&context).map(Json)
+}
+
+async fn restart_scheduler(
+    State(context): State<ApiContext>,
+    headers: HeaderMap,
+    Json(request): Json<LaunchRequest>,
+) -> Result<Json<SchedulerControl>, ApiError> {
+    require_session_token(&headers, &context.token)?;
+    let control = scheduler_control_response(&context)?;
+    validate_lifecycle_policy(&control, &request.policy_id, "restarted")?;
+    let launcher = context
+        .launcher
+        .clone()
+        .ok_or_else(|| ApiError::unavailable("managed scheduler launching is unavailable"))?;
+    tokio::task::spawn_blocking(move || launcher.restart(request))
         .await
         .map_err(|_| ApiError::unavailable("scheduler launcher worker failed"))?
         .map_err(|error| ApiError::bad_request(format!("{error:#}")))?;
@@ -413,8 +436,9 @@ fn scheduler_control_response(context: &ApiContext) -> Result<SchedulerControl, 
             .find_map(|policy| (policy.source.trim() == source.trim()).then(|| policy.id.clone()))
     });
 
+    let launch_known = status.launch.is_some();
     let mut launch = status.launch.unwrap_or_default();
-    if !status.managed && status.active && launch.fairness.is_none() {
+    if !launch_known && !status.managed && status.active && launch.fairness.is_none() {
         launch.fairness = inspection
             .snapshot
             .as_ref()
@@ -423,7 +447,11 @@ fn scheduler_control_response(context: &ApiContext) -> Result<SchedulerControl, 
             .and_then(serde_json::Value::as_str)
             .and_then(|mode| serde_json::from_value(serde_json::Value::String(mode.into())).ok());
     }
-    if !status.managed && status.active && launch.callback_timing_sample_rate.is_none() {
+    if !launch_known
+        && !status.managed
+        && status.active
+        && launch.callback_timing_sample_rate.is_none()
+    {
         launch.callback_timing_sample_rate = inspection
             .snapshot
             .as_ref()
@@ -467,21 +495,30 @@ fn scheduler_control_response(context: &ApiContext) -> Result<SchedulerControl, 
                     reload_reasons: Vec::new(),
                 }
             } else {
-                let reason = reload
+                let validation_error = reload
                     .get(policy.id.as_str())
-                    .map(|reason| (*reason).to_owned())
-                    .or_else(|| catalog.error.clone())
-                    .unwrap_or_else(|| {
+                    .map(|reason| (*reason).to_owned());
+                let reason = validation_error.clone().unwrap_or_else(|| {
+                    catalog.error.clone().unwrap_or_else(|| {
                         if status.active {
                             "Policy compatibility has not been validated yet.".into()
                         } else {
                             "Starting this policy requires launching Snake.".into()
                         }
-                    });
+                    })
+                });
                 SchedulerPolicyControl {
                     id: policy.id,
                     name: policy.name,
-                    change_mode: "reload",
+                    change_mode: if status.active
+                        && (!validation_error
+                            .as_deref()
+                            .is_some_and(policy_requires_restart))
+                    {
+                        "invalid"
+                    } else {
+                        "reload"
+                    },
                     reload_reasons: vec![reason],
                 }
             }
@@ -521,14 +558,44 @@ fn scheduler_control_response(context: &ApiContext) -> Result<SchedulerControl, 
 
     Ok(SchedulerControl {
         managed: status.managed,
+        controllable: status.controllable,
+        control_error: status.control_error,
         active: status.active,
         scheduler_name: status.scheduler_name,
+        pid: status.pid,
         policy_id,
         last_exit: status.last_exit,
         launch,
         policies,
         settings,
     })
+}
+
+fn policy_requires_restart(error: &str) -> bool {
+    error.contains("restart Snake to apply it")
+}
+
+fn validate_lifecycle_policy(
+    control: &SchedulerControl,
+    policy_id: &str,
+    action: &str,
+) -> Result<(), ApiError> {
+    let policy = control
+        .policies
+        .iter()
+        .find(|policy| policy.id == policy_id)
+        .ok_or_else(|| ApiError::bad_request("selected policy is not available"))?;
+    if policy.change_mode != "invalid" {
+        return Ok(());
+    }
+    let reason = policy
+        .reload_reasons
+        .first()
+        .map(String::as_str)
+        .unwrap_or("policy validation failed");
+    Err(ApiError::bad_request(format!(
+        "selected policy is invalid and cannot be {action}: {reason}"
+    )))
 }
 
 fn active_policy_source(snapshot: &serde_json::Value) -> Option<&str> {

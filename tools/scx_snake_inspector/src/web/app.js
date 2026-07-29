@@ -22,6 +22,7 @@ import {
   fineTimingCaptureModels,
   formatCallbackDuration,
   ladderPercentages,
+  policyLibraryModels,
   queueLadderSections,
   queueTopologyModel,
   routeFromHash,
@@ -94,6 +95,7 @@ const elements = {
   primaryNav: document.querySelector("#primaryNav"),
   referencePopover: document.querySelector("#referencePopover"),
   resetAllStats: document.querySelector("#resetAllStats"),
+  restartScheduler: document.querySelector("#restartScheduler"),
   confirmPolicyActivation: document.querySelector("#confirmPolicyActivation"),
   scopeMode: document.querySelector("#scopeMode"),
   scopeSummary: document.querySelector("#scopeSummary"),
@@ -156,6 +158,7 @@ const state = {
   schedulerControlLoading: false,
   schedulerControlPending: false,
   schedulerFormInitialized: false,
+  selectedLifecyclePolicyId: null,
   statsResetPending: false,
   referenceId: 0,
   references: new Map(),
@@ -318,12 +321,16 @@ function bindControls() {
     elements.schedulerVerbose,
   ]) {
     control.addEventListener("change", () => {
+      if (control === elements.schedulerPolicy) {
+        state.selectedLifecyclePolicyId = null;
+      }
       state.schedulerFormInitialized = true;
       renderSchedulerControl();
     });
   }
   elements.schedulerExitDumpLen.addEventListener("input", renderSchedulerCommandPreview);
   elements.startScheduler.addEventListener("click", startScheduler);
+  elements.restartScheduler.addEventListener("click", restartScheduler);
   elements.stopScheduler.addEventListener("click", stopScheduler);
   elements.resetAllStats.addEventListener("click", resetAllStats);
   elements.cellDetail.addEventListener("click", (event) => {
@@ -345,7 +352,11 @@ function bindControls() {
     if (!control || control.disabled) {
       return;
     }
-    openPolicyDialog(control.dataset.policyId);
+    if (control.dataset.policyAction === "lifecycle") {
+      selectPolicyForLifecycle(control.dataset.policyId);
+    } else {
+      openPolicyDialog(control.dataset.policyId);
+    }
   });
   elements.confirmPolicyActivation.addEventListener("click", activateSelectedPolicy);
   elements.policyDialog.addEventListener("close", () => {
@@ -812,6 +823,12 @@ async function setFineTiming(callback, enabled) {
   if (state.fineTimingPending.has(callback)) {
     return;
   }
+  const model = fineTimingCaptureModels(state.fineTiming)
+    .find((capture) => capture.callback === callback);
+  if (!model?.available) {
+    renderFineTiming();
+    return;
+  }
   state.fineTimingPending.add(callback);
   state.fineTimingError = null;
   renderFineTiming();
@@ -945,6 +962,8 @@ async function loadSchedulerControl() {
   }
   if (state.route === "control") {
     renderSchedulerControl();
+  } else if (state.route === "policy") {
+    renderPolicyLibrary();
   }
 }
 
@@ -954,6 +973,13 @@ function renderSchedulerControl() {
   if (control && !state.schedulerFormInitialized) {
     hydrateSchedulerLaunchForm(control);
     state.schedulerFormInitialized = true;
+  }
+  if (
+    state.selectedLifecyclePolicyId
+    && [...elements.schedulerPolicy.options]
+      .some((option) => option.value === state.selectedLifecyclePolicyId && !option.disabled)
+  ) {
+    elements.schedulerPolicy.value = state.selectedLifecyclePolicyId;
   }
 
   const active = Boolean(control?.active);
@@ -973,6 +999,7 @@ function renderSchedulerControl() {
   elements.schedulerSampleRate.disabled = locked || !elements.schedulerSampleRateEnabled.checked;
   elements.schedulerExitDumpLen.disabled = locked || !elements.schedulerExitDumpEnabled.checked;
   elements.startScheduler.disabled = model.startDisabled;
+  elements.restartScheduler.disabled = model.restartDisabled;
   elements.stopScheduler.disabled = model.stopDisabled;
   elements.resetAllStats.disabled = statsResetDisabled(control, state.statsResetPending);
 
@@ -982,6 +1009,15 @@ function renderSchedulerControl() {
   const message = schedulerControlMessage(control, state.schedulerControlError);
   if (message) {
     showElementNotice(elements.schedulerControlNotice, message);
+  } else if (state.selectedLifecyclePolicyId) {
+    const policy = control?.policies?.find(
+      (candidate) => candidate.id === state.selectedLifecyclePolicyId,
+    );
+    showElementNotice(
+      elements.schedulerControlNotice,
+      `${policy?.name || state.selectedLifecyclePolicyId} is selected. Review the command, then ${control?.active ? "restart" : "start"} Snake.`,
+      "info",
+    );
   } else {
     hideElementNotice(elements.schedulerControlNotice);
   }
@@ -1001,8 +1037,12 @@ function syncSchedulerPolicyOptions(policies) {
   elements.schedulerPolicy.innerHTML = policies.length === 0
     ? '<option value="">No policies available</option>'
     : policies.map((policy) => {
-      const mode = policy.change_mode === "dynamic" ? "Dynamic" : "Reload required";
-      return `<option value="${escapeHtml(policy.id)}">${escapeHtml(policy.name || policy.id)} (${mode})</option>`;
+      const mode = policy.change_mode === "dynamic"
+        ? "Dynamic"
+        : policy.change_mode === "reload"
+          ? "Reload required"
+          : "Invalid";
+      return `<option value="${escapeHtml(policy.id)}" ${policy.change_mode === "invalid" ? "disabled" : ""}>${escapeHtml(policy.name || policy.id)} (${mode})</option>`;
     }).join("");
   if ([...elements.schedulerPolicy.options].some((option) => option.value === selected)) {
     elements.schedulerPolicy.value = selected;
@@ -1053,7 +1093,10 @@ function schedulerLaunchFormValues() {
 function renderSchedulerCommandPreview() {
   try {
     const request = schedulerLaunchRequest(schedulerLaunchFormValues());
-    elements.schedulerCommandPreview.textContent = schedulerCommandPreview(request);
+    elements.schedulerCommandPreview.textContent = schedulerCommandPreview(
+      request,
+      state.schedulerControl?.launch?.preserved_args || [],
+    );
   } catch (error) {
     elements.schedulerCommandPreview.textContent = error.message;
   }
@@ -1082,8 +1125,22 @@ async function startScheduler() {
   await schedulerMutation("/api/scheduler/start", request);
 }
 
+async function restartScheduler() {
+  let request;
+  try {
+    request = schedulerLaunchRequest(schedulerLaunchFormValues());
+  } catch (error) {
+    showElementNotice(elements.schedulerControlNotice, error.message);
+    return;
+  }
+  if (!window.confirm("Restart the attached Snake scheduler with this configuration?")) {
+    return;
+  }
+  await schedulerMutation("/api/scheduler/restart", request);
+}
+
 async function stopScheduler() {
-  if (!window.confirm("Stop the managed Snake scheduler?")) {
+  if (!window.confirm("Stop the attached Snake scheduler?")) {
     return;
   }
   await schedulerMutation("/api/scheduler/stop", {});
@@ -1109,6 +1166,7 @@ async function schedulerMutation(path, payload) {
     if (!response.ok) {
       throw new Error(body.error || `Scheduler control failed (${response.status})`);
     }
+    state.selectedLifecyclePolicyId = null;
     state.schedulerFormInitialized = false;
     await loadSchedulerControl();
   } catch (error) {
@@ -1237,10 +1295,13 @@ function renderFineTiming() {
     hideElementNotice(elements.fineTimingNotice);
   }
 
-  const controlsEnabled = timing?.status === "ready" && timing?.sample_rate > 0;
   elements.fineTimingPanels.innerHTML = fineTimingCaptureModels(timing)
     .map((capture) => {
       const pending = state.fineTimingPending.has(capture.callback);
+      const availabilityId = `fine-${capture.callback}-availability`;
+      const availabilityText = capture.available
+        ? "Available in current mode"
+        : `${capture.availabilityLabel}: ${capture.unavailable_reason || "Not supported in current mode."}`;
       const metadata = capture.session_id == null
         ? "No capture"
         : `Session ${formatCount(capture.session_id)} · generation ${formatCount(capture.policy_generation)}`;
@@ -1264,12 +1325,19 @@ function renderFineTiming() {
             </div>
             <div class="fine-timing-actions">
               <span class="fine-timing-state ${capture.state}">${escapeHtml(capture.stateLabel)}</span>
-              <label class="fine-timing-toggle">
-                <input type="checkbox" data-fine-timing-callback="${capture.callback}"
-                  ${capture.checked ? "checked" : ""}
-                  ${!controlsEnabled || pending ? "disabled" : ""}>
-                <span>Collect Fine-grain Timestamps</span>
-              </label>
+              <div class="fine-timing-control">
+                <label class="fine-timing-toggle" title="${escapeHtml(availabilityText)}">
+                  <input type="checkbox" data-fine-timing-callback="${capture.callback}"
+                    aria-describedby="${availabilityId}"
+                    ${capture.checked ? "checked" : ""}
+                    ${capture.controlDisabled || pending ? "disabled" : ""}>
+                  <span>Collect Fine-grain Timestamps</span>
+                </label>
+                <span id="${availabilityId}"
+                  class="fine-timing-availability ${capture.available ? "available" : "unavailable"}">
+                  ${escapeHtml(availabilityText)}
+                </span>
+              </div>
             </div>
           </header>
           <div class="fine-timing-table-wrap">
@@ -1509,14 +1577,14 @@ function renderQueueLadder(section) {
 
 function renderPolicyLibrary() {
   const catalog = state.policyCatalog;
-  if (state.policyCatalogError) {
+  if (state.policyCatalogError && !state.schedulerControl?.policies?.length) {
     elements.policyLibraryStatus.textContent = "Unavailable";
     showElementNotice(elements.policyLibraryNotice, state.policyCatalogError);
     elements.policyChoices.replaceChildren();
     elements.invalidPolicies.classList.add("hidden");
     return;
   }
-  if (!catalog) {
+  if (!catalog && !state.schedulerControl?.policies?.length) {
     elements.policyLibraryStatus.textContent = "Loading policies";
     hideElementNotice(elements.policyLibraryNotice);
     elements.policyChoices.replaceChildren();
@@ -1532,39 +1600,43 @@ function renderPolicyLibrary() {
   } else {
     hideElementNotice(elements.policyLibraryNotice);
   }
-  elements.policyLibraryStatus.textContent = `${numberFormat.format(catalog.policies.length)} valid policies`;
   const activeSource = state.inspection?.slots
     ?.find((slot) => slot.state === "active")
     ?.policy?.source?.trim();
-  if (catalog.policies.length === 0) {
-    elements.policyChoices.innerHTML = '<p class="empty-state">No valid TOML policies were found.</p>';
+  const policies = policyLibraryModels(catalog, state.schedulerControl, activeSource);
+  elements.policyLibraryStatus.textContent = `${numberFormat.format(policies.length)} policies`;
+  if (policies.length === 0) {
+    elements.policyChoices.innerHTML = '<p class="empty-state">No TOML policies were found.</p>';
   } else {
-    elements.policyChoices.innerHTML = catalog.policies.map((policy) => {
-      const active = activeSource && policy.source.trim() === activeSource;
-      return `
-        <article class="policy-choice${active ? " active" : ""}">
+    elements.policyChoices.innerHTML = policies.map((policy) => `
+        <article class="policy-choice${policy.active ? " active" : ""}${policy.changeMode === "invalid" ? " invalid" : ""}">
           <div>
-            <h4>${escapeHtml(policy.name)}</h4>
+            <div class="policy-choice-heading">
+              <h4>${escapeHtml(policy.name)}</h4>
+              <span class="change-mode ${policy.changeMode}">${escapeHtml(policy.changeLabel)}</span>
+            </div>
             <p><code>${escapeHtml(policy.id)}</code> · ${escapeHtml(policy.summary)}</p>
           </div>
-          <button class="${active ? "secondary-button" : "apply-button"}" type="button"
-            data-policy-id="${escapeHtml(policy.id)}" ${active ? "disabled" : ""}>
-            ${active ? "Active" : "Activate"}
+          <button class="${policy.actionKind === "activate" || policy.actionKind === "lifecycle" ? "apply-button" : "secondary-button"}" type="button"
+            data-policy-id="${escapeHtml(policy.id)}"
+            data-policy-action="${escapeHtml(policy.actionKind)}" ${policy.disabled ? "disabled" : ""}>
+            ${escapeHtml(policy.actionLabel)}
           </button>
-        </article>`;
-    }).join("");
+        </article>`).join("");
   }
-  const invalid = catalog.invalid || [];
-  if (invalid.length === 0) {
-    elements.invalidPolicies.classList.add("hidden");
-  } else {
-    elements.invalidPolicies.classList.remove("hidden");
-    elements.invalidPolicies.querySelector("summary").textContent =
-      `${numberFormat.format(invalid.length)} invalid policy files`;
-    elements.invalidPolicies.querySelector("ul").innerHTML = invalid.map((entry) =>
-      `<li><code>${escapeHtml(entry.id)}</code><span>${escapeHtml(entry.error)}</span></li>`
-    ).join("");
+  elements.invalidPolicies.classList.add("hidden");
+}
+
+function selectPolicyForLifecycle(policyId) {
+  const policy = state.schedulerControl?.policies?.find((candidate) => candidate.id === policyId);
+  if (!policy || policy.change_mode !== "reload") {
+    showElementNotice(elements.policyLibraryNotice, `Policy ${policyId} is not available for restart.`);
+    return;
   }
+  state.selectedLifecyclePolicyId = policyId;
+  state.schedulerFormInitialized = false;
+  window.location.hash = "#/control";
+  renderRoute();
 }
 
 function openPolicyDialog(policyId) {

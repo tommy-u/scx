@@ -15,14 +15,14 @@ The embedded interface has five views:
   dispatch.
 - **Policy** shows both BPF placement-ladder slots, their rung data, live or
   frozen counters, configured enqueue and dispatch ladders, contextual
-  references for encoded fields, resolved queue topology, and a catalog of
-  validated TOML policies that can be activated after confirmation.
+  references for encoded fields, resolved queue topology, and a catalog that
+  identifies dynamic, restart-required, and invalid TOML policies.
 - **Cells** shows declared cell CPU membership, overlaps, and expandable
   current task mappings. It can assign or clear manual cell overrides for one
   TID, every current thread in a TGID, or every current thread in a cgroup
   subtree. TGID and cgroup operations use a bounded snapshot; newly created
   threads are not assigned automatically.
-- **Control** starts and stops one inspector-owned Snake process, shows the
+- **Control** starts, stops, or restarts the attached Snake process, shows the
   exact launch command, and distinguishes changes that can be applied
   dynamically from settings that require a scheduler reload.
 
@@ -30,14 +30,23 @@ The Control view accepts only typed launch options. A policy from the
 configured allowlist is required; fairness, callback sampling, exit dump
 length, and verbose logging are independently optional. FIFO and VTIME are
 available, but EEVDF is intentionally not exposed. The inspector refuses to
-start while any scheduler is attached and never stops a scheduler it did not
-launch. An owned child is stopped with the inspector.
+start while any scheduler is attached. It can adopt an externally launched
+Snake when exactly one matching process can be identified, retaining a PID
+file descriptor before signaling it. Ambiguous process matches leave lifecycle
+controls disabled with the reason shown. Restart preserves arguments not
+represented by the form, such as `--stats`, and validates the selected policy
+before stopping the current scheduler. A child launched by the inspector is
+stopped with the inspector; merely observing an external Snake does not change
+its lifetime.
 
 Compatible placement, enqueue, and dispatch ladder policy changes can be
-activated dynamically from the Policy view. Fairness, task membership, queue
-topology, cells, weights, CPU masks, and DSQ layout are attachment-time state
-and require a reload. Callback sampling, fine-grained timing, and workload
-cell assignments are dynamic. **Reset all stats** atomically switches Snake to
+activated dynamically from the Policy view. Selecting a restart-required
+policy opens Control with that policy and the current launch settings already
+loaded; the complete command remains visible before **Restart Snake** is
+pressed. Fairness, task membership, queue topology, cells, weights, CPU masks,
+and DSQ layout are attachment-time state and require a reload. Callback
+sampling, fine-grained timing, and workload cell assignments are dynamic.
+**Reset all stats** atomically switches Snake to
 a cleared statistics bank at the same policy generation, rebases the
 inspector's rolling histories, and clears fine-grained capture history. It
 does not reload the scheduler or alter queues, clocks, membership, or task-cell
@@ -70,7 +79,10 @@ Each fine-grained callback switch starts and stops an independent capture using
 the same sample decision. Snake folds bounded ring-buffer samples into fixed
 per-stage histograms and does not retain individual events. An unchecked
 capture remains visible as **Historical**; a policy update freezes every active
-capture before activating the next generation.
+capture before activating the next generation. Select CPU capture is available
+whenever callback sampling is enabled; enqueue and dispatch capture additionally
+require queue topology mode. Unavailable switches remain visible but disabled
+with the requirement shown.
 
 ## Build and run
 

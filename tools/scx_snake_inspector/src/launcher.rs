@@ -4,6 +4,7 @@
 // GNU General Public License version 2.
 
 use std::fs;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Component, Path, PathBuf};
@@ -56,6 +57,7 @@ pub struct LaunchOptions {
     pub callback_timing_sample_rate: Option<u32>,
     pub exit_dump_len: Option<u32>,
     pub verbose: bool,
+    pub preserved_args: Vec<String>,
 }
 
 impl From<&LaunchRequest> for LaunchOptions {
@@ -65,6 +67,7 @@ impl From<&LaunchRequest> for LaunchOptions {
             callback_timing_sample_rate: request.callback_timing_sample_rate,
             exit_dump_len: request.exit_dump_len,
             verbose: request.verbose,
+            preserved_args: Vec::new(),
         }
     }
 }
@@ -78,6 +81,8 @@ pub struct LaunchPolicy {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct LauncherStatus {
     pub managed: bool,
+    pub controllable: bool,
+    pub control_error: Option<String>,
     pub active: bool,
     pub scheduler_name: Option<String>,
     pub pid: Option<u32>,
@@ -94,22 +99,39 @@ pub struct SnakeLauncher {
 struct OwnedChild {
     child: Child,
     request: LaunchRequest,
+    executable: PathBuf,
+    preserved_args: Vec<String>,
 }
 
 struct Supervisor {
     snake_bin: PathBuf,
     policy_dir: PathBuf,
     ops_path: PathBuf,
+    proc_root: PathBuf,
     child: Option<OwnedChild>,
     last_exit: Option<String>,
 }
 
 impl SnakeLauncher {
     pub fn new(snake_bin: &Path, policy_dir: &Path) -> Result<Self> {
-        Self::with_ops_path(snake_bin, policy_dir, Path::new(DEFAULT_OPS_PATH))
+        Self::with_paths(
+            snake_bin,
+            policy_dir,
+            Path::new(DEFAULT_OPS_PATH),
+            Path::new("/proc"),
+        )
     }
 
     pub fn with_ops_path(snake_bin: &Path, policy_dir: &Path, ops_path: &Path) -> Result<Self> {
+        Self::with_paths(snake_bin, policy_dir, ops_path, Path::new("/proc"))
+    }
+
+    pub fn with_paths(
+        snake_bin: &Path,
+        policy_dir: &Path,
+        ops_path: &Path,
+        proc_root: &Path,
+    ) -> Result<Self> {
         let snake_bin = snake_bin
             .canonicalize()
             .with_context(|| format!("resolving Snake binary {}", snake_bin.display()))?;
@@ -132,6 +154,7 @@ impl SnakeLauncher {
                 snake_bin,
                 policy_dir,
                 ops_path: ops_path.to_path_buf(),
+                proc_root: proc_root.to_path_buf(),
                 child: None,
                 last_exit: None,
             })),
@@ -158,28 +181,14 @@ impl SnakeLauncher {
         if let Some(name) = supervisor.attached_scheduler()? {
             bail!("scheduler {name} is already attached");
         }
-        validate_sample_rate(request.callback_timing_sample_rate)?;
-        let policy_path = resolve_policy_path(&supervisor.policy_dir, &request.policy_id)?;
-        let args = launch_args(&request, &policy_path);
-        let mut command = Command::new(&supervisor.snake_bin);
-        command
-            .args(args)
-            .stdin(Stdio::null())
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit());
-        unsafe {
-            command.pre_exec(|| {
-                if libc::setsid() == -1 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                Ok(())
-            });
-        }
-        let child = command
-            .spawn()
-            .with_context(|| format!("starting Snake from {}", supervisor.snake_bin.display()))?;
-        supervisor.last_exit = None;
-        supervisor.child = Some(OwnedChild { child, request });
+        let executable = supervisor.snake_bin.clone();
+        supervisor.spawn(executable, request, Vec::new())?;
+        supervisor.status()
+    }
+
+    pub fn restart(&self, request: LaunchRequest) -> Result<LauncherStatus> {
+        let mut supervisor = self.inner.lock().expect("launcher lock poisoned");
+        supervisor.restart(request)?;
         supervisor.status()
     }
 
@@ -190,13 +199,15 @@ impl SnakeLauncher {
     pub fn stop(&self) -> Result<LauncherStatus> {
         let mut supervisor = self.inner.lock().expect("launcher lock poisoned");
         supervisor.refresh_child()?;
-        if supervisor.child.is_none() {
-            if let Some(name) = supervisor.attached_scheduler()? {
-                bail!("scheduler {name} is not managed by this inspector");
+        if supervisor.child.is_some() {
+            supervisor.stop_owned();
+        } else if let Some(name) = supervisor.attached_scheduler()? {
+            if !is_snake_scheduler(&name) {
+                bail!("attached scheduler {name} is not Snake and cannot be controlled");
             }
-            return supervisor.status();
+            let external = supervisor.external_process()?;
+            stop_process(&external)?;
         }
-        supervisor.stop_owned();
         supervisor.status()
     }
 
@@ -237,21 +248,176 @@ impl Supervisor {
     fn status(&mut self) -> Result<LauncherStatus> {
         self.refresh_child()?;
         let scheduler_name = self.attached_scheduler()?;
+        let external =
+            if self.child.is_none() && scheduler_name.as_deref().is_some_and(is_snake_scheduler) {
+                Some(self.external_process())
+            } else {
+                None
+            };
+        let external_process = external.as_ref().and_then(|result| result.as_ref().ok());
+        let control_error = if self.child.is_some() || scheduler_name.is_none() {
+            None
+        } else if !scheduler_name.as_deref().is_some_and(is_snake_scheduler) {
+            Some(format!(
+                "attached scheduler {} is not Snake",
+                scheduler_name.as_deref().unwrap_or("unknown")
+            ))
+        } else {
+            external
+                .as_ref()
+                .and_then(|result| result.as_ref().err())
+                .map(|error| format!("{error:#}"))
+        };
+        let child_launch = self.child.as_ref().map(|owned| {
+            let mut options = LaunchOptions::from(&owned.request);
+            options.preserved_args.clone_from(&owned.preserved_args);
+            options
+        });
+        let external_launch = external_process.map(|process| process.launch.clone());
         Ok(LauncherStatus {
             managed: self.child.is_some(),
+            controllable: self.child.is_some() || external_process.is_some(),
+            control_error,
             active: scheduler_name.is_some(),
             scheduler_name,
-            pid: self.child.as_ref().map(|owned| owned.child.id()),
+            pid: self
+                .child
+                .as_ref()
+                .map(|owned| owned.child.id())
+                .or_else(|| external_process.map(|process| process.pid)),
             policy_id: self
                 .child
                 .as_ref()
-                .map(|owned| owned.request.policy_id.clone()),
-            launch: self
-                .child
-                .as_ref()
-                .map(|owned| LaunchOptions::from(&owned.request)),
+                .map(|owned| owned.request.policy_id.clone())
+                .or_else(|| external_process.and_then(|process| process.policy_id.clone())),
+            launch: child_launch.or(external_launch),
             last_exit: self.last_exit.clone(),
         })
+    }
+
+    fn restart(&mut self, request: LaunchRequest) -> Result<()> {
+        self.refresh_child()?;
+        if self.child.is_none() {
+            let scheduler = self
+                .attached_scheduler()?
+                .ok_or_else(|| anyhow::anyhow!("Snake is not running"))?;
+            if !is_snake_scheduler(&scheduler) {
+                bail!("attached scheduler {scheduler} is not Snake");
+            }
+        }
+        validate_sample_rate(request.callback_timing_sample_rate)?;
+        resolve_policy_path(&self.policy_dir, &request.policy_id)?;
+
+        let external = if self.child.is_none() {
+            Some(self.external_process()?)
+        } else {
+            None
+        };
+        let (executable, preserved_args) = self.child.as_ref().map_or_else(
+            || {
+                let external = external.as_ref().expect("external process was discovered");
+                (
+                    external.executable.clone(),
+                    external.launch.preserved_args.clone(),
+                )
+            },
+            |owned| (owned.executable.clone(), owned.preserved_args.clone()),
+        );
+        validate_executable(&executable)?;
+        validate_preserved_args(&request, &preserved_args)?;
+
+        if self.child.is_some() {
+            self.stop_owned();
+        } else {
+            stop_process(external.as_ref().expect("external process was discovered"))?;
+        }
+        self.spawn(executable, request, preserved_args)
+    }
+
+    fn spawn(
+        &mut self,
+        executable: PathBuf,
+        request: LaunchRequest,
+        preserved_args: Vec<String>,
+    ) -> Result<()> {
+        validate_sample_rate(request.callback_timing_sample_rate)?;
+        let policy_path = resolve_policy_path(&self.policy_dir, &request.policy_id)?;
+        let mut args = launch_args(&request, &policy_path);
+        args.extend(preserved_args.iter().cloned());
+        let mut command = Command::new(&executable);
+        command
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit());
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let child = command
+            .spawn()
+            .with_context(|| format!("starting Snake from {}", executable.display()))?;
+        self.last_exit = None;
+        self.child = Some(OwnedChild {
+            child,
+            request,
+            executable,
+            preserved_args,
+        });
+        Ok(())
+    }
+
+    fn external_process(&self) -> Result<ExternalProcess> {
+        let expected_name = self
+            .snake_bin
+            .file_name()
+            .ok_or_else(|| anyhow::anyhow!("configured Snake binary has no filename"))?;
+        let mut candidates = Vec::new();
+        for entry in fs::read_dir(&self.proc_root)
+            .with_context(|| format!("reading process directory {}", self.proc_root.display()))?
+        {
+            let entry = entry?;
+            let Some(pid) = entry
+                .file_name()
+                .to_str()
+                .and_then(|name| name.parse::<u32>().ok())
+            else {
+                continue;
+            };
+            let cmdline = match read_cmdline(&entry.path().join("cmdline")) {
+                Ok(cmdline) if !cmdline.is_empty() => cmdline,
+                _ => continue,
+            };
+            let matches_name = Path::new(&cmdline[0])
+                .file_name()
+                .is_some_and(|name| name == expected_name);
+            if !matches_name {
+                continue;
+            }
+            let pidfd = open_pidfd(pid)?;
+            if read_cmdline(&entry.path().join("cmdline")).ok().as_ref() != Some(&cmdline) {
+                continue;
+            }
+            let executable = fs::read_link(entry.path().join("exe"))
+                .with_context(|| format!("reading executable for Snake PID {pid}"))?;
+            let (policy_id, launch) = parse_external_launch(&self.policy_dir, &cmdline)?;
+            candidates.push(ExternalProcess {
+                pid,
+                executable,
+                policy_id,
+                launch,
+                pidfd,
+            });
+        }
+        match candidates.len() {
+            0 => bail!("no scx_snake process matches the attached scheduler"),
+            1 => Ok(candidates.pop().expect("one candidate must exist")),
+            count => bail!("multiple ({count}) scx_snake processes match the attached scheduler"),
+        }
     }
 
     fn stop_owned(&mut self) {
@@ -291,6 +457,14 @@ impl Supervisor {
     }
 }
 
+struct ExternalProcess {
+    pid: u32,
+    executable: PathBuf,
+    policy_id: Option<String>,
+    launch: LaunchOptions,
+    pidfd: OwnedFd,
+}
+
 impl Drop for Supervisor {
     fn drop(&mut self) {
         self.stop_owned();
@@ -304,6 +478,184 @@ fn validate_sample_rate(rate: Option<u32>) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn validate_executable(path: &Path) -> Result<()> {
+    let metadata = fs::metadata(path)
+        .with_context(|| format!("reading Snake executable {}", path.display()))?;
+    if !metadata.is_file() || metadata.permissions().mode() & 0o111 == 0 {
+        bail!("Snake executable {} is not executable", path.display());
+    }
+    Ok(())
+}
+
+fn is_snake_scheduler(name: &str) -> bool {
+    name == "snake" || name.starts_with("snake_")
+}
+
+fn read_cmdline(path: &Path) -> Result<Vec<String>> {
+    let bytes = fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    bytes
+        .split(|byte| *byte == 0)
+        .filter(|argument| !argument.is_empty())
+        .map(|argument| {
+            String::from_utf8(argument.to_vec())
+                .with_context(|| format!("process argument in {} is not UTF-8", path.display()))
+        })
+        .collect()
+}
+
+fn parse_external_launch(
+    policy_dir: &Path,
+    cmdline: &[String],
+) -> Result<(Option<String>, LaunchOptions)> {
+    let mut policy = None;
+    let mut launch = LaunchOptions::default();
+    let mut index = 1;
+    while index < cmdline.len() {
+        let argument = &cmdline[index];
+        let (name, inline_value) = argument
+            .split_once('=')
+            .map_or((argument.as_str(), None), |(name, value)| {
+                (name, Some(value))
+            });
+        match name {
+            "--policy" => {
+                let (value, consumed) = launch_option_value(cmdline, index, inline_value, name)?;
+                policy = Some(value.to_owned());
+                index += consumed;
+            }
+            "--fairness" => {
+                let (value, consumed) = launch_option_value(cmdline, index, inline_value, name)?;
+                launch.fairness = Some(match value {
+                    "fifo" => LaunchFairness::Fifo,
+                    "vtime" => LaunchFairness::Vtime,
+                    other => bail!("unsupported fairness mode {other:?} in external Snake command"),
+                });
+                index += consumed;
+            }
+            "--callback-timing-sample-rate" => {
+                let (value, consumed) = launch_option_value(cmdline, index, inline_value, name)?;
+                launch.callback_timing_sample_rate =
+                    Some(value.parse().with_context(|| {
+                        format!("invalid callback timing sample rate {value:?}")
+                    })?);
+                index += consumed;
+            }
+            "--exit-dump-len" => {
+                let (value, consumed) = launch_option_value(cmdline, index, inline_value, name)?;
+                launch.exit_dump_len = Some(
+                    value
+                        .parse()
+                        .with_context(|| format!("invalid exit dump length {value:?}"))?,
+                );
+                index += consumed;
+            }
+            "--verbose" | "-v" => {
+                launch.verbose = true;
+                index += 1;
+            }
+            _ => {
+                launch.preserved_args.push(argument.clone());
+                index += 1;
+            }
+        }
+    }
+    validate_sample_rate(launch.callback_timing_sample_rate)?;
+    let policy_id = policy.and_then(|policy| {
+        let id = Path::new(&policy).file_name()?.to_str()?;
+        policy_dir.join(id).is_file().then(|| id.to_owned())
+    });
+    Ok((policy_id, launch))
+}
+
+fn launch_option_value<'a>(
+    cmdline: &'a [String],
+    index: usize,
+    inline_value: Option<&'a str>,
+    option: &str,
+) -> Result<(&'a str, usize)> {
+    if let Some(value) = inline_value {
+        if value.is_empty() {
+            bail!("external Snake option {option} has an empty value");
+        }
+        return Ok((value, 1));
+    }
+    cmdline
+        .get(index + 1)
+        .map(|value| (value.as_str(), 2))
+        .ok_or_else(|| anyhow::anyhow!("external Snake option {option} is missing its value"))
+}
+
+fn validate_preserved_args(request: &LaunchRequest, preserved_args: &[String]) -> Result<()> {
+    let has_stats = preserved_args
+        .iter()
+        .any(|argument| argument == "--stats" || argument.starts_with("--stats="));
+    if has_stats && request.callback_timing_sample_rate.is_some() {
+        bail!("callback timing sample rate conflicts with preserved --stats output");
+    }
+    Ok(())
+}
+
+fn open_pidfd(pid: u32) -> Result<OwnedFd> {
+    let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) } as i32;
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("opening pidfd for Snake PID {pid}"));
+    }
+    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+}
+
+fn stop_process(process: &ExternalProcess) -> Result<()> {
+    send_pidfd_signal(&process.pidfd, libc::SIGINT)
+        .with_context(|| format!("stopping external Snake PID {}", process.pid))?;
+    if wait_pidfd(&process.pidfd, STOP_TIMEOUT)? {
+        return Ok(());
+    }
+    send_pidfd_signal(&process.pidfd, libc::SIGKILL)
+        .with_context(|| format!("force-stopping external Snake PID {}", process.pid))?;
+    if !wait_pidfd(&process.pidfd, Duration::from_secs(2))? {
+        bail!("external Snake PID {} did not exit", process.pid);
+    }
+    Ok(())
+}
+
+fn send_pidfd_signal(pidfd: &OwnedFd, signal: i32) -> Result<()> {
+    let result = unsafe {
+        libc::syscall(
+            libc::SYS_pidfd_send_signal,
+            pidfd.as_raw_fd(),
+            signal,
+            std::ptr::null::<libc::siginfo_t>(),
+            0,
+        )
+    };
+    if result < 0 {
+        return Err(std::io::Error::last_os_error()).context("sending pidfd signal");
+    }
+    Ok(())
+}
+
+fn wait_pidfd(pidfd: &OwnedFd, timeout: Duration) -> Result<bool> {
+    let milliseconds = i32::try_from(timeout.as_millis()).unwrap_or(i32::MAX);
+    let mut pollfd = libc::pollfd {
+        fd: pidfd.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    loop {
+        let result = unsafe { libc::poll(&mut pollfd, 1, milliseconds) };
+        if result > 0 {
+            return Ok(true);
+        }
+        if result == 0 {
+            return Ok(false);
+        }
+        let error = std::io::Error::last_os_error();
+        if error.kind() != std::io::ErrorKind::Interrupted {
+            return Err(error).context("waiting for Snake process exit");
+        }
+    }
 }
 
 fn resolve_policy_path(root: &Path, id: &str) -> Result<PathBuf> {

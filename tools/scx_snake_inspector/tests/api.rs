@@ -6,6 +6,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
+use std::process::Command;
 use std::sync::mpsc;
 
 use axum::body::Body;
@@ -16,7 +17,7 @@ use scx_snake_inspector::collector::CollectorCommand;
 use scx_snake_inspector::dashboard::{Dashboard, FineTimingStatus};
 use scx_snake_inspector::launcher::SnakeLauncher;
 use scx_snake_inspector::model::CpuPair;
-use scx_snake_inspector::policies::{PolicyCatalog, PolicyChoice};
+use scx_snake_inspector::policies::{InvalidPolicy, PolicyCatalog, PolicyChoice};
 use scx_snake_inspector::scope::TaskScope;
 use scx_snake_inspector::topology::{CpuInfo, TopologyView};
 use serde_json::{json, Value};
@@ -276,12 +277,15 @@ async fn scheduler_control_lists_policies_while_stopped_and_manages_an_owned_chi
     let body: Value =
         serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
     assert_eq!(body["managed"], false);
+    assert_eq!(body["controllable"], false);
+    assert_eq!(body["control_error"], Value::Null);
     assert_eq!(body["active"], false);
     assert_eq!(body["policy_id"], Value::Null);
     assert_eq!(body["launch"]["fairness"], Value::Null);
     assert_eq!(body["launch"]["callback_timing_sample_rate"], Value::Null);
     assert_eq!(body["launch"]["exit_dump_len"], Value::Null);
     assert_eq!(body["launch"]["verbose"], false);
+    assert_eq!(body["launch"]["preserved_args"], json!([]));
     assert_eq!(body["policies"][0]["id"], "basic.toml");
     assert_eq!(body["policies"][0]["change_mode"], "reload");
     assert_eq!(body["settings"][0]["name"], "fairness");
@@ -322,11 +326,34 @@ async fn scheduler_control_lists_policies_while_stopped_and_manages_an_owned_chi
     let body: Value =
         serde_json::from_slice(&started.into_body().collect().await.unwrap().to_bytes()).unwrap();
     assert_eq!(body["managed"], true);
+    assert_eq!(body["controllable"], true);
     assert_eq!(body["policy_id"], "basic.toml");
     assert_eq!(body["launch"]["fairness"], "vtime");
     assert_eq!(body["launch"]["callback_timing_sample_rate"], 128);
     assert_eq!(body["launch"]["exit_dump_len"], 4096);
     assert_eq!(body["launch"]["verbose"], true);
+
+    let restarted = router(context.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/scheduler/restart")
+                .header("host", "127.0.0.1")
+                .header("content-type", "application/json")
+                .header(CSRF_HEADER, "secret")
+                .body(Body::from(
+                    r#"{"policy_id":"basic.toml","fairness":"fifo","verbose":false}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(restarted.status(), StatusCode::OK);
+    let body: Value =
+        serde_json::from_slice(&restarted.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(body["managed"], true);
+    assert_eq!(body["controllable"], true);
+    assert_eq!(body["launch"]["fairness"], "fifo");
 
     let stopped = router(context)
         .oneshot(
@@ -355,7 +382,7 @@ async fn scheduler_start_rejects_raw_or_unknown_arguments() {
     let context = ApiContext::new(dashboard(), tx, "secret", cgroup_root.path().to_path_buf())
         .with_launcher(launcher);
 
-    let response = router(context)
+    let response = router(context.clone())
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -410,6 +437,180 @@ async fn scheduler_control_preserves_omitted_launch_flags() {
 
     assert_eq!(body["launch"]["fairness"], Value::Null);
     assert_eq!(body["launch"]["callback_timing_sample_rate"], Value::Null);
+}
+
+#[tokio::test]
+async fn scheduler_control_uses_external_argv_without_inventing_launch_flags() {
+    let root = tempfile::tempdir().unwrap();
+    let binary = root.path().join("scx_snake");
+    fs::write(
+        &binary,
+        "#!/bin/sh\ntrap 'exit 0' INT TERM\nwhile :; do sleep 0.05; done\n",
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&binary).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&binary, permissions).unwrap();
+    let policies = root.path().join("policies");
+    fs::create_dir(&policies).unwrap();
+    let policy = policies.join("basic.toml");
+    fs::write(&policy, "basic").unwrap();
+    let ops = root.path().join("ops");
+    fs::write(&ops, "snake_test\n").unwrap();
+    let proc_root = root.path().join("proc");
+    fs::create_dir(&proc_root).unwrap();
+    let mut child = Command::new(&binary)
+        .args(["--policy", policy.to_str().unwrap(), "--stats", "1"])
+        .spawn()
+        .unwrap();
+    let process = proc_root.join(child.id().to_string());
+    fs::create_dir(&process).unwrap();
+    let cmdline = format!(
+        "{}\0--policy\0{}\0--stats\01\0",
+        binary.display(),
+        policy.display()
+    );
+    fs::write(process.join("cmdline"), cmdline.as_bytes()).unwrap();
+    std::os::unix::fs::symlink(&binary, process.join("exe")).unwrap();
+    let launcher = SnakeLauncher::with_paths(&binary, &policies, &ops, &proc_root).unwrap();
+    let dashboard = dashboard();
+    dashboard.set_inspection(
+        Some(json!({
+            "active_slot": 0,
+            "callback_timing_sample_rate": 64,
+            "fairness": {"mode_name": "vtime"},
+            "slots": [{"slot": 0, "policy": {"source": "basic"}}]
+        })),
+        None,
+    );
+    let (tx, _rx) = mpsc::channel();
+    let cgroup_root = tempfile::tempdir().unwrap();
+    let context = ApiContext::new(dashboard, tx, "secret", cgroup_root.path().to_path_buf())
+        .with_launcher(launcher);
+
+    let response = router(context.clone())
+        .oneshot(
+            Request::builder()
+                .uri("/api/scheduler/control")
+                .header("host", "127.0.0.1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(body["controllable"], true);
+    assert_eq!(body["pid"], child.id());
+    assert_eq!(body["launch"]["callback_timing_sample_rate"], Value::Null);
+    assert_eq!(body["launch"]["preserved_args"], json!(["--stats", "1"]));
+
+    child.kill().unwrap();
+    child.wait().unwrap();
+}
+
+#[tokio::test]
+async fn scheduler_control_distinguishes_dynamic_restart_and_invalid_policies() {
+    let (root, launcher) = launcher_fixture();
+    for name in ["cell.toml", "broken.toml"] {
+        fs::write(root.path().join("policies").join(name), "candidate").unwrap();
+    }
+    fs::write(root.path().join("ops"), "snake_test\n").unwrap();
+    let dashboard = dashboard();
+    dashboard.set_policy_catalog(
+        Some(PolicyCatalog {
+            policies: vec![PolicyChoice {
+                id: "basic.toml".into(),
+                name: "basic".into(),
+                source: "basic".into(),
+                rung_count: 1,
+                mask_table_count: 0,
+                cell_count: 0,
+                summary: "dynamic".into(),
+            }],
+            invalid: vec![
+                InvalidPolicy {
+                    id: "cell.toml".into(),
+                    error: "candidate changes attachment-time queue topology; restart Snake to apply it"
+                        .into(),
+                },
+                InvalidPolicy {
+                    id: "broken.toml".into(),
+                    error: "compiling candidate policy: missing rung".into(),
+                },
+            ],
+        }),
+        None,
+    );
+    let (tx, _rx) = mpsc::channel();
+    let cgroup_root = tempfile::tempdir().unwrap();
+    let context = ApiContext::new(dashboard, tx, "secret", cgroup_root.path().to_path_buf())
+        .with_launcher(launcher);
+
+    let response = router(context.clone())
+        .oneshot(
+            Request::builder()
+                .uri("/api/scheduler/control")
+                .header("host", "127.0.0.1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    let modes = body["policies"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|policy| {
+            (
+                policy["id"].as_str().unwrap(),
+                policy["change_mode"].as_str().unwrap(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(modes["basic.toml"], "dynamic");
+    assert_eq!(modes["cell.toml"], "reload");
+    assert_eq!(modes["broken.toml"], "invalid");
+
+    let rejected = router(context.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/scheduler/restart")
+                .header("host", "127.0.0.1")
+                .header("content-type", "application/json")
+                .header(CSRF_HEADER, "secret")
+                .body(Body::from(r#"{"policy_id":"broken.toml","verbose":false}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+    let body: Value =
+        serde_json::from_slice(&rejected.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert!(body["error"].as_str().unwrap().contains("invalid"));
+
+    fs::write(root.path().join("ops"), "\n").unwrap();
+    let response = router(context)
+        .oneshot(
+            Request::builder()
+                .uri("/api/scheduler/control")
+                .header("host", "127.0.0.1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert!(body["policies"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|policy| policy["change_mode"] == "reload"));
 }
 
 #[tokio::test]
@@ -762,7 +963,20 @@ async fn fine_timing_endpoint_summarizes_stages_and_controls_callbacks_independe
         .iter()
         .find(|capture| capture["callback"] == "dispatch")
         .unwrap();
+    let select_cpu = body["captures"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|capture| capture["callback"] == "select_cpu")
+        .unwrap();
     assert_eq!(body["status"], "ready");
+    assert_eq!(select_cpu["available"], true);
+    assert_eq!(select_cpu["unavailable_reason"], Value::Null);
+    assert_eq!(dispatch["available"], false);
+    assert_eq!(
+        dispatch["unavailable_reason"],
+        "Requires queue topology mode."
+    );
     assert_eq!(dispatch["state"], "historical");
     assert_eq!(dispatch["stages"][0]["stage"], "remote_normal_scan");
     assert_eq!(dispatch["stages"][0]["samples"], 100);
@@ -807,6 +1021,30 @@ async fn fine_timing_endpoint_summarizes_stages_and_controls_callbacks_independe
     assert_eq!(body["enabled"], true);
     assert_eq!(body["session_id"], 11);
     responder.join().unwrap();
+}
+
+#[test]
+fn fine_timing_availability_tracks_queue_topology_and_callback_sampling() {
+    let dashboard = dashboard();
+    let mut snapshot = fine_timing_snapshot();
+    snapshot["queue_topology"] = json!({});
+    dashboard.set_inspection(Some(snapshot.clone()), None);
+
+    let view = serde_json::to_value(dashboard.fine_timing()).unwrap();
+    assert!(view["captures"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|capture| capture["available"] == true));
+
+    snapshot["fine_timing"]["sample_rate"] = json!(0);
+    dashboard.set_inspection(Some(snapshot), None);
+    let view = serde_json::to_value(dashboard.fine_timing()).unwrap();
+    assert!(view["captures"].as_array().unwrap().iter().all(|capture| {
+        capture["available"] == false
+            && capture["unavailable_reason"]
+                == "Enable callback sampling to collect fine-grained timestamps."
+    }));
 }
 
 #[tokio::test]

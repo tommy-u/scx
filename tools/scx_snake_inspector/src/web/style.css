@@ -688,6 +688,14 @@ button:focus-visible {
   gap: 14px;
 }
 
+.fine-timing-control {
+  min-width: 0;
+  display: flex;
+  align-items: flex-end;
+  flex-direction: column;
+  gap: 3px;
+}
+
 .fine-timing-toggle {
   gap: 7px;
   color: var(--ink);
@@ -705,6 +713,16 @@ button:focus-visible {
 
 .fine-timing-toggle:has(input:disabled) {
   color: var(--muted);
+}
+
+.fine-timing-availability {
+  color: #075e4c;
+  font-size: 0.64rem;
+  font-weight: 650;
+}
+
+.fine-timing-availability.unavailable {
+  color: #805000;
 }
 
 .fine-timing-state {
@@ -983,6 +1001,10 @@ button:focus-visible {
   box-shadow: inset 3px 0 0 var(--active);
 }
 
+.policy-choice.invalid {
+  background: var(--surface-muted);
+}
+
 .policy-choice > div {
   min-width: 0;
 }
@@ -995,13 +1017,23 @@ button:focus-visible {
   white-space: nowrap;
 }
 
+.policy-choice-heading {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.policy-choice-heading .change-mode {
+  flex: 0 0 auto;
+}
+
 .policy-choice p {
   margin-top: 3px;
-  overflow: hidden;
   color: var(--muted);
   font-size: 0.62rem;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
 }
 
 .policy-choice button {
@@ -1985,6 +2017,12 @@ button:focus-visible {
   border-color: #e8c58e;
 }
 
+.change-mode.invalid {
+  color: #8a2431;
+  background: #fbeaec;
+  border-color: #d9a0a7;
+}
+
 .scheduler-settings-empty {
   color: var(--muted);
   text-align: center !important;
@@ -2127,7 +2165,12 @@ button:focus-visible {
 
   .fine-timing-actions {
     width: 100%;
+    align-items: flex-start;
     justify-content: space-between;
+  }
+
+  .fine-timing-control {
+    align-items: flex-start;
   }
 
   .fine-timing-toggle {

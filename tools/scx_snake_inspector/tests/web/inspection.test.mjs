@@ -16,6 +16,7 @@ import {
   fineTimingCaptureModels,
   formatCallbackDuration,
   ladderPercentages,
+  policyLibraryModels,
   queueTopologyModel,
   queueLadderSections,
   queueRungFlow,
@@ -127,6 +128,13 @@ test("scheduler command preview shows required policy and selected flags", () =>
     schedulerCommandPreview({ policy_id: "kernel-default-sim.toml", verbose: false }),
     "scx_snake --policy kernel-default-sim.toml",
   );
+  assert.equal(
+    schedulerCommandPreview(
+      { policy_id: "cell-borrowing.toml", fairness: "vtime", verbose: false },
+      ["--stats", "1"],
+    ),
+    "scx_snake --policy cell-borrowing.toml --fairness vtime --stats 1",
+  );
 });
 
 test("scheduler settings distinguish dynamic changes from reload requirements", () => {
@@ -178,33 +186,62 @@ test("stats reset is available for managed and external active Snake", () => {
 });
 
 test("managed spawn state is locked and cannot launch a duplicate scheduler", () => {
-  assert.deepEqual(schedulerControlModel({ managed: true, active: false }, false, true), {
+  assert.deepEqual(
+    schedulerControlModel({ managed: true, active: false, controllable: true }, false, true),
+    {
     stateName: "starting",
     stateLabel: "Managed / Starting",
     configLocked: true,
     startDisabled: true,
     stopDisabled: false,
-  });
-  assert.deepEqual(schedulerControlModel({ managed: false, active: true }, false, true), {
+    restartDisabled: true,
+    },
+  );
+  assert.deepEqual(
+    schedulerControlModel({ managed: false, active: true, controllable: true }, false, true),
+    {
     stateName: "external",
-    stateLabel: "External / Read-only",
-    configLocked: true,
+    stateLabel: "External / Controllable",
+    configLocked: false,
     startDisabled: true,
-    stopDisabled: true,
-  });
+    stopDisabled: false,
+    restartDisabled: false,
+    },
+  );
+  assert.deepEqual(
+    schedulerControlModel({ managed: false, active: true, controllable: false }, false, true),
+    {
+      stateName: "external",
+      stateLabel: "External / Read-only",
+      configLocked: true,
+      startDisabled: true,
+      stopDisabled: true,
+      restartDisabled: true,
+    },
+  );
   assert.deepEqual(schedulerControlModel({ managed: false, active: false }, false, true), {
     stateName: "stopped",
     stateLabel: "Stopped",
     configLocked: false,
     startDisabled: false,
     stopDisabled: true,
+    restartDisabled: true,
   });
 });
 
 test("scheduler control surfaces external ownership and managed launch exits", () => {
   assert.equal(
-    schedulerControlMessage({ active: true, managed: false }, null),
-    "The active Snake process is externally managed; inspector stop and reload controls are disabled.",
+    schedulerControlMessage({
+      active: true,
+      managed: false,
+      controllable: false,
+      control_error: "multiple Snake processes match",
+    }, null),
+    "multiple Snake processes match",
+  );
+  assert.equal(
+    schedulerControlMessage({ active: true, managed: false, controllable: true }, null),
+    null,
   );
   assert.equal(
     schedulerControlMessage({ active: false, managed: false, last_exit: "exit code 1" }, null),
@@ -234,6 +271,7 @@ test("control page exposes managed launch controls and settings table", () => {
     'id="schedulerVerbose"',
     'id="schedulerCommandPreview"',
     'id="startScheduler"',
+    'id="restartScheduler"',
     'id="stopScheduler"',
     'id="resetAllStats"',
     'id="statsResetNotice"',
@@ -244,16 +282,92 @@ test("control page exposes managed launch controls and settings table", () => {
   assert.doesNotMatch(page, /value="eevdf"/i);
 });
 
-test("control client uses the scheduler control, start, and stop endpoints", () => {
+test("control client uses the scheduler lifecycle endpoints", () => {
   const script = readFileSync(
     new URL("../../src/web/app.js", import.meta.url),
     "utf8",
   );
   assert.match(script, /fetch\("\/api\/scheduler\/control"/);
   assert.match(script, /schedulerMutation\("\/api\/scheduler\/start"/);
+  assert.match(script, /schedulerMutation\("\/api\/scheduler\/restart"/);
   assert.match(script, /schedulerMutation\("\/api\/scheduler\/stop"/);
   assert.match(script, /fetch\("\/api\/stats\/reset"/);
   assert.match(script, /confirm\("Reset all inspector and Snake statistics\?"\)/);
+});
+
+test("policy library separates dynamic, restart-required, and invalid choices", () => {
+  const models = policyLibraryModels(
+    {
+      policies: [
+        { id: "basic.toml", name: "Basic", source: "basic", summary: "One rung" },
+        { id: "random.toml", name: "Random", source: "random", summary: "Two rungs" },
+      ],
+      invalid: [
+        { id: "cell.toml", error: "restart Snake to apply it" },
+        { id: "broken.toml", error: "missing rung" },
+      ],
+    },
+    {
+      active: true,
+      policy_id: "basic.toml",
+      policies: [
+        { id: "basic.toml", name: "Basic", change_mode: "dynamic", reload_reasons: [] },
+        { id: "random.toml", name: "Random", change_mode: "dynamic", reload_reasons: [] },
+        {
+          id: "cell.toml",
+          name: "Cell",
+          change_mode: "reload",
+          reload_reasons: ["restart Snake to apply it"],
+        },
+        {
+          id: "broken.toml",
+          name: "Broken",
+          change_mode: "invalid",
+          reload_reasons: ["missing rung"],
+        },
+      ],
+    },
+  );
+
+  assert.deepEqual(
+    models.map(({ id, changeLabel, actionKind, actionLabel, disabled }) => ({
+      id,
+      changeLabel,
+      actionKind,
+      actionLabel,
+      disabled,
+    })),
+    [
+      {
+        id: "basic.toml",
+        changeLabel: "Dynamic",
+        actionKind: "active",
+        actionLabel: "Active",
+        disabled: true,
+      },
+      {
+        id: "random.toml",
+        changeLabel: "Dynamic",
+        actionKind: "activate",
+        actionLabel: "Activate",
+        disabled: false,
+      },
+      {
+        id: "cell.toml",
+        changeLabel: "Restart required",
+        actionKind: "lifecycle",
+        actionLabel: "Select for restart",
+        disabled: false,
+      },
+      {
+        id: "broken.toml",
+        changeLabel: "Invalid",
+        actionKind: "invalid",
+        actionLabel: "Unavailable",
+        disabled: true,
+      },
+    ],
+  );
 });
 
 test("control layout has bounded launch fields and a responsive narrow mode", () => {
@@ -291,18 +405,79 @@ test("callback durations over one thousand nanoseconds are warnings", () => {
 test("fine timing controls preserve independent collecting and historical states", () => {
   const captures = fineTimingCaptureModels({
     captures: [
-      { callback: "select_cpu", state: "collecting", session_id: 3, stages: [] },
-      { callback: "enqueue", state: "historical", session_id: 2, stages: [] },
-      { callback: "dispatch", state: "inactive", session_id: null, stages: [] },
+      {
+        callback: "select_cpu",
+        state: "collecting",
+        session_id: 3,
+        available: true,
+        unavailable_reason: null,
+        stages: [],
+      },
+      {
+        callback: "enqueue",
+        state: "historical",
+        session_id: 2,
+        available: false,
+        unavailable_reason: "Requires queue topology mode.",
+        stages: [],
+      },
+      {
+        callback: "dispatch",
+        state: "inactive",
+        session_id: null,
+        available: false,
+        unavailable_reason: "Requires queue topology mode.",
+        stages: [],
+      },
     ],
   });
 
   assert.deepEqual(
-    captures.map(({ callback, checked, stateLabel }) => ({ callback, checked, stateLabel })),
+    captures.map(({
+      callback,
+      checked,
+      stateLabel,
+      available,
+      unavailable_reason: unavailableReason,
+      availabilityLabel,
+      controlDisabled,
+    }) => ({
+      callback,
+      checked,
+      stateLabel,
+      available,
+      unavailableReason,
+      availabilityLabel,
+      controlDisabled,
+    })),
     [
-      { callback: "select_cpu", checked: true, stateLabel: "Collecting" },
-      { callback: "enqueue", checked: false, stateLabel: "Historical" },
-      { callback: "dispatch", checked: false, stateLabel: "Inactive" },
+      {
+        callback: "select_cpu",
+        checked: true,
+        stateLabel: "Collecting",
+        available: true,
+        unavailableReason: null,
+        availabilityLabel: "Available",
+        controlDisabled: false,
+      },
+      {
+        callback: "enqueue",
+        checked: false,
+        stateLabel: "Historical",
+        available: false,
+        unavailableReason: "Requires queue topology mode.",
+        availabilityLabel: "Unavailable",
+        controlDisabled: true,
+      },
+      {
+        callback: "dispatch",
+        checked: false,
+        stateLabel: "Inactive",
+        available: false,
+        unavailableReason: "Requires queue topology mode.",
+        availabilityLabel: "Unavailable",
+        controlDisabled: true,
+      },
     ],
   );
 });

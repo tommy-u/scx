@@ -6,6 +6,7 @@
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::process::{Child, Command};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -41,6 +42,55 @@ fn wait_until(timeout: Duration, mut predicate: impl FnMut() -> bool) {
         assert!(Instant::now() < deadline, "condition did not become true");
         thread::sleep(Duration::from_millis(10));
     }
+}
+
+fn external_fixture() -> (tempfile::TempDir, SnakeLauncher, PathBuf, PathBuf) {
+    let root = tempfile::tempdir().unwrap();
+    let binary = root.path().join("scx_snake");
+    let ops = root.path().join("ops");
+    executable(
+        &binary,
+        &format!(
+            r#"#!/bin/sh
+printf 'snake_test\n' > '{}'
+printf '%s\n' "$@" > '{}'
+trap "printf '\n' > '{}'; exit 0" INT TERM
+while :; do sleep 0.05; done
+"#,
+            ops.display(),
+            root.path().join("argv").display(),
+            ops.display(),
+        ),
+    );
+    let policies = root.path().join("policies");
+    fs::create_dir(&policies).unwrap();
+    for name in ["basic.toml", "cell.toml"] {
+        fs::write(
+            policies.join(name),
+            "[[rung]]\noperation = \"claim_idle\"\nscope = \"previous_cpu\"\n",
+        )
+        .unwrap();
+    }
+    fs::write(&ops, "\n").unwrap();
+    let proc_root = root.path().join("proc");
+    fs::create_dir(&proc_root).unwrap();
+    let launcher = SnakeLauncher::with_paths(&binary, &policies, &ops, &proc_root).unwrap();
+    (root, launcher, ops, proc_root)
+}
+
+fn register_external_process(binary: &Path, proc_root: &Path, args: &[&str]) -> Child {
+    let child = Command::new(binary).args(args).spawn().unwrap();
+    let process = proc_root.join(child.id().to_string());
+    fs::create_dir(&process).unwrap();
+    let mut cmdline = binary.as_os_str().as_encoded_bytes().to_vec();
+    cmdline.push(0);
+    for arg in args {
+        cmdline.extend_from_slice(arg.as_bytes());
+        cmdline.push(0);
+    }
+    fs::write(process.join("cmdline"), cmdline).unwrap();
+    std::os::unix::fs::symlink(binary, process.join("exe")).unwrap();
+    child
 }
 
 #[test]
@@ -196,7 +246,7 @@ fn start_refuses_any_attached_scheduler_and_stop_never_signals_it() {
     assert!(!root.path().join("spawned").exists());
 
     let error = launcher.stop().unwrap_err();
-    assert!(error.to_string().contains("not managed"));
+    assert!(error.to_string().contains("not Snake"));
     assert_eq!(fs::read_to_string(ops).unwrap(), "another_scheduler\n");
 }
 
@@ -269,4 +319,145 @@ fn allowlisted_policies_are_available_while_scheduler_is_stopped() {
     assert_eq!(policies.len(), 1);
     assert_eq!(policies[0].id, "basic.toml");
     assert_eq!(policies[0].name, "basic");
+}
+
+#[test]
+fn externally_started_snake_is_controllable_and_can_be_stopped() {
+    let (root, launcher, ops, proc_root) = external_fixture();
+    let binary = root.path().join("scx_snake");
+    let policy = root.path().join("policies/basic.toml");
+    let mut child = register_external_process(
+        &binary,
+        &proc_root,
+        &["--policy", policy.to_str().unwrap(), "--stats", "1"],
+    );
+    wait_until(Duration::from_secs(2), || {
+        fs::read_to_string(&ops).unwrap().trim() == "snake_test"
+    });
+
+    let status = launcher.status().unwrap();
+    assert!(status.active);
+    assert!(!status.managed);
+    assert!(status.controllable);
+    assert_eq!(status.pid, Some(child.id()));
+    assert_eq!(status.launch.unwrap().preserved_args, vec!["--stats", "1"]);
+
+    let stopped = launcher.stop().unwrap();
+    assert!(!stopped.active);
+    assert!(!stopped.controllable);
+    assert!(child.wait().unwrap().success());
+}
+
+#[test]
+fn external_restart_replaces_policy_and_preserves_other_arguments() {
+    let (root, launcher, ops, proc_root) = external_fixture();
+    let binary = root.path().join("scx_snake");
+    let old_policy = root.path().join("policies/basic.toml");
+    let mut external = register_external_process(
+        &binary,
+        &proc_root,
+        &["--policy", old_policy.to_str().unwrap(), "--stats", "1"],
+    );
+    wait_until(Duration::from_secs(2), || {
+        fs::read_to_string(&ops).unwrap().trim() == "snake_test"
+    });
+
+    let restarted = launcher
+        .restart(LaunchRequest {
+            policy_id: "cell.toml".into(),
+            fairness: Some(LaunchFairness::Vtime),
+            callback_timing_sample_rate: None,
+            exit_dump_len: Some(4096),
+            verbose: true,
+        })
+        .unwrap();
+    assert!(external.wait().unwrap().success());
+    assert!(restarted.managed);
+    assert!(restarted.controllable);
+    wait_until(Duration::from_secs(2), || launcher.status().unwrap().active);
+
+    let argv = root.path().join("argv");
+    let new_policy = root
+        .path()
+        .join("policies/cell.toml")
+        .canonicalize()
+        .unwrap();
+    wait_until(Duration::from_secs(2), || {
+        fs::read_to_string(&argv)
+            .is_ok_and(|contents| contents.contains(new_policy.to_str().unwrap()))
+    });
+    assert_eq!(
+        fs::read_to_string(argv)
+            .unwrap()
+            .lines()
+            .collect::<Vec<_>>(),
+        vec![
+            "--policy",
+            new_policy.to_str().unwrap(),
+            "--fairness",
+            "vtime",
+            "--exit-dump-len",
+            "4096",
+            "--verbose",
+            "--stats",
+            "1",
+        ]
+    );
+    launcher.stop().unwrap();
+}
+
+#[test]
+fn external_lifecycle_refuses_ambiguous_snake_processes() {
+    let (root, launcher, ops, proc_root) = external_fixture();
+    let binary = root.path().join("scx_snake");
+    let policy = root.path().join("policies/basic.toml");
+    let args = ["--policy", policy.to_str().unwrap()];
+    let mut first = register_external_process(&binary, &proc_root, &args);
+    let mut second = register_external_process(&binary, &proc_root, &args);
+    wait_until(Duration::from_secs(2), || {
+        fs::read_to_string(&ops).unwrap().trim() == "snake_test"
+    });
+
+    let status = launcher.status().unwrap();
+    assert!(status.active);
+    assert!(!status.controllable);
+    assert!(status.control_error.unwrap().contains("multiple"));
+    assert!(launcher
+        .stop()
+        .unwrap_err()
+        .to_string()
+        .contains("multiple"));
+
+    first.kill().unwrap();
+    second.kill().unwrap();
+    first.wait().unwrap();
+    second.wait().unwrap();
+}
+
+#[test]
+fn external_restart_keeps_scheduler_running_when_executable_disappears() {
+    let (root, launcher, ops, proc_root) = external_fixture();
+    let binary = root.path().join("scx_snake");
+    let policy = root.path().join("policies/basic.toml");
+    let mut child =
+        register_external_process(&binary, &proc_root, &["--policy", policy.to_str().unwrap()]);
+    wait_until(Duration::from_secs(2), || {
+        fs::read_to_string(&ops).unwrap().trim() == "snake_test"
+    });
+    fs::remove_file(&binary).unwrap();
+
+    let error = launcher
+        .restart(LaunchRequest {
+            policy_id: "cell.toml".into(),
+            fairness: None,
+            callback_timing_sample_rate: None,
+            exit_dump_len: None,
+            verbose: false,
+        })
+        .unwrap_err();
+    assert!(error.to_string().contains("executable"));
+    assert!(child.try_wait().unwrap().is_none());
+
+    child.kill().unwrap();
+    child.wait().unwrap();
 }

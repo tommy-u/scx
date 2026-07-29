@@ -52,12 +52,78 @@ export function fineTimingCaptureModels(payload) {
       : capture.state === "historical"
         ? "Historical"
         : "Inactive";
+    const available = capture.available === true;
     return {
       ...capture,
       callback,
       label,
+      available,
+      unavailable_reason: capture.unavailable_reason || null,
+      availabilityLabel: available ? "Available" : "Unavailable",
+      controlDisabled: !available,
       checked: capture.state === "collecting",
       stateLabel,
+    };
+  });
+}
+
+export function policyLibraryModels(catalog, control, activeSource = null) {
+  const valid = new Map((catalog?.policies || []).map((policy) => [policy.id, policy]));
+  const invalid = new Map((catalog?.invalid || []).map((policy) => [policy.id, policy]));
+  const controls = control?.policies?.length
+    ? control.policies
+    : [
+        ...(catalog?.policies || []).map((policy) => ({
+          id: policy.id,
+          name: policy.name,
+          change_mode: "dynamic",
+          reload_reasons: [],
+        })),
+        ...(catalog?.invalid || []).map((policy) => ({
+          id: policy.id,
+          name: policy.id,
+          change_mode: "invalid",
+          reload_reasons: [policy.error],
+        })),
+      ];
+  return controls.map((entry) => {
+    const details = valid.get(entry.id);
+    const invalidDetails = invalid.get(entry.id);
+    const changeMode = ["dynamic", "reload", "invalid"].includes(entry.change_mode)
+      ? entry.change_mode
+      : "invalid";
+    const active = control?.policy_id === entry.id
+      || Boolean(details?.source && activeSource && details.source.trim() === activeSource.trim());
+    const actionKind = active
+      ? "active"
+      : changeMode === "dynamic"
+        ? "activate"
+        : changeMode === "reload"
+          ? "lifecycle"
+          : "invalid";
+    const actionLabel = actionKind === "active"
+      ? "Active"
+      : actionKind === "activate"
+        ? "Activate"
+        : actionKind === "lifecycle"
+          ? (control?.active ? "Select for restart" : "Select to start")
+          : "Unavailable";
+    const reasons = entry.reload_reasons || [];
+    return {
+      ...entry,
+      name: details?.name || entry.name || entry.id,
+      source: details?.source || null,
+      summary: details?.summary || reasons[0] || invalidDetails?.error || "No policy details available.",
+      active,
+      changeMode,
+      changeLabel: changeMode === "dynamic"
+        ? "Dynamic"
+        : changeMode === "reload"
+          ? "Restart required"
+          : "Invalid",
+      actionKind,
+      actionLabel,
+      disabled: active || changeMode === "invalid",
     };
   });
 }
@@ -275,7 +341,7 @@ export function schedulerLaunchRequest(values) {
   return request;
 }
 
-export function schedulerCommandPreview(request) {
+export function schedulerCommandPreview(request, preservedArgs = []) {
   if (!request?.policy_id) {
     return "scx_snake --policy <select a policy>";
   }
@@ -292,6 +358,7 @@ export function schedulerCommandPreview(request) {
   if (request.verbose) {
     args.push("--verbose");
   }
+  args.push(...preservedArgs.map(shellWord));
   return args.join(" ");
 }
 
@@ -329,8 +396,8 @@ export function schedulerControlMessage(control, error) {
   if (error) {
     return error;
   }
-  if (control?.active && !control?.managed) {
-    return "The active Snake process is externally managed; inspector stop and reload controls are disabled.";
+  if (control?.active && !control?.controllable) {
+    return control.control_error || "The active Snake process cannot be controlled safely.";
   }
   if (!control?.active && control?.last_exit) {
     return `Last managed Snake exit: ${control.last_exit}`;
@@ -341,15 +408,17 @@ export function schedulerControlMessage(control, error) {
 export function schedulerControlModel(control, pending, hasPolicy) {
   const active = Boolean(control?.active);
   const managed = Boolean(control?.managed);
+  const controllable = Boolean(control?.controllable);
   const stateName = managed ? (active ? "active" : "starting") : (active ? "external" : "stopped");
   return {
     stateName,
     stateLabel: managed
       ? (active ? "Managed / Running" : "Managed / Starting")
-      : (active ? "External / Read-only" : "Stopped"),
-    configLocked: Boolean(pending) || active || managed,
+      : (active ? (controllable ? "External / Controllable" : "External / Read-only") : "Stopped"),
+    configLocked: Boolean(pending) || (active && !controllable) || (managed && !active),
     startDisabled: Boolean(pending) || active || managed || !hasPolicy,
-    stopDisabled: Boolean(pending) || !managed,
+    stopDisabled: Boolean(pending) || !controllable,
+    restartDisabled: Boolean(pending) || !active || !controllable || !hasPolicy,
   };
 }
 
