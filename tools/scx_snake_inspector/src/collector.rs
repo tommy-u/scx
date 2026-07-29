@@ -197,6 +197,12 @@ pub struct FineTimingControlResponse {
     pub session_id: Option<u64>,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CallbackTimingRateResponse {
+    pub sample_rate: u32,
+    pub fine_timing_stopped: bool,
+}
+
 #[derive(Debug)]
 pub enum CollectorCommand {
     SetScope(TaskScope),
@@ -209,6 +215,11 @@ pub enum CollectorCommand {
         enabled: bool,
         response:
             std::sync::mpsc::SyncSender<std::result::Result<FineTimingControlResponse, String>>,
+    },
+    SetCallbackTimingSampleRate {
+        sample_rate: u32,
+        response:
+            std::sync::mpsc::SyncSender<std::result::Result<CallbackTimingRateResponse, String>>,
     },
     SetWorkloadCell {
         target: WorkloadTarget,
@@ -254,6 +265,14 @@ impl PartialEq for CollectorCommand {
                     ..
                 },
             ) => left_target == right_target && left_cell == right_cell,
+            (
+                Self::SetCallbackTimingSampleRate {
+                    sample_rate: left, ..
+                },
+                Self::SetCallbackTimingSampleRate {
+                    sample_rate: right, ..
+                },
+            ) => left == right,
             (Self::Shutdown, Self::Shutdown) => true,
             _ => false,
         }
@@ -403,6 +422,20 @@ pub fn run_collector(
                     &options.cgroup_root,
                     &target,
                     cell_id,
+                )
+                .map_err(|error| format!("{error:#}"));
+                let _ = response.send(result);
+                next_inspection_at = Instant::now();
+                continue;
+            }
+            Ok(CollectorCommand::SetCallbackTimingSampleRate {
+                sample_rate,
+                response,
+            }) => {
+                let result = set_callback_timing_sample_rate(
+                    &mut stats_client,
+                    &options.stats_path,
+                    sample_rate,
                 )
                 .map_err(|error| format!("{error:#}"));
                 let _ = response.send(result);
@@ -604,6 +637,31 @@ fn set_fine_timing(
                 ("target".into(), "fine_timing_set".into()),
                 ("callback".into(), callback.as_str().into()),
                 ("enabled".into(), enabled.to_string()),
+            ],
+        )
+}
+
+fn set_callback_timing_sample_rate(
+    client: &mut Option<StatsClient>,
+    stats_path: &Path,
+    sample_rate: u32,
+) -> Result<CallbackTimingRateResponse> {
+    if client.is_none() {
+        *client = Some(
+            StatsClient::new()
+                .set_path(stats_path)
+                .connect(Some(STATS_TIMEOUT_MS))
+                .with_context(|| format!("connecting to {}", stats_path.display()))?,
+        );
+    }
+    client
+        .as_mut()
+        .context("Snake stats client is unavailable")?
+        .request(
+            "stats",
+            vec![
+                ("target".into(), "callback_timing_sample_rate_set".into()),
+                ("sample_rate".into(), sample_rate.to_string()),
             ],
         )
 }

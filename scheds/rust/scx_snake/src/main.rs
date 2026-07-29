@@ -179,8 +179,13 @@ fn parse_callback_timing_sample_rate(value: &str) -> std::result::Result<u32, St
     let rate = value
         .parse::<u32>()
         .map_err(|error| format!("invalid callback timing sample rate `{value}`: {error}"))?;
+    validate_callback_timing_sample_rate(rate)?;
+    Ok(rate)
+}
+
+fn validate_callback_timing_sample_rate(rate: u32) -> std::result::Result<(), String> {
     if rate == 0 || (rate.is_power_of_two() && rate <= 4096) {
-        return Ok(rate);
+        return Ok(());
     }
     Err("callback timing sample rate must be zero or a power of two through 4096".into())
 }
@@ -1204,9 +1209,9 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
             .context("BPF read-only data is unavailable")?
             .fairness_mode = opts.fairness as u32;
         skel.maps
-            .rodata_data
+            .bss_data
             .as_mut()
-            .context("BPF read-only data is unavailable")?
+            .context("BPF bss data is unavailable")?
             .callback_timing_sample_rate = opts.callback_timing_sample_rate;
         skel.struct_ops.snake_ops_mut().exit_dump_len = opts.exit_dump_len;
         let mut skel = scx_ops_load!(skel, snake_ops, uei)?;
@@ -1520,6 +1525,35 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
         })
     }
 
+    fn set_callback_timing_sample_rate(
+        &mut self,
+        sample_rate: u32,
+    ) -> Result<control::CallbackTimingRateResponse> {
+        validate_callback_timing_sample_rate(sample_rate).map_err(anyhow::Error::msg)?;
+        if sample_rate == self.callback_timing_sample_rate {
+            return Ok(control::CallbackTimingRateResponse {
+                sample_rate,
+                fine_timing_stopped: false,
+            });
+        }
+        let fine_timing_stopped = fine_timing::FineTimingCallback::ALL
+            .into_iter()
+            .any(|callback| self.fine_timing_state.is_enabled(callback));
+        self.stop_all_fine_timing()?;
+        self.skel
+            .maps
+            .bss_data
+            .as_mut()
+            .context("BPF bss map is not memory mapped")?
+            .callback_timing_sample_rate = sample_rate;
+        self.callback_timing_sample_rate = sample_rate;
+        self.inspector.set_callback_timing_sample_rate(sample_rate);
+        Ok(control::CallbackTimingRateResponse {
+            sample_rate,
+            fine_timing_stopped,
+        })
+    }
+
     fn stop_all_fine_timing(&mut self) -> Result<()> {
         if !fine_timing::FineTimingCallback::ALL
             .iter()
@@ -1720,6 +1754,12 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
                         .set_fine_timing(callback, enabled)
                         .map_err(|error| format!("{error:#}"));
                     response_channel.send(SchedulerResponse::FineTiming(response))?;
+                }
+                Ok(SchedulerRequest::SetCallbackTimingSampleRate { sample_rate }) => {
+                    let response = self
+                        .set_callback_timing_sample_rate(sample_rate)
+                        .map_err(|error| format!("{error:#}"));
+                    response_channel.send(SchedulerResponse::CallbackTimingSampleRate(response))?;
                 }
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => {

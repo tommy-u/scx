@@ -645,6 +645,26 @@ pub fn server_data() -> StatsServerData<SchedulerRequest, SchedulerResponse> {
             Ok(read)
         });
 
+    let set_callback_timing_sample_rate: Box<dyn StatsOpener<SchedulerRequest, SchedulerResponse>> =
+        Box::new(move |_| {
+            let read: Box<dyn StatsReader<SchedulerRequest, SchedulerResponse>> =
+                Box::new(move |args, (req_ch, res_ch)| {
+                    let sample_rate =
+                        parse_arg::<u32>(args, "sample_rate", "callback_timing_sample_rate_set")?;
+                    req_ch.send(SchedulerRequest::SetCallbackTimingSampleRate { sample_rate })?;
+                    match res_ch.recv()? {
+                        SchedulerResponse::CallbackTimingSampleRate(Ok(response)) => {
+                            Ok(serde_json::to_value(response)?)
+                        }
+                        SchedulerResponse::CallbackTimingSampleRate(Err(error)) => bail!(error),
+                        response => bail!(
+                        "unexpected response to callback timing sample rate request: {response:?}"
+                    ),
+                    }
+                });
+            Ok(read)
+        });
+
     StatsServerData::new()
         .add_meta(Metrics::meta())
         .add_meta(CallbackTimingMetrics::meta())
@@ -691,6 +711,13 @@ pub fn server_data() -> StatsServerData<SchedulerRequest, SchedulerResponse> {
             "fine_timing_set",
             StatsOps {
                 open: set_fine_timing,
+                close: None,
+            },
+        )
+        .add_ops(
+            "callback_timing_sample_rate_set",
+            StatsOps {
+                open: set_callback_timing_sample_rate,
                 close: None,
             },
         )

@@ -38,13 +38,13 @@ Snake build that exports the versioned `inspect` stats target; Activity remains
 available with older compatible schedulers. The Callbacks view reports an
 unsupported state when the active Snake build predates callback histograms.
 
-High-level callback timing is read-only. Snake chooses the launch-time sample
-rate with `--callback-timing-sample-rate` and defaults to 1/64. The
-inspector retains up to `--max-window` of one-second histogram deltas, resets
-the rolling baseline on scheduler restarts or policy-generation changes, and
-keeps the scheduler's cumulative histogram for the Lifetime selection. Values
-are upper bounds of base-2 nanosecond buckets; p95 is withheld below 20 samples
-and p99 below 100.
+Snake defaults callback timing to 1/64. The Callbacks view can change the rate
+from disabled through every callback to 1/4096 without restarting Snake. A rate
+change freezes active fine-grained captures as **Historical** and begins a new
+rolling callback baseline. The inspector retains up to `--max-window` of
+one-second histogram deltas and keeps the scheduler's cumulative histogram for
+the Lifetime selection. Values are upper bounds of base-2 nanosecond buckets;
+p95 is withheld below 20 samples and p99 below 100.
 
 Each fine-grained callback switch starts and stops an independent capture using
 the same sample decision. Snake folds bounded ring-buffer samples into fixed

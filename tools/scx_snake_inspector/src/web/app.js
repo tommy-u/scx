@@ -15,6 +15,7 @@ import {
 } from "/assets/heatmap.js";
 import {
   callbackDurationClass,
+  callbackSampleRateOptions,
   compactCpuList,
   decorateCells,
   fieldReferenceGroups,
@@ -45,6 +46,9 @@ const elements = {
   callbackRange: document.querySelector("#callbackRange"),
   callbackRangeSelect: document.querySelector("#callbackRangeSelect"),
   callbackSampleRate: document.querySelector("#callbackSampleRate"),
+  callbackSampleRateControl: document.querySelector("#callbackSampleRateControl"),
+  applyCallbackSampleRate: document.querySelector("#applyCallbackSampleRate"),
+  callbackRateNotice: document.querySelector("#callbackRateNotice"),
   callbacksNotice: document.querySelector("#callbacksNotice"),
   callbacksView: document.querySelector("#callbacksView"),
   callbackTimingRows: document.querySelector("#callbackTimingRows"),
@@ -103,6 +107,7 @@ const state = {
   callbackTiming: null,
   callbackTimingError: null,
   callbackTimingLoading: false,
+  callbackRatePending: false,
   fineTiming: null,
   fineTimingError: null,
   fineTimingLoading: false,
@@ -137,6 +142,7 @@ const state = {
 
 configureWindowSelector();
 configureCallbackRangeSelector();
+configureCallbackSampleRateSelector();
 bindControls();
 renderWorkloadTargetField();
 start().catch((error) => {
@@ -199,6 +205,15 @@ function configureCallbackRangeSelector() {
   elements.callbackRangeSelect.append(lifetime);
 }
 
+function configureCallbackSampleRateSelector() {
+  for (const optionModel of callbackSampleRateOptions()) {
+    const option = document.createElement("option");
+    option.value = String(optionModel.value);
+    option.textContent = optionModel.label;
+    elements.callbackSampleRateControl.append(option);
+  }
+}
+
 function bindControls() {
   elements.windowSelect.addEventListener("change", () => {
     state.windowMs = Number(elements.windowSelect.value);
@@ -208,6 +223,7 @@ function bindControls() {
     state.callbackRange = elements.callbackRangeSelect.value;
     loadCallbackTiming();
   });
+  elements.applyCallbackSampleRate.addEventListener("click", setCallbackSampleRate);
   elements.fineTimingPanels.addEventListener("change", (event) => {
     const control = event.target.closest("[data-fine-timing-callback]");
     if (control) {
@@ -758,6 +774,44 @@ async function setFineTiming(callback, enabled) {
   }
 }
 
+async function setCallbackSampleRate() {
+  if (state.callbackRatePending) {
+    return;
+  }
+  const sampleRate = Number(elements.callbackSampleRateControl.value);
+  state.callbackRatePending = true;
+  elements.applyCallbackSampleRate.disabled = true;
+  showElementNotice(elements.callbackRateNotice, "Updating callback sampling…", "info");
+  try {
+    const response = await fetch("/api/callback-timing", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-snake-token": token,
+      },
+      body: JSON.stringify({ sample_rate: sampleRate }),
+    });
+    const payload = await response.json();
+    if (!response.ok) {
+      throw new Error(payload.error || `Sampling update failed (${response.status})`);
+    }
+    const suffix = payload.fine_timing_stopped
+      ? " Active fine-grained captures were preserved as Historical."
+      : "";
+    showElementNotice(
+      elements.callbackRateNotice,
+      `Callback sampling updated to ${sampleRate === 0 ? "Disabled" : `1 / ${numberFormat.format(sampleRate)}`}.${suffix}`,
+      "success",
+    );
+    await Promise.all([loadCallbackTiming(), loadFineTiming(), loadInspection()]);
+  } catch (error) {
+    showElementNotice(elements.callbackRateNotice, error.message);
+  } finally {
+    state.callbackRatePending = false;
+    elements.applyCallbackSampleRate.disabled = false;
+  }
+}
+
 async function loadInspection() {
   if (state.inspectionLoading) {
     return;
@@ -825,6 +879,9 @@ function renderCallbackTiming() {
   elements.callbackSampleRate.textContent = timing?.sample_rate > 0
     ? `1 / ${numberFormat.format(timing.sample_rate)}`
     : "Off";
+  if (!state.callbackRatePending && timing?.sample_rate != null) {
+    elements.callbackSampleRateControl.value = String(timing.sample_rate);
+  }
   elements.callbackGeneration.textContent = timing?.generation == null
     ? "—"
     : numberFormat.format(timing.generation);

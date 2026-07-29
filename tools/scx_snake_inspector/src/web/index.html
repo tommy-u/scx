@@ -115,6 +115,12 @@
             <span>Range</span>
             <select id="callbackRangeSelect" aria-label="Callback timing range"></select>
           </label>
+          <label class="control-field">
+            <span>Sampling</span>
+            <select id="callbackSampleRateControl" aria-label="Callback timing sample rate"></select>
+          </label>
+          <button class="apply-button" id="applyCallbackSampleRate" type="button">Apply rate</button>
+          <p class="control-message hidden" id="callbackRateNotice" role="status"></p>
         </section>
         <section class="callback-summary-band" aria-label="Callback timing summary">
           <dl>

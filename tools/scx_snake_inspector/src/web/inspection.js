@@ -225,6 +225,17 @@ export function workloadAssignmentRequest(kind, value, cellId, clear) {
   return { target, cell_id: parsedCell };
 }
 
+export function callbackSampleRateOptions() {
+  const options = [{ value: 0, label: "Disabled" }];
+  for (let value = 1; value <= 4096; value *= 2) {
+    options.push({
+      value,
+      label: value === 1 ? "Every callback" : `1 / ${value.toLocaleString()} callbacks`,
+    });
+  }
+  return options;
+}
+
 function formatDsqId(value) {
   const number = Number(value);
   return Number.isSafeInteger(number) && number >= 0

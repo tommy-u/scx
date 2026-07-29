@@ -515,6 +515,12 @@ button:focus-visible {
   min-height: 58px;
 }
 
+.callback-control-band .notice {
+  flex: 1 1 100%;
+  border-bottom: 0;
+  border-left: 3px solid #d89c3c;
+}
+
 .callback-summary-band {
   padding: 12px clamp(16px, 3vw, 40px);
   background: var(--surface-muted);

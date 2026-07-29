@@ -268,6 +268,10 @@ impl Inspector {
         self
     }
 
+    pub fn set_callback_timing_sample_rate(&mut self, sample_rate: u32) {
+        self.callback_timing_sample_rate = sample_rate;
+    }
+
     pub fn activate(&mut self, next: SlotPolicy, frozen_metrics: Metrics, at_ms: u64) {
         if let Some(previous) = self.slots[self.active_slot as usize].as_mut() {
             previous.deactivated_at_ms = Some(at_ms);

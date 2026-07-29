@@ -11,6 +11,7 @@ char _license[] SEC("license") = "GPL";
 UEI_DEFINE(uei);
 
 u32 staging_ladder_slot;
+u32 callback_timing_sample_rate;
 u64 select_fine_timing_session_id;
 
 static __always_inline int

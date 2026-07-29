@@ -7,7 +7,7 @@
 #include "intf.h"
 
 static u32 nr_cpu_ids;
-const volatile u32 callback_timing_sample_rate = 64;
+extern u32 callback_timing_sample_rate;
 extern u64 select_fine_timing_session_id;
 
 struct snake_ladder_ctx {
@@ -217,7 +217,7 @@ static __always_inline void stat_inc(const struct snake_ladder_ctx *ctx, u32 idx
 
 static __always_inline u64 callback_timing_start(void)
 {
-	u32 rate = callback_timing_sample_rate;
+	u32 rate = READ_ONCE(callback_timing_sample_rate);
 
 	if (!rate)
 		return 0;

@@ -9,6 +9,7 @@ import test from "node:test";
 
 import {
   callbackDurationClass,
+  callbackSampleRateOptions,
   compactCpuList,
   decorateCells,
   fieldReferenceGroups,
@@ -40,6 +41,14 @@ test("callback durations consistently use nanoseconds", () => {
   assert.equal(formatCallbackDuration(1_500), "1,500 ns");
   assert.equal(formatCallbackDuration(2_500_000), "2,500,000 ns");
   assert.equal(formatCallbackDuration(3_000_000_000), "3,000,000,000 ns");
+});
+
+test("callback sampling offers disabled and bounded power-of-two rates", () => {
+  const options = callbackSampleRateOptions();
+  assert.deepEqual(options[0], { value: 0, label: "Disabled" });
+  assert.deepEqual(options[1], { value: 1, label: "Every callback" });
+  assert.deepEqual(options.at(-1), { value: 4096, label: "1 / 4,096 callbacks" });
+  assert.equal(options.length, 14);
 });
 
 test("callback durations over one thousand nanoseconds are warnings", () => {

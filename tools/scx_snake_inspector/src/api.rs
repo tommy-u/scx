@@ -20,7 +20,9 @@ use serde::Deserialize;
 use tokio_stream::wrappers::WatchStream;
 use tokio_stream::StreamExt;
 
-use crate::collector::{CollectorCommand, FineTimingCallback, FineTimingControlResponse};
+use crate::collector::{
+    CallbackTimingRateResponse, CollectorCommand, FineTimingCallback, FineTimingControlResponse,
+};
 use crate::dashboard::Dashboard;
 use crate::policies::PolicyActivation;
 use crate::scope::{resolve_scope, ScopeRequest};
@@ -74,7 +76,10 @@ pub fn router(context: ApiContext) -> Router {
         .route("/api/topology", get(topology))
         .route("/api/snapshot", get(snapshot))
         .route("/api/inspection", get(inspection))
-        .route("/api/callback-timing", get(callback_timing))
+        .route(
+            "/api/callback-timing",
+            get(callback_timing).post(set_callback_timing_sample_rate),
+        )
         .route("/api/fine-timing", get(fine_timing).post(set_fine_timing))
         .route("/api/policies", get(policies))
         .route("/api/policies/activate", post(activate_policy))
@@ -214,6 +219,34 @@ async fn callback_timing(
             "callback timing scope must be window or lifetime",
         )),
     }
+}
+
+#[derive(Deserialize)]
+struct CallbackTimingRateRequest {
+    sample_rate: u32,
+}
+
+async fn set_callback_timing_sample_rate(
+    State(context): State<ApiContext>,
+    headers: HeaderMap,
+    Json(request): Json<CallbackTimingRateRequest>,
+) -> Result<Json<CallbackTimingRateResponse>, ApiError> {
+    require_session_token(&headers, &context.token)?;
+    let (response_tx, response_rx) = std::sync::mpsc::sync_channel(1);
+    context
+        .commands
+        .send(CollectorCommand::SetCallbackTimingSampleRate {
+            sample_rate: request.sample_rate,
+            response: response_tx,
+        })
+        .map_err(|_| ApiError::unavailable("collector is not running"))?;
+    let response =
+        tokio::task::spawn_blocking(move || response_rx.recv_timeout(Duration::from_secs(5)))
+            .await
+            .map_err(|_| ApiError::unavailable("callback timing worker failed"))?
+            .map_err(|_| ApiError::unavailable("callback timing update timed out"))?
+            .map_err(ApiError::bad_request)?;
+    Ok(Json(response))
 }
 
 async fn fine_timing(State(context): State<ApiContext>) -> impl IntoResponse {

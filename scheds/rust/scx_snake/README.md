@@ -267,7 +267,9 @@ Callback execution-time sampling defaults to one in every 64 invocations for
 `quiescent`. `--callback-timing-sample-rate N` accepts zero to disable sampling
 or a power of two through 4096. Unsampled calls perform only the sampling
 decision; sampled calls update a per-CPU base-2 nanosecond histogram without
-atomic contention. Changing the rate requires restarting Snake.
+atomic contention. The inspector can change the rate while Snake is running;
+changing it stops active fine-grained captures so each capture has one sampling
+rate.
 
 The inspector can independently enable fine-grained timing for `select_cpu`,
 queue-mode `enqueue`, and queue-mode `dispatch`. Fine timing reuses the same

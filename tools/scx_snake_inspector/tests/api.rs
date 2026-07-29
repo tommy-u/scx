@@ -341,6 +341,66 @@ async fn callback_timing_endpoint_returns_window_and_lifetime_percentiles() {
 }
 
 #[tokio::test]
+async fn callback_timing_rate_update_requires_token_and_uses_runtime_control() {
+    use scx_snake_inspector::collector::CallbackTimingRateResponse;
+
+    let (tx, rx) = mpsc::channel();
+    let root = tempfile::tempdir().unwrap();
+    let context = ApiContext::new(dashboard(), tx, "secret", root.path().to_path_buf());
+    let body = r#"{"sample_rate":128}"#;
+
+    let unauthorized = router(context.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/callback-timing")
+                .header("host", "127.0.0.1")
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+    let responder = std::thread::spawn(move || {
+        let CollectorCommand::SetCallbackTimingSampleRate {
+            sample_rate,
+            response,
+        } = rx.recv().unwrap()
+        else {
+            panic!("expected callback timing rate command");
+        };
+        assert_eq!(sample_rate, 128);
+        response
+            .send(Ok(CallbackTimingRateResponse {
+                sample_rate,
+                fine_timing_stopped: true,
+            }))
+            .unwrap();
+    });
+    let accepted = router(context)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/callback-timing")
+                .header("host", "127.0.0.1")
+                .header("content-type", "application/json")
+                .header(CSRF_HEADER, "secret")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(accepted.status(), StatusCode::OK);
+    let response: Value =
+        serde_json::from_slice(&accepted.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(response["sample_rate"], 128);
+    assert_eq!(response["fine_timing_stopped"], true);
+    responder.join().unwrap();
+}
+
+#[tokio::test]
 async fn fine_timing_endpoint_summarizes_stages_and_controls_callbacks_independently() {
     use scx_snake_inspector::collector::{FineTimingCallback, FineTimingControlResponse};
 
@@ -707,6 +767,8 @@ async fn root_page_embeds_session_configuration_and_local_assets() {
         "id=\"scopeMode\"",
         "id=\"totalMigrations\"",
         "id=\"heatmapCanvas\"",
+        "id=\"callbackSampleRateControl\"",
+        "id=\"applyCallbackSampleRate\"",
     ] {
         assert!(page.contains(control), "missing page control {control}");
     }

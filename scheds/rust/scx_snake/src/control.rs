@@ -12,6 +12,12 @@ use crate::runtime_policy::{PolicyUpdateResponse, PolicyValidationResponse};
 use crate::stats::Metrics;
 use crate::task_cells::{ThreadCellAssignment, ThreadCellResponse};
 
+#[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
+pub struct CallbackTimingRateResponse {
+    pub sample_rate: u32,
+    pub fine_timing_stopped: bool,
+}
+
 const UPDATE_TIMEOUT_MS: u64 = 15_000;
 
 /// Requests serialized through the scheduler's main userspace loop.
@@ -33,6 +39,9 @@ pub enum SchedulerRequest {
         callback: FineTimingCallback,
         enabled: bool,
     },
+    SetCallbackTimingSampleRate {
+        sample_rate: u32,
+    },
 }
 
 /// Typed responses routed back through the shared stats socket.
@@ -44,6 +53,21 @@ pub enum SchedulerResponse {
     ReplacePolicy(std::result::Result<PolicyUpdateResponse, String>),
     ThreadCell(std::result::Result<ThreadCellResponse, String>),
     FineTiming(std::result::Result<FineTimingControlResponse, String>),
+    CallbackTimingSampleRate(std::result::Result<CallbackTimingRateResponse, String>),
+}
+
+#[cfg(test)]
+pub fn request_callback_timing_sample_rate(
+    client: &mut StatsClient,
+    sample_rate: u32,
+) -> Result<CallbackTimingRateResponse> {
+    client.request(
+        "stats",
+        vec![
+            ("target".into(), "callback_timing_sample_rate_set".into()),
+            ("sample_rate".into(), sample_rate.to_string()),
+        ],
+    )
 }
 
 #[cfg(test)]
@@ -257,6 +281,45 @@ scope = "task_allowed"
 
         assert!(response.enabled);
         assert_eq!(response.session_id, Some(9));
+        worker.join().expect("worker should finish");
+        drop(server);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn callback_timing_rate_control_round_trips_runtime_rate() {
+        let path = socket_path("callback-rate");
+        let server = StatsServer::new(stats::server_data())
+            .set_path(&path)
+            .launch()
+            .expect("test server should launch");
+        let (responses, requests) = server.channels();
+        let worker = thread::spawn(move || {
+            let SchedulerRequest::SetCallbackTimingSampleRate { sample_rate } =
+                requests.recv().expect("request should arrive")
+            else {
+                panic!("expected a callback timing rate request");
+            };
+            assert_eq!(sample_rate, 128);
+            responses
+                .send(SchedulerResponse::CallbackTimingSampleRate(Ok(
+                    CallbackTimingRateResponse {
+                        sample_rate,
+                        fine_timing_stopped: true,
+                    },
+                )))
+                .expect("response should send");
+        });
+
+        let mut client = StatsClient::new()
+            .set_path(&path)
+            .connect(Some(1_000))
+            .expect("client should connect");
+        let response = request_callback_timing_sample_rate(&mut client, 128)
+            .expect("rate update should be acknowledged");
+
+        assert_eq!(response.sample_rate, 128);
+        assert!(response.fine_timing_stopped);
         worker.join().expect("worker should finish");
         drop(server);
         let _ = fs::remove_file(path);
