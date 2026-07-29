@@ -221,8 +221,15 @@ impl Supervisor {
     }
 
     fn attached_scheduler(&self) -> Result<Option<String>> {
-        let name = fs::read_to_string(&self.ops_path)
-            .with_context(|| format!("reading scheduler state from {}", self.ops_path.display()))?;
+        let name = match fs::read_to_string(&self.ops_path) {
+            Ok(name) => name,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("reading scheduler state from {}", self.ops_path.display())
+                });
+            }
+        };
         let name = name.trim();
         Ok((!name.is_empty()).then(|| name.to_owned()))
     }

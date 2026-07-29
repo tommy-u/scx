@@ -201,6 +201,17 @@ fn start_refuses_any_attached_scheduler_and_stop_never_signals_it() {
 }
 
 #[test]
+fn missing_ops_file_is_treated_as_no_attached_scheduler() {
+    let (_root, launcher, ops) = fixture("#!/bin/sh\nexit 0\n");
+    fs::remove_file(ops).unwrap();
+
+    let status = launcher.status().unwrap();
+
+    assert!(!status.active);
+    assert_eq!(status.scheduler_name, None);
+}
+
+#[test]
 fn launcher_owns_at_most_one_child_and_drop_stops_it() {
     let script = r#"#!/bin/sh
 trap 'exit 0' INT TERM
