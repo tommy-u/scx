@@ -4,6 +4,12 @@
 // GNU General Public License version 2.
 
 const ROUTES = new Set(["activity", "policy", "cells", "callbacks", "control", "feedback"]);
+const DEMO_POLICY_IDS = new Set([
+  "llc-half-random.toml",
+  "llc-random.toml",
+  "llc-whole-core-random.toml",
+  "random-idle.toml",
+]);
 const callbackDurationFormat = new Intl.NumberFormat("en-US", {
   maximumFractionDigits: 0,
 });
@@ -320,6 +326,17 @@ export function policyLibraryModels(
   }).filter((policy) => !selectedFairness || policy.fairnessModes.includes(selectedFairness));
 }
 
+export function policyCategoryGroups(policies) {
+  const groups = [
+    { id: "production", label: "Production", policies: [] },
+    { id: "demo", label: "Demo", policies: [] },
+  ];
+  for (const policy of policies || []) {
+    groups[DEMO_POLICY_IDS.has(policy.id) ? 1 : 0].policies.push(policy);
+  }
+  return groups;
+}
+
 export function fieldReferenceGroups(reference) {
   return {
     selected: reference?.selected || {
@@ -351,6 +368,13 @@ export function decorateCells(cells, taskMappings) {
       .sort((left, right) => left.tid - right.tid);
     return { ...cell, overlapIds, tasks };
   });
+}
+
+export function cellCpuOrder(topology, mode) {
+  const order = mode === "numeric"
+    ? topology?.numeric_order
+    : topology?.topology_order;
+  return [...(order || [])];
 }
 
 export function rungPercentages(metrics) {
@@ -554,6 +578,19 @@ export function schedulerCommandPreview(request, preservedArgs = []) {
   return args.join(" ");
 }
 
+export function schedulerCurrentCommand(control) {
+  if (!control) {
+    return "Command line unavailable.";
+  }
+  if (!control.active) {
+    return "Snake is not running.";
+  }
+  if (!Array.isArray(control.current_command) || control.current_command.length === 0) {
+    return "Command line unavailable.";
+  }
+  return control.current_command.map(shellWord).join(" ");
+}
+
 export function schedulerSettingModels(settings) {
   const labels = {
     fairness: "Fairness",
@@ -655,12 +692,18 @@ export function compactCpuList(cpus) {
   return ranges.join(", ");
 }
 
-export function queueTopologyModel(fairness, topology) {
+export function queueTopologyModel(fairness, topology, onlineCpus = null) {
+  const affinityQueueCount = Number(topology?.affinity_queue_count) || 0;
+  const expectedCpuCount = topology && Array.isArray(onlineCpus)
+    ? onlineCpus.length
+    : affinityQueueCount;
   const model = {
     mode: String(fairness?.mode_name || "unknown").toUpperCase(),
     clockModel: fairness?.clock_model || "Unknown clock model",
     layout: topology?.layout || null,
-    affinityQueueCount: Number(topology?.affinity_queue_count) || 0,
+    affinityQueueCount,
+    expectedCpuCount,
+    routesComplete: expectedCpuCount === 0,
     cells: [],
     normalQueues: [],
     cpuRoutes: [],
@@ -678,10 +721,13 @@ export function queueTopologyModel(fairness, topology) {
     ...queue,
     dsq: formatDsqId(queue.dsq_id),
   }));
-  model.cpuRoutes = (topology.cpu_routes || []).map((route) => ({
-    ...route,
-    normalDsq: formatDsqId(route.normal_dsq_id),
-    affinityDsq: formatDsqId(route.affinity_dsq_id),
-  }));
+  model.cpuRoutes = (topology.cpu_routes || [])
+    .map((route) => ({
+      ...route,
+      normalDsq: formatDsqId(route.normal_dsq_id),
+      affinityDsq: formatDsqId(route.affinity_dsq_id),
+    }))
+    .sort((left, right) => left.cpu - right.cpu);
+  model.routesComplete = model.cpuRoutes.length === expectedCpuCount;
   return model;
 }

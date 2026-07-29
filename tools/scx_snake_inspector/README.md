@@ -16,7 +16,8 @@ The embedded interface has six views:
 - **Policy** shows both BPF placement-ladder slots, their rung data, live or
   frozen counters, configured enqueue and dispatch ladders, contextual
   references for encoded fields, resolved queue topology, and a catalog that
-  identifies dynamic, restart-required, and invalid TOML policies.
+  separates production and demo policies and identifies dynamic,
+  restart-required, and invalid TOML policies.
 - **Cells** shows declared cell CPU membership, overlaps, and expandable
   current task mappings. It can assign or clear manual cell overrides for one
   TID, every current thread in a TGID, or every current thread in a cgroup
@@ -62,7 +63,7 @@ attach runtime queue depth, enqueue/dispatch, borrowing/lending, or clock
 transition metrics to those topology rows; use scheduler statistics for those
 counters.
 
-An aligned strip below the matrix shows per-CPU utilization reported by
+An aligned strip above the matrix shows per-CPU utilization reported by
 Snake's stats socket. The strip always covers all Snake tasks; TGID and cgroup
 selectors apply only to the migration matrix. Window, CPU order, color scale,
 and zoom apply to both Activity visualizations. Policy and Cells require a

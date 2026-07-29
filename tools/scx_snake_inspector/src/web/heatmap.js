@@ -50,6 +50,43 @@ export function buildCpuUsage(topology, entries, orderMode) {
   return { order, positions, runtimeNs, utilizationPct };
 }
 
+export function axisLabelIndices(count, maxLabels = 24) {
+  const total = Math.max(0, Math.trunc(Number(count) || 0));
+  if (total === 0) {
+    return [];
+  }
+  const limit = Math.max(2, Math.trunc(Number(maxLabels) || 0));
+  if (total <= limit) {
+    return Array.from({ length: total }, (_, index) => index);
+  }
+  return [...new Set(Array.from(
+    { length: limit },
+    (_, index) => Math.round(index * (total - 1) / (limit - 1)),
+  ))];
+}
+
+export function heatmapLayout(cpuCount, viewportWidth, zoom) {
+  const count = Math.max(1, Math.trunc(Number(cpuCount) || 0));
+  const availableWidth = Math.max(320, Number(viewportWidth) || 800);
+  const fitCell = (availableWidth - 104) / count;
+  const cellSize = Math.max(2, Math.min(9, fitCell)) * (Number(zoom) || 1);
+  const usageHeight = Math.max(13, Math.min(26, cellSize * 2.5));
+  const usageTop = 20;
+  const margins = { left: 64, top: usageTop + usageHeight + 10, right: 18 };
+  const matrixSize = count * cellSize;
+  const width = Math.ceil(margins.left + matrixSize + margins.right);
+  const height = Math.ceil(margins.top + matrixSize + 46);
+  return {
+    cellSize,
+    height,
+    margins,
+    matrixSize,
+    usageHeight,
+    usageTop,
+    width,
+  };
+}
+
 export function normalizeCount(value, max, scale) {
   if (value <= 0 || max <= 0) {
     return 0;

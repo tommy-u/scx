@@ -1149,3 +1149,161 @@ test("feedback client mirrors inline edits and can copy or clear the whole batch
   assert.match(script, /data-lucide="ear"/);
   assert.match(script, /confirm\("Clear all collected feedback\?"\)/);
 });
+
+test("policy choices are separated into production and demo groups", () => {
+  assert.equal(typeof inspectionState.policyCategoryGroups, "function");
+  const groups = inspectionState.policyCategoryGroups([
+    { id: "llc-random.toml" },
+    { id: "cell-min-vtime.toml" },
+    { id: "random-idle.toml" },
+    { id: "future-policy.toml" },
+  ]);
+
+  assert.deepEqual(
+    groups.map((group) => [group.id, group.policies.map((policy) => policy.id)]),
+    [
+      ["production", ["cell-min-vtime.toml", "future-policy.toml"]],
+      ["demo", ["llc-random.toml", "random-idle.toml"]],
+    ],
+  );
+});
+
+test("resolved routing retains and sorts every online CPU route", () => {
+  const routes = Array.from({ length: 32 }, (_, cpu) => ({
+    cpu: 31 - cpu,
+    owner_cell_id: 0,
+    owner_cell_index: 0,
+    llc_id: 0,
+    normal_queue_index: 0,
+    normal_dsq_id: 536870912,
+    affinity_dsq_id: 268435456 + cpu,
+  }));
+  const onlineCpus = Array.from({ length: 32 }, (_, cpu) => cpu);
+  const complete = queueTopologyModel(
+    { mode_name: "vtime" },
+    { layout: "cell", affinity_queue_count: 32, cpu_routes: routes },
+    onlineCpus,
+  );
+
+  assert.equal(complete.cpuRoutes.length, 32);
+  assert.equal(complete.cpuRoutes[0].cpu, 0);
+  assert.equal(complete.cpuRoutes.at(-1).cpu, 31);
+  assert.equal(complete.expectedCpuCount, 32);
+  assert.equal(complete.routesComplete, true);
+
+  const incomplete = queueTopologyModel(
+    { mode_name: "vtime" },
+    { layout: "cell", affinity_queue_count: 32, cpu_routes: routes },
+    [...onlineCpus, 32],
+  );
+  assert.equal(incomplete.routesComplete, false);
+});
+
+test("placement-only policies do not expect per-CPU queue routes", () => {
+  const model = queueTopologyModel(
+    { mode_name: "fifo" },
+    null,
+    Array.from({ length: 32 }, (_, cpu) => cpu),
+  );
+
+  assert.equal(model.expectedCpuCount, 0);
+  assert.equal(model.routesComplete, true);
+});
+
+test("per-CPU routing delegates vertical scrolling to the document", () => {
+  const stylesheet = readFileSync(
+    new URL("../../src/web/style.css", import.meta.url),
+    "utf8",
+  );
+  const routeRules = [...stylesheet.matchAll(/\.queue-route-table-wrap\s*\{([^}]*)\}/g)];
+
+  assert.ok(routeRules.length > 0);
+  assert.equal(routeRules.some((match) => /max-height\s*:/.test(match[1])), false);
+});
+
+test("Cell bars support independent LLC and numeric orderings", () => {
+  assert.equal(typeof inspectionState.cellCpuOrder, "function");
+  const topology = {
+    numeric_order: [0, 1, 2, 3],
+    topology_order: [0, 2, 1, 3],
+  };
+
+  assert.deepEqual(inspectionState.cellCpuOrder(topology, "llc"), [0, 2, 1, 3]);
+  assert.deepEqual(inspectionState.cellCpuOrder(topology, "numeric"), [0, 1, 2, 3]);
+});
+
+test("Cell rows reserve task and overlap details for the detail panel", () => {
+  const page = readFileSync(
+    new URL("../../src/web/index.html", import.meta.url),
+    "utf8",
+  );
+  const script = readFileSync(
+    new URL("../../src/web/app.js", import.meta.url),
+    "utf8",
+  );
+  const stylesheet = readFileSync(
+    new URL("../../src/web/style.css", import.meta.url),
+    "utf8",
+  );
+
+  for (const fragment of [
+    'id="cellOrderMode"',
+    'name="cellCpuOrder"',
+    'id="cellBarTooltip"',
+  ]) {
+    assert.match(page, new RegExp(fragment), `missing ${fragment}`);
+  }
+  assert.doesNotMatch(script, /class="cell-count"/);
+  assert.doesNotMatch(script, /class="cell-overlap"/);
+  assert.match(script, /data-cell-cpu=/);
+  assert.match(script, /mapped tasks/);
+  assert.match(script, /Overlapping cells/);
+  assert.doesNotMatch(script, /function renderCells\(\) \{\s*hideCellBarTooltip\(\)/);
+  assert.match(stylesheet, /\.cell-order-mode\s*\{[^}]*width:\s*100%/s);
+});
+
+test("current scheduler command formats exact argv and unavailable states", () => {
+  assert.equal(typeof inspectionState.schedulerCurrentCommand, "function");
+  assert.equal(
+    inspectionState.schedulerCurrentCommand({
+      active: true,
+      current_command: [
+        "./target/release/scx_snake",
+        "--policy",
+        "policies/cell demo.toml",
+        "--stats",
+        "1",
+      ],
+    }),
+    "./target/release/scx_snake --policy 'policies/cell demo.toml' --stats 1",
+  );
+  assert.equal(
+    inspectionState.schedulerCurrentCommand({ active: false, current_command: null }),
+    "Snake is not running.",
+  );
+  assert.equal(
+    inspectionState.schedulerCurrentCommand({ active: true, current_command: null }),
+    "Command line unavailable.",
+  );
+});
+
+test("Control feedback buttons use reserved right-aligned anchors", () => {
+  const page = readFileSync(
+    new URL("../../src/web/index.html", import.meta.url),
+    "utf8",
+  );
+  const script = readFileSync(
+    new URL("../../src/web/app.js", import.meta.url),
+    "utf8",
+  );
+  const stylesheet = readFileSync(
+    new URL("../../src/web/style.css", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(page, /id="schedulerCurrentCommand"/);
+  assert.ok((page.match(/data-feedback-anchor/g) || []).length >= 3);
+  assert.match(script, /matches\("\[data-feedback-anchor\]"\)/);
+  assert.match(stylesheet, /\.feedback-heading\s*\{[^}]*justify-content:\s*space-between/s);
+  assert.match(stylesheet, /\.scheduler-feedback-anchor\.feedback-heading\s*\{[^}]*justify-content:\s*flex-end/s);
+});

@@ -4,8 +4,10 @@
 // GNU General Public License version 2.
 
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
+import * as heatmapModule from "../../src/web/heatmap.js";
 import {
   buildCpuUsage,
   buildMatrix,
@@ -110,4 +112,36 @@ test("infernoColor is deterministic and clamps its input", () => {
   assert.equal(infernoColor(1), "#fcffa4");
   assert.equal(infernoColor(2), "#fcffa4");
   assert.match(infernoColor(0.5), /^#[0-9a-f]{6}$/);
+});
+
+test("axis labels sample the full CPU order without omitting either end", () => {
+  assert.equal(typeof heatmapModule.axisLabelIndices, "function");
+  const indices = heatmapModule.axisLabelIndices(316, 24);
+
+  assert.equal(indices[0], 0);
+  assert.equal(indices.at(-1), 315);
+  assert.ok(indices.length <= 24);
+  assert.equal(new Set(indices).size, indices.length);
+  assert.ok(indices.some((index) => index % 2 === 0));
+  assert.ok(indices.some((index) => index % 2 === 1));
+});
+
+test("heatmap layout places utilization above the migration matrix", () => {
+  assert.equal(typeof heatmapModule.heatmapLayout, "function");
+  const layout = heatmapModule.heatmapLayout(316, 1440, 1);
+
+  assert.ok(layout.usageTop + layout.usageHeight < layout.margins.top);
+  assert.equal(layout.matrixSize, 316 * layout.cellSize);
+  assert.ok(layout.height > layout.margins.top + layout.matrixSize);
+});
+
+test("the Activity viewport delegates vertical scrolling to the document", () => {
+  const stylesheet = readFileSync(
+    new URL("../../src/web/style.css", import.meta.url),
+    "utf8",
+  );
+  const viewportRules = [...stylesheet.matchAll(/\.heatmap-viewport\s*\{([^}]*)\}/g)];
+
+  assert.ok(viewportRules.length > 0);
+  assert.equal(viewportRules.some((match) => /max-height\s*:/.test(match[1])), false);
 });

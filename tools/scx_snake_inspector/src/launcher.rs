@@ -88,6 +88,7 @@ pub struct LauncherStatus {
     pub active: bool,
     pub scheduler_name: Option<String>,
     pub pid: Option<u32>,
+    pub current_command: Option<Vec<String>>,
     pub policy_id: Option<String>,
     pub launch: Option<LaunchOptions>,
     pub last_exit: Option<String>,
@@ -100,6 +101,7 @@ pub struct SnakeLauncher {
 
 struct OwnedChild {
     child: Child,
+    current_command: Vec<String>,
     request: LaunchRequest,
     executable: PathBuf,
     preserved_args: Vec<String>,
@@ -287,6 +289,11 @@ impl Supervisor {
                 .as_ref()
                 .map(|owned| owned.child.id())
                 .or_else(|| external_process.map(|process| process.pid)),
+            current_command: self
+                .child
+                .as_ref()
+                .map(|owned| owned.current_command.clone())
+                .or_else(|| external_process.map(|process| process.current_command.clone())),
             policy_id: self
                 .child
                 .as_ref()
@@ -346,6 +353,9 @@ impl Supervisor {
         let policy_path = resolve_policy_path(&self.policy_dir, &request.policy_id)?;
         let mut args = launch_args(&request, &policy_path);
         args.extend(preserved_args.iter().cloned());
+        let current_command = std::iter::once(executable.to_string_lossy().into_owned())
+            .chain(args.iter().cloned())
+            .collect();
         let mut command = Command::new(&executable);
         command
             .args(args)
@@ -366,6 +376,7 @@ impl Supervisor {
         self.last_exit = None;
         self.child = Some(OwnedChild {
             child,
+            current_command,
             request,
             executable,
             preserved_args,
@@ -410,6 +421,7 @@ impl Supervisor {
             candidates.push(ExternalProcess {
                 pid,
                 executable,
+                current_command: cmdline,
                 policy_id,
                 launch,
                 pidfd,
@@ -462,6 +474,7 @@ impl Supervisor {
 struct ExternalProcess {
     pid: u32,
     executable: PathBuf,
+    current_command: Vec<String>,
     policy_id: Option<String>,
     launch: LaunchOptions,
     pidfd: OwnedFd,

@@ -328,6 +328,16 @@ async fn scheduler_control_lists_policies_while_stopped_and_manages_an_owned_chi
     assert_eq!(body["managed"], true);
     assert_eq!(body["controllable"], true);
     assert_eq!(body["policy_id"], "basic.toml");
+    let current_command = body["current_command"]
+        .as_array()
+        .expect("managed command must expose argv");
+    assert!(current_command[0]
+        .as_str()
+        .is_some_and(|argument| argument.ends_with("scx_snake")));
+    assert_eq!(current_command[1], "--policy");
+    assert_eq!(current_command[3], "--fairness");
+    assert_eq!(current_command[4], "vtime");
+    assert_eq!(current_command.last().unwrap(), "--verbose");
     assert_eq!(body["launch"]["fairness"], "vtime");
     assert_eq!(body["launch"]["callback_timing_sample_rate"], 128);
     assert_eq!(body["launch"]["exit_dump_len"], 4096);
@@ -502,6 +512,16 @@ async fn scheduler_control_uses_external_argv_without_inventing_launch_flags() {
         serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
     assert_eq!(body["controllable"], true);
     assert_eq!(body["pid"], child.id());
+    assert_eq!(
+        body["current_command"],
+        json!([
+            binary.to_string_lossy(),
+            "--policy",
+            policy.to_string_lossy(),
+            "--stats",
+            "1"
+        ])
+    );
     assert_eq!(body["launch"]["callback_timing_sample_rate"], Value::Null);
     assert_eq!(body["launch"]["preserved_args"], json!(["--stats", "1"]));
 

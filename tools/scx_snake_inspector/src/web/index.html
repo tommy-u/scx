@@ -217,8 +217,17 @@
         </section>
         <div class="cells-layout">
           <section class="cell-browser" aria-label="Configured cells" data-feedback-key="Cells:Cell-browser">
+            <header class="cell-browser-heading">
+              <h3>Cell CPU membership</h3>
+              <fieldset class="control-field segmented cell-order-mode" id="cellOrderMode">
+                <legend>CPU order</legend>
+                <label><input type="radio" name="cellCpuOrder" value="llc" checked><span>LLC</span></label>
+                <label><input type="radio" name="cellCpuOrder" value="numeric"><span>Numeric</span></label>
+              </fieldset>
+            </header>
             <div class="cell-list" id="cellList"></div>
           </section>
+          <div class="cell-bar-tooltip hidden" id="cellBarTooltip" role="tooltip"></div>
           <section class="cell-detail" id="cellDetail" aria-live="polite" data-feedback-key="Cells:Cell-detail"></section>
         </div>
       </section>
@@ -239,6 +248,7 @@
           </header>
           <div class="scheduler-launch-grid">
             <div class="scheduler-launch-fields" data-feedback-key="Control:Launch-configuration">
+              <div class="scheduler-feedback-anchor" data-feedback-anchor></div>
               <label class="control-field scheduler-policy-field">
                 <span>Policy</span>
                 <select id="schedulerPolicy" aria-label="Snake policy"></select>
@@ -286,8 +296,17 @@
             </div>
 
             <section class="scheduler-command-section" aria-labelledby="schedulerCommandTitle" data-feedback-key="Control:Command-preview">
-              <h3 id="schedulerCommandTitle">Command preview</h3>
-              <pre id="schedulerCommandPreview">scx_snake --policy &lt;select a policy&gt;</pre>
+              <header class="scheduler-command-heading" data-feedback-anchor>
+                <h3 id="schedulerCommandTitle">Command preview</h3>
+              </header>
+              <div class="scheduler-command-block">
+                <span class="scheduler-command-label">Current command line</span>
+                <pre id="schedulerCurrentCommand">Snake is not running.</pre>
+              </div>
+              <div class="scheduler-command-block">
+                <span class="scheduler-command-label">Next start or restart</span>
+                <pre id="schedulerCommandPreview">scx_snake --policy &lt;select a policy&gt;</pre>
+              </div>
               <div class="scheduler-actions">
                 <button class="apply-button" id="startScheduler" type="button">Start Snake</button>
                 <button class="apply-button" id="restartScheduler" type="button" disabled>Restart Snake</button>
@@ -300,7 +319,7 @@
         </section>
 
         <section class="scheduler-settings-section" aria-labelledby="schedulerSettingsTitle" data-feedback-key="Control:Change-behavior">
-          <header class="section-heading">
+          <header class="section-heading" data-feedback-anchor>
             <h3 id="schedulerSettingsTitle">Change behavior</h3>
           </header>
           <div class="scheduler-settings-table-wrap">

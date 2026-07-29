@@ -4,19 +4,21 @@
 // GNU General Public License version 2.
 
 import {
+  axisLabelIndices,
   buildCpuUsage,
   buildMatrix,
+  heatmapLayout,
   infernoColor,
   normalizeCount,
   normalizeUtilization,
   parseTgids,
   topologyBoundaries,
-  topologyGroups,
 } from "/assets/heatmap.js";
 import {
   callbackDurationClass,
   callbackSampleRateOptions,
   captureKeyedRenderState,
+  cellCpuOrder,
   compactCpuList,
   decorateCells,
   fieldReferenceGroups,
@@ -25,6 +27,7 @@ import {
   formatFeedbackTranscript,
   ladderPercentages,
   parseFeedbackEntries,
+  policyCategoryGroups,
   policyLibraryModels,
   queueLadderSections,
   queueTopologyModel,
@@ -33,6 +36,7 @@ import {
   schedulerCommandPreview,
   schedulerControlModel,
   schedulerControlMessage,
+  schedulerCurrentCommand,
   schedulerLaunchRequest,
   schedulerSettingModels,
   statsResetDisabled,
@@ -96,7 +100,9 @@ const elements = {
   cellsNotice: document.querySelector("#cellsNotice"),
   cellsView: document.querySelector("#cellsView"),
   cellDetail: document.querySelector("#cellDetail"),
+  cellBarTooltip: document.querySelector("#cellBarTooltip"),
   cellList: document.querySelector("#cellList"),
+  cellOrderMode: document.querySelector("#cellOrderMode"),
   workloadTargetKind: document.querySelector("#workloadTargetKind"),
   workloadTargetLabel: document.querySelector("#workloadTargetLabel"),
   workloadTargetValue: document.querySelector("#workloadTargetValue"),
@@ -129,6 +135,7 @@ const elements = {
   scopeMode: document.querySelector("#scopeMode"),
   scopeSummary: document.querySelector("#scopeSummary"),
   schedulerCommandPreview: document.querySelector("#schedulerCommandPreview"),
+  schedulerCurrentCommand: document.querySelector("#schedulerCurrentCommand"),
   schedulerControlNotice: document.querySelector("#schedulerControlNotice"),
   schedulerControlState: document.querySelector("#schedulerControlState"),
   schedulerControlView: document.querySelector("#controlView"),
@@ -163,6 +170,7 @@ const state = {
   callbackTimingLoading: false,
   callbackRatePending: false,
   callbackRateDirty: false,
+  cellOrderMode: "llc",
   fineTiming: null,
   fineTimingError: null,
   fineTimingLoading: false,
@@ -344,6 +352,15 @@ function bindControls() {
       return;
     }
     state.selectedCellId = Number(control.dataset.cellId);
+    renderCells();
+  });
+  elements.cellList.addEventListener("pointermove", showCellBarTooltip);
+  elements.cellList.addEventListener("pointerleave", hideCellBarTooltip);
+  elements.cellOrderMode.addEventListener("change", (event) => {
+    if (event.target.name !== "cellCpuOrder") {
+      return;
+    }
+    state.cellOrderMode = event.target.value;
     renderCells();
   });
   elements.workloadTargetKind.addEventListener("change", renderWorkloadTargetField);
@@ -544,9 +561,10 @@ function decorateFeedbackTarget(target) {
     return;
   }
   target.classList.add("feedback-target");
-  const heading = [...target.children].find((child) => child.matches(
-    "header, .matrix-heading, .fine-timing-panel-heading, .cell-detail-heading",
-  ));
+  const heading = [...target.children].find((child) => child.matches("[data-feedback-anchor]"))
+    || [...target.children].find((child) => child.matches(
+      "header, .matrix-heading, .fine-timing-panel-heading, .cell-detail-heading",
+    ));
   let button = [...target.querySelectorAll("[data-feedback-toggle]")]
     .find((candidate) => candidate.dataset.feedbackToggle === key);
   if (!button) {
@@ -769,14 +787,15 @@ function renderHeatmap() {
   );
   const cpuCount = matrix.order.length;
   const viewportWidth = Math.max(320, elements.viewport.clientWidth || 800);
-  const fitCell = (viewportWidth - 104) / Math.max(1, cpuCount);
-  const cellSize = Math.max(2, Math.min(9, fitCell)) * state.zoom;
-  const margins = { left: 64, top: 20, right: 18 };
-  const matrixSize = cpuCount * cellSize;
-  const usageTop = margins.top + matrixSize + 68;
-  const usageHeight = Math.max(13, Math.min(26, cellSize * 2.5));
-  const width = Math.ceil(margins.left + matrixSize + margins.right);
-  const height = Math.ceil(usageTop + usageHeight + 46);
+  const {
+    cellSize,
+    height,
+    margins,
+    matrixSize,
+    usageHeight,
+    usageTop,
+    width,
+  } = heatmapLayout(cpuCount, viewportWidth, state.zoom);
   const pixelRatio = Math.min(2, window.devicePixelRatio || 1);
 
   elements.canvas.style.width = `${width}px`;
@@ -857,36 +876,6 @@ function drawCpuUsage(context, usage, margins, matrixSize, cellSize, top, height
     context.lineTo(x, top + height);
     context.stroke();
   }
-
-  context.fillStyle = "#43515d";
-  context.font = "10px ui-monospace, SFMono-Regular, Menlo, monospace";
-  context.textAlign = "center";
-  const labelStep = Math.max(1, Math.ceil(usage.order.length / 24));
-  for (let index = 0; index < usage.order.length; index += labelStep) {
-    context.fillText(
-      String(usage.order[index]),
-      margins.left + (index + 0.5) * cellSize,
-      top + height + 10,
-    );
-  }
-
-  const bracketY = top + height + 23;
-  context.font = "600 9px ui-sans-serif, system-ui, sans-serif";
-  for (const group of topologyGroups(state.topology, usage.order, "llc")) {
-    const left = margins.left + group.start * cellSize;
-    const right = margins.left + group.end * cellSize;
-    context.beginPath();
-    context.lineWidth = 1;
-    context.strokeStyle = "#82919c";
-    context.moveTo(left, bracketY - 3);
-    context.lineTo(left, bracketY);
-    context.lineTo(right, bracketY);
-    context.lineTo(right, bracketY - 3);
-    context.stroke();
-    if (right - left >= 30 && group.value !== undefined) {
-      context.fillText(`LLC ${group.value}`, (left + right) / 2, bracketY + 10);
-    }
-  }
 }
 
 function drawBoundaries(context, matrix, margins, matrixSize, cellSize) {
@@ -909,8 +898,7 @@ function drawAxes(context, order, margins, matrixSize, cellSize) {
   context.fillStyle = "#43515d";
   context.font = "10px ui-monospace, SFMono-Regular, Menlo, monospace";
   context.textBaseline = "middle";
-  const labelStep = Math.max(1, Math.ceil(order.length / 24));
-  for (let index = 0; index < order.length; index += labelStep) {
+  for (const index of axisLabelIndices(order.length)) {
     const center = (index + 0.5) * cellSize;
     context.textAlign = "right";
     context.fillText(String(order[index]), margins.left - 7, margins.top + center);
@@ -998,6 +986,7 @@ function hideTooltip() {
 
 function renderRoute() {
   state.route = routeFromHash(window.location.hash);
+  hideCellBarTooltip();
   for (const view of [
     elements.activityView,
     elements.callbacksView,
@@ -1290,6 +1279,7 @@ function renderSchedulerControl() {
     hideElementNotice(elements.schedulerControlNotice);
   }
 
+  elements.schedulerCurrentCommand.textContent = schedulerCurrentCommand(control);
   renderSchedulerCommandPreview();
   renderSchedulerSettings(control);
 }
@@ -1653,6 +1643,7 @@ function renderResolvedQueueTopology() {
   const model = queueTopologyModel(
     state.inspection.fairness,
     state.inspection.queue_topology,
+    state.topology?.numeric_order || [],
   );
   const generation = state.inspection.slots
     .find((slot) => slot.state === "active")
@@ -1664,7 +1655,11 @@ function renderResolvedQueueTopology() {
       <div><dt>Clock model</dt><dd>${escapeHtml(model.clockModel)}</dd></div>
       <div><dt>Layout</dt><dd>${escapeHtml(model.layout || "None")}</dd></div>
       <div><dt>Affinity DSQs</dt><dd>${formatCount(model.affinityQueueCount)}</dd></div>
+      <div><dt>CPU routes</dt><dd>${formatCount(model.cpuRoutes.length)} / ${formatCount(model.expectedCpuCount)}</dd></div>
     </dl>`;
+  const routeWarning = model.routesComplete
+    ? ""
+    : `<p class="notice">Routing data is incomplete: loaded ${formatCount(model.cpuRoutes.length)} of ${formatCount(model.expectedCpuCount)} online CPUs.</p>`;
   if (!model.layout) {
     replaceKeyedHtml(elements.queueTopology, `
       <header class="queue-topology-heading">
@@ -1704,6 +1699,7 @@ function renderResolvedQueueTopology() {
       <div><h3>Resolved queue topology</h3><p>Attachment-time CPU ownership, DSQs, and clock domains</p></div>
     </header>
     ${summary}
+    ${routeWarning}
     <section class="queue-topology-table-section">
       <h4>Cell allocation</h4>
       <div class="queue-topology-table-wrap" data-render-key="queue:${generation}:cell-allocation:scroll">
@@ -1717,7 +1713,7 @@ function renderResolvedQueueTopology() {
       </div>
     </details>
     <details class="queue-topology-details" data-render-key="queue:${generation}:cpu-routes">
-      <summary data-render-key="queue:${generation}:cpu-routes:summary">Per-CPU routing (${formatCount(model.cpuRoutes.length)} CPUs)</summary>
+      <summary data-render-key="queue:${generation}:cpu-routes:summary">Per-CPU routing (${formatCount(model.cpuRoutes.length)} of ${formatCount(model.expectedCpuCount)} online CPUs)</summary>
       <div class="queue-topology-table-wrap queue-route-table-wrap" data-render-key="queue:${generation}:cpu-routes:scroll">
         <table><thead><tr><th>CPU</th><th>Owner</th><th>LLC</th><th>Normal DSQ</th><th>Affinity DSQ</th></tr></thead><tbody>${routes}</tbody></table>
       </div>
@@ -1917,9 +1913,10 @@ function renderPolicyLibrary() {
       <strong>${escapeHtml(option.label)}</strong>
       <span>${numberFormat.format(option.policies.length)} policies${option.active ? " · active" : ""}</span>
     </button>`).join("");
-  const policyCards = policies.length === 0
-    ? '<p class="empty-state">No policies are available for this fairness approach.</p>'
-    : policies.map((policy) => `
+  const policySections = policyCategoryGroups(policies).map((group) => {
+    const policyCards = group.policies.length === 0
+      ? '<p class="empty-state">No policies in this group.</p>'
+      : group.policies.map((policy) => `
       <article class="policy-choice${policy.active ? " active" : ""}${policy.changeMode === "invalid" ? " invalid" : ""}"
         ${policy.hoverDetail ? `title="${escapeHtml(policy.hoverDetail)}"` : ""}>
         <div class="policy-choice-copy">
@@ -1936,6 +1933,12 @@ function renderPolicyLibrary() {
           </button>
         </div>
       </article>`).join("");
+    return `
+      <section class="policy-category-section" data-policy-category="${group.id}">
+        <header><h5>${escapeHtml(group.label)}</h5><span>${formatCount(group.policies.length)}</span></header>
+        <div class="policy-choice-list">${policyCards}</div>
+      </section>`;
+  }).join("");
   elements.policyChoices.innerHTML = `
     <div class="policy-fairness-options" role="tablist" aria-label="Fairness approach">
       ${fairnessOptions}
@@ -1947,7 +1950,7 @@ function renderPolicyLibrary() {
           <p>${escapeHtml(selectedModel.description)}</p>
         </div>
       </header>
-      <div class="policy-choice-list">${policyCards}</div>
+      ${policySections}
     </section>`;
   elements.invalidPolicies.classList.add("hidden");
 }
@@ -2264,23 +2267,18 @@ async function setWorkloadCell(clear, tidOverride = null) {
 
 function renderCellRow(cell) {
   const selected = cell.id === state.selectedCellId;
-  const overlap = cell.overlapIds.length > 0
-    ? `Overlaps ${cell.overlapIds.map((id) => `cell ${id}`).join(", ")}`
-    : "No overlap";
   const definition = cell.undefined ? "Undefined by active policy" : `${cell.cpus.length} CPUs`;
   return `
     <button class="cell-row${selected ? " selected" : ""}" type="button"
       data-cell-id="${cell.id}" aria-pressed="${selected}">
       <span class="cell-identity"><strong>Cell ${cell.id}</strong><small>${definition}</small></span>
       ${renderCpuStrip(cell)}
-      <span class="cell-count"><strong>${numberFormat.format(cell.tasks.length)}</strong><small>tasks</small></span>
-      <span class="cell-overlap">${escapeHtml(overlap)}</span>
     </button>`;
 }
 
 function renderCpuStrip(cell) {
   const members = new Set(cell.cpus);
-  const order = state.topology.topology_order;
+  const order = cellCpuOrder(state.topology, state.cellOrderMode);
   const cpuInfo = new Map(state.topology.cpus.map((cpu) => [cpu.cpu, cpu]));
   return `
     <span class="cell-cpu-strip" style="--cpu-count:${order.length}">
@@ -2288,14 +2286,22 @@ function renderCpuStrip(cell) {
         const previous = index > 0 ? cpuInfo.get(order[index - 1]) : null;
         const current = cpuInfo.get(cpu);
         const boundary = previous && current && previous.llc !== current.llc ? " llc-boundary" : "";
-        return `<i class="cpu-pixel${members.has(cpu) ? " member" : ""}${boundary}"
+        const member = members.has(cpu);
+        return `<i class="cpu-pixel${member ? " member" : ""}${boundary}"
+          data-cell-cpu="${cpu}" data-cell-llc="${current?.llc ?? "?"}" data-cell-member="${member}"
           title="CPU ${cpu} · LLC ${current?.llc ?? "?"}"></i>`;
       }).join("")}
     </span>`;
 }
 
 function renderCpuAxis() {
-  const order = state.topology.topology_order;
+  const order = cellCpuOrder(state.topology, state.cellOrderMode);
+  if (state.cellOrderMode === "numeric") {
+    const labels = axisLabelIndices(order.length, 18).map((index) =>
+      `<span style="grid-column:${index + 1}">${order[index]}</span>`
+    );
+    return `<span class="cell-axis-labels numeric" style="--cpu-count:${order.length}">${labels.join("")}</span>`;
+  }
   const cpuInfo = new Map(state.topology.cpus.map((cpu) => [cpu.cpu, cpu]));
   const labels = [];
   let start = 0;
@@ -2309,6 +2315,24 @@ function renderCpuAxis() {
     start = end;
   }
   return `<span class="cell-axis-labels" style="--cpu-count:${order.length}">${labels.join("")}</span>`;
+}
+
+function showCellBarTooltip(event) {
+  const pixel = event.target.closest("[data-cell-cpu]");
+  if (!pixel) {
+    hideCellBarTooltip();
+    return;
+  }
+  const cellId = pixel.closest("[data-cell-id]")?.dataset.cellId || "?";
+  const membership = pixel.dataset.cellMember === "true" ? "Member" : "Not a member";
+  elements.cellBarTooltip.textContent = `Cell ${cellId} · CPU ${pixel.dataset.cellCpu} · LLC ${pixel.dataset.cellLlc} · ${membership}`;
+  elements.cellBarTooltip.style.left = `${Math.min(event.clientX + 12, window.innerWidth - 260)}px`;
+  elements.cellBarTooltip.style.top = `${Math.min(event.clientY + 12, window.innerHeight - 48)}px`;
+  elements.cellBarTooltip.classList.remove("hidden");
+}
+
+function hideCellBarTooltip() {
+  elements.cellBarTooltip.classList.add("hidden");
 }
 
 function renderCellDetail(cell) {
