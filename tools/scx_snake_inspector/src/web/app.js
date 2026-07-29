@@ -25,6 +25,11 @@ import {
   queueLadderSections,
   queueTopologyModel,
   routeFromHash,
+  schedulerCommandPreview,
+  schedulerControlModel,
+  schedulerControlMessage,
+  schedulerLaunchRequest,
+  schedulerSettingModels,
   rungLadderPercentages,
   rungPercentages,
   selectionRungHitFlow,
@@ -90,6 +95,21 @@ const elements = {
   confirmPolicyActivation: document.querySelector("#confirmPolicyActivation"),
   scopeMode: document.querySelector("#scopeMode"),
   scopeSummary: document.querySelector("#scopeSummary"),
+  schedulerCommandPreview: document.querySelector("#schedulerCommandPreview"),
+  schedulerControlNotice: document.querySelector("#schedulerControlNotice"),
+  schedulerControlState: document.querySelector("#schedulerControlState"),
+  schedulerControlView: document.querySelector("#controlView"),
+  schedulerExitDumpEnabled: document.querySelector("#schedulerExitDumpEnabled"),
+  schedulerExitDumpLen: document.querySelector("#schedulerExitDumpLen"),
+  schedulerFairness: document.querySelector("#schedulerFairness"),
+  schedulerFairnessEnabled: document.querySelector("#schedulerFairnessEnabled"),
+  schedulerPolicy: document.querySelector("#schedulerPolicy"),
+  schedulerSampleRate: document.querySelector("#schedulerSampleRate"),
+  schedulerSampleRateEnabled: document.querySelector("#schedulerSampleRateEnabled"),
+  schedulerSettingsRows: document.querySelector("#schedulerSettingsRows"),
+  schedulerVerbose: document.querySelector("#schedulerVerbose"),
+  startScheduler: document.querySelector("#startScheduler"),
+  stopScheduler: document.querySelector("#stopScheduler"),
   tgidField: document.querySelector("#tgidField"),
   tgidInput: document.querySelector("#tgidInput"),
   tooltip: document.querySelector("#heatmapTooltip"),
@@ -128,6 +148,11 @@ const state = {
   policyLibraryMessage: null,
   policyActivationPending: false,
   selectedPolicy: null,
+  schedulerControl: null,
+  schedulerControlError: null,
+  schedulerControlLoading: false,
+  schedulerControlPending: false,
+  schedulerFormInitialized: false,
   referenceId: 0,
   references: new Map(),
   route: routeFromHash(window.location.hash),
@@ -143,8 +168,10 @@ const state = {
 configureWindowSelector();
 configureCallbackRangeSelector();
 configureCallbackSampleRateSelector();
+configureSchedulerSampleRateSelector();
 bindControls();
 renderWorkloadTargetField();
+renderSchedulerControl();
 start().catch((error) => {
   setStatus("error", "Connection failed");
   showNotice(error.message);
@@ -163,10 +190,12 @@ async function start() {
   await loadCallbackTiming();
   await loadFineTiming();
   await loadPolicyCatalog();
+  await loadSchedulerControl();
   window.setInterval(loadInspection, 1_000);
   window.setInterval(loadCallbackTiming, 1_000);
   window.setInterval(loadFineTiming, 1_000);
   window.setInterval(loadPolicyCatalog, 5_000);
+  window.setInterval(loadSchedulerControl, 2_000);
 }
 
 function configureWindowSelector() {
@@ -211,6 +240,18 @@ function configureCallbackSampleRateSelector() {
     option.value = String(optionModel.value);
     option.textContent = optionModel.label;
     elements.callbackSampleRateControl.append(option);
+  }
+}
+
+function configureSchedulerSampleRateSelector() {
+  for (const optionModel of callbackSampleRateOptions()) {
+    const option = document.createElement("option");
+    option.value = String(optionModel.value);
+    option.textContent = optionModel.label;
+    if (optionModel.value === 64) {
+      option.selected = true;
+    }
+    elements.schedulerSampleRate.append(option);
   }
 }
 
@@ -262,6 +303,24 @@ function bindControls() {
   elements.workloadTargetKind.addEventListener("change", renderWorkloadTargetField);
   elements.assignWorkloadCell.addEventListener("click", () => setWorkloadCell(false));
   elements.clearWorkloadCell.addEventListener("click", () => setWorkloadCell(true));
+  for (const control of [
+    elements.schedulerPolicy,
+    elements.schedulerFairnessEnabled,
+    elements.schedulerFairness,
+    elements.schedulerSampleRateEnabled,
+    elements.schedulerSampleRate,
+    elements.schedulerExitDumpEnabled,
+    elements.schedulerExitDumpLen,
+    elements.schedulerVerbose,
+  ]) {
+    control.addEventListener("change", () => {
+      state.schedulerFormInitialized = true;
+      renderSchedulerControl();
+    });
+  }
+  elements.schedulerExitDumpLen.addEventListener("input", renderSchedulerCommandPreview);
+  elements.startScheduler.addEventListener("click", startScheduler);
+  elements.stopScheduler.addEventListener("click", stopScheduler);
   elements.cellDetail.addEventListener("click", (event) => {
     const select = event.target.closest("[data-workload-tid]");
     if (select) {
@@ -672,6 +731,7 @@ function renderRoute() {
     elements.callbacksView,
     elements.policyView,
     elements.cellsView,
+    elements.schedulerControlView,
   ]) {
     view.classList.toggle("hidden", view.dataset.view !== state.route);
   }
@@ -685,6 +745,8 @@ function renderRoute() {
   hideReferencePopover(true);
   if (state.route === "activity") {
     window.requestAnimationFrame(renderHeatmap);
+  } else if (state.route === "control") {
+    renderSchedulerControl();
   } else {
     renderInspectionViews();
   }
@@ -855,6 +917,199 @@ async function loadPolicyCatalog() {
   }
   if (state.route === "policy") {
     renderPolicyLibrary();
+  }
+}
+
+async function loadSchedulerControl() {
+  if (state.schedulerControlLoading) {
+    return;
+  }
+  state.schedulerControlLoading = true;
+  try {
+    const response = await fetch("/api/scheduler/control", { cache: "no-store" });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(payload.error || `Scheduler control request failed (${response.status})`);
+    }
+    state.schedulerControl = payload;
+    state.schedulerControlError = null;
+  } catch (error) {
+    state.schedulerControlError = error.message;
+  } finally {
+    state.schedulerControlLoading = false;
+  }
+  if (state.route === "control") {
+    renderSchedulerControl();
+  }
+}
+
+function renderSchedulerControl() {
+  const control = state.schedulerControl;
+  syncSchedulerPolicyOptions(control?.policies || []);
+  if (control && !state.schedulerFormInitialized) {
+    hydrateSchedulerLaunchForm(control);
+    state.schedulerFormInitialized = true;
+  }
+
+  const active = Boolean(control?.active);
+  const managed = Boolean(control?.managed);
+  const model = schedulerControlModel(
+    control,
+    state.schedulerControlPending,
+    Boolean(elements.schedulerPolicy.value),
+  );
+  const locked = model.configLocked;
+  elements.schedulerPolicy.disabled = locked || elements.schedulerPolicy.options.length === 0;
+  elements.schedulerFairnessEnabled.disabled = locked;
+  elements.schedulerSampleRateEnabled.disabled = locked;
+  elements.schedulerExitDumpEnabled.disabled = locked;
+  elements.schedulerVerbose.disabled = locked;
+  elements.schedulerFairness.disabled = locked || !elements.schedulerFairnessEnabled.checked;
+  elements.schedulerSampleRate.disabled = locked || !elements.schedulerSampleRateEnabled.checked;
+  elements.schedulerExitDumpLen.disabled = locked || !elements.schedulerExitDumpEnabled.checked;
+  elements.startScheduler.disabled = model.startDisabled;
+  elements.stopScheduler.disabled = model.stopDisabled;
+
+  elements.schedulerControlState.className = `scheduler-state ${model.stateName}`;
+  elements.schedulerControlState.textContent = model.stateLabel;
+
+  const message = schedulerControlMessage(control, state.schedulerControlError);
+  if (message) {
+    showElementNotice(elements.schedulerControlNotice, message);
+  } else {
+    hideElementNotice(elements.schedulerControlNotice);
+  }
+
+  renderSchedulerCommandPreview();
+  renderSchedulerSettings(control);
+}
+
+function syncSchedulerPolicyOptions(policies) {
+  const signature = policies
+    .map((policy) => `${policy.id}:${policy.name}:${policy.change_mode}`)
+    .join("|");
+  if (elements.schedulerPolicy.dataset.signature === signature) {
+    return;
+  }
+  const selected = elements.schedulerPolicy.value;
+  elements.schedulerPolicy.innerHTML = policies.length === 0
+    ? '<option value="">No policies available</option>'
+    : policies.map((policy) => {
+      const mode = policy.change_mode === "dynamic" ? "Dynamic" : "Reload required";
+      return `<option value="${escapeHtml(policy.id)}">${escapeHtml(policy.name || policy.id)} (${mode})</option>`;
+    }).join("");
+  if ([...elements.schedulerPolicy.options].some((option) => option.value === selected)) {
+    elements.schedulerPolicy.value = selected;
+  }
+  elements.schedulerPolicy.dataset.signature = signature;
+}
+
+function hydrateSchedulerLaunchForm(control) {
+  const launch = control.launch || {};
+  const policyId = control.policy_id || launch.policy_id;
+  if (
+    policyId
+    && [...elements.schedulerPolicy.options].some((option) => option.value === policyId)
+  ) {
+    elements.schedulerPolicy.value = policyId;
+  }
+  const hasFairness = launch.fairness != null;
+  elements.schedulerFairnessEnabled.checked = hasFairness;
+  if (hasFairness && ["fifo", "vtime"].includes(launch.fairness)) {
+    elements.schedulerFairness.value = launch.fairness;
+  }
+  const hasSampleRate = launch.callback_timing_sample_rate != null;
+  elements.schedulerSampleRateEnabled.checked = hasSampleRate;
+  if (hasSampleRate) {
+    elements.schedulerSampleRate.value = String(launch.callback_timing_sample_rate);
+  }
+  const hasExitDump = launch.exit_dump_len != null;
+  elements.schedulerExitDumpEnabled.checked = hasExitDump;
+  if (hasExitDump) {
+    elements.schedulerExitDumpLen.value = String(launch.exit_dump_len);
+  }
+  elements.schedulerVerbose.checked = Boolean(launch.verbose);
+}
+
+function schedulerLaunchFormValues() {
+  return {
+    policy_id: elements.schedulerPolicy.value,
+    fairness_enabled: elements.schedulerFairnessEnabled.checked,
+    fairness: elements.schedulerFairness.value,
+    callback_timing_sample_rate_enabled: elements.schedulerSampleRateEnabled.checked,
+    callback_timing_sample_rate: elements.schedulerSampleRate.value,
+    exit_dump_len_enabled: elements.schedulerExitDumpEnabled.checked,
+    exit_dump_len: elements.schedulerExitDumpLen.value,
+    verbose: elements.schedulerVerbose.checked,
+  };
+}
+
+function renderSchedulerCommandPreview() {
+  try {
+    const request = schedulerLaunchRequest(schedulerLaunchFormValues());
+    elements.schedulerCommandPreview.textContent = schedulerCommandPreview(request);
+  } catch (error) {
+    elements.schedulerCommandPreview.textContent = error.message;
+  }
+}
+
+function renderSchedulerSettings(control) {
+  const settings = schedulerSettingModels(control?.settings || []);
+  elements.schedulerSettingsRows.innerHTML = settings.length === 0
+    ? '<tr><td class="scheduler-settings-empty" colspan="3">No scheduler settings reported.</td></tr>'
+    : settings.map((setting) => `
+      <tr>
+        <th scope="row">${escapeHtml(setting.name)}</th>
+        <td><code>${escapeHtml(setting.value)}</code></td>
+        <td><span class="change-mode ${setting.changeMode}">${setting.changeLabel}</span></td>
+      </tr>`).join("");
+}
+
+async function startScheduler() {
+  let request;
+  try {
+    request = schedulerLaunchRequest(schedulerLaunchFormValues());
+  } catch (error) {
+    showElementNotice(elements.schedulerControlNotice, error.message);
+    return;
+  }
+  await schedulerMutation("/api/scheduler/start", request);
+}
+
+async function stopScheduler() {
+  if (!window.confirm("Stop the managed Snake scheduler?")) {
+    return;
+  }
+  await schedulerMutation("/api/scheduler/stop", {});
+}
+
+async function schedulerMutation(path, payload) {
+  if (state.schedulerControlPending) {
+    return;
+  }
+  state.schedulerControlPending = true;
+  state.schedulerControlError = null;
+  renderSchedulerControl();
+  try {
+    const response = await fetch(path, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-snake-token": token,
+      },
+      body: JSON.stringify(payload),
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(body.error || `Scheduler control failed (${response.status})`);
+    }
+    state.schedulerFormInitialized = false;
+    await loadSchedulerControl();
+  } catch (error) {
+    state.schedulerControlError = error.message;
+  } finally {
+    state.schedulerControlPending = false;
+    renderSchedulerControl();
   }
 }
 

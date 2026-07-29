@@ -14,6 +14,7 @@ use scx_snake_inspector::api::{router, ApiContext};
 use scx_snake_inspector::cli::Args;
 use scx_snake_inspector::collector::{run_collector, CollectorCommand, CollectorOptions};
 use scx_snake_inspector::dashboard::Dashboard;
+use scx_snake_inspector::launcher::SnakeLauncher;
 use scx_snake_inspector::topology::TopologyView;
 use tokio::net::TcpListener;
 
@@ -26,6 +27,7 @@ async fn main() -> Result<()> {
 
     let topology = TopologyView::discover()?;
     let dashboard = Dashboard::new(topology, max_window_ms);
+    let launcher = SnakeLauncher::new(&args.snake_bin, &args.policy_dir)?;
     let token = session_token()?;
     let (command_tx, command_rx) = mpsc::channel();
 
@@ -51,7 +53,8 @@ async fn main() -> Result<()> {
         token,
         "/sys/fs/cgroup".into(),
     )
-    .with_initial_window_ms(initial_window_ms);
+    .with_initial_window_ms(initial_window_ms)
+    .with_launcher(launcher.clone());
     let listener = TcpListener::bind(args.listen)
         .await
         .with_context(|| format!("failed to bind dashboard to {}", args.listen))?;
@@ -68,6 +71,7 @@ async fn main() -> Result<()> {
     let server_result = axum::serve(listener, router(context))
         .with_graceful_shutdown(shutdown_signal())
         .await;
+    launcher.shutdown();
     let _ = command_tx.send(CollectorCommand::Shutdown);
     let collector_result = collector
         .join()

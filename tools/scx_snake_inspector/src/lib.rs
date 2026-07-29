@@ -9,6 +9,7 @@ pub mod bpf_skel;
 pub mod cli;
 pub mod collector;
 pub mod dashboard;
+pub mod launcher;
 pub mod model;
 pub mod policies;
 pub mod scheduler;

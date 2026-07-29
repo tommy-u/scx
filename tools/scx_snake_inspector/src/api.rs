@@ -16,7 +16,7 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio_stream::wrappers::WatchStream;
 use tokio_stream::StreamExt;
 
@@ -24,6 +24,7 @@ use crate::collector::{
     CallbackTimingRateResponse, CollectorCommand, FineTimingCallback, FineTimingControlResponse,
 };
 use crate::dashboard::Dashboard;
+use crate::launcher::{LaunchOptions, LaunchRequest, SnakeLauncher};
 use crate::policies::PolicyActivation;
 use crate::scope::{resolve_scope, ScopeRequest};
 use crate::workload::{WorkloadCellResponse, WorkloadTarget};
@@ -42,6 +43,7 @@ pub struct ApiContext {
     token: Arc<str>,
     cgroup_root: Arc<PathBuf>,
     initial_window_ms: u64,
+    launcher: Option<SnakeLauncher>,
 }
 
 impl ApiContext {
@@ -57,11 +59,17 @@ impl ApiContext {
             token: token.into(),
             cgroup_root: Arc::new(cgroup_root),
             initial_window_ms: 10_000,
+            launcher: None,
         }
     }
 
     pub fn with_initial_window_ms(mut self, initial_window_ms: u64) -> Self {
         self.initial_window_ms = initial_window_ms;
+        self
+    }
+
+    pub fn with_launcher(mut self, launcher: SnakeLauncher) -> Self {
+        self.launcher = Some(launcher);
         self
     }
 }
@@ -83,6 +91,9 @@ pub fn router(context: ApiContext) -> Router {
         .route("/api/fine-timing", get(fine_timing).post(set_fine_timing))
         .route("/api/policies", get(policies))
         .route("/api/policies/activate", post(activate_policy))
+        .route("/api/scheduler/control", get(scheduler_control))
+        .route("/api/scheduler/start", post(start_scheduler))
+        .route("/api/scheduler/stop", post(stop_scheduler))
         .route("/api/events", get(events))
         .route("/api/scope", post(set_scope))
         .route("/api/cells/assignment", post(set_workload_cell))
@@ -285,6 +296,221 @@ async fn set_fine_timing(
 
 async fn policies(State(context): State<ApiContext>) -> impl IntoResponse {
     Json(context.dashboard.policy_catalog())
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct SchedulerPolicyControl {
+    id: String,
+    name: String,
+    change_mode: &'static str,
+    reload_reasons: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct SchedulerSettingControl {
+    name: &'static str,
+    value: serde_json::Value,
+    change_mode: &'static str,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct SchedulerControl {
+    managed: bool,
+    active: bool,
+    policy_id: Option<String>,
+    last_exit: Option<String>,
+    launch: LaunchOptions,
+    policies: Vec<SchedulerPolicyControl>,
+    settings: Vec<SchedulerSettingControl>,
+}
+
+async fn scheduler_control(
+    State(context): State<ApiContext>,
+) -> Result<Json<SchedulerControl>, ApiError> {
+    scheduler_control_response(&context).map(Json)
+}
+
+async fn start_scheduler(
+    State(context): State<ApiContext>,
+    headers: HeaderMap,
+    Json(request): Json<LaunchRequest>,
+) -> Result<Json<SchedulerControl>, ApiError> {
+    require_session_token(&headers, &context.token)?;
+    let launcher = context
+        .launcher
+        .clone()
+        .ok_or_else(|| ApiError::unavailable("managed scheduler launching is unavailable"))?;
+    tokio::task::spawn_blocking(move || launcher.start(request))
+        .await
+        .map_err(|_| ApiError::unavailable("scheduler launcher worker failed"))?
+        .map_err(|error| ApiError::bad_request(format!("{error:#}")))?;
+    scheduler_control_response(&context).map(Json)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EmptyRequest {}
+
+async fn stop_scheduler(
+    State(context): State<ApiContext>,
+    headers: HeaderMap,
+    Json(_request): Json<EmptyRequest>,
+) -> Result<Json<SchedulerControl>, ApiError> {
+    require_session_token(&headers, &context.token)?;
+    let launcher = context
+        .launcher
+        .clone()
+        .ok_or_else(|| ApiError::unavailable("managed scheduler launching is unavailable"))?;
+    tokio::task::spawn_blocking(move || launcher.stop())
+        .await
+        .map_err(|_| ApiError::unavailable("scheduler launcher worker failed"))?
+        .map_err(|error| ApiError::bad_request(format!("{error:#}")))?;
+    scheduler_control_response(&context).map(Json)
+}
+
+fn scheduler_control_response(context: &ApiContext) -> Result<SchedulerControl, ApiError> {
+    let launcher = context
+        .launcher
+        .as_ref()
+        .ok_or_else(|| ApiError::unavailable("managed scheduler launching is unavailable"))?;
+    let status = launcher
+        .status()
+        .map_err(|error| ApiError::unavailable(format!("reading scheduler status: {error:#}")))?;
+    let inspection = context.dashboard.inspection();
+    let catalog = context.dashboard.policy_catalog();
+    let active_source = inspection.snapshot.as_ref().and_then(active_policy_source);
+    let policy_id = status.policy_id.clone().or_else(|| {
+        let source = active_source?;
+        catalog
+            .catalog
+            .as_ref()?
+            .policies
+            .iter()
+            .find_map(|policy| (policy.source.trim() == source.trim()).then(|| policy.id.clone()))
+    });
+
+    let mut launch = status.launch.unwrap_or_default();
+    if !status.managed && status.active && launch.fairness.is_none() {
+        launch.fairness = inspection
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.get("fairness"))
+            .and_then(|fairness| fairness.get("mode_name"))
+            .and_then(serde_json::Value::as_str)
+            .and_then(|mode| serde_json::from_value(serde_json::Value::String(mode.into())).ok());
+    }
+    if !status.managed && status.active && launch.callback_timing_sample_rate.is_none() {
+        launch.callback_timing_sample_rate = inspection
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.get("callback_timing_sample_rate"))
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|rate| u32::try_from(rate).ok());
+    }
+
+    let dynamic = catalog
+        .catalog
+        .as_ref()
+        .map(|catalog| {
+            catalog
+                .policies
+                .iter()
+                .map(|policy| policy.id.as_str())
+                .collect::<std::collections::BTreeSet<_>>()
+        })
+        .unwrap_or_default();
+    let reload = catalog
+        .catalog
+        .as_ref()
+        .map(|catalog| {
+            catalog
+                .invalid
+                .iter()
+                .map(|policy| (policy.id.as_str(), policy.error.as_str()))
+                .collect::<std::collections::BTreeMap<_, _>>()
+        })
+        .unwrap_or_default();
+    let policies = launcher
+        .policies()
+        .map_err(|error| ApiError::unavailable(format!("reading policy library: {error:#}")))?
+        .into_iter()
+        .map(|policy| {
+            if status.active && dynamic.contains(policy.id.as_str()) {
+                SchedulerPolicyControl {
+                    id: policy.id,
+                    name: policy.name,
+                    change_mode: "dynamic",
+                    reload_reasons: Vec::new(),
+                }
+            } else {
+                let reason = reload
+                    .get(policy.id.as_str())
+                    .map(|reason| (*reason).to_owned())
+                    .or_else(|| catalog.error.clone())
+                    .unwrap_or_else(|| {
+                        if status.active {
+                            "Policy compatibility has not been validated yet.".into()
+                        } else {
+                            "Starting this policy requires launching Snake.".into()
+                        }
+                    });
+                SchedulerPolicyControl {
+                    id: policy.id,
+                    name: policy.name,
+                    change_mode: "reload",
+                    reload_reasons: vec![reason],
+                }
+            }
+        })
+        .collect();
+
+    let settings = vec![
+        SchedulerSettingControl {
+            name: "fairness",
+            value: serde_json::to_value(launch.fairness)
+                .map_err(|error| ApiError::unavailable(error.to_string()))?,
+            change_mode: "reload",
+        },
+        SchedulerSettingControl {
+            name: "callback_timing_sample_rate",
+            value: serde_json::to_value(launch.callback_timing_sample_rate)
+                .map_err(|error| ApiError::unavailable(error.to_string()))?,
+            change_mode: "dynamic",
+        },
+        SchedulerSettingControl {
+            name: "exit_dump_len",
+            value: serde_json::to_value(launch.exit_dump_len)
+                .map_err(|error| ApiError::unavailable(error.to_string()))?,
+            change_mode: "reload",
+        },
+        SchedulerSettingControl {
+            name: "verbose",
+            value: serde_json::Value::Bool(launch.verbose),
+            change_mode: "reload",
+        },
+    ];
+
+    Ok(SchedulerControl {
+        managed: status.managed,
+        active: status.active,
+        policy_id,
+        last_exit: status.last_exit,
+        launch,
+        policies,
+        settings,
+    })
+}
+
+fn active_policy_source(snapshot: &serde_json::Value) -> Option<&str> {
+    let active_slot = snapshot.get("active_slot")?.as_u64()?;
+    snapshot
+        .get("slots")?
+        .as_array()?
+        .iter()
+        .find(|slot| slot.get("slot").and_then(serde_json::Value::as_u64) == Some(active_slot))?
+        .get("policy")?
+        .get("source")?
+        .as_str()
 }
 
 #[derive(Deserialize)]

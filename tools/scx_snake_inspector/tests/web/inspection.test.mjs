@@ -20,19 +20,220 @@ import {
   queueLadderSections,
   queueRungFlow,
   routeFromHash,
+  schedulerControlModel,
+  schedulerControlMessage,
+  schedulerCommandPreview,
+  schedulerLaunchRequest,
+  schedulerSettingModels,
   rungLadderPercentages,
   rungPercentages,
   selectionRungHitFlow,
   workloadAssignmentRequest,
 } from "../../src/web/inspection.js";
 
-test("inspection routes default to activity and accept policy, cells, and callbacks", () => {
+test("inspection routes default to activity and accept every inspector view", () => {
   assert.equal(routeFromHash(""), "activity");
   assert.equal(routeFromHash("#/activity"), "activity");
   assert.equal(routeFromHash("#/policy"), "policy");
   assert.equal(routeFromHash("#/cells"), "cells");
   assert.equal(routeFromHash("#/callbacks"), "callbacks");
+  assert.equal(routeFromHash("#/control"), "control");
   assert.equal(routeFromHash("#/unknown"), "activity");
+});
+
+test("scheduler launch requests include only checkbox-enabled optional flags", () => {
+  assert.deepEqual(
+    schedulerLaunchRequest({
+      policy_id: "kernel-default-sim.toml",
+      fairness_enabled: false,
+      fairness: "vtime",
+      callback_timing_sample_rate_enabled: true,
+      callback_timing_sample_rate: "128",
+      exit_dump_len_enabled: true,
+      exit_dump_len: "4096",
+      verbose: false,
+    }),
+    {
+      policy_id: "kernel-default-sim.toml",
+      callback_timing_sample_rate: 128,
+      exit_dump_len: 4096,
+      verbose: false,
+    },
+  );
+
+  assert.deepEqual(
+    schedulerLaunchRequest({
+      policy_id: "cell-borrowing.toml",
+      fairness_enabled: true,
+      fairness: "vtime",
+      callback_timing_sample_rate_enabled: false,
+      callback_timing_sample_rate: "7",
+      exit_dump_len_enabled: false,
+      exit_dump_len: "-1",
+      verbose: true,
+    }),
+    {
+      policy_id: "cell-borrowing.toml",
+      fairness: "vtime",
+      verbose: true,
+    },
+  );
+});
+
+test("scheduler launch requests reject unsafe or unsupported values", () => {
+  const base = {
+    policy_id: "kernel-default-sim.toml",
+    fairness_enabled: false,
+    callback_timing_sample_rate_enabled: false,
+    exit_dump_len_enabled: false,
+    verbose: false,
+  };
+  assert.throws(() => schedulerLaunchRequest({ ...base, policy_id: "" }), /policy/i);
+  assert.throws(
+    () => schedulerLaunchRequest({ ...base, fairness_enabled: true, fairness: "eevdf" }),
+    /FIFO or VTIME/,
+  );
+  assert.throws(
+    () => schedulerLaunchRequest({
+      ...base,
+      callback_timing_sample_rate_enabled: true,
+      callback_timing_sample_rate: "7",
+    }),
+    /power of two/,
+  );
+  assert.throws(
+    () => schedulerLaunchRequest({
+      ...base,
+      exit_dump_len_enabled: true,
+      exit_dump_len: "-1",
+    }),
+    /non-negative integer/,
+  );
+});
+
+test("scheduler command preview shows required policy and selected flags", () => {
+  assert.equal(
+    schedulerCommandPreview({
+      policy_id: "cell borrowing.toml",
+      fairness: "vtime",
+      callback_timing_sample_rate: 128,
+      exit_dump_len: 4096,
+      verbose: true,
+    }),
+    "scx_snake --policy 'cell borrowing.toml' --fairness vtime --callback-timing-sample-rate 128 --exit-dump-len 4096 --verbose",
+  );
+  assert.equal(
+    schedulerCommandPreview({ policy_id: "kernel-default-sim.toml", verbose: false }),
+    "scx_snake --policy kernel-default-sim.toml",
+  );
+});
+
+test("scheduler settings distinguish dynamic changes from reload requirements", () => {
+  assert.deepEqual(
+    schedulerSettingModels([
+      { name: "callback_timing_sample_rate", value: 64, change_mode: "dynamic" },
+      { name: "fairness", value: "fifo", change_mode: "reload" },
+    ]),
+    [
+      {
+        name: "Callback sample rate",
+        value: "64",
+        changeMode: "dynamic",
+        changeLabel: "Dynamic",
+      },
+      {
+        name: "Fairness",
+        value: "fifo",
+        changeMode: "reload",
+        changeLabel: "Reload required",
+      },
+    ],
+  );
+});
+
+test("managed spawn state is locked and cannot launch a duplicate scheduler", () => {
+  assert.deepEqual(schedulerControlModel({ managed: true, active: false }, false, true), {
+    stateName: "starting",
+    stateLabel: "Managed / Starting",
+    configLocked: true,
+    startDisabled: true,
+    stopDisabled: false,
+  });
+  assert.deepEqual(schedulerControlModel({ managed: false, active: true }, false, true), {
+    stateName: "external",
+    stateLabel: "External / Read-only",
+    configLocked: true,
+    startDisabled: true,
+    stopDisabled: true,
+  });
+  assert.deepEqual(schedulerControlModel({ managed: false, active: false }, false, true), {
+    stateName: "stopped",
+    stateLabel: "Stopped",
+    configLocked: false,
+    startDisabled: false,
+    stopDisabled: true,
+  });
+});
+
+test("scheduler control surfaces external ownership and managed launch exits", () => {
+  assert.equal(
+    schedulerControlMessage({ active: true, managed: false }, null),
+    "The active Snake process is externally managed; inspector stop and reload controls are disabled.",
+  );
+  assert.equal(
+    schedulerControlMessage({ active: false, managed: false, last_exit: "exit code 1" }, null),
+    "Last managed Snake exit: exit code 1",
+  );
+  assert.equal(
+    schedulerControlMessage({ active: true, managed: false }, "Control unavailable"),
+    "Control unavailable",
+  );
+});
+
+test("control page exposes managed launch controls and settings table", () => {
+  const page = readFileSync(
+    new URL("../../src/web/index.html", import.meta.url),
+    "utf8",
+  );
+  for (const control of [
+    'href="#/control"',
+    'id="controlView"',
+    'id="schedulerPolicy"',
+    'id="schedulerFairnessEnabled"',
+    'id="schedulerFairness"',
+    'id="schedulerSampleRateEnabled"',
+    'id="schedulerSampleRate"',
+    'id="schedulerExitDumpEnabled"',
+    'id="schedulerExitDumpLen"',
+    'id="schedulerVerbose"',
+    'id="schedulerCommandPreview"',
+    'id="startScheduler"',
+    'id="stopScheduler"',
+    'id="schedulerSettingsRows"',
+  ]) {
+    assert.match(page, new RegExp(control), `missing ${control}`);
+  }
+  assert.doesNotMatch(page, /value="eevdf"/i);
+});
+
+test("control client uses the scheduler control, start, and stop endpoints", () => {
+  const script = readFileSync(
+    new URL("../../src/web/app.js", import.meta.url),
+    "utf8",
+  );
+  assert.match(script, /fetch\("\/api\/scheduler\/control"/);
+  assert.match(script, /schedulerMutation\("\/api\/scheduler\/start"/);
+  assert.match(script, /schedulerMutation\("\/api\/scheduler\/stop"/);
+});
+
+test("control layout has bounded launch fields and a responsive narrow mode", () => {
+  const stylesheet = readFileSync(
+    new URL("../../src/web/style.css", import.meta.url),
+    "utf8",
+  );
+  assert.match(stylesheet, /\.scheduler-launch-grid\s*\{/);
+  assert.match(stylesheet, /\.scheduler-flag-row\s*\{/);
+  assert.match(stylesheet, /@media\s*\(max-width:\s*760px\)/);
 });
 
 test("callback durations consistently use nanoseconds", () => {

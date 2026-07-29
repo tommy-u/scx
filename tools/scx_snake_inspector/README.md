@@ -4,7 +4,7 @@
 activity, installed policy state, cells, and task mappings in one local web
 application instead of splitting them across separate tools.
 
-The embedded interface has four views:
+The embedded interface has five views:
 
 - **Activity** counts a migration when a Snake task executes on a different
   CPU than its previous execution slice. It also shows aligned per-CPU runtime.
@@ -22,6 +22,22 @@ The embedded interface has four views:
   TID, every current thread in a TGID, or every current thread in a cgroup
   subtree. TGID and cgroup operations use a bounded snapshot; newly created
   threads are not assigned automatically.
+- **Control** starts and stops one inspector-owned Snake process, shows the
+  exact launch command, and distinguishes changes that can be applied
+  dynamically from settings that require a scheduler reload.
+
+The Control view accepts only typed launch options. A policy from the
+configured allowlist is required; fairness, callback sampling, exit dump
+length, and verbose logging are independently optional. FIFO and VTIME are
+available, but EEVDF is intentionally not exposed. The inspector refuses to
+start while any scheduler is attached and never stops a scheduler it did not
+launch. An owned child is stopped with the inspector.
+
+Compatible placement, enqueue, and dispatch ladder policy changes can be
+activated dynamically from the Policy view. Fairness, task membership, queue
+topology, cells, weights, CPU masks, and DSQ layout are attachment-time state
+and require a reload. Callback sampling, fine-grained timing, and workload
+cell assignments are dynamic.
 
 In queue mode, the Policy view shows fairness and clock mode, synthetic cell 0,
 dense cell indices, allocated primary and borrowable masks, cell/LLC normal DSQ
@@ -55,6 +71,7 @@ capture before activating the next generation.
 ## Build and run
 
 ```bash
+cargo build --release -p scx_snake
 cargo build --release --manifest-path tools/scx_snake_inspector/Cargo.toml
 sudo tools/scx_snake_inspector/target/release/scx_snake_inspector
 ```
@@ -70,6 +87,7 @@ Useful options:
 --max-window 5m       Maximum rolling history retained in memory
 --listen 127.0.0.1:8787
 --policy-dir scheds/rust/scx_snake/examples
+--snake-bin target/release/scx_snake
 ```
 
 The listen address is intentionally restricted to loopback. The page remains

@@ -3,7 +3,7 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 
-const ROUTES = new Set(["activity", "policy", "cells", "callbacks"]);
+const ROUTES = new Set(["activity", "policy", "cells", "callbacks", "control"]);
 const callbackDurationFormat = new Intl.NumberFormat("en-US", {
   maximumFractionDigits: 0,
 });
@@ -234,6 +234,123 @@ export function callbackSampleRateOptions() {
     });
   }
   return options;
+}
+
+export function schedulerLaunchRequest(values) {
+  const policyId = String(values?.policy_id || "").trim();
+  if (!policyId) {
+    throw new Error("Select a policy before starting Snake.");
+  }
+
+  const request = {
+    policy_id: policyId,
+    verbose: Boolean(values?.verbose),
+  };
+  if (values?.fairness_enabled) {
+    const fairness = String(values.fairness || "").toLowerCase();
+    if (fairness !== "fifo" && fairness !== "vtime") {
+      throw new Error("Fairness must be FIFO or VTIME.");
+    }
+    request.fairness = fairness;
+  }
+  if (values?.callback_timing_sample_rate_enabled) {
+    const sampleRate = Number(values.callback_timing_sample_rate);
+    if (
+      !Number.isSafeInteger(sampleRate)
+      || sampleRate < 0
+      || sampleRate > 4096
+      || (sampleRate !== 0 && !isPowerOfTwo(sampleRate))
+    ) {
+      throw new Error("Callback sample rate must be zero or a power of two through 4096.");
+    }
+    request.callback_timing_sample_rate = sampleRate;
+  }
+  if (values?.exit_dump_len_enabled) {
+    const exitDumpLen = Number(values.exit_dump_len);
+    if (!Number.isSafeInteger(exitDumpLen) || exitDumpLen < 0 || exitDumpLen > 0xffffffff) {
+      throw new Error("Exit dump length must be a non-negative integer through 4294967295.");
+    }
+    request.exit_dump_len = exitDumpLen;
+  }
+  return request;
+}
+
+export function schedulerCommandPreview(request) {
+  if (!request?.policy_id) {
+    return "scx_snake --policy <select a policy>";
+  }
+  const args = ["scx_snake", "--policy", shellWord(request.policy_id)];
+  if (request.fairness != null) {
+    args.push("--fairness", shellWord(request.fairness));
+  }
+  if (request.callback_timing_sample_rate != null) {
+    args.push("--callback-timing-sample-rate", String(request.callback_timing_sample_rate));
+  }
+  if (request.exit_dump_len != null) {
+    args.push("--exit-dump-len", String(request.exit_dump_len));
+  }
+  if (request.verbose) {
+    args.push("--verbose");
+  }
+  return args.join(" ");
+}
+
+export function schedulerSettingModels(settings) {
+  const labels = {
+    fairness: "Fairness",
+    callback_timing_sample_rate: "Callback sample rate",
+    exit_dump_len: "Exit dump length",
+    verbose: "Verbose logging",
+  };
+  return (settings || []).map((setting) => {
+    const changeMode = setting.change_mode === "dynamic" ? "dynamic" : "reload";
+    return {
+      name: labels[setting.name] || String(setting.name || "Unknown setting"),
+      value: String(setting.value ?? "Unavailable"),
+      changeMode,
+      changeLabel: changeMode === "dynamic" ? "Dynamic" : "Reload required",
+    };
+  });
+}
+
+export function schedulerControlMessage(control, error) {
+  if (error) {
+    return error;
+  }
+  if (control?.active && !control?.managed) {
+    return "The active Snake process is externally managed; inspector stop and reload controls are disabled.";
+  }
+  if (!control?.active && control?.last_exit) {
+    return `Last managed Snake exit: ${control.last_exit}`;
+  }
+  return null;
+}
+
+export function schedulerControlModel(control, pending, hasPolicy) {
+  const active = Boolean(control?.active);
+  const managed = Boolean(control?.managed);
+  const stateName = managed ? (active ? "active" : "starting") : (active ? "external" : "stopped");
+  return {
+    stateName,
+    stateLabel: managed
+      ? (active ? "Managed / Running" : "Managed / Starting")
+      : (active ? "External / Read-only" : "Stopped"),
+    configLocked: Boolean(pending) || active || managed,
+    startDisabled: Boolean(pending) || active || managed || !hasPolicy,
+    stopDisabled: Boolean(pending) || !managed,
+  };
+}
+
+function isPowerOfTwo(value) {
+  return value > 0 && Math.log2(value) % 1 === 0;
+}
+
+function shellWord(value) {
+  const word = String(value);
+  if (/^[a-zA-Z0-9_./:-]+$/.test(word)) {
+    return word;
+  }
+  return `'${word.replaceAll("'", `'"'"'`)}'`;
 }
 
 function formatDsqId(value) {

@@ -1771,6 +1771,221 @@ button:focus-visible {
   flex-wrap: wrap;
 }
 
+.scheduler-state {
+  padding: 4px 8px;
+  color: var(--muted);
+  background: var(--surface-muted);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 0.7rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.scheduler-state.active {
+  color: #075e4c;
+  background: #e4f5ef;
+  border-color: #80bba8;
+}
+
+.scheduler-state.external {
+  color: #7d4400;
+  background: #fff5e5;
+  border-color: #e8c58e;
+}
+
+.scheduler-state.starting {
+  color: var(--accent);
+  background: #e8f1f8;
+  border-color: #9bbbd5;
+}
+
+.scheduler-launch-section,
+.scheduler-settings-section {
+  padding: 20px clamp(16px, 3vw, 40px) 24px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+
+.section-heading {
+  margin-bottom: 14px;
+}
+
+.section-heading h3,
+.scheduler-command-section h3 {
+  margin: 0;
+  font-size: 0.85rem;
+  font-weight: 700;
+}
+
+.scheduler-launch-grid {
+  display: grid;
+  grid-template-columns: minmax(520px, 1.7fr) minmax(300px, 1fr);
+  gap: 28px;
+  align-items: start;
+}
+
+.scheduler-policy-field {
+  width: min(460px, 100%);
+  margin-bottom: 16px;
+}
+
+.scheduler-flag-list {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.scheduler-flag-list > legend {
+  margin-bottom: 6px;
+  color: var(--muted);
+  font-size: 0.7rem;
+  font-weight: 700;
+}
+
+.scheduler-flag-row {
+  min-height: 48px;
+  display: grid;
+  grid-template-columns: minmax(150px, 0.8fr) minmax(170px, 1fr) minmax(215px, 1.2fr);
+  align-items: center;
+  gap: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.scheduler-flag-row:last-child {
+  border-bottom: 1px solid var(--border);
+}
+
+.scheduler-flag-toggle {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.76rem;
+  font-weight: 650;
+}
+
+.scheduler-flag-toggle input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.scheduler-flag-row select,
+.scheduler-flag-row input[type="number"] {
+  min-width: 0;
+  width: 100%;
+  height: 34px;
+  padding: 5px 9px;
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+}
+
+.scheduler-flag-row select:disabled,
+.scheduler-flag-row input[type="number"]:disabled {
+  color: var(--muted);
+  background: var(--surface-muted);
+}
+
+.scheduler-flag-row code {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 0.69rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.scheduler-command-section {
+  min-width: 0;
+  padding-left: 24px;
+  border-left: 1px solid var(--border);
+}
+
+.scheduler-command-section pre {
+  min-height: 88px;
+  margin: 12px 0;
+  padding: 12px;
+  overflow: auto;
+  color: var(--ink);
+  background: var(--surface-muted);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 0.72rem;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.scheduler-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.scheduler-settings-table-wrap {
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+
+.scheduler-settings-table-wrap table {
+  width: 100%;
+  min-width: 560px;
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+
+.scheduler-settings-table-wrap th,
+.scheduler-settings-table-wrap td {
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.73rem;
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+
+.scheduler-settings-table-wrap thead th {
+  color: var(--muted);
+  background: var(--surface-muted);
+  font-size: 0.65rem;
+  font-weight: 700;
+}
+
+.scheduler-settings-table-wrap tbody tr:last-child > * {
+  border-bottom: 0;
+}
+
+.change-mode {
+  display: inline-block;
+  padding: 3px 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 0.65rem;
+  font-weight: 700;
+}
+
+.change-mode.dynamic {
+  color: #075e4c;
+  background: #e4f5ef;
+  border-color: #80bba8;
+}
+
+.change-mode.reload {
+  color: #7d4400;
+  background: #fff5e5;
+  border-color: #e8c58e;
+}
+
+.scheduler-settings-empty {
+  color: var(--muted);
+  text-align: center !important;
+}
+
 .empty-state {
   margin: 0;
   padding: 28px 16px;
@@ -1963,5 +2178,35 @@ button:focus-visible {
 
   .task-mappings {
     max-height: none;
+  }
+
+  .scheduler-launch-section,
+  .scheduler-settings-section {
+    padding: 14px 12px 18px;
+  }
+
+  .scheduler-launch-grid {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 20px;
+  }
+
+  .scheduler-flag-row {
+    padding: 9px 0;
+    grid-template-columns: minmax(0, 1fr) minmax(140px, 1fr);
+    gap: 7px 10px;
+  }
+
+  .scheduler-flag-row code {
+    grid-column: 1 / -1;
+  }
+
+  .scheduler-boolean-flag > span {
+    display: none;
+  }
+
+  .scheduler-command-section {
+    padding: 18px 0 0;
+    border-top: 1px solid var(--border);
+    border-left: 0;
   }
 }

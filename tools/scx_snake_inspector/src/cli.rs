@@ -27,6 +27,10 @@ pub struct Args {
     /// Directory containing selectable Snake TOML policies.
     #[arg(long, default_value = "scheds/rust/scx_snake/examples")]
     pub policy_dir: PathBuf,
+
+    /// Snake executable used for scheduler launches from the dashboard.
+    #[arg(long, default_value = "target/release/scx_snake")]
+    pub snake_bin: PathBuf,
 }
 
 impl Args {

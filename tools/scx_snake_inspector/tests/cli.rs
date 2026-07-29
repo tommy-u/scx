@@ -37,3 +37,11 @@ fn policy_directory_can_be_overridden() {
         std::path::PathBuf::from("/tmp/snake-policies")
     );
 }
+
+#[test]
+fn snake_binary_can_be_overridden() {
+    let args =
+        Args::try_parse_from(["scx_snake_inspector", "--snake-bin", "/opt/scx_snake"]).unwrap();
+
+    assert_eq!(args.snake_bin, std::path::PathBuf::from("/opt/scx_snake"));
+}

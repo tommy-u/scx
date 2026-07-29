@@ -24,6 +24,7 @@
       <a href="#/callbacks" data-route="callbacks">Callbacks</a>
       <a href="#/policy" data-route="policy">Policy</a>
       <a href="#/cells" data-route="cells">Cells</a>
+      <a href="#/control" data-route="control">Control</a>
     </nav>
 
     <main id="app" aria-label="Snake scheduler inspector">
@@ -219,6 +220,91 @@
           </section>
           <section class="cell-detail" id="cellDetail" aria-live="polite"></section>
         </div>
+      </section>
+
+      <section class="view-panel hidden" id="controlView" data-view="control" aria-labelledby="controlTitle">
+        <header class="view-heading">
+          <div>
+            <h2 id="controlTitle">Scheduler control</h2>
+            <p>Managed Snake process and launch configuration</p>
+          </div>
+          <span class="scheduler-state stopped" id="schedulerControlState">Stopped</span>
+        </header>
+        <p class="notice hidden" id="schedulerControlNotice" role="status"></p>
+
+        <section class="scheduler-launch-section" aria-labelledby="schedulerLaunchTitle">
+          <header class="section-heading">
+            <h3 id="schedulerLaunchTitle">Launch configuration</h3>
+          </header>
+          <div class="scheduler-launch-grid">
+            <div class="scheduler-launch-fields">
+              <label class="control-field scheduler-policy-field">
+                <span>Policy</span>
+                <select id="schedulerPolicy" aria-label="Snake policy"></select>
+              </label>
+
+              <fieldset class="scheduler-flag-list">
+                <legend>Optional flags</legend>
+                <div class="scheduler-flag-row">
+                  <label class="scheduler-flag-toggle">
+                    <input id="schedulerFairnessEnabled" type="checkbox">
+                    <span>Fairness</span>
+                  </label>
+                  <select id="schedulerFairness" aria-label="Fairness mode" disabled>
+                    <option value="fifo">FIFO</option>
+                    <option value="vtime">VTIME</option>
+                  </select>
+                  <code>--fairness</code>
+                </div>
+                <div class="scheduler-flag-row">
+                  <label class="scheduler-flag-toggle">
+                    <input id="schedulerSampleRateEnabled" type="checkbox">
+                    <span>Callback sampling</span>
+                  </label>
+                  <select id="schedulerSampleRate" aria-label="Launch callback timing sample rate" disabled></select>
+                  <code>--callback-timing-sample-rate</code>
+                </div>
+                <div class="scheduler-flag-row">
+                  <label class="scheduler-flag-toggle">
+                    <input id="schedulerExitDumpEnabled" type="checkbox">
+                    <span>Exit dump length</span>
+                  </label>
+                  <input id="schedulerExitDumpLen" type="number" min="0" max="4294967295" step="1" value="0" disabled>
+                  <code>--exit-dump-len</code>
+                </div>
+                <div class="scheduler-flag-row scheduler-boolean-flag">
+                  <label class="scheduler-flag-toggle">
+                    <input id="schedulerVerbose" type="checkbox">
+                    <span>Verbose logging</span>
+                  </label>
+                  <span></span>
+                  <code>--verbose</code>
+                </div>
+              </fieldset>
+            </div>
+
+            <section class="scheduler-command-section" aria-labelledby="schedulerCommandTitle">
+              <h3 id="schedulerCommandTitle">Command preview</h3>
+              <pre id="schedulerCommandPreview">scx_snake --policy &lt;select a policy&gt;</pre>
+              <div class="scheduler-actions">
+                <button class="apply-button" id="startScheduler" type="button">Start Snake</button>
+                <button class="secondary-button" id="stopScheduler" type="button" disabled>Stop Snake</button>
+              </div>
+            </section>
+          </div>
+        </section>
+
+        <section class="scheduler-settings-section" aria-labelledby="schedulerSettingsTitle">
+          <header class="section-heading">
+            <h3 id="schedulerSettingsTitle">Change behavior</h3>
+          </header>
+          <div class="scheduler-settings-table-wrap">
+            <table>
+              <thead><tr><th scope="col">Setting</th><th scope="col">Current value</th><th scope="col">Application</th></tr></thead>
+              <tbody id="schedulerSettingsRows"></tbody>
+            </table>
+          </div>
+        </section>
       </section>
     </main>
 

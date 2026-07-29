@@ -4,6 +4,8 @@
 // GNU General Public License version 2.
 
 use std::collections::BTreeMap;
+use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::sync::mpsc;
 
 use axum::body::Body;
@@ -12,12 +14,37 @@ use http_body_util::BodyExt;
 use scx_snake_inspector::api::{router, ApiContext, CSRF_HEADER};
 use scx_snake_inspector::collector::CollectorCommand;
 use scx_snake_inspector::dashboard::Dashboard;
+use scx_snake_inspector::launcher::SnakeLauncher;
 use scx_snake_inspector::model::CpuPair;
 use scx_snake_inspector::policies::{PolicyCatalog, PolicyChoice};
 use scx_snake_inspector::scope::TaskScope;
 use scx_snake_inspector::topology::{CpuInfo, TopologyView};
 use serde_json::{json, Value};
 use tower::ServiceExt;
+
+fn launcher_fixture() -> (tempfile::TempDir, SnakeLauncher) {
+    launcher_fixture_with_script("#!/bin/sh\ntrap 'exit 0' INT TERM\nwhile :; do sleep 1; done\n")
+}
+
+fn launcher_fixture_with_script(script: &str) -> (tempfile::TempDir, SnakeLauncher) {
+    let root = tempfile::tempdir().unwrap();
+    let binary = root.path().join("scx_snake");
+    fs::write(&binary, script).unwrap();
+    let mut permissions = fs::metadata(&binary).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&binary, permissions).unwrap();
+    let policies = root.path().join("policies");
+    fs::create_dir(&policies).unwrap();
+    fs::write(
+        policies.join("basic.toml"),
+        "[[rung]]\noperation = \"claim_idle\"\nscope = \"previous_cpu\"\n",
+    )
+    .unwrap();
+    let ops = root.path().join("ops");
+    fs::write(&ops, "\n").unwrap();
+    let launcher = SnakeLauncher::with_ops_path(&binary, &policies, &ops).unwrap();
+    (root, launcher)
+}
 
 fn dashboard() -> Dashboard {
     let topology = TopologyView::from_cpus(vec![
@@ -124,6 +151,211 @@ fn fine_timing_snapshot() -> Value {
         ]
     });
     snapshot
+}
+
+#[tokio::test]
+async fn scheduler_control_lists_policies_while_stopped_and_manages_an_owned_child() {
+    let (_root, launcher) = launcher_fixture();
+    let (tx, _rx) = mpsc::channel();
+    let cgroup_root = tempfile::tempdir().unwrap();
+    let context = ApiContext::new(dashboard(), tx, "secret", cgroup_root.path().to_path_buf())
+        .with_launcher(launcher);
+
+    let response = router(context.clone())
+        .oneshot(
+            Request::builder()
+                .uri("/api/scheduler/control")
+                .header("host", "127.0.0.1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(body["managed"], false);
+    assert_eq!(body["active"], false);
+    assert_eq!(body["policy_id"], Value::Null);
+    assert_eq!(body["launch"]["fairness"], Value::Null);
+    assert_eq!(body["launch"]["callback_timing_sample_rate"], Value::Null);
+    assert_eq!(body["launch"]["exit_dump_len"], Value::Null);
+    assert_eq!(body["launch"]["verbose"], false);
+    assert_eq!(body["policies"][0]["id"], "basic.toml");
+    assert_eq!(body["policies"][0]["change_mode"], "reload");
+    assert_eq!(body["settings"][0]["name"], "fairness");
+
+    let request_body = Body::from(
+        r#"{"policy_id":"basic.toml","fairness":"vtime","callback_timing_sample_rate":128,"exit_dump_len":4096,"verbose":true}"#,
+    );
+    let unauthorized = router(context.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/scheduler/start")
+                .header("host", "127.0.0.1")
+                .header("content-type", "application/json")
+                .body(request_body)
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+    let started = router(context.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/scheduler/start")
+                .header("host", "127.0.0.1")
+                .header("content-type", "application/json")
+                .header(CSRF_HEADER, "secret")
+                .body(Body::from(
+                    r#"{"policy_id":"basic.toml","fairness":"vtime","callback_timing_sample_rate":128,"exit_dump_len":4096,"verbose":true}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(started.status(), StatusCode::OK);
+    let body: Value =
+        serde_json::from_slice(&started.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(body["managed"], true);
+    assert_eq!(body["policy_id"], "basic.toml");
+    assert_eq!(body["launch"]["fairness"], "vtime");
+    assert_eq!(body["launch"]["callback_timing_sample_rate"], 128);
+    assert_eq!(body["launch"]["exit_dump_len"], 4096);
+    assert_eq!(body["launch"]["verbose"], true);
+
+    let stopped = router(context)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/scheduler/stop")
+                .header("host", "127.0.0.1")
+                .header("content-type", "application/json")
+                .header(CSRF_HEADER, "secret")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(stopped.status(), StatusCode::OK);
+    let body: Value =
+        serde_json::from_slice(&stopped.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(body["managed"], false);
+}
+
+#[tokio::test]
+async fn scheduler_start_rejects_raw_or_unknown_arguments() {
+    let (_root, launcher) = launcher_fixture();
+    let (tx, _rx) = mpsc::channel();
+    let cgroup_root = tempfile::tempdir().unwrap();
+    let context = ApiContext::new(dashboard(), tx, "secret", cgroup_root.path().to_path_buf())
+        .with_launcher(launcher);
+
+    let response = router(context)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/scheduler/start")
+                .header("host", "127.0.0.1")
+                .header("content-type", "application/json")
+                .header(CSRF_HEADER, "secret")
+                .body(Body::from(
+                    r#"{"policy_id":"basic.toml","verbose":false,"args":["--fairness","eevdf"]}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test]
+async fn scheduler_control_preserves_omitted_launch_flags() {
+    let (_root, launcher) = launcher_fixture();
+    let dashboard = dashboard();
+    dashboard.set_inspection(
+        Some(json!({
+            "active_slot": 0,
+            "callback_timing_sample_rate": 64,
+            "fairness": {"mode_name": "fifo"},
+            "slots": [{"slot": 0, "policy": {"source": "basic"}}]
+        })),
+        None,
+    );
+    let (tx, _rx) = mpsc::channel();
+    let cgroup_root = tempfile::tempdir().unwrap();
+    let context = ApiContext::new(dashboard, tx, "secret", cgroup_root.path().to_path_buf())
+        .with_launcher(launcher);
+
+    let response = router(context)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/scheduler/start")
+                .header("host", "127.0.0.1")
+                .header("content-type", "application/json")
+                .header(CSRF_HEADER, "secret")
+                .body(Body::from(r#"{"policy_id":"basic.toml","verbose":false}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+
+    assert_eq!(body["launch"]["fairness"], Value::Null);
+    assert_eq!(body["launch"]["callback_timing_sample_rate"], Value::Null);
+}
+
+#[tokio::test]
+async fn scheduler_control_reports_the_last_managed_exit() {
+    let (_root, launcher) = launcher_fixture_with_script("#!/bin/sh\nexit 7\n");
+    let (tx, _rx) = mpsc::channel();
+    let cgroup_root = tempfile::tempdir().unwrap();
+    let context = ApiContext::new(dashboard(), tx, "secret", cgroup_root.path().to_path_buf())
+        .with_launcher(launcher);
+
+    let started = router(context.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/scheduler/start")
+                .header("host", "127.0.0.1")
+                .header("content-type", "application/json")
+                .header(CSRF_HEADER, "secret")
+                .body(Body::from(r#"{"policy_id":"basic.toml","verbose":false}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(started.status(), StatusCode::OK);
+
+    let mut body = Value::Null;
+    for _ in 0..50 {
+        let response = router(context.clone())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/scheduler/control")
+                    .header("host", "127.0.0.1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        body = serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+            .unwrap();
+        if body["managed"] == false {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    assert_eq!(body["managed"], false);
+    assert_eq!(body["last_exit"], "exit code 7");
 }
 
 #[tokio::test]
