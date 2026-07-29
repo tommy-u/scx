@@ -216,6 +216,14 @@ impl FineTimingState {
         }
     }
 
+    pub fn clear(&mut self) -> bool {
+        let stopped_active_capture = FineTimingCallback::ALL
+            .into_iter()
+            .any(|callback| self.is_enabled(callback));
+        self.sessions = [None, None, None];
+        stopped_active_capture
+    }
+
     pub fn session(&self, callback: FineTimingCallback) -> Option<&FineTimingSession> {
         self.sessions[callback.index()].as_ref()
     }
@@ -241,5 +249,31 @@ impl FineTimingState {
             }
         }
         config
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clear_discards_active_and_historical_sessions() {
+        let mut state = FineTimingState::default();
+        let previous = state.start(FineTimingCallback::SelectCpu, 4, 100);
+        state.start(FineTimingCallback::Enqueue, 4, 200);
+        state.stop(FineTimingCallback::Enqueue, 300);
+
+        let stopped_active_capture = state.clear();
+
+        assert!(stopped_active_capture);
+        for callback in FineTimingCallback::ALL {
+            assert!(state.session(callback).is_none());
+            assert!(!state.is_enabled(callback));
+        }
+        let config = state.bpf_config();
+        assert_eq!(config.enabled_mask, 0);
+        assert_eq!(config.session_ids, [0; 3]);
+        let next = state.start(FineTimingCallback::SelectCpu, 4, 400);
+        assert_ne!(next.session_id, previous.session_id);
     }
 }

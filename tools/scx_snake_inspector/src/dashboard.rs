@@ -252,6 +252,26 @@ impl Dashboard {
         self.updates.send_replace(sequence);
     }
 
+    pub fn reset_statistics(&self, at_ms: u64, baseline: &BTreeMap<CpuPair, u64>) {
+        let sequence = {
+            let mut live = self.live.write().expect("dashboard lock poisoned");
+            live.history.reset(at_ms, baseline);
+            live.cpu_history.reset(at_ms);
+            live.now_ms = at_ms;
+            live.cpu_now_ms = at_ms;
+            live.inspection = None;
+            live.inspection_error = None;
+            live.inspection_sequence = live.inspection_sequence.wrapping_add(1);
+            live.callback_timing_now_ms = at_ms;
+            live.callback_timing_history.clear();
+            live.callback_timing_status = CallbackTimingStatus::Unavailable;
+            live.callback_timing_error = None;
+            live.sequence = live.sequence.wrapping_add(1);
+            live.sequence
+        };
+        self.updates.send_replace(sequence);
+    }
+
     pub fn reset_migrations(&self, at_ms: u64, baseline: &BTreeMap<CpuPair, u64>) {
         let sequence = {
             let mut live = self.live.write().expect("dashboard lock poisoned");

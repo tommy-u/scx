@@ -387,6 +387,12 @@ impl FineTimingAccumulator {
         self.active[callback.index()] = false;
     }
 
+    fn clear(&mut self) {
+        self.sessions = [None, None, None];
+        self.active = [false; 3];
+        self.metrics.clear();
+    }
+
     fn metrics(&self, session_id: u64, stage: u32) -> CallbackTimingMetrics {
         self.metrics
             .get(&(session_id, stage))
@@ -1554,6 +1560,61 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
         })
     }
 
+    fn reset_stats(&mut self) -> Result<control::StatsResetResponse> {
+        self.drain_fine_timing_events()?;
+        let resolved_tables = self
+            .inspector
+            .active_resolved_tables()
+            .context("active policy has no resolved mask tables")?
+            .to_vec();
+        let previous_fine_timing = self.fine_timing_state.clone();
+        let mut cleared_fine_timing = previous_fine_timing.clone();
+        let fine_timing_stopped = cleared_fine_timing.clear();
+        let accumulator = Arc::clone(&self.fine_timing_accumulator);
+        let mut accumulator = accumulator
+            .lock()
+            .map_err(|_| anyhow!("fine timing accumulator lock poisoned"))?;
+        self.publish_fine_timing_state(&cleared_fine_timing)?;
+
+        let mut backend = BpfPolicyBackend {
+            skel: &mut self.skel,
+        };
+        let reset_result =
+            runtime_policy::reset_stats(self.runtime, &resolved_tables, &mut backend);
+        drop(backend);
+        let active_slot = match reset_result {
+            Ok(active_slot) => active_slot,
+            Err(error) => {
+                if let Err(restore_error) = self.publish_fine_timing_state(&previous_fine_timing) {
+                    return Err(error).context(format!(
+                        "restoring fine timing after reset failure also failed: {restore_error:#}"
+                    ));
+                }
+                return Err(error);
+            }
+        };
+
+        accumulator.clear();
+        drop(accumulator);
+        self.fine_timing_state = cleared_fine_timing;
+
+        let reset_at_ms = unix_time_ms();
+        self.inspector.reset_stats(SlotPolicy::new(
+            active_slot,
+            self.runtime.generation,
+            self.runtime.source.clone(),
+            self.runtime.compiled.clone(),
+            resolved_tables,
+            reset_at_ms,
+        ));
+        Ok(control::StatsResetResponse {
+            generation: self.runtime.generation,
+            active_slot,
+            reset_at_ms,
+            fine_timing_stopped,
+        })
+    }
+
     fn stop_all_fine_timing(&mut self) -> Result<()> {
         if !fine_timing::FineTimingCallback::ALL
             .iter()
@@ -1760,6 +1821,10 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
                         .set_callback_timing_sample_rate(sample_rate)
                         .map_err(|error| format!("{error:#}"));
                     response_channel.send(SchedulerResponse::CallbackTimingSampleRate(response))?;
+                }
+                Ok(SchedulerRequest::ResetStats) => {
+                    let response = self.reset_stats().map_err(|error| format!("{error:#}"));
+                    response_channel.send(SchedulerResponse::StatsReset(response))?;
                 }
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => {
@@ -2944,6 +3009,23 @@ scope = "task_allowed"
         accumulator.stop(FineTimingCallback::SelectCpu);
         accumulator.record(7, stage, 2_000);
         assert_eq!(accumulator.metrics(7, stage), metrics);
+    }
+
+    #[test]
+    fn fine_timing_accumulator_clear_discards_history_and_rejects_old_events() {
+        use crate::fine_timing::{stages, FineTimingCallback};
+
+        let mut accumulator = FineTimingAccumulator::default();
+        let stage = stages(FineTimingCallback::SelectCpu)[0].id;
+        accumulator.reset(FineTimingCallback::SelectCpu, 11);
+        accumulator.record(11, stage, 900);
+
+        accumulator.clear();
+        accumulator.record(11, stage, 1_100);
+
+        let metrics = accumulator.metrics(11, stage);
+        assert_eq!(metrics.total_ns, 0);
+        assert_eq!(metrics.buckets.iter().sum::<u64>(), 0);
     }
 
     #[test]

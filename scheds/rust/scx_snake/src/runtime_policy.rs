@@ -141,6 +141,27 @@ where
     Ok(response)
 }
 
+/// Reinstall the active policy into the inactive slot and publish its empty
+/// statistics bank without changing the policy generation or scheduler state.
+pub fn reset_stats<B>(
+    current: &mut RuntimePolicy,
+    tables: &[ResolvedMaskTable],
+    backend: &mut B,
+) -> Result<u32>
+where
+    B: PolicyBackend,
+{
+    let slot = inactive_slot(current.active_slot)?;
+    backend.wait_for_slot_quiescent(slot)?;
+    backend.write_ladder(slot, current.generation, &current.compiled)?;
+    backend.write_mask_tables(slot, tables)?;
+    backend.prepare_ladder(slot)?;
+    backend.clear_stats(slot)?;
+    backend.publish_ladder(slot)?;
+    current.active_slot = slot;
+    Ok(slot)
+}
+
 pub fn inactive_slot(active: u32) -> Result<u32> {
     if active >= bpf_intf::SNAKE_LADDER_SLOTS {
         bail!("invalid active ladder slot {active}");
@@ -249,6 +270,7 @@ scope = "task_allowed"
     struct RecordingBackend {
         fail_at: Option<&'static str>,
         steps: Vec<&'static str>,
+        ladder_writes: Vec<(u32, u64)>,
     }
 
     impl RecordingBackend {
@@ -268,10 +290,11 @@ scope = "task_allowed"
 
         fn write_ladder(
             &mut self,
-            _slot: u32,
-            _generation: u64,
+            slot: u32,
+            generation: u64,
             _policy: &CompiledPolicy,
         ) -> Result<()> {
+            self.ladder_writes.push((slot, generation));
             self.record("write_ladder")
         }
 
@@ -356,6 +379,58 @@ scope = "task_allowed"
                 &mut backend,
             )
             .is_err());
+            assert_eq!(current, original, "state changed after {fail_at} failure");
+        }
+    }
+
+    #[test]
+    fn stats_reset_reinstalls_the_same_generation_before_flipping_slots() {
+        let mut current = initial_state();
+        current.generation = 9;
+        let original_source = current.source.clone();
+        let original_policy = current.compiled.clone();
+        let mut backend = RecordingBackend::default();
+
+        let active_slot = reset_stats(&mut current, &[], &mut backend)
+            .expect("statistics reset should publish a fresh slot");
+
+        assert_eq!(
+            backend.steps,
+            [
+                "wait",
+                "write_ladder",
+                "write_masks",
+                "prepare",
+                "clear_stats",
+                "publish"
+            ]
+        );
+        assert_eq!(backend.ladder_writes, [(1, 9)]);
+        assert_eq!(active_slot, 1);
+        assert_eq!(current.active_slot, 1);
+        assert_eq!(current.generation, 9);
+        assert_eq!(current.source, original_source);
+        assert_eq!(current.compiled, original_policy);
+    }
+
+    #[test]
+    fn stats_reset_failure_preserves_the_runtime_policy() {
+        for fail_at in [
+            "wait",
+            "write_ladder",
+            "write_masks",
+            "prepare",
+            "clear_stats",
+            "publish",
+        ] {
+            let mut current = initial_state();
+            let original = current.clone();
+            let mut backend = RecordingBackend {
+                fail_at: Some(fail_at),
+                ..Default::default()
+            };
+
+            assert!(reset_stats(&mut current, &[], &mut backend).is_err());
             assert_eq!(current, original, "state changed after {fail_at} failure");
         }
     }

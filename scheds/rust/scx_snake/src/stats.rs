@@ -665,6 +665,16 @@ pub fn server_data() -> StatsServerData<SchedulerRequest, SchedulerResponse> {
             Ok(read)
         });
 
+    let reset_stats: Box<dyn StatsOpener<SchedulerRequest, SchedulerResponse>> =
+        Box::new(move |_| {
+            let read: Box<dyn StatsReader<SchedulerRequest, SchedulerResponse>> =
+                Box::new(move |_args, (req_ch, res_ch)| {
+                    req_ch.send(SchedulerRequest::ResetStats)?;
+                    receive_stats_reset_response(res_ch.recv()?)
+                });
+            Ok(read)
+        });
+
     StatsServerData::new()
         .add_meta(Metrics::meta())
         .add_meta(CallbackTimingMetrics::meta())
@@ -721,6 +731,13 @@ pub fn server_data() -> StatsServerData<SchedulerRequest, SchedulerResponse> {
                 close: None,
             },
         )
+        .add_ops(
+            "stats_reset",
+            StatsOps {
+                open: reset_stats,
+                close: None,
+            },
+        )
 }
 
 fn parse_arg<T>(args: &BTreeMap<String, String>, key: &str, operation: &str) -> Result<T>
@@ -741,6 +758,14 @@ fn receive_thread_cell_response(response: SchedulerResponse) -> Result<serde_jso
         SchedulerResponse::ThreadCell(Ok(response)) => Ok(serde_json::to_value(response)?),
         SchedulerResponse::ThreadCell(Err(error)) => bail!(error),
         response => bail!("unexpected response to thread cell request: {response:?}"),
+    }
+}
+
+fn receive_stats_reset_response(response: SchedulerResponse) -> Result<serde_json::Value> {
+    match response {
+        SchedulerResponse::StatsReset(Ok(response)) => Ok(serde_json::to_value(response)?),
+        SchedulerResponse::StatsReset(Err(error)) => bail!(error),
+        response => bail!("unexpected response to statistics reset request: {response:?}"),
     }
 }
 
@@ -808,6 +833,29 @@ mod tests {
 
         assert_eq!(timing.total_ns, 250);
         assert_eq!(timing.buckets, vec![3, 6, 7]);
+    }
+
+    #[test]
+    fn stats_reset_response_serializes_the_control_contract() {
+        let response = crate::control::StatsResetResponse {
+            generation: 12,
+            active_slot: 0,
+            reset_at_ms: 8_765,
+            fine_timing_stopped: false,
+        };
+
+        let value = receive_stats_reset_response(SchedulerResponse::StatsReset(Ok(response)))
+            .expect("reset response should serialize");
+
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "generation": 12,
+                "active_slot": 0,
+                "reset_at_ms": 8_765,
+                "fine_timing_stopped": false,
+            })
+        );
     }
 
     #[test]

@@ -1927,6 +1927,10 @@ button:focus-visible {
   flex-wrap: wrap;
 }
 
+.scheduler-command-section .control-message {
+  margin-top: 12px;
+}
+
 .scheduler-settings-table-wrap {
   overflow: auto;
   border: 1px solid var(--border);

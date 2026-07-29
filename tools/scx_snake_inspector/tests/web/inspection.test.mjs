@@ -25,6 +25,7 @@ import {
   schedulerCommandPreview,
   schedulerLaunchRequest,
   schedulerSettingModels,
+  statsResetDisabled,
   rungLadderPercentages,
   rungPercentages,
   selectionRungHitFlow,
@@ -133,6 +134,7 @@ test("scheduler settings distinguish dynamic changes from reload requirements", 
     schedulerSettingModels([
       { name: "callback_timing_sample_rate", value: 64, change_mode: "dynamic" },
       { name: "fairness", value: "fifo", change_mode: "reload" },
+      { name: "stats_reset", value: "On demand", change_mode: "dynamic" },
     ]),
     [
       {
@@ -147,8 +149,32 @@ test("scheduler settings distinguish dynamic changes from reload requirements", 
         changeMode: "reload",
         changeLabel: "Reload required",
       },
+      {
+        name: "Stats reset",
+        value: "On demand",
+        changeMode: "dynamic",
+        changeLabel: "Dynamic",
+      },
     ],
   );
+});
+
+test("stats reset is available for managed and external active Snake", () => {
+  assert.equal(statsResetDisabled({ active: true, managed: true }, false), false);
+  assert.equal(
+    statsResetDisabled({ active: true, managed: false, scheduler_name: "snake" }, false),
+    false,
+  );
+  assert.equal(
+    statsResetDisabled({ active: true, managed: false, scheduler_name: "snake_ops" }, false),
+    false,
+  );
+  assert.equal(
+    statsResetDisabled({ active: true, managed: false, scheduler_name: "scx_mitosis" }, false),
+    true,
+  );
+  assert.equal(statsResetDisabled({ active: false, managed: true }, false), true);
+  assert.equal(statsResetDisabled({ active: true, managed: true }, true), true);
 });
 
 test("managed spawn state is locked and cannot launch a duplicate scheduler", () => {
@@ -209,6 +235,8 @@ test("control page exposes managed launch controls and settings table", () => {
     'id="schedulerCommandPreview"',
     'id="startScheduler"',
     'id="stopScheduler"',
+    'id="resetAllStats"',
+    'id="statsResetNotice"',
     'id="schedulerSettingsRows"',
   ]) {
     assert.match(page, new RegExp(control), `missing ${control}`);
@@ -224,6 +252,8 @@ test("control client uses the scheduler control, start, and stop endpoints", () 
   assert.match(script, /fetch\("\/api\/scheduler\/control"/);
   assert.match(script, /schedulerMutation\("\/api\/scheduler\/start"/);
   assert.match(script, /schedulerMutation\("\/api\/scheduler\/stop"/);
+  assert.match(script, /fetch\("\/api\/stats\/reset"/);
+  assert.match(script, /confirm\("Reset all inspector and Snake statistics\?"\)/);
 });
 
 test("control layout has bounded launch fields and a responsive narrow mode", () => {

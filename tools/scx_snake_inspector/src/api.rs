@@ -22,6 +22,7 @@ use tokio_stream::StreamExt;
 
 use crate::collector::{
     CallbackTimingRateResponse, CollectorCommand, FineTimingCallback, FineTimingControlResponse,
+    StatsResetResponse,
 };
 use crate::dashboard::Dashboard;
 use crate::launcher::{LaunchOptions, LaunchRequest, SnakeLauncher};
@@ -94,6 +95,7 @@ pub fn router(context: ApiContext) -> Router {
         .route("/api/scheduler/control", get(scheduler_control))
         .route("/api/scheduler/start", post(start_scheduler))
         .route("/api/scheduler/stop", post(stop_scheduler))
+        .route("/api/stats/reset", post(reset_stats))
         .route("/api/events", get(events))
         .route("/api/scope", post(set_scope))
         .route("/api/cells/assignment", post(set_workload_cell))
@@ -317,6 +319,7 @@ struct SchedulerSettingControl {
 struct SchedulerControl {
     managed: bool,
     active: bool,
+    scheduler_name: Option<String>,
     policy_id: Option<String>,
     last_exit: Option<String>,
     launch: LaunchOptions,
@@ -366,6 +369,27 @@ async fn stop_scheduler(
         .map_err(|_| ApiError::unavailable("scheduler launcher worker failed"))?
         .map_err(|error| ApiError::bad_request(format!("{error:#}")))?;
     scheduler_control_response(&context).map(Json)
+}
+
+async fn reset_stats(
+    State(context): State<ApiContext>,
+    headers: HeaderMap,
+) -> Result<Json<StatsResetResponse>, ApiError> {
+    require_session_token(&headers, &context.token)?;
+    let (response_tx, response_rx) = std::sync::mpsc::sync_channel(1);
+    context
+        .commands
+        .send(CollectorCommand::ResetStats {
+            response: response_tx,
+        })
+        .map_err(|_| ApiError::unavailable("collector is not running"))?;
+    let response =
+        tokio::task::spawn_blocking(move || response_rx.recv_timeout(Duration::from_secs(15)))
+            .await
+            .map_err(|_| ApiError::unavailable("stats reset worker failed"))?
+            .map_err(|_| ApiError::unavailable("stats reset timed out"))?
+            .map_err(ApiError::bad_request)?;
+    Ok(Json(response))
 }
 
 fn scheduler_control_response(context: &ApiContext) -> Result<SchedulerControl, ApiError> {
@@ -488,11 +512,17 @@ fn scheduler_control_response(context: &ApiContext) -> Result<SchedulerControl, 
             value: serde_json::Value::Bool(launch.verbose),
             change_mode: "reload",
         },
+        SchedulerSettingControl {
+            name: "stats_reset",
+            value: serde_json::Value::String("On demand".into()),
+            change_mode: "dynamic",
+        },
     ];
 
     Ok(SchedulerControl {
         managed: status.managed,
         active: status.active,
+        scheduler_name: status.scheduler_name,
         policy_id,
         last_exit: status.last_exit,
         launch,

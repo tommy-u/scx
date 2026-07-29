@@ -281,6 +281,18 @@ impl Inspector {
         self.slots[self.active_slot as usize] = Some(next);
     }
 
+    pub fn reset_stats(&mut self, next: SlotPolicy) {
+        self.active_slot = next.slot;
+        self.slots = std::array::from_fn(|_| None);
+        self.slots[self.active_slot as usize] = Some(next);
+    }
+
+    pub fn active_resolved_tables(&self) -> Option<&[ResolvedMaskTable]> {
+        self.slots[self.active_slot as usize]
+            .as_ref()
+            .map(|slot| slot.resolved_tables.as_slice())
+    }
+
     pub fn set_assignment(&mut self, tid: i32, cell_id: u32) {
         self.assignments.insert(tid, cell_id);
     }
@@ -1077,6 +1089,42 @@ scope = "task_cell_borrowable"
             view.slots[1].metrics.as_ref().unwrap().rungs[&0].attempts,
             8
         );
+    }
+
+    #[test]
+    fn stats_reset_moves_the_same_generation_and_discards_old_metrics() {
+        let mut inspector =
+            Inspector::new(slot(0, 7, FIRST_POLICY, 1_000), FairnessMode::Fifo, None);
+        inspector.activate(slot(1, 8, SECOND_POLICY, 2_000), metrics(7, 30), 2_000);
+
+        let table = ResolvedMaskTable {
+            id: 3,
+            source: MaskTableSource::PreviousLlcByCpu,
+            entries: BTreeMap::new(),
+        };
+        let next = SlotPolicy::new(
+            0,
+            8,
+            SECOND_POLICY.into(),
+            policy::compile_policy(SECOND_POLICY).unwrap(),
+            vec![table.clone()],
+            3_000,
+        );
+
+        inspector.reset_stats(next);
+        let view = inspector.snapshot(metrics(8, 0), Vec::new());
+
+        assert_eq!(view.active_slot, 0);
+        assert_eq!(view.slots[0].state, SlotState::Active);
+        assert_eq!(view.slots[0].generation, Some(8));
+        assert_eq!(view.slots[0].activated_at_ms, Some(3_000));
+        assert_eq!(
+            view.slots[0].metrics.as_ref().unwrap().rungs[&0].attempts,
+            0
+        );
+        assert_eq!(view.slots[1].state, SlotState::Empty);
+        assert!(view.slots[1].metrics.is_none());
+        assert_eq!(inspector.active_resolved_tables(), Some([table].as_slice()));
     }
 
     #[test]

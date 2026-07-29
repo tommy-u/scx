@@ -301,6 +301,7 @@ export function schedulerSettingModels(settings) {
     callback_timing_sample_rate: "Callback sample rate",
     exit_dump_len: "Exit dump length",
     verbose: "Verbose logging",
+    stats_reset: "Stats reset",
   };
   return (settings || []).map((setting) => {
     const changeMode = setting.change_mode === "dynamic" ? "dynamic" : "reload";
@@ -311,6 +312,17 @@ export function schedulerSettingModels(settings) {
       changeLabel: changeMode === "dynamic" ? "Dynamic" : "Reload required",
     };
   });
+}
+
+export function statsResetDisabled(control, pending) {
+  if (pending || !control?.active) {
+    return true;
+  }
+  if (control.managed) {
+    return false;
+  }
+  const schedulerName = String(control.scheduler_name || "").trim();
+  return schedulerName !== "snake" && !schedulerName.startsWith("snake_");
 }
 
 export function schedulerControlMessage(control, error) {

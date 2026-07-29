@@ -30,6 +30,7 @@ import {
   schedulerControlMessage,
   schedulerLaunchRequest,
   schedulerSettingModels,
+  statsResetDisabled,
   rungLadderPercentages,
   rungPercentages,
   selectionRungHitFlow,
@@ -92,6 +93,7 @@ const elements = {
   queueTopology: document.querySelector("#queueTopology"),
   primaryNav: document.querySelector("#primaryNav"),
   referencePopover: document.querySelector("#referencePopover"),
+  resetAllStats: document.querySelector("#resetAllStats"),
   confirmPolicyActivation: document.querySelector("#confirmPolicyActivation"),
   scopeMode: document.querySelector("#scopeMode"),
   scopeSummary: document.querySelector("#scopeSummary"),
@@ -108,6 +110,7 @@ const elements = {
   schedulerSampleRateEnabled: document.querySelector("#schedulerSampleRateEnabled"),
   schedulerSettingsRows: document.querySelector("#schedulerSettingsRows"),
   schedulerVerbose: document.querySelector("#schedulerVerbose"),
+  statsResetNotice: document.querySelector("#statsResetNotice"),
   startScheduler: document.querySelector("#startScheduler"),
   stopScheduler: document.querySelector("#stopScheduler"),
   tgidField: document.querySelector("#tgidField"),
@@ -153,6 +156,7 @@ const state = {
   schedulerControlLoading: false,
   schedulerControlPending: false,
   schedulerFormInitialized: false,
+  statsResetPending: false,
   referenceId: 0,
   references: new Map(),
   route: routeFromHash(window.location.hash),
@@ -321,6 +325,7 @@ function bindControls() {
   elements.schedulerExitDumpLen.addEventListener("input", renderSchedulerCommandPreview);
   elements.startScheduler.addEventListener("click", startScheduler);
   elements.stopScheduler.addEventListener("click", stopScheduler);
+  elements.resetAllStats.addEventListener("click", resetAllStats);
   elements.cellDetail.addEventListener("click", (event) => {
     const select = event.target.closest("[data-workload-tid]");
     if (select) {
@@ -969,6 +974,7 @@ function renderSchedulerControl() {
   elements.schedulerExitDumpLen.disabled = locked || !elements.schedulerExitDumpEnabled.checked;
   elements.startScheduler.disabled = model.startDisabled;
   elements.stopScheduler.disabled = model.stopDisabled;
+  elements.resetAllStats.disabled = statsResetDisabled(control, state.statsResetPending);
 
   elements.schedulerControlState.className = `scheduler-state ${model.stateName}`;
   elements.schedulerControlState.textContent = model.stateLabel;
@@ -1109,6 +1115,39 @@ async function schedulerMutation(path, payload) {
     state.schedulerControlError = error.message;
   } finally {
     state.schedulerControlPending = false;
+    renderSchedulerControl();
+  }
+}
+
+async function resetAllStats() {
+  if (state.statsResetPending || !window.confirm("Reset all inspector and Snake statistics?")) {
+    return;
+  }
+  state.statsResetPending = true;
+  renderSchedulerControl();
+  showElementNotice(elements.statsResetNotice, "Resetting statistics…", "info");
+  try {
+    const response = await fetch("/api/stats/reset", {
+      method: "POST",
+      headers: { "x-snake-token": token },
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(payload.error || `Stats reset failed (${response.status})`);
+    }
+    const captureMessage = payload.fine_timing_stopped
+      ? " Fine-grained captures were stopped."
+      : "";
+    showElementNotice(
+      elements.statsResetNotice,
+      `Reset generation ${numberFormat.format(payload.generation)}, slot ${numberFormat.format(payload.active_slot)} at ${formatTimestamp(payload.reset_at_ms)}.${captureMessage}`,
+      "success",
+    );
+    await Promise.all([loadInspection(), loadCallbackTiming(), loadFineTiming()]);
+  } catch (error) {
+    showElementNotice(elements.statsResetNotice, error.message);
+  } finally {
+    state.statsResetPending = false;
     renderSchedulerControl();
   }
 }

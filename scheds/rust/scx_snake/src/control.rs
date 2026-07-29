@@ -18,6 +18,14 @@ pub struct CallbackTimingRateResponse {
     pub fine_timing_stopped: bool,
 }
 
+#[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
+pub struct StatsResetResponse {
+    pub generation: u64,
+    pub active_slot: u32,
+    pub reset_at_ms: u64,
+    pub fine_timing_stopped: bool,
+}
+
 const UPDATE_TIMEOUT_MS: u64 = 15_000;
 
 /// Requests serialized through the scheduler's main userspace loop.
@@ -42,6 +50,7 @@ pub enum SchedulerRequest {
     SetCallbackTimingSampleRate {
         sample_rate: u32,
     },
+    ResetStats,
 }
 
 /// Typed responses routed back through the shared stats socket.
@@ -54,6 +63,12 @@ pub enum SchedulerResponse {
     ThreadCell(std::result::Result<ThreadCellResponse, String>),
     FineTiming(std::result::Result<FineTimingControlResponse, String>),
     CallbackTimingSampleRate(std::result::Result<CallbackTimingRateResponse, String>),
+    StatsReset(std::result::Result<StatsResetResponse, String>),
+}
+
+#[cfg(test)]
+pub fn request_stats_reset(client: &mut StatsClient) -> Result<StatsResetResponse> {
+    client.request("stats", vec![("target".into(), "stats_reset".into())])
 }
 
 #[cfg(test)]
@@ -320,6 +335,49 @@ scope = "task_allowed"
 
         assert_eq!(response.sample_rate, 128);
         assert!(response.fine_timing_stopped);
+        worker.join().expect("worker should finish");
+        drop(server);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn stats_reset_round_trips_the_atomic_reset_result() {
+        let path = socket_path("stats-reset");
+        let server = StatsServer::new(stats::server_data())
+            .set_path(&path)
+            .launch()
+            .expect("test server should launch");
+        let (responses, requests) = server.channels();
+        let worker = thread::spawn(move || {
+            let SchedulerRequest::ResetStats = requests.recv().expect("request should arrive")
+            else {
+                panic!("expected a statistics reset request");
+            };
+            responses
+                .send(SchedulerResponse::StatsReset(Ok(StatsResetResponse {
+                    generation: 9,
+                    active_slot: 1,
+                    reset_at_ms: 4_200,
+                    fine_timing_stopped: true,
+                })))
+                .expect("response should send");
+        });
+
+        let mut client = StatsClient::new()
+            .set_path(&path)
+            .connect(Some(1_000))
+            .expect("client should connect");
+        let response = request_stats_reset(&mut client).expect("reset should be acknowledged");
+
+        assert_eq!(
+            response,
+            StatsResetResponse {
+                generation: 9,
+                active_slot: 1,
+                reset_at_ms: 4_200,
+                fine_timing_stopped: true,
+            }
+        );
         worker.join().expect("worker should finish");
         drop(server);
         let _ = fs::remove_file(path);

@@ -393,6 +393,10 @@ into rolling and policy-lifetime mean, p50, p95, and p99 estimates in its
 Callbacks tab. Percentiles are reported as the upper bound of a base-2 bucket;
 p95 requires at least 20 samples and p99 at least 100. The same target publishes
 the current or historical fine-grained capture for each supported callback.
+The inspector's **Reset all stats** action switches to a cleared ladder stats
+bank without changing the policy generation or reloading Snake. It also clears
+fine-grained capture history while leaving DSQs, clocks, membership, and task
+cell assignments intact.
 
 Use `--stats-format json` for NDJSON, `--help-stats` for counter definitions, or
 monitor an already running scheduler without a policy:

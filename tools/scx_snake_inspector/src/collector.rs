@@ -203,6 +203,14 @@ pub struct CallbackTimingRateResponse {
     pub fine_timing_stopped: bool,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct StatsResetResponse {
+    pub generation: u64,
+    pub active_slot: u32,
+    pub reset_at_ms: u64,
+    pub fine_timing_stopped: bool,
+}
+
 #[derive(Debug)]
 pub enum CollectorCommand {
     SetScope(TaskScope),
@@ -225,6 +233,9 @@ pub enum CollectorCommand {
         target: WorkloadTarget,
         cell_id: Option<u32>,
         response: std::sync::mpsc::SyncSender<std::result::Result<WorkloadCellResponse, String>>,
+    },
+    ResetStats {
+        response: std::sync::mpsc::SyncSender<std::result::Result<StatsResetResponse, String>>,
     },
     Shutdown,
 }
@@ -273,6 +284,7 @@ impl PartialEq for CollectorCommand {
                     sample_rate: right, ..
                 },
             ) => left == right,
+            (Self::ResetStats { .. }, Self::ResetStats { .. }) => true,
             (Self::Shutdown, Self::Shutdown) => true,
             _ => false,
         }
@@ -440,6 +452,45 @@ pub fn run_collector(
                 .map_err(|error| format!("{error:#}"));
                 let _ = response.send(result);
                 next_inspection_at = Instant::now();
+                continue;
+            }
+            Ok(CollectorCommand::ResetStats { response }) => {
+                let result = reset_scheduler_stats(&mut stats_client, &options.stats_path)
+                    .map_err(|error| format!("{error:#}"));
+                let result = match result {
+                    Ok(reset) => {
+                        stats_client = None;
+                        let now_ms = elapsed_ms(started);
+                        match read_counts(&skel.maps.migration_counts) {
+                            Ok(baseline) => {
+                                dashboard.reset_statistics(now_ms, &baseline);
+                                match read_inspection(&mut stats_client, &options.stats_path) {
+                                    Ok(snapshot) => {
+                                        dashboard.set_inspection_at(now_ms, Some(snapshot), None);
+                                        next_inspection_at =
+                                            Instant::now() + INSPECTION_POLL_INTERVAL;
+                                    }
+                                    Err(error) => {
+                                        dashboard.set_inspection_at(
+                                            now_ms,
+                                            None,
+                                            Some(format!(
+                                                "Snake inspection unavailable after stats reset: {error:#}"
+                                            )),
+                                        );
+                                        next_inspection_at = Instant::now();
+                                    }
+                                }
+                                Ok(reset)
+                            }
+                            Err(error) => Err(format!(
+                                "rebasing inspector migration history after stats reset: {error:#}"
+                            )),
+                        }
+                    }
+                    Err(error) => Err(error),
+                };
+                let _ = response.send(result);
                 continue;
             }
             Ok(CollectorCommand::Shutdown) => return Ok(()),
@@ -664,6 +715,24 @@ fn set_callback_timing_sample_rate(
                 ("sample_rate".into(), sample_rate.to_string()),
             ],
         )
+}
+
+fn reset_scheduler_stats(
+    client: &mut Option<StatsClient>,
+    stats_path: &Path,
+) -> Result<StatsResetResponse> {
+    if client.is_none() {
+        *client = Some(
+            StatsClient::new()
+                .set_path(stats_path)
+                .connect(Some(STATS_TIMEOUT_MS))
+                .with_context(|| format!("connecting to {}", stats_path.display()))?,
+        );
+    }
+    client
+        .as_mut()
+        .context("Snake stats client is unavailable")?
+        .request("stats", vec![("target".into(), "stats_reset".into())])
 }
 
 #[derive(Deserialize)]

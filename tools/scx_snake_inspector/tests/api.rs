@@ -13,7 +13,7 @@ use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use scx_snake_inspector::api::{router, ApiContext, CSRF_HEADER};
 use scx_snake_inspector::collector::CollectorCommand;
-use scx_snake_inspector::dashboard::Dashboard;
+use scx_snake_inspector::dashboard::{Dashboard, FineTimingStatus};
 use scx_snake_inspector::launcher::SnakeLauncher;
 use scx_snake_inspector::model::CpuPair;
 use scx_snake_inspector::policies::{PolicyCatalog, PolicyChoice};
@@ -151,6 +151,107 @@ fn fine_timing_snapshot() -> Value {
         ]
     });
     snapshot
+}
+
+#[test]
+fn dashboard_stats_reset_rebases_all_histories_without_changing_scope() {
+    let dashboard = dashboard();
+    let pair = CpuPair::new(0, 1);
+    dashboard.set_scope(TaskScope::Tgids(vec![42]));
+    dashboard.ingest(0, &BTreeMap::new());
+    dashboard.ingest(500, &BTreeMap::from([(pair, 9)]));
+    dashboard.reset_cpu_usage(0);
+    dashboard.ingest_cpu_usage(500, &BTreeMap::from([(0, 250_000_000)]));
+    dashboard.set_scheduler("snake", true, 4);
+
+    let mut inspection = fine_timing_snapshot();
+    let mut buckets = vec![0_u64; 64];
+    buckets[5] = 100;
+    inspection["slots"][0]["metrics"]["callback_timing"]["dispatch"] =
+        json!({"total_ns": 6300, "buckets": buckets});
+    dashboard.set_inspection_at(500, Some(inspection), None);
+    assert_eq!(
+        dashboard
+            .callback_timing_lifetime()
+            .callbacks
+            .iter()
+            .find(|row| row.callback == "dispatch")
+            .unwrap()
+            .samples,
+        100
+    );
+    assert_eq!(dashboard.fine_timing().status, FineTimingStatus::Ready);
+
+    dashboard.reset_statistics(750, &BTreeMap::from([(pair, 9)]));
+
+    let snapshot = dashboard.snapshot(1_000).unwrap();
+    assert_eq!(snapshot.scope, TaskScope::Tgids(vec![42]));
+    assert_eq!(snapshot.total, 0);
+    assert_eq!(snapshot.observed_ms, 0);
+    assert!(snapshot.cpu_usage.is_empty());
+    assert_eq!(snapshot.cpu_usage_observed_ms, 0);
+    assert!(dashboard.callback_timing_lifetime().callbacks.is_empty());
+    assert_eq!(
+        dashboard.fine_timing().status,
+        FineTimingStatus::Unavailable
+    );
+    assert!(dashboard.inspection().snapshot.is_none());
+}
+
+#[tokio::test]
+async fn stats_reset_requires_token_and_sends_collector_command() {
+    use scx_snake_inspector::collector::StatsResetResponse;
+
+    let (tx, rx) = mpsc::channel();
+    let root = tempfile::tempdir().unwrap();
+    let context = ApiContext::new(dashboard(), tx, "secret", root.path().to_path_buf());
+
+    let unauthorized = router(context.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/stats/reset")
+                .header("host", "127.0.0.1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+    let responder = std::thread::spawn(move || {
+        let CollectorCommand::ResetStats { response } = rx.recv().unwrap() else {
+            panic!("expected stats reset command");
+        };
+        response
+            .send(Ok(StatsResetResponse {
+                generation: 7,
+                active_slot: 1,
+                reset_at_ms: 123_456,
+                fine_timing_stopped: true,
+            }))
+            .unwrap();
+    });
+    let accepted = router(context)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/stats/reset")
+                .header("host", "127.0.0.1")
+                .header(CSRF_HEADER, "secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(accepted.status(), StatusCode::OK);
+    let response: Value =
+        serde_json::from_slice(&accepted.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(response["generation"], 7);
+    assert_eq!(response["active_slot"], 1);
+    assert_eq!(response["reset_at_ms"], 123_456);
+    assert_eq!(response["fine_timing_stopped"], true);
+    responder.join().unwrap();
 }
 
 #[tokio::test]

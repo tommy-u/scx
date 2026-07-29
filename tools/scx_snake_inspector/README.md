@@ -37,7 +37,11 @@ Compatible placement, enqueue, and dispatch ladder policy changes can be
 activated dynamically from the Policy view. Fairness, task membership, queue
 topology, cells, weights, CPU masks, and DSQ layout are attachment-time state
 and require a reload. Callback sampling, fine-grained timing, and workload
-cell assignments are dynamic.
+cell assignments are dynamic. **Reset all stats** atomically switches Snake to
+a cleared statistics bank at the same policy generation, rebases the
+inspector's rolling histories, and clears fine-grained capture history. It
+does not reload the scheduler or alter queues, clocks, membership, or task-cell
+assignments.
 
 In queue mode, the Policy view shows fairness and clock mode, synthetic cell 0,
 dense cell indices, allocated primary and borrowable masks, cell/LLC normal DSQ
