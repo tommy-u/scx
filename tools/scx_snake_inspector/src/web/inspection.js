@@ -13,6 +13,69 @@ export function routeFromHash(hash) {
   return ROUTES.has(route) ? route : "activity";
 }
 
+export function captureKeyedRenderState(nodes, activeElement = null) {
+  const entries = new Map();
+  let focusedKey = null;
+  for (const node of nodes || []) {
+    const key = node?.dataset?.renderKey;
+    if (!key) {
+      continue;
+    }
+    entries.set(key, {
+      open: typeof node.open === "boolean" ? node.open : null,
+      scrollTop: Number.isFinite(node.scrollTop) ? node.scrollTop : 0,
+      scrollLeft: Number.isFinite(node.scrollLeft) ? node.scrollLeft : 0,
+    });
+    if (node === activeElement) {
+      focusedKey = key;
+    }
+  }
+  return { entries, focusedKey };
+}
+
+export function restoreKeyedRenderState(nodes, snapshot) {
+  if (!snapshot?.entries) {
+    return;
+  }
+  let focusTarget = null;
+  for (const node of nodes || []) {
+    const key = node?.dataset?.renderKey;
+    const entry = key ? snapshot.entries.get(key) : null;
+    if (!entry) {
+      continue;
+    }
+    if (entry.open !== null && typeof node.open === "boolean") {
+      node.open = entry.open;
+    }
+    if (Number.isFinite(node.scrollTop)) {
+      node.scrollTop = entry.scrollTop;
+    }
+    if (Number.isFinite(node.scrollLeft)) {
+      node.scrollLeft = entry.scrollLeft;
+    }
+    if (key === snapshot.focusedKey && typeof node.focus === "function") {
+      focusTarget = node;
+    }
+  }
+  focusTarget?.focus({ preventScroll: true });
+}
+
+export function syncCallbackSampleRateControl(
+  control,
+  serverRate,
+  { dirty = false, pending = false, activeElement = null } = {},
+) {
+  if (!control || serverRate == null || dirty || pending || activeElement === control) {
+    return false;
+  }
+  const value = String(serverRate);
+  if (control.value === value) {
+    return false;
+  }
+  control.value = value;
+  return true;
+}
+
 export function formatCallbackDuration(value) {
   if (value == null || !Number.isFinite(Number(value)) || Number(value) < 0) {
     return "—";

@@ -6,6 +6,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
+import * as inspectionState from "../../src/web/inspection.js";
 
 import {
   callbackDurationClass,
@@ -836,4 +837,123 @@ test("resolved queue topology model labels cells and DSQs for display", () => {
 test("CPU masks are compacted into readable ranges", () => {
   assert.equal(compactCpuList([]), "None");
   assert.equal(compactCpuList([0, 1, 2, 4, 6, 7]), "0-2, 4, 6-7");
+});
+
+test("keyed render state restores disclosure, scrolling, and focus only for matching keys", () => {
+  assert.equal(typeof inspectionState.captureKeyedRenderState, "function");
+  assert.equal(typeof inspectionState.restoreKeyedRenderState, "function");
+  if (
+    typeof inspectionState.captureKeyedRenderState !== "function"
+    || typeof inspectionState.restoreKeyedRenderState !== "function"
+  ) {
+    return;
+  }
+
+  const keyed = (key, values = {}) => ({
+    dataset: { renderKey: key },
+    open: values.open,
+    scrollTop: values.scrollTop ?? 0,
+    scrollLeft: values.scrollLeft ?? 0,
+    focusCalls: 0,
+    focus() {
+      this.focusCalls += 1;
+    },
+  });
+  const oldDetails = keyed("policy-slot:0:generation:7", { open: true });
+  const oldSummary = keyed("policy-slot:0:generation:7:summary");
+  const oldScroller = keyed("queue:7:cpu-routes:scroll", {
+    scrollTop: 42,
+    scrollLeft: 17,
+  });
+  const snapshot = inspectionState.captureKeyedRenderState(
+    [oldDetails, oldSummary, oldScroller],
+    oldSummary,
+  );
+
+  const newDetails = keyed("policy-slot:0:generation:7", { open: false });
+  const newSummary = keyed("policy-slot:0:generation:7:summary");
+  const newScroller = keyed("queue:7:cpu-routes:scroll");
+  const changedGeneration = keyed("policy-slot:0:generation:8", { open: false });
+  inspectionState.restoreKeyedRenderState(
+    [newDetails, newSummary, newScroller, changedGeneration],
+    snapshot,
+  );
+
+  assert.equal(newDetails.open, true);
+  assert.equal(newScroller.scrollTop, 42);
+  assert.equal(newScroller.scrollLeft, 17);
+  assert.equal(newSummary.focusCalls, 1);
+  assert.equal(changedGeneration.open, false);
+});
+
+test("callback sample-rate synchronization preserves drafts and accepts pristine server updates", () => {
+  assert.equal(typeof inspectionState.syncCallbackSampleRateControl, "function");
+  if (typeof inspectionState.syncCallbackSampleRateControl !== "function") {
+    return;
+  }
+
+  const control = { value: "128" };
+  assert.equal(
+    inspectionState.syncCallbackSampleRateControl(control, 64, {
+      dirty: true,
+      pending: false,
+      activeElement: null,
+    }),
+    false,
+  );
+  assert.equal(control.value, "128");
+  assert.equal(
+    inspectionState.syncCallbackSampleRateControl(control, 64, {
+      dirty: false,
+      pending: false,
+      activeElement: control,
+    }),
+    false,
+  );
+  assert.equal(
+    inspectionState.syncCallbackSampleRateControl(control, 64, {
+      dirty: false,
+      pending: true,
+      activeElement: null,
+    }),
+    false,
+  );
+  assert.equal(
+    inspectionState.syncCallbackSampleRateControl(control, 64, {
+      dirty: false,
+      pending: false,
+      activeElement: null,
+    }),
+    true,
+  );
+  assert.equal(control.value, "64");
+  assert.equal(
+    inspectionState.syncCallbackSampleRateControl(control, 64, {
+      dirty: false,
+      pending: false,
+      activeElement: null,
+    }),
+    false,
+  );
+});
+
+test("polling renderers use stable keys and avoid synchronous hidden-popover rerenders", () => {
+  const script = readFileSync(
+    new URL("../../src/web/app.js", import.meta.url),
+    "utf8",
+  );
+
+  for (const keyFragment of [
+    "policy-slot:",
+    "generation:",
+    ":normal-dsqs",
+    ":cpu-routes",
+    "cell:${cellId}:task:${task.tid}",
+  ]) {
+    assert.match(script, new RegExp(keyFragment.replaceAll("$", "\\$")));
+  }
+  assert.match(script, /function replaceKeyedHtml\(/);
+  assert.match(script, /requestAnimationFrame\(\(\) =>/);
+  assert.match(script, /referencePopover\.classList\.contains\("hidden"\)/);
+  assert.match(script, /callbackRateDirty/);
 });

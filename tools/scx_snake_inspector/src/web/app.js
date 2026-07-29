@@ -16,6 +16,7 @@ import {
 import {
   callbackDurationClass,
   callbackSampleRateOptions,
+  captureKeyedRenderState,
   compactCpuList,
   decorateCells,
   fieldReferenceGroups,
@@ -26,12 +27,14 @@ import {
   queueLadderSections,
   queueTopologyModel,
   routeFromHash,
+  restoreKeyedRenderState,
   schedulerCommandPreview,
   schedulerControlModel,
   schedulerControlMessage,
   schedulerLaunchRequest,
   schedulerSettingModels,
   statsResetDisabled,
+  syncCallbackSampleRateControl,
   rungLadderPercentages,
   rungPercentages,
   selectionRungHitFlow,
@@ -150,6 +153,7 @@ const state = {
   callbackTimingError: null,
   callbackTimingLoading: false,
   callbackRatePending: false,
+  callbackRateDirty: false,
   fineTiming: null,
   fineTimingError: null,
   fineTimingLoading: false,
@@ -291,6 +295,9 @@ function bindControls() {
     loadCallbackTiming();
   });
   elements.applyCallbackSampleRate.addEventListener("click", setCallbackSampleRate);
+  elements.callbackSampleRateControl.addEventListener("change", () => {
+    state.callbackRateDirty = true;
+  });
   elements.fineTimingPanels.addEventListener("change", (event) => {
     const control = event.target.closest("[data-fine-timing-callback]");
     if (control) {
@@ -912,6 +919,7 @@ async function setCallbackSampleRate() {
     if (!response.ok) {
       throw new Error(payload.error || `Sampling update failed (${response.status})`);
     }
+    state.callbackRateDirty = false;
     const suffix = payload.fine_timing_stopped
       ? " Active fine-grained captures were preserved as Historical."
       : "";
@@ -1273,9 +1281,15 @@ function renderCallbackTiming() {
   elements.callbackSampleRate.textContent = timing?.sample_rate > 0
     ? `1 / ${numberFormat.format(timing.sample_rate)}`
     : "Off";
-  if (!state.callbackRatePending && timing?.sample_rate != null) {
-    elements.callbackSampleRateControl.value = String(timing.sample_rate);
-  }
+  syncCallbackSampleRateControl(
+    elements.callbackSampleRateControl,
+    timing?.sample_rate,
+    {
+      dirty: state.callbackRateDirty,
+      pending: state.callbackRatePending,
+      activeElement: document.activeElement,
+    },
+  );
   elements.callbackGeneration.textContent = timing?.generation == null
     ? "—"
     : numberFormat.format(timing.generation);
@@ -1408,9 +1422,10 @@ function renderPolicy() {
     elements.queueTopology.classList.add("hidden");
     return;
   }
-  elements.slotComparison.innerHTML = state.inspection.slots
-    .map(renderSlot)
-    .join("");
+  replaceKeyedHtml(
+    elements.slotComparison,
+    state.inspection.slots.map(renderSlot).join(""),
+  );
   renderResolvedQueueTopology();
 }
 
@@ -1419,6 +1434,9 @@ function renderResolvedQueueTopology() {
     state.inspection.fairness,
     state.inspection.queue_topology,
   );
+  const generation = state.inspection.slots
+    .find((slot) => slot.state === "active")
+    ?.generation ?? "unknown";
   elements.queueTopology.classList.remove("hidden");
   const summary = `
     <dl class="queue-topology-summary">
@@ -1428,12 +1446,12 @@ function renderResolvedQueueTopology() {
       <div><dt>Affinity DSQs</dt><dd>${formatCount(model.affinityQueueCount)}</dd></div>
     </dl>`;
   if (!model.layout) {
-    elements.queueTopology.innerHTML = `
+    replaceKeyedHtml(elements.queueTopology, `
       <header class="queue-topology-heading">
         <div><h3>Scheduler execution model</h3><p>Fairness and attachment-time queue topology</p></div>
       </header>
       ${summary}
-      <p class="queue-topology-empty">No resolved cell queue topology is installed.</p>`;
+      <p class="queue-topology-empty">No resolved cell queue topology is installed.</p>`);
     return;
   }
   const cells = model.cells.map((cell) => `
@@ -1461,29 +1479,29 @@ function renderResolvedQueueTopology() {
       <td><code>${escapeHtml(route.normalDsq)}</code></td>
       <td><code>${escapeHtml(route.affinityDsq)}</code></td>
     </tr>`).join("");
-  elements.queueTopology.innerHTML = `
+  replaceKeyedHtml(elements.queueTopology, `
     <header class="queue-topology-heading">
       <div><h3>Resolved queue topology</h3><p>Attachment-time CPU ownership, DSQs, and clock domains</p></div>
     </header>
     ${summary}
     <section class="queue-topology-table-section">
       <h4>Cell allocation</h4>
-      <div class="queue-topology-table-wrap">
+      <div class="queue-topology-table-wrap" data-render-key="queue:${generation}:cell-allocation:scroll">
         <table><thead><tr><th>Cell</th><th>Dense</th><th>Weight</th><th>Clock</th><th>Primary CPUs</th><th>Borrowable CPUs</th></tr></thead><tbody>${cells}</tbody></table>
       </div>
     </section>
-    <details class="queue-topology-details">
-      <summary>Normal DSQs (${formatCount(model.normalQueues.length)})</summary>
-      <div class="queue-topology-table-wrap">
+    <details class="queue-topology-details" data-render-key="queue:${generation}:normal-dsqs">
+      <summary data-render-key="queue:${generation}:normal-dsqs:summary">Normal DSQs (${formatCount(model.normalQueues.length)})</summary>
+      <div class="queue-topology-table-wrap" data-render-key="queue:${generation}:normal-dsqs:scroll">
         <table><thead><tr><th>DSQ</th><th>Cell</th><th>LLC</th><th>Clock</th><th>Consumer CPUs</th></tr></thead><tbody>${queues}</tbody></table>
       </div>
     </details>
-    <details class="queue-topology-details">
-      <summary>Per-CPU routing (${formatCount(model.cpuRoutes.length)} CPUs)</summary>
-      <div class="queue-topology-table-wrap queue-route-table-wrap">
+    <details class="queue-topology-details" data-render-key="queue:${generation}:cpu-routes">
+      <summary data-render-key="queue:${generation}:cpu-routes:summary">Per-CPU routing (${formatCount(model.cpuRoutes.length)} CPUs)</summary>
+      <div class="queue-topology-table-wrap queue-route-table-wrap" data-render-key="queue:${generation}:cpu-routes:scroll">
         <table><thead><tr><th>CPU</th><th>Owner</th><th>LLC</th><th>Normal DSQ</th><th>Affinity DSQ</th></tr></thead><tbody>${routes}</tbody></table>
       </div>
-    </details>`;
+    </details>`);
 }
 
 function renderSlot(slot) {
@@ -1556,12 +1574,12 @@ function renderSlot(slot) {
         </div>
       </section>
       ${queueLadders}
-      <details class="policy-details">
-        <summary>Mask tables and source policy</summary>
+      <details class="policy-details" data-render-key="policy-slot:${slot.slot}:generation:${slot.generation}">
+        <summary data-render-key="policy-slot:${slot.slot}:generation:${slot.generation}:summary">Mask tables and source policy</summary>
         <h4>Installed mask tables</h4>
         <ul class="mask-table-list">${maskTables}</ul>
         <h4>Policy source</h4>
-        <pre>${escapeHtml(slot.policy.source)}</pre>
+        <pre data-render-key="policy-slot:${slot.slot}:generation:${slot.generation}:source-scroll">${escapeHtml(slot.policy.source)}</pre>
       </details>
     </section>`;
 }
@@ -1875,10 +1893,33 @@ function hideReferencePopover(force) {
     return;
   }
   state.popoverPinned = false;
+  if (elements.referencePopover.classList.contains("hidden")) {
+    return;
+  }
   elements.referencePopover.classList.add("hidden");
   if (state.route === "policy" && state.inspection) {
-    renderPolicy();
+    window.requestAnimationFrame(() => {
+      if (
+        state.route === "policy"
+        && state.inspection
+        && elements.referencePopover.classList.contains("hidden")
+      ) {
+        renderPolicy();
+      }
+    });
   }
+}
+
+function replaceKeyedHtml(container, html) {
+  const snapshot = captureKeyedRenderState(
+    container.querySelectorAll("[data-render-key]"),
+    document.activeElement,
+  );
+  container.innerHTML = html;
+  restoreKeyedRenderState(
+    container.querySelectorAll("[data-render-key]"),
+    snapshot,
+  );
 }
 
 function renderCells() {
@@ -1909,11 +1950,13 @@ function renderCells() {
   if (!cells.some((cell) => cell.id === state.selectedCellId)) {
     state.selectedCellId = cells[0].id;
   }
-  elements.cellList.innerHTML = `
-    <div class="cell-axis">${renderCpuAxis()}</div>
-    ${cells.map(renderCellRow).join("")}`;
+  replaceKeyedHtml(
+    elements.cellList,
+    `<div class="cell-axis">${renderCpuAxis()}</div>
+    ${cells.map(renderCellRow).join("")}`,
+  );
   const selected = cells.find((cell) => cell.id === state.selectedCellId);
-  elements.cellDetail.innerHTML = renderCellDetail(selected);
+  replaceKeyedHtml(elements.cellDetail, renderCellDetail(selected));
 }
 
 function renderWorkloadTargetField() {
@@ -2051,7 +2094,7 @@ function renderCellDetail(cell) {
     ? cell.overlapIds.map((id) => `Cell ${id}`).join(", ")
     : "None";
   const tasks = cell.tasks.length > 0
-    ? cell.tasks.map(renderTaskMapping).join("")
+    ? cell.tasks.map((task) => renderTaskMapping(task, cell.id)).join("")
     : '<p class="empty-state">No live task mappings for this cell.</p>';
   return `
     <header class="cell-detail-heading">
@@ -2065,13 +2108,13 @@ function renderCellDetail(cell) {
     <div class="task-mappings">${tasks}</div>`;
 }
 
-function renderTaskMapping(task) {
+function renderTaskMapping(task, cellId) {
   const cpu = task.current_cpu === null || task.current_cpu === undefined
     ? "CPU unavailable"
     : `CPU ${task.current_cpu}`;
   return `
-    <details class="task-mapping">
-      <summary>
+    <details class="task-mapping" data-render-key="cell:${cellId}:task:${task.tid}">
+      <summary data-render-key="cell:${cellId}:task:${task.tid}:summary">
         <span><strong>${escapeHtml(task.name || "unnamed")}</strong><small>TID ${task.tid} · TGID ${task.tgid}</small></span>
         <span><strong>${escapeHtml(cpu)}</strong><small>${escapeHtml(task.state || "unknown")}</small></span>
       </summary>
