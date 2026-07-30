@@ -19,7 +19,6 @@ import {
   ladderPercentages,
   nextPolicyCandidate,
   policyLibraryModels,
-  policyCandidateActionDisabled,
   policyInlineActionModel,
   queueTopologyModel,
   queueLadderSections,
@@ -28,7 +27,9 @@ import {
   schedulerControlModel,
   schedulerControlMessage,
   schedulerCommandPreview,
+  schedulerCurrentLaunch,
   schedulerLaunchRequest,
+  schedulerLifecycleRequest,
   schedulerSettingModels,
   statsResetDisabled,
   rungLadderPercentages,
@@ -252,13 +253,11 @@ test("feedback storage parser ignores malformed or duplicate entries", () => {
   );
 });
 
-test("scheduler launch requests include only checkbox-enabled optional flags", () => {
+test("scheduler launch requests validate the selected policy configuration", () => {
   assert.deepEqual(
     schedulerLaunchRequest({
       policy_id: "kernel-default-sim.toml",
-      fairness_enabled: false,
       fairness: "vtime",
-      callback_timing_sample_rate_enabled: true,
       callback_timing_sample_rate: "128",
       exit_dump_len_enabled: true,
       exit_dump_len: "4096",
@@ -266,6 +265,7 @@ test("scheduler launch requests include only checkbox-enabled optional flags", (
     }),
     {
       policy_id: "kernel-default-sim.toml",
+      fairness: "vtime",
       callback_timing_sample_rate: 128,
       exit_dump_len: 4096,
       verbose: false,
@@ -275,10 +275,7 @@ test("scheduler launch requests include only checkbox-enabled optional flags", (
   assert.deepEqual(
     schedulerLaunchRequest({
       policy_id: "cell-borrowing.toml",
-      fairness_enabled: true,
       fairness: "vtime",
-      callback_timing_sample_rate_enabled: false,
-      callback_timing_sample_rate: "7",
       exit_dump_len_enabled: false,
       exit_dump_len: "-1",
       verbose: true,
@@ -294,20 +291,18 @@ test("scheduler launch requests include only checkbox-enabled optional flags", (
 test("scheduler launch requests reject unsafe or unsupported values", () => {
   const base = {
     policy_id: "kernel-default-sim.toml",
-    fairness_enabled: false,
-    callback_timing_sample_rate_enabled: false,
+    fairness: "vtime",
     exit_dump_len_enabled: false,
     verbose: false,
   };
   assert.throws(() => schedulerLaunchRequest({ ...base, policy_id: "" }), /policy/i);
   assert.throws(
-    () => schedulerLaunchRequest({ ...base, fairness_enabled: true, fairness: "cfs" }),
+    () => schedulerLaunchRequest({ ...base, fairness: "cfs" }),
     /FIFO, VTIME, or EEVDF/,
   );
   assert.throws(
     () => schedulerLaunchRequest({
       ...base,
-      callback_timing_sample_rate_enabled: true,
       callback_timing_sample_rate: "7",
     }),
     /power of two/,
@@ -347,11 +342,79 @@ test("scheduler command preview shows required policy and selected flags", () =>
   assert.deepEqual(
     schedulerLaunchRequest({
       policy_id: "basic.toml",
-      fairness_enabled: true,
       fairness: "eevdf",
       verbose: false,
     }),
     { policy_id: "basic.toml", fairness: "eevdf", verbose: false },
+  );
+});
+
+test("lifecycle requests preserve effective callback sampling only across restarts", () => {
+  const active = {
+    active: true,
+    policy_id: "basic.toml",
+    launch: { exit_dump_len: 0, verbose: false },
+    settings: [
+      { name: "fairness", effective: "vtime" },
+      { name: "callback_timing_sample_rate", effective: 128 },
+    ],
+  };
+  assert.deepEqual(schedulerCurrentLaunch(active), {
+    policy_id: "basic.toml",
+    fairness: "vtime",
+    callback_timing_sample_rate: 128,
+    exit_dump_len: 0,
+    verbose: false,
+  });
+  assert.deepEqual(
+    schedulerLifecycleRequest(active, {
+      policy_id: "cell.toml",
+      fairness: "eevdf",
+      exit_dump_len_enabled: false,
+      verbose: true,
+    }),
+    {
+      policy_id: "cell.toml",
+      fairness: "eevdf",
+      callback_timing_sample_rate: 128,
+      verbose: true,
+    },
+  );
+  for (const sampleRate of [0, 64, 128]) {
+    assert.equal(
+      schedulerLifecycleRequest({ ...active, settings: [
+        { name: "fairness", effective: "vtime" },
+        { name: "callback_timing_sample_rate", effective: sampleRate },
+      ] }, {
+        policy_id: "cell.toml",
+        fairness: "vtime",
+        exit_dump_len_enabled: false,
+        verbose: false,
+      }).callback_timing_sample_rate,
+      sampleRate,
+    );
+  }
+  assert.equal(
+    inspectionState.launchDiff(
+      schedulerCurrentLaunch(active),
+      schedulerLifecycleRequest(active, {
+        policy_id: "basic.toml",
+        fairness: "vtime",
+        exit_dump_len_enabled: true,
+        exit_dump_len: 0,
+        verbose: false,
+      }),
+    ).some((change) => change.name === "Callback sample rate"),
+    false,
+  );
+  assert.equal(
+    schedulerLifecycleRequest({ active: false }, {
+      policy_id: "basic.toml",
+      fairness: "fifo",
+      exit_dump_len_enabled: false,
+      verbose: false,
+    }).callback_timing_sample_rate,
+    undefined,
   );
 });
 
@@ -519,10 +582,6 @@ test("configure workspace exposes policy selection, launch controls, and setting
     'href="#/configure"',
     'id="controlView"',
     'id="policyChoices"',
-    'id="schedulerFairnessEnabled"',
-    'id="schedulerFairness"',
-    'id="schedulerSampleRateEnabled"',
-    'id="schedulerSampleRate"',
     'id="schedulerExitDumpEnabled"',
     'id="schedulerExitDumpLen"',
     'id="schedulerVerbose"',
@@ -535,10 +594,10 @@ test("configure workspace exposes policy selection, launch controls, and setting
     assert.match(page, new RegExp(control), `missing ${control}`);
   }
   assert.doesNotMatch(page, /id="schedulerPolicy"/);
-  assert.match(page, /value="eevdf"/i);
   assert.match(page, /Launch argument overrides/);
-  assert.match(page, /Override fairness/);
-  assert.match(page, /Override callback sampling/);
+  assert.doesNotMatch(page, /id="schedulerFairnessEnabled"|id="schedulerFairness"/);
+  assert.doesNotMatch(page, /id="schedulerSampleRateEnabled"|id="schedulerSampleRate"/);
+  assert.doesNotMatch(page, /Override fairness|Override callback sampling/);
   assert.match(page, /Effective now/);
   assert.match(page, /Launch override/);
 });
@@ -737,34 +796,6 @@ test("policy library separates dynamic, restart-required, and invalid choices", 
   ]);
 });
 
-test("lifecycle candidate actions honor scheduler controllability and pending state", () => {
-  const lifecycle = { actionKind: "lifecycle", disabled: false };
-  assert.equal(policyCandidateActionDisabled(lifecycle, null), true);
-  assert.equal(policyCandidateActionDisabled(lifecycle, {
-    active: true,
-    managed: false,
-    controllable: false,
-  }), true);
-  assert.equal(policyCandidateActionDisabled(lifecycle, {
-    active: true,
-    managed: false,
-    controllable: true,
-  }), false);
-  assert.equal(policyCandidateActionDisabled(lifecycle, {
-    active: true,
-    managed: true,
-    controllable: true,
-  }, true), true);
-  assert.equal(policyCandidateActionDisabled({
-    actionKind: "activate",
-    disabled: false,
-  }, null, true), false);
-  assert.equal(policyCandidateActionDisabled({
-    actionKind: "lifecycle",
-    disabled: true,
-  }, { active: false, managed: false }), true);
-});
-
 test("only the selected live-applicable policy exposes its inline action", () => {
   const current = {
     policyId: "random.toml",
@@ -951,7 +982,10 @@ test("Policy exposes a tuning context strip and accessible change reasons", () =
     "utf8",
   );
   assert.match(page, /id="policyContextBar"/);
-  assert.match(page, /id="policyCandidateAction"/);
+  assert.match(page, /id="policyActiveContext"/);
+  assert.match(page, /id="policyCandidateContext"/);
+  assert.match(page, /id="policyCandidateImpact"/);
+  assert.doesNotMatch(page, /id="policyCandidateAction"/);
   assert.match(script, /policy-reason-details/);
   assert.match(script, /data-render-key="policy-choice:/);
   assert.doesNotMatch(script, /policy\.hoverDetail \? `title=/);

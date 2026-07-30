@@ -42,7 +42,6 @@ test("workspace reorganization preserves every existing inspector surface", () =
 
 test("workspace reorganization preserves control and feedback behavior", () => {
   for (const behavior of [
-    "runPolicyCandidate",
     "activateSelectedPolicy",
     "startScheduler",
     "restartScheduler",
@@ -365,8 +364,10 @@ test("feedback is a drawer with a visible draft count", () => {
 
 test("policy list clicks select a candidate without immediately mutating Snake", () => {
   const policyClickHandler = script.match(
-    /elements\.policyChoices\.addEventListener\("click",[\s\S]*?elements\.policyCandidateAction\.addEventListener/,
+    /elements\.policyChoices\.addEventListener\("click",[\s\S]*?elements\.confirmPolicyActivation\.addEventListener/,
   )?.[0] || "";
   assert.match(policyClickHandler, /state\.policyCandidate\s*=/);
+  assert.match(policyClickHandler, /state\.selectedLifecycleFairness\s*=/);
   assert.doesNotMatch(policyClickHandler, /runPolicyCandidate\(\);/);
+  assert.doesNotMatch(script, /policyCandidateAction/);
 });

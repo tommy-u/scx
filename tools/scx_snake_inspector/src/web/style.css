@@ -1183,7 +1183,7 @@ button:focus-visible {
 .policy-context-bar {
   padding: 10px clamp(16px, 3vw, 40px);
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr)) auto;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   align-items: center;
   gap: 12px 20px;
   background: var(--surface);
@@ -2956,10 +2956,6 @@ button:focus-visible {
     grid-template-columns: 1fr 1fr;
   }
 
-  .policy-context-bar button {
-    width: 100%;
-  }
-
   .policy-choice {
     align-items: flex-start;
   }
@@ -3916,10 +3912,6 @@ body {
   .configure-detail > .policy-context-bar {
     grid-template-columns: minmax(0, 1fr);
     align-items: stretch;
-  }
-
-  .configure-detail > .policy-context-bar .apply-button {
-    width: 100%;
   }
 
   .feedback-drawer {

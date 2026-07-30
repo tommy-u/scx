@@ -333,8 +333,6 @@ impl Supervisor {
             |owned| (owned.executable.clone(), owned.preserved_args.clone()),
         );
         validate_executable(&executable)?;
-        validate_preserved_args(&request, &preserved_args)?;
-
         if self.child.is_some() {
             self.stop_owned();
         } else {
@@ -601,16 +599,6 @@ fn launch_option_value<'a>(
         .get(index + 1)
         .map(|value| (value.as_str(), 2))
         .ok_or_else(|| anyhow::anyhow!("external Snake option {option} is missing its value"))
-}
-
-fn validate_preserved_args(request: &LaunchRequest, preserved_args: &[String]) -> Result<()> {
-    let has_stats = preserved_args
-        .iter()
-        .any(|argument| argument == "--stats" || argument.starts_with("--stats="));
-    if has_stats && request.callback_timing_sample_rate.is_some() {
-        bail!("callback timing sample rate conflicts with preserved --stats output");
-    }
-    Ok(())
 }
 
 fn open_pidfd(pid: u32) -> Result<OwnedFd> {

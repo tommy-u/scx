@@ -364,7 +364,6 @@
                 <span>Impact</span>
                 <strong id="policyCandidateImpact">—</strong>
               </div>
-              <button class="apply-button" id="policyCandidateAction" type="button" disabled>Select a policy</button>
             </section>
             <p class="notice hidden" id="schedulerControlNotice" role="status"></p>
 
@@ -377,26 +376,6 @@
               <div class="scheduler-feedback-anchor" data-feedback-anchor></div>
               <fieldset class="scheduler-flag-list">
                 <legend>Launch argument overrides</legend>
-                <div class="scheduler-flag-row">
-                  <label class="scheduler-flag-toggle">
-                    <input id="schedulerFairnessEnabled" type="checkbox">
-                    <span>Override fairness</span>
-                  </label>
-                  <select id="schedulerFairness" aria-label="Fairness mode" disabled>
-                    <option value="fifo">FIFO</option>
-                    <option value="vtime">VTIME</option>
-                    <option value="eevdf">EEVDF</option>
-                  </select>
-                  <code>--fairness</code>
-                </div>
-                <div class="scheduler-flag-row">
-                  <label class="scheduler-flag-toggle">
-                    <input id="schedulerSampleRateEnabled" type="checkbox">
-                    <span>Override callback sampling</span>
-                  </label>
-                  <select id="schedulerSampleRate" aria-label="Launch callback timing sample rate" disabled></select>
-                  <code>--callback-timing-sample-rate</code>
-                </div>
                 <div class="scheduler-flag-row">
                   <label class="scheduler-flag-toggle">
                     <input id="schedulerExitDumpEnabled" type="checkbox">

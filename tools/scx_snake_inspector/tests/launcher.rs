@@ -378,7 +378,7 @@ fn external_restart_replaces_policy_and_preserves_other_arguments() {
         .restart(LaunchRequest {
             policy_id: "cell.toml".into(),
             fairness: Some(LaunchFairness::Vtime),
-            callback_timing_sample_rate: None,
+            callback_timing_sample_rate: Some(128),
             exit_dump_len: Some(4096),
             verbose: true,
         })
@@ -408,6 +408,8 @@ fn external_restart_replaces_policy_and_preserves_other_arguments() {
             new_policy.to_str().unwrap(),
             "--fairness",
             "vtime",
+            "--callback-timing-sample-rate",
+            "128",
             "--exit-dump-len",
             "4096",
             "--verbose",

@@ -34,7 +34,6 @@ import {
   launchDiff,
   nextPolicyCandidate,
   parseFeedbackEntries,
-  policyCandidateActionDisabled,
   policyCategoryGroups,
   policyInlineActionModel,
   policyLibraryModels,
@@ -51,8 +50,9 @@ import {
   schedulerControlModel,
   schedulerControlMessage,
   schedulerCurrentCommand,
+  schedulerCurrentLaunch,
   schedulerDebugModel,
-  schedulerLaunchRequest,
+  schedulerLifecycleRequest,
   schedulerSettingModels,
   statsResetDisabled,
   syncCallbackSampleRateControl,
@@ -152,7 +152,6 @@ const elements = {
   policyFreshness: document.querySelector("#policyFreshness"),
   policyActivationNotice: document.querySelector("#policyActivationNotice"),
   policyActiveContext: document.querySelector("#policyActiveContext"),
-  policyCandidateAction: document.querySelector("#policyCandidateAction"),
   policyCandidateContext: document.querySelector("#policyCandidateContext"),
   policyCandidateImpact: document.querySelector("#policyCandidateImpact"),
   policyChoices: document.querySelector("#policyChoices"),
@@ -184,10 +183,6 @@ const elements = {
   schedulerControlView: document.querySelector("#controlView"),
   schedulerExitDumpEnabled: document.querySelector("#schedulerExitDumpEnabled"),
   schedulerExitDumpLen: document.querySelector("#schedulerExitDumpLen"),
-  schedulerFairness: document.querySelector("#schedulerFairness"),
-  schedulerFairnessEnabled: document.querySelector("#schedulerFairnessEnabled"),
-  schedulerSampleRate: document.querySelector("#schedulerSampleRate"),
-  schedulerSampleRateEnabled: document.querySelector("#schedulerSampleRateEnabled"),
   schedulerSettingsRows: document.querySelector("#schedulerSettingsRows"),
   schedulerVerbose: document.querySelector("#schedulerVerbose"),
   statsResetNotice: document.querySelector("#statsResetNotice"),
@@ -284,7 +279,6 @@ const state = {
 configureWindowSelector();
 configureCallbackRangeSelector();
 configureCallbackSampleRateSelector();
-configureSchedulerSampleRateSelector();
 bindControls();
 decorateFeedbackTargets(document);
 renderFeedback();
@@ -372,18 +366,6 @@ function configureCallbackSampleRateSelector() {
   }
 }
 
-function configureSchedulerSampleRateSelector() {
-  for (const optionModel of callbackSampleRateOptions()) {
-    const option = document.createElement("option");
-    option.value = String(optionModel.value);
-    option.textContent = optionModel.label;
-    if (optionModel.value === 64) {
-      option.selected = true;
-    }
-    elements.schedulerSampleRate.append(option);
-  }
-}
-
 function bindControls() {
   elements.windowSelect.addEventListener("change", () => {
     setWindow(elements.windowSelect.value);
@@ -460,21 +442,11 @@ function bindControls() {
   elements.assignWorkloadCell.addEventListener("click", () => setWorkloadCell(false));
   elements.clearWorkloadCell.addEventListener("click", () => setWorkloadCell(true));
   for (const control of [
-    elements.schedulerFairnessEnabled,
-    elements.schedulerFairness,
-    elements.schedulerSampleRateEnabled,
-    elements.schedulerSampleRate,
     elements.schedulerExitDumpEnabled,
     elements.schedulerExitDumpLen,
     elements.schedulerVerbose,
   ]) {
     control.addEventListener("change", () => {
-      if (
-        control === elements.schedulerFairnessEnabled
-        || control === elements.schedulerFairness
-      ) {
-        state.selectedLifecycleFairness = null;
-      }
       state.schedulerFormInitialized = true;
       renderSchedulerControl();
     });
@@ -571,7 +543,6 @@ function bindControls() {
     renderPolicyLibrary();
     renderSchedulerControl();
   });
-  elements.policyCandidateAction.addEventListener("click", runPolicyCandidate);
   elements.confirmPolicyActivation.addEventListener("click", activateSelectedPolicy);
   elements.policyDialog.addEventListener("close", () => {
     state.selectedPolicy = null;
@@ -1789,16 +1760,8 @@ function renderSchedulerControl() {
     )
   ) {
     state.selectedLifecyclePolicyId = null;
+    state.selectedLifecycleFairness = null;
   }
-  if (
-    state.selectedLifecycleFairness
-    && [...elements.schedulerFairness.options]
-      .some((option) => option.value === state.selectedLifecycleFairness)
-  ) {
-    elements.schedulerFairnessEnabled.checked = true;
-    elements.schedulerFairness.value = state.selectedLifecycleFairness;
-  }
-  syncSchedulerFairnessOptions(control);
 
   const model = schedulerControlModel(
     control,
@@ -1806,12 +1769,8 @@ function renderSchedulerControl() {
     Boolean(state.selectedLifecyclePolicyId),
   );
   const locked = model.configLocked;
-  elements.schedulerFairnessEnabled.disabled = locked;
-  elements.schedulerSampleRateEnabled.disabled = locked;
   elements.schedulerExitDumpEnabled.disabled = locked;
   elements.schedulerVerbose.disabled = locked;
-  elements.schedulerFairness.disabled = locked || !elements.schedulerFairnessEnabled.checked;
-  elements.schedulerSampleRate.disabled = locked || !elements.schedulerSampleRateEnabled.checked;
   elements.schedulerExitDumpLen.disabled = locked || !elements.schedulerExitDumpEnabled.checked;
   elements.startScheduler.disabled = model.startDisabled;
   elements.restartScheduler.disabled = model.restartDisabled;
@@ -1858,24 +1817,6 @@ function renderStatsResetControl() {
   );
 }
 
-function syncSchedulerFairnessOptions(control) {
-  const policy = control?.policies?.find(
-    (candidate) => candidate.id === state.selectedLifecyclePolicyId,
-  );
-  const supported = policy?.supported_fairness?.length
-    ? policy.supported_fairness
-    : ["fifo", "vtime", "eevdf"];
-  for (const option of elements.schedulerFairness.options) {
-    option.disabled = !supported.includes(option.value);
-  }
-  if (!supported.includes(elements.schedulerFairness.value)) {
-    elements.schedulerFairness.value = supported[0];
-  }
-  if (supported.length === 1 && supported[0] !== "fifo") {
-    elements.schedulerFairnessEnabled.checked = true;
-  }
-}
-
 function hydrateSchedulerLaunchForm(control) {
   const launch = control.launch || {};
   const policyId = control.policy_id || launch.policy_id;
@@ -1885,16 +1826,16 @@ function hydrateSchedulerLaunchForm(control) {
   state.selectedLifecyclePolicyId = validPolicies.some((policy) => policy.id === policyId)
     ? policyId
     : validPolicies[0]?.id || null;
-  const hasFairness = launch.fairness != null;
-  elements.schedulerFairnessEnabled.checked = hasFairness;
-  if (hasFairness && ["fifo", "vtime", "eevdf"].includes(launch.fairness)) {
-    elements.schedulerFairness.value = launch.fairness;
-  }
-  const hasSampleRate = launch.callback_timing_sample_rate != null;
-  elements.schedulerSampleRateEnabled.checked = hasSampleRate;
-  if (hasSampleRate) {
-    elements.schedulerSampleRate.value = String(launch.callback_timing_sample_rate);
-  }
+  const selectedPolicy = validPolicies.find(
+    (policy) => policy.id === state.selectedLifecyclePolicyId,
+  );
+  const supportedFairness = selectedPolicy?.supported_fairness?.length
+    ? selectedPolicy.supported_fairness
+    : ["fifo", "vtime", "eevdf"];
+  const currentFairness = control.context?.fairness || launch.fairness || "fifo";
+  state.selectedLifecycleFairness = supportedFairness.includes(currentFairness)
+    ? currentFairness
+    : supportedFairness[0] || "fifo";
   const hasExitDump = launch.exit_dump_len != null;
   elements.schedulerExitDumpEnabled.checked = hasExitDump;
   if (hasExitDump) {
@@ -1903,13 +1844,10 @@ function hydrateSchedulerLaunchForm(control) {
   elements.schedulerVerbose.checked = Boolean(launch.verbose);
 }
 
-function schedulerLaunchFormValues() {
+function schedulerLifecycleValues() {
   return {
     policy_id: state.selectedLifecyclePolicyId || "",
-    fairness_enabled: elements.schedulerFairnessEnabled.checked,
-    fairness: elements.schedulerFairness.value,
-    callback_timing_sample_rate_enabled: elements.schedulerSampleRateEnabled.checked,
-    callback_timing_sample_rate: elements.schedulerSampleRate.value,
+    fairness: state.selectedLifecycleFairness || "",
     exit_dump_len_enabled: elements.schedulerExitDumpEnabled.checked,
     exit_dump_len: elements.schedulerExitDumpLen.value,
     verbose: elements.schedulerVerbose.checked,
@@ -1918,19 +1856,15 @@ function schedulerLaunchFormValues() {
 
 function renderSchedulerCommandPreview() {
   try {
-    const request = schedulerLaunchRequest(schedulerLaunchFormValues());
+    const request = schedulerLifecycleRequest(
+      state.schedulerControl,
+      schedulerLifecycleValues(),
+    );
     elements.schedulerCommandPreview.textContent = schedulerCommandPreview(
       request,
       state.schedulerControl?.launch?.preserved_args || [],
     );
-    const current = {
-      policy_id: state.schedulerControl?.policy_id ?? null,
-      fairness: state.schedulerControl?.launch?.fairness ?? null,
-      callback_timing_sample_rate:
-        state.schedulerControl?.launch?.callback_timing_sample_rate ?? null,
-      exit_dump_len: state.schedulerControl?.launch?.exit_dump_len ?? null,
-      verbose: Boolean(state.schedulerControl?.launch?.verbose),
-    };
+    const current = schedulerCurrentLaunch(state.schedulerControl);
     const changes = launchDiff(current, request);
     elements.schedulerPendingChanges.innerHTML = changes.length === 0
       ? "No launch changes selected."
@@ -1968,7 +1902,7 @@ function renderSchedulerSettings(control) {
 async function startScheduler() {
   let request;
   try {
-    request = schedulerLaunchRequest(schedulerLaunchFormValues());
+    request = schedulerLifecycleRequest(state.schedulerControl, schedulerLifecycleValues());
   } catch (error) {
     showElementNotice(elements.schedulerControlNotice, error.message);
     return;
@@ -1979,7 +1913,7 @@ async function startScheduler() {
 async function restartScheduler() {
   let request;
   try {
-    request = schedulerLaunchRequest(schedulerLaunchFormValues());
+    request = schedulerLifecycleRequest(state.schedulerControl, schedulerLifecycleValues());
   } catch (error) {
     showElementNotice(elements.schedulerControlNotice, error.message);
     return;
@@ -2741,9 +2675,6 @@ function renderPolicyContextBar(fairnessModels, activeFairness) {
   if (!candidate) {
     elements.policyCandidateContext.textContent = "None selected";
     elements.policyCandidateImpact.textContent = "—";
-    elements.policyCandidateAction.textContent = "Select a policy";
-    elements.policyCandidateAction.disabled = true;
-    elements.policyCandidateAction.classList.remove("hidden");
     return;
   }
   elements.policyCandidateContext.textContent = `${candidate.name} · ${candidate.selectedFairness.toUpperCase()}`;
@@ -2752,53 +2683,6 @@ function renderPolicyContextBar(fairnessModels, activeFairness) {
     ? `${candidate.changeLabel}: ${reasonLabels.join(", ")}`
     : candidate.changeLabel;
   state.policyCandidate.actionKind = candidate.actionKind;
-  elements.policyCandidateAction.classList.toggle("hidden", candidate.actionKind === "activate");
-  elements.policyCandidateAction.textContent = candidate.actionLabel;
-  elements.policyCandidateAction.disabled = policyCandidateActionDisabled(
-    candidate,
-    state.schedulerControl,
-    state.schedulerControlPending,
-  );
-}
-
-function runPolicyCandidate() {
-  const candidate = state.policyCandidate;
-  if (policyCandidateActionDisabled(
-    candidate,
-    state.schedulerControl,
-    state.schedulerControlPending,
-  )) {
-    return;
-  }
-  if (candidate.actionKind === "lifecycle") {
-    if (!selectPolicyForLifecycle(candidate.policyId, candidate.fairness)) {
-      return;
-    }
-    if (state.schedulerControl?.active) {
-      restartScheduler();
-    } else {
-      startScheduler();
-    }
-  } else if (candidate.actionKind === "activate") {
-    openPolicyDialog(candidate.policyId);
-  }
-}
-
-function selectPolicyForLifecycle(policyId, fairnessMode) {
-  const policy = state.schedulerControl?.policies?.find((candidate) => candidate.id === policyId);
-  if (
-    !policy
-    || policy.change_mode === "invalid"
-    || !POLICY_FAIRNESS_OPTIONS.some((option) => option.id === fairnessMode)
-  ) {
-    showElementNotice(elements.policyLibraryNotice, `Policy ${policyId} is not available for restart.`);
-    return false;
-  }
-  state.selectedLifecyclePolicyId = policyId;
-  state.selectedLifecycleFairness = fairnessMode;
-  state.schedulerFormInitialized = true;
-  renderSchedulerControl();
-  return true;
 }
 
 function openPolicyDialog(policyId) {

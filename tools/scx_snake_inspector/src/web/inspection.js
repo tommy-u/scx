@@ -1181,14 +1181,12 @@ export function schedulerLaunchRequest(values) {
     policy_id: policyId,
     verbose: Boolean(values?.verbose),
   };
-  if (values?.fairness_enabled) {
-    const fairness = String(values.fairness || "").toLowerCase();
-    if (!["fifo", "vtime", "eevdf"].includes(fairness)) {
-      throw new Error("Fairness must be FIFO, VTIME, or EEVDF.");
-    }
-    request.fairness = fairness;
+  const fairness = String(values?.fairness || "").toLowerCase();
+  if (!["fifo", "vtime", "eevdf"].includes(fairness)) {
+    throw new Error("Fairness must be FIFO, VTIME, or EEVDF.");
   }
-  if (values?.callback_timing_sample_rate_enabled) {
+  request.fairness = fairness;
+  if (values?.callback_timing_sample_rate != null) {
     const sampleRate = Number(values.callback_timing_sample_rate);
     if (
       !Number.isSafeInteger(sampleRate)
@@ -1208,6 +1206,36 @@ export function schedulerLaunchRequest(values) {
     request.exit_dump_len = exitDumpLen;
   }
   return request;
+}
+
+function schedulerEffectiveSetting(control, name) {
+  const setting = (control?.settings || []).find((candidate) => candidate.name === name);
+  return setting?.effective ?? setting?.value ?? null;
+}
+
+export function schedulerCurrentLaunch(control) {
+  return {
+    policy_id: control?.policy_id ?? null,
+    fairness: schedulerEffectiveSetting(control, "fairness")
+      ?? control?.context?.fairness
+      ?? null,
+    callback_timing_sample_rate: schedulerEffectiveSetting(
+      control,
+      "callback_timing_sample_rate",
+    ) ?? control?.context?.callback_sample_rate ?? null,
+    exit_dump_len: control?.launch?.exit_dump_len ?? null,
+    verbose: Boolean(control?.launch?.verbose),
+  };
+}
+
+export function schedulerLifecycleRequest(control, values) {
+  const sampleRate = control?.active
+    ? schedulerCurrentLaunch(control).callback_timing_sample_rate
+    : null;
+  return schedulerLaunchRequest({
+    ...values,
+    callback_timing_sample_rate: sampleRate,
+  });
 }
 
 export function schedulerCommandPreview(request, preservedArgs = []) {
@@ -1477,20 +1505,6 @@ export function schedulerControlModel(control, pending, hasPolicy) {
     stopDisabled: Boolean(pending) || !controllable,
     restartDisabled: Boolean(pending) || !active || !controllable || !hasPolicy,
   };
-}
-
-export function policyCandidateActionDisabled(candidate, control, pending = false) {
-  if (!candidate || candidate.disabled) {
-    return true;
-  }
-  if (candidate.actionKind !== "lifecycle") {
-    return false;
-  }
-  if (!control) {
-    return true;
-  }
-  const model = schedulerControlModel(control, pending, true);
-  return control?.active ? model.restartDisabled : model.startDisabled;
 }
 
 export function policyInlineActionModel(policy, candidate, pending = false) {
