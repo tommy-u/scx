@@ -11,53 +11,6 @@
 extern u64				  queue_timing_session_id;
 extern struct snake_queue_timing_counters queue_timing_counters;
 
-struct {
-	__uint(type, BPF_MAP_TYPE_ARRAY);
-	__type(key, u32);
-	__type(value, struct snake_queue_header);
-	__uint(max_entries, 1);
-} queue_header SEC(".maps");
-
-struct {
-	__uint(type, BPF_MAP_TYPE_ARRAY);
-	__type(key, u32);
-	__type(value, u32);
-	__uint(max_entries, SNAKE_MAX_CPUS);
-} queue_cell_lookup SEC(".maps");
-
-struct {
-	__uint(type, BPF_MAP_TYPE_ARRAY);
-	__type(key, u32);
-	__type(value, struct snake_queue_cell);
-	__uint(max_entries, SNAKE_MAX_QUEUE_CELLS);
-} queue_cells SEC(".maps");
-
-struct {
-	__uint(type, BPF_MAP_TYPE_ARRAY);
-	__type(key, u32);
-	__type(value, struct snake_normal_queue);
-	__uint(max_entries, SNAKE_MAX_NORMAL_QUEUES);
-} normal_queues SEC(".maps");
-
-struct {
-	__uint(type, BPF_MAP_TYPE_ARRAY);
-	__type(key, u32);
-	__type(value, struct snake_cpu_queue);
-	__uint(max_entries, SNAKE_MAX_CPUS);
-} cpu_queues SEC(".maps");
-
-struct snake_queue_cell_masks {
-	struct bpf_cpumask __kptr *primary;
-	struct bpf_cpumask __kptr *borrowable;
-};
-
-struct {
-	__uint(type, BPF_MAP_TYPE_ARRAY);
-	__type(key, u32);
-	__type(value, struct snake_queue_cell_masks);
-	__uint(max_entries, SNAKE_MAX_QUEUE_CELLS);
-} queue_cell_masks SEC(".maps");
-
 /* Queue residence events are independent from fine timing stage events. */
 struct {
 	__uint(type, BPF_MAP_TYPE_RINGBUF);

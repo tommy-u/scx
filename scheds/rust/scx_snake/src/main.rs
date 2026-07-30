@@ -2541,6 +2541,16 @@ scope = "task_allowed"
         visited.insert(name.to_owned());
     }
 
+    fn assert_text_order(source: &str, labels: &[&str]) {
+        let mut offset = 0;
+        for label in labels {
+            let index = source[offset..]
+                .find(label)
+                .unwrap_or_else(|| panic!("missing ordered source marker `{label}`"));
+            offset += index + label.len();
+        }
+    }
+
     #[test]
     fn bpf_is_one_translation_unit_and_all_headers_are_reachable() {
         let bpf_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bpf");
@@ -2823,6 +2833,104 @@ scope = "task_allowed"
             assert!(!source.contains("BPF_MAP_TYPE_TASK_STORAGE"));
             assert!(!source.contains("BPF_LOCAL_STORAGE_GET_F_CREATE"));
         }
+    }
+
+    #[test]
+    fn bpf_queue_state_and_initialization_have_distinct_owners() {
+        let bpf_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bpf");
+        let state = fs::read_to_string(bpf_dir.join("queue_state.h"))
+            .expect("queue maps should have a dedicated owner");
+        let init = fs::read_to_string(bpf_dir.join("queue_init.h"))
+            .expect("queue initialization should have a dedicated owner");
+        let runtime = fs::read_to_string(bpf_dir.join("queue.h")).unwrap();
+        let umbrella = fs::read_to_string(bpf_dir.join("main.h")).unwrap();
+
+        assert!(state.contains("#include \"bpf_common.h\""));
+        for map in [
+            "queue_header",
+            "queue_cell_lookup",
+            "queue_cells",
+            "normal_queues",
+            "cpu_queues",
+            "queue_cell_masks",
+            "queue_cpu_states",
+        ] {
+            assert!(
+                state.contains(&format!("}} {map}")),
+                "queue state owner is missing {map}"
+            );
+            let declaration = format!("}} {map}");
+            assert!(!umbrella.contains(&declaration));
+            assert!(!runtime.contains(&declaration));
+        }
+        for accessor in [
+            "queue_config(",
+            "queue_topology_enabled(",
+            "queue_cell(",
+            "queue_cpu(",
+            "queue_cell_mask(",
+        ] {
+            assert!(
+                state.contains(accessor),
+                "queue state is missing {accessor}"
+            );
+        }
+        assert!(runtime.contains("#include \"queue_state.h\""));
+        assert!(init.contains("#include \"queue.h\""));
+        assert!(init.contains("#include \"dsq.h\""));
+        for initializer in [
+            "queue_build_cpumask(",
+            "queue_init_cell_masks(",
+            "validate_queue_topology(",
+            "create_queue_topology_dsqs(",
+        ] {
+            assert!(
+                init.contains(initializer),
+                "queue init is missing {initializer}"
+            );
+            assert!(!runtime.contains(initializer));
+        }
+
+        let main = fs::read_to_string(bpf_dir.join("main.bpf.c")).unwrap();
+        let prepare = main
+            .split_once("int prepare_ladder(void *ctx)")
+            .unwrap()
+            .1
+            .split_once("BPF_STRUCT_OPS(snake_select_cpu")
+            .unwrap()
+            .0;
+        assert_text_order(
+            prepare,
+            &[
+                "active_ladder_slot()",
+                "validate_compiled_ladder(ladder)",
+                "scx_bpf_nr_cpu_ids()",
+                "validate_queue_topology()",
+                "queue_topology_enabled() && !fairness_is_vtime()",
+                "prepare_mask_tables(slot, ladder)",
+            ],
+        );
+        let attach = main
+            .split_once("BPF_STRUCT_OPS_SLEEPABLE(snake_init)")
+            .unwrap()
+            .1
+            .split_once("BPF_STRUCT_OPS(snake_exit")
+            .unwrap()
+            .0;
+        assert_text_order(
+            attach,
+            &[
+                "scx_bpf_nr_cpu_ids()",
+                "init_mask_table_scratch()",
+                "validate_queue_topology()",
+                "queue_topology_enabled() && !fairness_is_vtime()",
+                "fairness_init()",
+                "queue_init_cell_masks()",
+                "create_queue_topology_dsqs()",
+                "acquire_active_ladder(&ladder_ctx)",
+                "validate_compiled_ladder(ladder_ctx.ladder)",
+            ],
+        );
     }
 
     #[test]

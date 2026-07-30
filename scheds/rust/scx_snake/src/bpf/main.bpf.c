@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 #include "main.h"
 #include "queue.h"
+#include "queue_init.h"
 #include "fairness.h"
 #include "queue_fairness.h"
 #include "queue_ladder.h"
