@@ -85,6 +85,8 @@ run_case vtime_cell_borrowing \
 run_case vtime_cell_llc_borrowing \
     env SNAKE_QUEUE_LAYOUT=cell_llc "${script_dir}/vtime_cell_borrowing.sh" "${snake_bin}"
 run_case vtime_mixed_affinity "${script_dir}/vtime_mixed_affinity.sh" "${snake_bin}"
+run_case vtime_policy_reader_lifetime \
+    "${script_dir}/vtime_policy_reader_lifetime.sh" "${snake_bin}"
 run_case vtime_queue_ladders "${script_dir}/vtime_queue_ladders.sh" "${snake_bin}"
 run_case vtime_queued_rehome "${script_dir}/vtime_queued_rehome.sh" "${snake_bin}"
 run_case vtime_single_runner_rehome \

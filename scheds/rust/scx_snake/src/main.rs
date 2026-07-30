@@ -2478,9 +2478,10 @@ fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::{BTreeMap, BTreeSet};
     use std::fs;
     use std::mem::{offset_of, size_of};
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     use clap::Parser;
 
@@ -2497,6 +2498,277 @@ scope = "previous_cpu"
 operation = "pick_idle"
 scope = "task_allowed"
 "#
+    }
+
+    fn bpf_sources(bpf_dir: &Path) -> Vec<(PathBuf, String)> {
+        let mut sources = fs::read_dir(bpf_dir)
+            .expect("BPF source directory should exist")
+            .map(|entry| entry.expect("BPF source entry should be readable").path())
+            .filter(|path| {
+                matches!(
+                    path.extension().and_then(|extension| extension.to_str()),
+                    Some("h" | "c")
+                )
+            })
+            .map(|path| {
+                let source = fs::read_to_string(&path).expect("BPF source should be readable");
+                (path, source)
+            })
+            .collect::<Vec<_>>();
+        sources.sort_by(|left, right| left.0.cmp(&right.0));
+        sources
+    }
+
+    #[test]
+    fn bpf_is_one_translation_unit_and_all_headers_are_reachable() {
+        let bpf_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bpf");
+        let sources = bpf_sources(&bpf_dir);
+        let translation_units = sources
+            .iter()
+            .filter(|(path, _)| path.extension().and_then(|value| value.to_str()) == Some("c"))
+            .map(|(path, _)| path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(translation_units, ["main.bpf.c"]);
+
+        let by_name = sources
+            .iter()
+            .map(|(path, source)| {
+                (
+                    path.file_name().unwrap().to_string_lossy().into_owned(),
+                    source.as_str(),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let mut pending = vec!["main.bpf.c".to_owned()];
+        let mut reachable = BTreeSet::new();
+        while let Some(name) = pending.pop() {
+            if !reachable.insert(name.clone()) {
+                continue;
+            }
+            let source = by_name
+                .get(&name)
+                .unwrap_or_else(|| panic!("included BPF source `{name}` should exist"));
+            for include in source
+                .lines()
+                .filter_map(|line| line.trim().strip_prefix("#include \"")?.strip_suffix('"'))
+            {
+                assert!(
+                    by_name.contains_key(include),
+                    "{name} includes missing local header {include}"
+                );
+                pending.push(include.to_owned());
+            }
+        }
+        let expected = by_name.keys().cloned().collect::<BTreeSet<_>>();
+        assert_eq!(reachable, expected);
+    }
+
+    #[test]
+    fn bpf_external_map_and_program_surface_is_stable() {
+        const EXPECTED_MAPS: &[&str] = &[
+            ".data.uei_dump",
+            "active_ladder",
+            "bpf_bpf.bss",
+            "bpf_bpf.data",
+            "bpf_bpf.kconfig",
+            "bpf_bpf.rodata",
+            "callback_timing",
+            "cell_stats",
+            "cell_vtime_domains",
+            "compiled_ladders",
+            "cpu_queues",
+            "eevdf_domain",
+            "fine_timing_config",
+            "fine_timing_events",
+            "ladder_readers",
+            "mask_data",
+            "mask_scratch",
+            "mask_slots",
+            "normal_queues",
+            "queue_cell_lookup",
+            "queue_cell_masks",
+            "queue_cells",
+            "queue_cpu_states",
+            "queue_header",
+            "queue_timing_events",
+            "rung_timing_events",
+            "snake_ops",
+            "stats",
+            "task_cells",
+            "task_runtimes",
+            "vtime_domain",
+        ];
+        const EXPECTED_PROGRAMS: &[&str] = &[
+            "prepare_ladder",
+            "scx_lib_init_probe",
+            "snake_dispatch",
+            "snake_enqueue",
+            "snake_exit",
+            "snake_init",
+            "snake_init_task",
+            "snake_quiescent",
+            "snake_runnable",
+            "snake_running",
+            "snake_select_cpu",
+            "snake_set_weight",
+            "snake_stopping",
+        ];
+
+        let skeleton = include_str!(concat!(env!("OUT_DIR"), "/bpf_skel.rs"));
+        let mut maps = skeleton
+            .lines()
+            .filter_map(|line| {
+                line.trim()
+                    .strip_prefix(".map(\"")?
+                    .split_once('"')
+                    .map(|(name, _)| name)
+            })
+            .collect::<Vec<_>>();
+        maps.sort_unstable();
+        let mut programs = skeleton
+            .lines()
+            .filter_map(|line| {
+                line.trim()
+                    .strip_prefix(".prog(\"")?
+                    .split_once('"')
+                    .map(|(name, _)| name)
+            })
+            .collect::<Vec<_>>();
+        programs.sort_unstable();
+
+        assert_eq!(maps, EXPECTED_MAPS);
+        assert_eq!(programs, EXPECTED_PROGRAMS);
+    }
+
+    #[test]
+    fn task_runtime_flat_field_inventory_is_stable() {
+        const EXPECTED_FIELDS: &[&str] = &[
+            "queue_cpumask",
+            "started_exec_runtime",
+            "service_budget",
+            "vruntime",
+            "affinity_vruntime",
+            "deadline",
+            "request_remaining_ns",
+            "queue_timing_session_id",
+            "queue_timing_dsq_id",
+            "queue_timing_enqueued_at_ns",
+            "sleep_lag",
+            "active_weight",
+            "pending_weight",
+            "cell_index",
+            "affinity_cell_index",
+            "run_cell_index",
+            "run_owner_cell_index",
+            "selected_cpu",
+            "direct_cell_index",
+            "queue_timing_cell_index",
+            "queue_timing_depth_after_insert",
+            "queue_timing_queue_class",
+            "runtime_valid",
+            "initialized",
+            "runnable_accounted",
+            "has_sleep_lag",
+            "run_direct",
+            "cell_initialized",
+            "affinity_initialized",
+            "selected_cpu_valid",
+            "queue_class",
+            "run_queue_class",
+            "direct_cell_valid",
+        ];
+
+        let bpf_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bpf");
+        let combined = bpf_sources(&bpf_dir)
+            .into_iter()
+            .map(|(_, source)| source)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let body = combined
+            .split_once("struct snake_task_runtime {")
+            .and_then(|(_, rest)| rest.split_once("};"))
+            .map(|(body, _)| body)
+            .expect("snake_task_runtime should remain defined in BPF source");
+        let fields = body
+            .lines()
+            .filter_map(|line| {
+                let declaration = line.trim().strip_suffix(';')?;
+                declaration
+                    .split_whitespace()
+                    .last()
+                    .map(|field| field.trim_start_matches('*'))
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(fields, EXPECTED_FIELDS);
+
+        type TaskRuntime = bpf_skel::types::snake_task_runtime;
+        assert_eq!(size_of::<TaskRuntime>(), 144);
+        assert_eq!(std::mem::align_of::<TaskRuntime>(), 8);
+        assert_eq!(offset_of!(TaskRuntime, queue_cpumask), 0);
+        assert_eq!(offset_of!(TaskRuntime, started_exec_runtime), 8);
+        assert_eq!(offset_of!(TaskRuntime, service_budget), 16);
+        assert_eq!(offset_of!(TaskRuntime, vruntime), 24);
+        assert_eq!(offset_of!(TaskRuntime, affinity_vruntime), 32);
+        assert_eq!(offset_of!(TaskRuntime, deadline), 40);
+        assert_eq!(offset_of!(TaskRuntime, request_remaining_ns), 48);
+        assert_eq!(offset_of!(TaskRuntime, queue_timing_session_id), 56);
+        assert_eq!(offset_of!(TaskRuntime, queue_timing_dsq_id), 64);
+        assert_eq!(offset_of!(TaskRuntime, queue_timing_enqueued_at_ns), 72);
+        assert_eq!(offset_of!(TaskRuntime, sleep_lag), 80);
+        assert_eq!(offset_of!(TaskRuntime, active_weight), 88);
+        assert_eq!(offset_of!(TaskRuntime, pending_weight), 92);
+        assert_eq!(offset_of!(TaskRuntime, cell_index), 96);
+        assert_eq!(offset_of!(TaskRuntime, affinity_cell_index), 100);
+        assert_eq!(offset_of!(TaskRuntime, run_cell_index), 104);
+        assert_eq!(offset_of!(TaskRuntime, run_owner_cell_index), 108);
+        assert_eq!(offset_of!(TaskRuntime, selected_cpu), 112);
+        assert_eq!(offset_of!(TaskRuntime, direct_cell_index), 116);
+        assert_eq!(offset_of!(TaskRuntime, queue_timing_cell_index), 120);
+        assert_eq!(
+            offset_of!(TaskRuntime, queue_timing_depth_after_insert),
+            124
+        );
+        assert_eq!(offset_of!(TaskRuntime, queue_timing_queue_class), 128);
+        assert_eq!(offset_of!(TaskRuntime, runtime_valid), 132);
+        assert_eq!(offset_of!(TaskRuntime, initialized), 133);
+        assert_eq!(offset_of!(TaskRuntime, runnable_accounted), 134);
+        assert_eq!(offset_of!(TaskRuntime, has_sleep_lag), 135);
+        assert_eq!(offset_of!(TaskRuntime, run_direct), 136);
+        assert_eq!(offset_of!(TaskRuntime, cell_initialized), 137);
+        assert_eq!(offset_of!(TaskRuntime, affinity_initialized), 138);
+        assert_eq!(offset_of!(TaskRuntime, selected_cpu_valid), 139);
+        assert_eq!(offset_of!(TaskRuntime, queue_class), 140);
+        assert_eq!(offset_of!(TaskRuntime, run_queue_class), 141);
+        assert_eq!(offset_of!(TaskRuntime, direct_cell_valid), 142);
+    }
+
+    #[test]
+    fn fairness_callback_facade_surface_is_stable() {
+        const ENTRYPOINTS: &[&str] = &[
+            "fairness_init(",
+            "fairness_runnable(",
+            "fairness_dispatch_slice(",
+            "fairness_enqueue(",
+            "fairness_dispatch(",
+            "fairness_running(",
+            "fairness_stopping(",
+            "fairness_quiescent(",
+            "fairness_set_weight(",
+        ];
+
+        let bpf_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bpf");
+        let combined = bpf_sources(&bpf_dir)
+            .into_iter()
+            .map(|(_, source)| source)
+            .collect::<Vec<_>>()
+            .join("\n");
+        for entrypoint in ENTRYPOINTS {
+            assert!(
+                combined.contains(entrypoint),
+                "fairness callback facade lost `{entrypoint}`"
+            );
+        }
     }
 
     fn raw_percpu_stats() -> Vec<Vec<Vec<u8>>> {
@@ -2534,27 +2806,27 @@ scope = "task_allowed"
             "scx_bpf_destroy_dsq(",
         ];
         let bpf_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bpf");
-        for entry in fs::read_dir(&bpf_dir).expect("BPF source directory should exist") {
-            let path = entry.expect("BPF source entry should be readable").path();
-            if path.file_name().and_then(|name| name.to_str()) == Some("dsq.h")
-                || !matches!(
-                    path.extension().and_then(|ext| ext.to_str()),
-                    Some("h" | "c")
-                )
-            {
-                continue;
-            }
-            let source = fs::read_to_string(&path).expect("BPF source should be readable");
-            for operation in RAW_OPERATIONS {
-                assert!(
-                    !source.contains(operation),
-                    "{} bypasses dsq.h with {operation}",
-                    path.display()
-                );
-            }
+        let sources = bpf_sources(&bpf_dir);
+        let owners = sources
+            .iter()
+            .filter(|(_, source)| {
+                RAW_OPERATIONS
+                    .iter()
+                    .any(|operation| source.contains(operation))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            owners.len(),
+            1,
+            "raw sched_ext DSQ operations must have exactly one source owner"
+        );
+        let shared = &owners[0].1;
+        for operation in RAW_OPERATIONS {
+            assert!(
+                shared.contains(operation),
+                "shared DSQ owner is missing {operation}"
+            );
         }
-        let shared = fs::read_to_string(bpf_dir.join("dsq.h"))
-            .expect("shared DSQ helpers should be readable");
         assert!(shared.contains("fine_timing_record_dsq_operation"));
         assert!(shared.contains("static __noinline bool\ndsq_move_to_local"));
     }
