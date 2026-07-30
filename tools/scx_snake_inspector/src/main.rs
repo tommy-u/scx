@@ -14,6 +14,7 @@ use scx_snake_inspector::api::{router, ApiContext};
 use scx_snake_inspector::cli::Args;
 use scx_snake_inspector::collector::{run_collector, CollectorCommand, CollectorOptions};
 use scx_snake_inspector::dashboard::Dashboard;
+use scx_snake_inspector::host_context::HostContextService;
 use scx_snake_inspector::launcher::SnakeLauncher;
 use scx_snake_inspector::topology::TopologyView;
 use tokio::net::TcpListener;
@@ -26,6 +27,8 @@ async fn main() -> Result<()> {
     let max_window_ms = args.max_window_ms().map_err(anyhow::Error::msg)?;
 
     let topology = TopologyView::discover()?;
+    let host_context = HostContextService::system(hostname_from_environment(), topology.cpus.len());
+    host_context.spawn_refresh_tasks();
     let dashboard = Dashboard::new(topology, max_window_ms);
     let launcher = SnakeLauncher::new(&args.snake_bin, &args.policy_dir)?;
     let token = session_token()?;
@@ -54,7 +57,8 @@ async fn main() -> Result<()> {
         "/sys/fs/cgroup".into(),
     )
     .with_initial_window_ms(initial_window_ms)
-    .with_launcher(launcher.clone());
+    .with_launcher(launcher.clone())
+    .with_host_context(host_context);
     let listener = TcpListener::bind(args.listen)
         .await
         .with_context(|| format!("failed to bind dashboard to {}", args.listen))?;
@@ -127,6 +131,13 @@ fn ssh_destination_from_environment() -> String {
     let user = std::env::var("USER").ok();
     let hostname = std::env::var("HOSTNAME").ok();
     ssh_destination(sudo_user.as_deref(), user.as_deref(), hostname.as_deref())
+}
+
+fn hostname_from_environment() -> String {
+    std::env::var("HOSTNAME")
+        .ok()
+        .filter(|hostname| !hostname.is_empty())
+        .unwrap_or_else(|| "localhost".into())
 }
 
 fn ssh_destination(sudo_user: Option<&str>, user: Option<&str>, hostname: Option<&str>) -> String {

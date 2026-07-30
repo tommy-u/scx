@@ -108,18 +108,24 @@ function normalizedCell(cell, observedMs) {
     CELL_COUNTER_FIELDS.map((field) => [field, Math.max(0, finiteValue(cell?.[field]) ?? 0)]),
   );
   const observedSeconds = Number(observedMs) > 0 ? Number(observedMs) / 1_000 : null;
+  const primaryCpuCount = finiteValue(cell?.primary_cpu_count);
+  const ownedCapacityNs = primaryCpuCount > 0 && Number(observedMs) > 0
+    ? primaryCpuCount * Number(observedMs) * 1_000_000
+    : null;
   const perSecond = (count) => observedSeconds === null
     ? null
     : Number((count / observedSeconds).toFixed(4));
   return {
     id: finiteValue(cell?.id, cell?.cell_id, cell?.external_id),
     index: finiteValue(cell?.index, cell?.cell_index),
-    primaryCpuCount: finiteValue(cell?.primary_cpu_count),
+    primaryCpuCount,
     raw,
     serviceCores: finiteValue(cell?.service_cores),
     serviceSharePct: finiteValue(cell?.service_share_pct),
     primaryPct: finiteValue(cell?.primary_pct, cell?.primary_runtime_pct),
     borrowedPct: finiteValue(cell?.borrowed_pct, cell?.borrowed_runtime_pct),
+    lentPct: finiteValue(cell?.lent_pct, cell?.lent_runtime_pct)
+      ?? (ownedCapacityNs === null ? null : raw.lent_runtime_ns * 100 / ownedCapacityNs),
     ownedUtilizationPct: finiteValue(cell?.owned_utilization_pct),
     normalEnqueueRate: finiteValue(
       cell?.normal_enqueues_per_second,
@@ -435,6 +441,8 @@ export function overviewModel({
   inspection,
   control,
   topology,
+  queueTiming,
+  hostContext,
   errors = [],
 } = {}) {
   const context = inspection?.context || snapshot?.context || control?.context || null;
@@ -464,6 +472,92 @@ export function overviewModel({
     inspection?.queue_topology,
     topology?.numeric_order || [],
   );
+  const cellStats = cellStatsModel(snapshot?.cell_stats, {
+    policyGeneration: context?.policy_generation ?? null,
+  });
+  const timing = queueTimingModel(queueTiming, { context });
+  const rankedCallbacks = callbacks
+    .map((callback) => ({
+      callback: String(callback?.callback || "unknown"),
+      samples: Math.max(0, Number(callback?.samples) || 0),
+      p99Ns: finiteValue(callback?.p99_ns),
+    }))
+    .filter((callback) => callback.p99Ns !== null)
+    .sort((left, right) => right.p99Ns - left.p99Ns)
+    .slice(0, 3);
+  const rankedCells = [...cellStats.cells]
+    .sort((left, right) => (
+      (right.ownedUtilizationPct ?? -1) - (left.ownedUtilizationPct ?? -1)
+      || (right.borrowedPct ?? -1) - (left.borrowedPct ?? -1)
+      || left.id - right.id
+    ))
+    .slice(0, 3);
+  const rankedBorrowers = [...cellStats.cells]
+    .filter((cell) => cell.borrowedPct !== null)
+    .sort((left, right) => right.borrowedPct - left.borrowedPct || left.id - right.id)
+    .slice(0, 3);
+  const rankedLenders = [...cellStats.cells]
+    .filter((cell) => cell.lentPct !== null)
+    .sort((left, right) => right.lentPct - left.lentPct || left.id - right.id)
+    .slice(0, 3);
+  const rankedQueues = timing.dsqs
+    .map((dsq) => ({
+      dsqId: dsq.dsqId,
+      queueClass: dsq.queueClass,
+      cellId: dsq.cellId,
+      cpu: dsq.cpu,
+      samples: dsq.residence.samples,
+      p99Ns: dsq.residence.p99Ns,
+      p95Depth: dsq.depth.p95,
+    }))
+    .filter((dsq) => dsq.p99Ns !== null || dsq.p95Depth !== null)
+    .sort((left, right) => (
+      (right.p99Ns ?? -1) - (left.p99Ns ?? -1)
+      || (right.p95Depth ?? -1) - (left.p95Depth ?? -1)
+    ))
+    .slice(0, 3);
+  const ladderRates = ladderPercentages(activeSlot?.metrics);
+  const rankedRungs = (activeSlot?.policy?.rungs || [])
+    .map((rung) => ({
+      index: finiteValue(rung?.index),
+      operation: String(rung?.operation || "unknown"),
+      ...rungTimingSummary(rung?.timing),
+    }))
+    .filter((rung) => rung.p95Ns !== null)
+    .sort((left, right) => right.p95Ns - left.p95Ns)
+    .slice(0, 3);
+  const jobs = new Map();
+  for (const task of hostContext?.tupperware?.data || []) {
+    const jobHandle = String(task?.job_handle || "").trim();
+    const taskId = String(task?.task_id ?? "").trim();
+    if (!jobHandle || !taskId) {
+      continue;
+    }
+    if (!jobs.has(jobHandle)) {
+      jobs.set(jobHandle, []);
+    }
+    jobs.get(jobHandle).push(taskId);
+  }
+  const allotmentGroups = new Map();
+  for (const allotment of hostContext?.allotments?.data || []) {
+    const shape = String(allotment?.shape || "Unknown");
+    const ownership = String(allotment?.ownership || "Unknown");
+    const state = String(allotment?.state || "Unknown");
+    const key = `${shape}\u0000${ownership}\u0000${state}`;
+    const group = allotmentGroups.get(key) || {
+      shape,
+      ownership,
+      state,
+      count: 0,
+      owners: [],
+    };
+    group.count += 1;
+    const owner = String(allotment?.owner || "").trim();
+    if (owner && !group.owners.includes(owner)) {
+      group.owners.push(owner);
+    }
+    allotmentGroups.set(key, group);
+  }
   const reportedWarnings = [
     snapshot?.collector_error,
     snapshot?.pair_map_failures || snapshot?.task_storage_failures
@@ -472,6 +566,12 @@ export function overviewModel({
     snapshot?.cpu_usage_error,
     callbackTiming?.error,
     inspection?.error,
+    timing.counts.dropped > 0
+      ? `${timing.counts.dropped} queue timing samples dropped`
+      : null,
+    queue.expectedCpuCount > 0 && !queue.routesComplete
+      ? `CPU routing incomplete: ${queue.cpuRoutes.length} / ${queue.expectedCpuCount}`
+      : null,
     ...errors,
   ].filter((warning, index, all) => (
     typeof warning === "string"
@@ -495,6 +595,11 @@ export function overviewModel({
             count: Number(busiestRoute.count),
           }
         : null,
+      selectCalls: Math.max(0, Number(activeSlot?.metrics?.select_calls) || 0),
+      directDispatches: Math.max(0, Number(activeSlot?.metrics?.direct_dispatches) || 0),
+      ladderExhaustions: Math.max(0, Number(activeSlot?.metrics?.ladder_exhaustions) || 0),
+      directDispatchPct: ladderRates.hit,
+      exhaustionPct: ladderRates.miss,
     },
     callbacks: {
       available: Boolean(callbackTiming),
@@ -521,6 +626,51 @@ export function overviewModel({
       available: Boolean(inspection),
       cellCount: inspection?.cells?.length || 0,
       taskCount: inspection?.task_mappings?.length || 0,
+    },
+    tuning: {
+      cells: {
+        status: cellStats.status,
+        statusLabel: cellStats.statusLabel,
+        ranked: rankedCells,
+        borrowers: rankedBorrowers,
+        lenders: rankedLenders,
+      },
+      queues: {
+        status: timing.status,
+        statusLabel: timing.statusLabel,
+        state: timing.state,
+        stateLabel: timing.stateLabel,
+        droppedSamples: timing.counts.dropped,
+        ranked: rankedQueues,
+      },
+      callbacks: {
+        available: Boolean(callbackTiming),
+        windowMs: finiteValue(callbackTiming?.window_ms),
+        ranked: rankedCallbacks,
+      },
+      rungs: {
+        available: rankedRungs.length > 0,
+        ranked: rankedRungs,
+      },
+    },
+    host: {
+      available: Boolean(hostContext),
+      identity: hostContext?.identity || null,
+      resourceBrowser: hostContext?.resource_browser || null,
+      taskState: hostContext?.tupperware?.state || "loading",
+      taskMessage: hostContext?.tupperware?.message || null,
+      jobs: [...jobs.entries()]
+        .map(([jobHandle, taskIds]) => ({
+          jobHandle,
+          taskIds: taskIds.sort((left, right) => left.localeCompare(right, undefined, {
+            numeric: true,
+          })),
+        }))
+        .sort((left, right) => left.jobHandle.localeCompare(right.jobHandle)),
+      allotmentState: hostContext?.allotments?.state || "loading",
+      allotmentMessage: hostContext?.allotments?.message || null,
+      allotmentGroups: [...allotmentGroups.values()],
+      charts: hostContext?.charts || [],
     },
   };
 }

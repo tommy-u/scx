@@ -194,12 +194,23 @@ const elements = {
   totalMigrations: document.querySelector("#totalMigrations"),
   activityView: document.querySelector("#activityView"),
   overviewView: document.querySelector("#overviewView"),
-  overviewRuntime: document.querySelector("#overviewRuntime"),
-  overviewWarnings: document.querySelector("#overviewWarnings"),
-  overviewActivity: document.querySelector("#overviewActivity"),
-  overviewCallbacks: document.querySelector("#overviewCallbacks"),
-  overviewPolicy: document.querySelector("#overviewPolicy"),
-  overviewCells: document.querySelector("#overviewCells"),
+  overviewWindowSelect: document.querySelector("#overviewWindowSelect"),
+  overviewScopeMode: document.querySelector("#overviewScopeMode"),
+  overviewScopeValueField: document.querySelector("#overviewScopeValueField"),
+  overviewScopeValueLabel: document.querySelector("#overviewScopeValueLabel"),
+  overviewScopeValue: document.querySelector("#overviewScopeValue"),
+  overviewApplyScope: document.querySelector("#overviewApplyScope"),
+  overviewControlNotice: document.querySelector("#overviewControlNotice"),
+  overviewContext: document.querySelector("#overviewContext"),
+  overviewFaults: document.querySelector("#overviewFaults"),
+  overviewPlacement: document.querySelector("#overviewPlacement"),
+  overviewCellBalance: document.querySelector("#overviewCellBalance"),
+  overviewQueueing: document.querySelector("#overviewQueueing"),
+  overviewOverhead: document.querySelector("#overviewOverhead"),
+  overviewHost: document.querySelector("#overviewHost"),
+  overviewCharts: document.querySelector("#overviewCharts"),
+  overviewCpuPressureChart: document.querySelector("#overviewCpuPressureChart"),
+  overviewSchedulerDelayChart: document.querySelector("#overviewSchedulerDelayChart"),
   navigationDrawer: document.querySelector("#navigationDrawer"),
   openNavigation: document.querySelector("#openNavigation"),
   closeNavigation: document.querySelector("#closeNavigation"),
@@ -240,6 +251,11 @@ const state = {
   lastPolicyCatalogAt: 0,
   lastSchedulerControlAt: 0,
   lastSnapshotAt: 0,
+  hostContext: null,
+  hostContextError: null,
+  hostContextLoading: false,
+  lastHostContextAt: 0,
+  overviewScopeDirty: false,
   orderMode: "topology",
   popoverPinned: false,
   policyCatalog: null,
@@ -283,6 +299,7 @@ bindControls();
 decorateFeedbackTargets(document);
 renderFeedback();
 renderWorkloadTargetField();
+renderOverviewScopeField();
 renderSchedulerControl();
 start().catch((error) => {
   setStatus("error", "Connection failed");
@@ -304,12 +321,14 @@ async function start() {
   await loadFineTiming();
   await loadPolicyCatalog();
   await loadSchedulerControl();
+  await loadHostContext();
   window.setInterval(loadInspection, 1_000);
   window.setInterval(loadQueueTiming, 1_000);
   window.setInterval(loadCallbackTiming, 1_000);
   window.setInterval(loadFineTiming, 1_000);
   window.setInterval(loadPolicyCatalog, 5_000);
   window.setInterval(loadSchedulerControl, 2_000);
+  window.setInterval(loadHostContext, 30_000);
 }
 
 function configureWindowSelector() {
@@ -319,7 +338,11 @@ function configureWindowSelector() {
     presets.push(initialWindowMs);
     presets.sort((left, right) => left - right);
   }
-  for (const select of [elements.windowSelect, elements.cellWindowSelect]) {
+  for (const select of [
+    elements.overviewWindowSelect,
+    elements.windowSelect,
+    elements.cellWindowSelect,
+  ]) {
     for (const value of presets) {
       const option = document.createElement("option");
       option.value = String(value);
@@ -334,6 +357,7 @@ function setWindow(value) {
   state.windowMs = Number(value);
   elements.windowSelect.value = String(state.windowMs);
   elements.cellWindowSelect.value = String(state.windowMs);
+  elements.overviewWindowSelect.value = String(state.windowMs);
   connectEvents();
 }
 
@@ -367,6 +391,9 @@ function configureCallbackSampleRateSelector() {
 }
 
 function bindControls() {
+  elements.overviewWindowSelect.addEventListener("change", () => {
+    setWindow(elements.overviewWindowSelect.value);
+  });
   elements.windowSelect.addEventListener("change", () => {
     setWindow(elements.windowSelect.value);
   });
@@ -411,6 +438,20 @@ function bindControls() {
   });
   elements.scopeMode.addEventListener("change", renderScopeFields);
   elements.applyScope.addEventListener("click", applyScope);
+  elements.overviewScopeMode.addEventListener("change", () => {
+    state.overviewScopeDirty = true;
+    renderOverviewScopeField();
+  });
+  elements.overviewScopeValue.addEventListener("input", () => {
+    state.overviewScopeDirty = true;
+  });
+  elements.overviewApplyScope.addEventListener("click", applyOverviewScope);
+  elements.overviewCharts.addEventListener("click", (event) => {
+    const control = event.target.closest("[data-open-ods]");
+    if (control) {
+      openOdsChart(control.dataset.openOds, control);
+    }
+  });
   elements.canvas.addEventListener("pointermove", showTooltip);
   elements.canvas.addEventListener("pointerleave", hideTooltip);
   elements.canvas.addEventListener("click", pinMigrationPair);
@@ -827,21 +868,38 @@ function renderScopeFields() {
   elements.cgroupField.classList.toggle("hidden", mode !== "cgroup");
 }
 
+function renderOverviewScopeField() {
+  const mode = elements.overviewScopeMode.value;
+  elements.overviewScopeValueField.classList.toggle("hidden", mode === "all");
+  elements.overviewScopeValueLabel.textContent = mode === "tgids" ? "TGIDs" : "Cgroup";
+  elements.overviewScopeValue.placeholder = mode === "tgids"
+    ? "1204, 1881"
+    : "/workload.slice";
+  elements.overviewScopeValue.inputMode = mode === "tgids" ? "numeric" : "text";
+}
+
+function scopePayload(mode, value) {
+  if (mode === "tgids") {
+    return { kind: "tgids", tgids: parseTgids(value) };
+  }
+  if (mode === "cgroup") {
+    const path = value.trim();
+    if (!path) {
+      throw new Error("Enter a cgroup path");
+    }
+    return { kind: "cgroup", path };
+  }
+  return { kind: "all" };
+}
+
 async function applyScope() {
   hideNotice();
   let payload;
   try {
-    if (elements.scopeMode.value === "tgids") {
-      payload = { kind: "tgids", tgids: parseTgids(elements.tgidInput.value) };
-    } else if (elements.scopeMode.value === "cgroup") {
-      const path = elements.cgroupInput.value.trim();
-      if (!path) {
-        throw new Error("Enter a cgroup path");
-      }
-      payload = { kind: "cgroup", path };
-    } else {
-      payload = { kind: "all" };
-    }
+    const value = elements.scopeMode.value === "tgids"
+      ? elements.tgidInput.value
+      : elements.cgroupInput.value;
+    payload = scopePayload(elements.scopeMode.value, value);
   } catch (error) {
     showNotice(error.message);
     return;
@@ -849,22 +907,47 @@ async function applyScope() {
 
   elements.applyScope.disabled = true;
   try {
-    const response = await fetch("/api/scope", {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-snake-token": token,
-      },
-      body: JSON.stringify(payload),
-    });
-    if (!response.ok) {
-      const body = await response.json().catch(() => ({}));
-      throw new Error(body.error || `Scope change failed (${response.status})`);
-    }
+    await postScope(payload);
   } catch (error) {
     showNotice(error.message);
   } finally {
     elements.applyScope.disabled = false;
+  }
+}
+
+async function applyOverviewScope() {
+  hideElementNotice(elements.overviewControlNotice);
+  let payload;
+  try {
+    payload = scopePayload(elements.overviewScopeMode.value, elements.overviewScopeValue.value);
+  } catch (error) {
+    showElementNotice(elements.overviewControlNotice, error.message);
+    return;
+  }
+  elements.overviewApplyScope.disabled = true;
+  try {
+    await postScope(payload);
+    state.overviewScopeDirty = false;
+    showElementNotice(elements.overviewControlNotice, "Scope updated.", "success");
+  } catch (error) {
+    showElementNotice(elements.overviewControlNotice, error.message);
+  } finally {
+    elements.overviewApplyScope.disabled = false;
+  }
+}
+
+async function postScope(payload) {
+  const response = await fetch("/api/scope", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-snake-token": token,
+    },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({}));
+    throw new Error(body.error || `Scope change failed (${response.status})`);
   }
 }
 
@@ -901,6 +984,7 @@ function renderSnapshot() {
   elements.activePairs.textContent = numberFormat.format(snapshot.active_pairs);
   elements.windowCoverage.textContent = `${formatDuration(snapshot.observed_ms)} / ${formatDuration(snapshot.window_ms)}`;
   elements.scopeSummary.textContent = formatScope(snapshot.scope);
+  syncOverviewScope(snapshot.scope);
 
   const notices = [];
   if (snapshot.collector_error) {
@@ -929,6 +1013,29 @@ function renderSnapshot() {
   } else if (state.route === "debugging") {
     renderDebugging();
   }
+}
+
+function syncOverviewScope(scope) {
+  if (
+    state.overviewScopeDirty
+    ||
+    elements.overviewApplyScope.disabled
+    || elements.overviewScopeMode === document.activeElement
+    || elements.overviewScopeValue === document.activeElement
+  ) {
+    return;
+  }
+  if (scope === "all" || scope?.all !== undefined) {
+    elements.overviewScopeMode.value = "all";
+    elements.overviewScopeValue.value = "";
+  } else if (scope?.tgids) {
+    elements.overviewScopeMode.value = "tgids";
+    elements.overviewScopeValue.value = scope.tgids.join(", ");
+  } else if (scope?.cgroup) {
+    elements.overviewScopeMode.value = "cgroup";
+    elements.overviewScopeValue.value = scope.cgroup.path || "";
+  }
+  renderOverviewScopeField();
 }
 
 function renderHeatmap() {
@@ -1314,76 +1421,203 @@ function renderOverview() {
       : null,
     control: state.schedulerControl,
     topology: state.topology,
+    queueTiming: state.queueTiming,
+    hostContext: state.hostContext,
     errors: [
       state.snapshotError,
       state.callbackTimingError,
       state.inspectionError,
+      state.queueTimingError,
       state.policyCatalogError,
       state.schedulerControlError,
+      state.hostContextError,
     ],
   });
-  elements.overviewRuntime.innerHTML = `
-    <strong>${escapeHtml(model.runtime.statusLabel)}</strong>
-    <span>${escapeHtml(model.runtime.detailLabel)}</span>`;
-  elements.overviewWarnings.classList.toggle("hidden", model.warnings.length === 0);
+  const identity = model.host.identity || {};
+  elements.overviewContext.innerHTML = overviewFacts([
+    ["Host", identity.hostname || "Unavailable"],
+    ["Location", [identity.datacenter, identity.region].filter(Boolean).join(" · ") || "Unavailable"],
+    ["Pool / hardware", [identity.machine_pool, identity.hardware].filter(Boolean).join(" · ") || "Unavailable"],
+    ["Logical CPUs", identity.cpu_count == null ? "Unavailable" : formatCount(identity.cpu_count)],
+    ["Host data", state.hostContextError
+      ? `Stale · last contact ${formatTimestamp(state.lastHostContextAt)}`
+      : model.host.resourceBrowser?.state || (model.host.available ? "Local only" : "Loading")],
+    ["Scheduler", model.runtime.statusLabel],
+    ["Policy", model.runtime.detailLabel],
+  ]);
+
+  elements.overviewFaults.classList.toggle("hidden", model.warnings.length === 0);
   const warningSignature = JSON.stringify(model.warnings);
-  if (elements.overviewWarnings.dataset.warningSignature !== warningSignature) {
-    elements.overviewWarnings.dataset.warningSignature = warningSignature;
-    elements.overviewWarnings.innerHTML = model.warnings.length === 0
+  if (elements.overviewFaults.dataset.warningSignature !== warningSignature) {
+    elements.overviewFaults.dataset.warningSignature = warningSignature;
+    elements.overviewFaults.innerHTML = model.warnings.length === 0
       ? ""
-      : `<strong>Reported warnings</strong><ul>${model.warnings.map((warning) => `<li>${escapeHtml(warning)}</li>`).join("")}</ul>`;
+      : `<strong>Reported faults and incomplete data</strong><ul>${model.warnings.map((warning) => `<li>${escapeHtml(warning)}</li>`).join("")}</ul>`;
   }
 
   const busiestRoute = model.activity.busiestRoute
     ? `CPU ${formatCount(model.activity.busiestRoute.from)} → CPU ${formatCount(model.activity.busiestRoute.to)} · ${formatCount(model.activity.busiestRoute.count)}`
     : "No migrations in the current window";
-  elements.overviewActivity.innerHTML = model.activity.available
+  const placementFacts = [
+    ["Migrations", formatCount(model.activity.total)],
+    ["Rate", `${formatRate(model.activity.ratePerSecond)}/s`],
+    ["Busiest route", busiestRoute],
+    ["Coverage", `${formatDuration(model.activity.observedMs)} / ${formatDuration(model.activity.windowMs)}`],
+  ];
+  if (model.activity.selectCalls > 0) {
+    placementFacts.splice(2, 0,
+      ["Policy-generation direct dispatch", `${formatPercentage(model.activity.directDispatchPct)} · ${formatCount(model.activity.directDispatches)}`],
+      ["Policy-generation ladder exhaustion", `${formatPercentage(model.activity.exhaustionPct)} · ${formatCount(model.activity.ladderExhaustions)}`],
+    );
+  }
+  elements.overviewPlacement.innerHTML = model.activity.available
     ? overviewFacts([
-        ["Migrations", formatCount(model.activity.total)],
-        ["Rate", `${formatRate(model.activity.ratePerSecond)}/s`],
-        ["Active routes", formatCount(model.activity.activePairs)],
-        ["Busiest route", busiestRoute],
-        ["Coverage", `${formatDuration(model.activity.observedMs)} / ${formatDuration(model.activity.windowMs)}`],
+        ...placementFacts,
       ])
     : '<span class="overview-empty">Waiting for migration data</span>';
 
-  const slowestCallback = model.callbacks.slowest
-    ? `${model.callbacks.slowest.callback} · p99 ${formatCallbackDuration(model.callbacks.slowest.p99Ns)}`
-    : "No callback samples";
-  elements.overviewCallbacks.innerHTML = model.callbacks.available
-    ? overviewFacts([
-        ["Sampling", model.callbacks.sampleRate > 0 ? `1 / ${formatCount(model.callbacks.sampleRate)}` : "Off"],
-        ["Generation", model.callbacks.generation == null ? "Unavailable" : formatCount(model.callbacks.generation)],
-        ["Samples", formatCount(model.callbacks.sampleCount)],
-        ["Slowest p99", slowestCallback],
-      ])
-    : '<span class="overview-empty">Waiting for callback timing data</span>';
+  const topBorrower = model.tuning.cells.borrowers[0];
+  const topLender = model.tuning.cells.lenders[0];
+  elements.overviewCellBalance.innerHTML = model.tuning.cells.ranked.length > 0
+    ? `<div class="overview-cell-highlights">
+        <span><small>Largest borrower</small><strong>${topBorrower ? `Cell ${escapeHtml(topBorrower.id)} · ${escapeHtml(formatCellMetric(topBorrower.borrowedPct, "percentage"))}` : "—"}</strong></span>
+        <span><small>Largest lender</small><strong>${topLender ? `Cell ${escapeHtml(topLender.id)} · ${escapeHtml(formatCellMetric(topLender.lentPct, "percentage"))}` : "—"}</strong></span>
+      </div><ol class="overview-ranking">${model.tuning.cells.ranked.map((cell) => `
+        <li><strong>Cell ${escapeHtml(cell.id)}</strong><span>Owned ${escapeHtml(formatCellMetric(cell.ownedUtilizationPct, "percentage"))} · borrowed ${escapeHtml(formatCellMetric(cell.borrowedPct, "percentage"))} · lent ${escapeHtml(formatCellMetric(cell.lentPct, "percentage"))}</span></li>`).join("")}</ol>`
+    : `<span class="overview-empty">${escapeHtml(model.tuning.cells.statusLabel)}</span>`;
 
-  const routeCoverage = model.policy.expectedCpuCount > 0
-    ? `${formatCount(model.policy.cpuRouteCount)} / ${formatCount(model.policy.expectedCpuCount)}${model.policy.routesComplete ? "" : " · incomplete"}`
-    : "Not applicable";
-  elements.overviewPolicy.innerHTML = model.policy.available
-    ? overviewFacts([
-        ["Policy", model.policy.policyId || "Unknown"],
-        ["Fairness", model.policy.fairness ? model.policy.fairness.toUpperCase() : "Unknown"],
-        ["Generation", model.policy.generation == null ? "Unavailable" : formatCount(model.policy.generation)],
-        ["Active rung set", model.policy.activeSlot == null ? "Unavailable" : formatCount(model.policy.activeSlot)],
-        ["Queue layout", model.policy.queueLayout || "None"],
-        ["CPU routes", routeCoverage],
-      ])
-    : '<span class="overview-empty">Waiting for policy inspection</span>';
+  elements.overviewQueueing.innerHTML = model.tuning.queues.ranked.length > 0
+    ? `<p class="overview-time-basis">Current queue-capture session</p><ol class="overview-ranking">${model.tuning.queues.ranked.map((queue) => `
+        <li><strong>DSQ ${escapeHtml(queue.dsqId)}</strong><span>p99 ${escapeHtml(queue.p99Ns == null ? "—" : formatCallbackDuration(queue.p99Ns))} · p95 depth ${escapeHtml(formatNullableCount(queue.p95Depth))} · ${formatCount(queue.samples)} samples</span></li>`).join("")}</ol>`
+    : `<span class="overview-empty">${escapeHtml(
+        model.tuning.queues.status === "ready" && model.tuning.queues.state === "inactive"
+          ? "Queue timing capture is off. Open Queue topology to collect it."
+          : model.tuning.queues.statusLabel,
+      )}</span>`;
 
-  elements.overviewCells.innerHTML = model.cells.available
-    ? overviewFacts([
-        ["Configured cells", formatCount(model.cells.cellCount)],
-        ["Mapped tasks", formatCount(model.cells.taskCount)],
-      ])
-    : '<span class="overview-empty">Waiting for cell inspection</span>';
+  const callbackRanking = model.tuning.callbacks.ranked.length > 0
+    ? `<div><h4>Callbacks · ${escapeHtml(model.tuning.callbacks.windowMs ? formatDuration(model.tuning.callbacks.windowMs) : "selected range")}</h4><ol class="overview-ranking">${model.tuning.callbacks.ranked.map((callback) => `
+        <li><strong>${escapeHtml(callback.callback)}</strong><span>p99 ${escapeHtml(formatCallbackDuration(callback.p99Ns))} · ${formatCount(callback.samples)} samples</span></li>`).join("")}</ol></div>`
+    : '<span class="overview-empty">No callback samples</span>';
+  const rungRanking = model.tuning.rungs.ranked.length > 0
+    ? `<div><h4>Policy rungs · current generation</h4><ol class="overview-ranking">${model.tuning.rungs.ranked.map((rung) => `
+        <li><strong>Rung ${escapeHtml(rung.index)} · ${escapeHtml(rung.operation)}</strong><span>sampled p95 ${escapeHtml(formatCallbackDuration(rung.p95Ns))} · ${formatCount(rung.samples)} samples</span></li>`).join("")}</ol></div>`
+    : '<span class="overview-empty">No sampled rung timing</span>';
+  elements.overviewOverhead.innerHTML = `<div class="overview-overhead-groups">${callbackRanking}${rungRanking}</div>`;
+
+  renderOverviewHost(model.host);
+  renderOverviewChart(
+    elements.overviewCpuPressureChart,
+    model.host.charts.find((chart) => chart.metric === "cpu-pressure"),
+  );
+  renderOverviewChart(
+    elements.overviewSchedulerDelayChart,
+    model.host.charts.find((chart) => chart.metric === "scheduler-delay"),
+  );
 }
 
 function overviewFacts(facts) {
   return `<dl>${facts.map(([name, value]) => `
     <div><dt>${escapeHtml(name)}</dt><dd>${escapeHtml(value)}</dd></div>`).join("")}</dl>`;
+}
+
+function renderOverviewHost(host) {
+  const signature = JSON.stringify([host, state.hostContextError]);
+  if (elements.overviewHost.dataset.hostSignature === signature) {
+    return;
+  }
+  elements.overviewHost.dataset.hostSignature = signature;
+  if (!host.available) {
+    elements.overviewHost.innerHTML = `<span class="overview-empty">${escapeHtml(state.hostContextError || "Host metadata is loading")}</span>`;
+    return;
+  }
+  const identity = host.identity || {};
+  const taskContent = host.taskState === "ready" || host.taskState === "stale"
+    ? host.jobs.length === 0
+      ? '<p class="overview-empty">No Tupperware tasks are assigned to this host.</p>'
+      : `<ul class="overview-host-list">${host.jobs.map((job) => `
+          <li><strong>${escapeHtml(job.jobHandle)}</strong><span>Tasks ${job.taskIds.map(escapeHtml).join(", ")}</span></li>`).join("")}</ul>`
+    : `<p class="overview-empty">${escapeHtml(host.taskMessage || "Tupperware placement is loading")}</p>`;
+  const allotmentContent = host.allotmentState === "ready" || host.allotmentState === "stale"
+    ? host.allotmentGroups.length === 0
+      ? '<p class="overview-empty">No Resource Broker allotments; this host is currently unreserved.</p>'
+      : `<ul class="overview-host-list">${host.allotmentGroups.map((group) => `
+          <li><strong>${formatCount(group.count)} × ${escapeHtml(group.shape)} · ${escapeHtml(group.ownership)}</strong><span>${escapeHtml(group.state)}${group.owners.length > 0 ? ` · ${group.owners.map(escapeHtml).join(", ")}` : ""}</span></li>`).join("")}</ul>`
+    : `<p class="overview-empty">${escapeHtml(host.allotmentMessage || "Allotment data is loading")}</p>`;
+  replaceKeyedHtml(elements.overviewHost, `
+    ${state.hostContextError ? `<p class="overview-source-stale">Host context is stale · ${escapeHtml(state.hostContextError)} · last successful contact ${escapeHtml(formatTimestamp(state.lastHostContextAt))}</p>` : ""}
+    <div class="overview-host-columns">
+      <details open data-render-key="overview:tw-tasks">
+        <summary data-render-key="overview:tw-tasks:summary">Tupperware tasks · ${formatCount(host.jobs.reduce((total, job) => total + job.taskIds.length, 0))}</summary>
+        ${host.taskState === "stale" ? `<p class="overview-source-stale">Stale · ${escapeHtml(host.taskMessage || "refresh failed")}</p>` : ""}
+        ${taskContent}
+      </details>
+      <details open data-render-key="overview:allotments">
+        <summary data-render-key="overview:allotments:summary">Allotments · ${formatCount(host.allotmentGroups.reduce((total, group) => total + group.count, 0))}</summary>
+        ${host.allotmentState === "stale" ? `<p class="overview-source-stale">Stale · ${escapeHtml(host.allotmentMessage || "refresh failed")}</p>` : ""}
+        ${allotmentContent}
+      </details>
+    </div>
+    <dl class="overview-host-identifiers">
+      <div><dt>Device</dt><dd>${escapeHtml(identity.device_id || "Unavailable")}</dd></div>
+      <div><dt>Reservation</dt><dd>${escapeHtml(identity.reservation_id || "Unreserved")}</dd></div>
+      <div><dt>Materialization</dt><dd>${escapeHtml(identity.materialization_id || "None")}</dd></div>
+    </dl>`);
+}
+
+function renderOverviewChart(container, chart) {
+  const signature = JSON.stringify([
+    chart?.state,
+    chart?.fetched_at_ms,
+    chart?.message,
+    chart?.image_url,
+    chart?.open_url,
+    state.hostContextError,
+  ]);
+  if (container.dataset.chartSignature === signature) {
+    return;
+  }
+  container.dataset.chartSignature = signature;
+  if (!chart || !["ready", "stale"].includes(chart.state) || !chart.fetched_at_ms) {
+    container.innerHTML = `<span class="overview-empty">${escapeHtml(chart?.message || "ODS chart is loading")}</span>`;
+    return;
+  }
+  container.innerHTML = `
+    <button class="overview-chart-image-link" type="button" data-open-ods="${escapeHtml(chart.open_url)}" aria-label="Open ${escapeHtml(chart.label)} in ODS">
+      <img src="${escapeHtml(chart.image_url)}?revision=${encodeURIComponent(chart.fetched_at_ms)}" alt="${escapeHtml(chart.label)} over the last three hours">
+    </button>
+    <footer><span>${chart.state === "stale" || state.hostContextError ? "Stale · last successful chart" : "Updated"} ${escapeHtml(formatTimestamp(chart.fetched_at_ms))}</span><button class="overview-chart-open" type="button" data-open-ods="${escapeHtml(chart.open_url)}">Open in ODS</button></footer>`;
+}
+
+async function openOdsChart(endpoint, control) {
+  const popup = window.open("about:blank", "_blank");
+  if (popup) {
+    popup.opener = null;
+  }
+  control.disabled = true;
+  hideElementNotice(elements.overviewControlNotice);
+  try {
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: { "x-snake-token": token },
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok || !body.url) {
+      throw new Error(body.error || `ODS link request failed (${response.status})`);
+    }
+    if (popup) {
+      popup.location.replace(body.url);
+    } else {
+      window.open(body.url, "_blank", "noopener");
+    }
+  } catch (error) {
+    if (popup) {
+      popup.close();
+    }
+    showElementNotice(elements.overviewControlNotice, error.message);
+  } finally {
+    control.disabled = false;
+  }
 }
 
 function renderDebugging() {
@@ -1661,6 +1895,30 @@ async function setQueueTiming(enabled) {
   } finally {
     state.queueTimingPending = false;
     renderQueueTopologyView();
+  }
+}
+
+async function loadHostContext() {
+  if (state.hostContextLoading) {
+    return;
+  }
+  state.hostContextLoading = true;
+  try {
+    const response = await fetch("/api/host-context", { cache: "no-store" });
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      throw new Error(body.error || `Host context request failed (${response.status})`);
+    }
+    state.hostContext = await response.json();
+    state.hostContextError = null;
+    state.lastHostContextAt = Date.now();
+  } catch (error) {
+    state.hostContextError = error.message;
+  } finally {
+    state.hostContextLoading = false;
+    if (state.route === "overview") {
+      renderOverview();
+    }
   }
 }
 

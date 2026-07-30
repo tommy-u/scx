@@ -3676,6 +3676,284 @@ body {
   display: none;
 }
 
+.overview-controls {
+  min-height: 62px;
+  padding: 10px clamp(16px, 3vw, 40px);
+  display: flex;
+  align-items: end;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+  background: var(--surface-muted);
+  border-bottom: 1px solid var(--border);
+}
+
+.overview-controls .control-message {
+  flex: 1 1 100%;
+}
+
+.overview-scope-value {
+  flex: 1 1 260px;
+}
+
+.overview-context {
+  padding: 14px clamp(16px, 3vw, 40px);
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+
+.overview-context dl,
+.overview-tuning-card dl {
+  margin: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 12px 20px;
+}
+
+.overview-context dt,
+.overview-tuning-card dt,
+.overview-host-identifiers dt {
+  color: var(--muted);
+  font-size: 0.62rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.overview-context dd,
+.overview-tuning-card dd,
+.overview-host-identifiers dd {
+  margin: 2px 0 0;
+  font-size: 0.75rem;
+  font-weight: 680;
+  overflow-wrap: anywhere;
+}
+
+.overview-faults {
+  padding: 11px clamp(16px, 3vw, 40px);
+  color: #7d4400;
+  background: #fff5e5;
+  border-bottom: 1px solid #e8c58e;
+  font-size: 0.72rem;
+}
+
+.overview-faults ul {
+  margin: 5px 0 0;
+  padding-left: 20px;
+}
+
+.overview-tuning-grid {
+  padding: 18px clamp(16px, 3vw, 40px);
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  background: var(--surface-muted);
+  border-bottom: 1px solid var(--border);
+}
+
+.overview-tuning-card,
+.overview-chart-card {
+  min-width: 0;
+  padding: 15px 16px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+}
+
+.overview-ranking,
+.overview-host-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.overview-cell-highlights {
+  margin-bottom: 10px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.overview-cell-highlights span,
+.overview-cell-highlights small,
+.overview-cell-highlights strong {
+  display: block;
+}
+
+.overview-cell-highlights span {
+  padding: 8px 9px;
+  background: var(--surface-muted);
+  border: 1px solid var(--border);
+}
+
+.overview-cell-highlights small {
+  color: var(--muted);
+  font-size: 0.6rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.overview-cell-highlights strong {
+  margin-top: 2px;
+  font-size: 0.72rem;
+}
+
+.overview-ranking li,
+.overview-host-list li {
+  padding: 8px 0;
+  display: grid;
+  grid-template-columns: minmax(110px, 0.8fr) minmax(0, 1.4fr);
+  gap: 12px;
+  border-top: 1px solid var(--border);
+  font-size: 0.72rem;
+}
+
+.overview-ranking li:first-child,
+.overview-host-list li:first-child {
+  padding-top: 0;
+  border-top: 0;
+}
+
+.overview-ranking span,
+.overview-host-list span {
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.overview-overhead-groups {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.overview-overhead-groups h4 {
+  margin: 0 0 8px;
+  font-size: 0.69rem;
+  text-transform: uppercase;
+}
+
+.overview-time-basis {
+  margin: 0 0 8px;
+  color: var(--muted);
+  font-size: 0.64rem;
+}
+
+.overview-overhead-groups .overview-ranking li {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 2px;
+}
+
+.overview-wide-section {
+  padding: 20px clamp(16px, 3vw, 40px) 24px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+
+.overview-section-heading p {
+  margin: 3px 0 0;
+  color: var(--muted);
+  font-size: 0.67rem;
+}
+
+.overview-chart-grid,
+.overview-host-columns {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.overview-chart-card header,
+.overview-chart-card footer {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.overview-chart-card h4 {
+  margin: 0;
+  font-size: 0.8rem;
+}
+
+.overview-chart-card header span,
+.overview-chart-card footer {
+  color: var(--muted);
+  font-size: 0.65rem;
+}
+
+.overview-chart-card img {
+  width: 100%;
+  min-height: 160px;
+  margin: 10px 0 6px;
+  display: block;
+  object-fit: contain;
+  background: var(--surface-muted);
+}
+
+.overview-chart-image-link {
+  width: 100%;
+  padding: 0;
+  display: block;
+  color: inherit;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+}
+
+.overview-chart-image-link:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.overview-chart-open {
+  padding: 0;
+  color: var(--accent);
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 680;
+  text-decoration: none;
+}
+
+.overview-chart-open:disabled,
+.overview-chart-image-link:disabled {
+  cursor: wait;
+  opacity: 0.6;
+}
+
+.overview-control-scope-note {
+  flex-basis: 100%;
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.65rem;
+}
+
+.overview-host-columns details {
+  min-width: 0;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+
+.overview-host-columns summary {
+  margin-bottom: 10px;
+  font-size: 0.75rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.overview-source-stale {
+  margin: 0 0 9px;
+  color: var(--waiting);
+  font-size: 0.67rem;
+}
+
+.overview-host-identifiers {
+  margin: 14px 0 0;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
 .configure-workspace {
   min-width: 0;
   display: grid;
@@ -3907,6 +4185,33 @@ body {
     overflow-wrap: anywhere;
     white-space: normal;
     text-align: right;
+  }
+
+  .overview-controls {
+    align-items: stretch;
+  }
+
+  .overview-controls .control-field,
+  .overview-controls .apply-button {
+    width: 100%;
+  }
+
+  .overview-tuning-grid,
+  .overview-chart-grid,
+  .overview-host-columns,
+  .overview-overhead-groups,
+  .overview-host-identifiers {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .overview-ranking li,
+  .overview-host-list li {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 3px;
+  }
+
+  .overview-cell-highlights {
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .configure-detail > .policy-context-bar {

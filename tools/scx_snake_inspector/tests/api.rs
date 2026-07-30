@@ -7,7 +7,8 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc, Mutex};
+use std::time::Duration;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -16,6 +17,10 @@ use scx_snake_inspector::api::{router, ApiContext, CSRF_HEADER};
 use scx_snake_inspector::collector::CollectorCommand;
 use scx_snake_inspector::dashboard::{
     CellStatsStatus, Dashboard, FineTimingStatus, QueueTimingStatus,
+};
+use scx_snake_inspector::host_context::{
+    ChartMetric, CommandFuture, CommandInvocation, CommandOutput as HostCommandOutput,
+    CommandRunner, HostContextService,
 };
 use scx_snake_inspector::launcher::SnakeLauncher;
 use scx_snake_inspector::model::{CellMetricCounters, CpuPair};
@@ -1975,4 +1980,143 @@ async fn router_rejects_non_loopback_host_headers() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::MISDIRECTED_REQUEST);
+}
+
+#[derive(Default)]
+struct HostApiRunner {
+    calls: Mutex<Vec<CommandInvocation>>,
+}
+
+impl CommandRunner for HostApiRunner {
+    fn run<'a>(&'a self, invocation: CommandInvocation, _timeout: Duration) -> CommandFuture<'a> {
+        self.calls.lock().unwrap().push(invocation.clone());
+        Box::pin(async move {
+            let joined = invocation.args.join(" ");
+            if joined.contains("tupperware.host") {
+                Ok(HostCommandOutput::text(
+                    r#"[{"job_handle":"tsp_atn/team/service","task_id":"3"}]"#,
+                ))
+            } else if joined.contains("allotments_table") {
+                Ok(HostCommandOutput::text("[]"))
+            } else if joined.contains("host_fqdn") {
+                Ok(HostCommandOutput::text(
+                    r#"[{"datacenter_name":"atn3","host_fqdn":"devbig008.atn3.facebook.com","id":"332060305","logical_server_subtype":"T2_TRN","machine_pool":"devbig","region":"atn","reservation_entitlement_id":"-","resource_materialization_id":"","stackable":"false"}]"#,
+                ))
+            } else if joined.contains("--image") {
+                let path = invocation
+                    .args
+                    .iter()
+                    .position(|arg| arg == "--image")
+                    .and_then(|index| invocation.args.get(index + 1))
+                    .ok_or_else(|| "missing chart path".to_owned())?;
+                fs::write(path, b"\x89PNG\r\n\x1a\npng-data").map_err(|error| error.to_string())?;
+                Ok(HostCommandOutput::text(""))
+            } else if joined.contains("--fburlonly") {
+                Ok(HostCommandOutput::text("https://fburl.com/ods/fresh\n"))
+            } else {
+                Err(format!("unexpected command: {joined}"))
+            }
+        })
+    }
+}
+
+#[tokio::test]
+async fn host_context_routes_expose_metadata_charts_and_fresh_ods_links() {
+    let runner = Arc::new(HostApiRunner::default());
+    let host_context =
+        HostContextService::with_runner("devbig008.atn3.facebook.com", 316, None, runner);
+    host_context.refresh_metadata(1_000).await;
+    host_context
+        .refresh_chart(ChartMetric::CpuPressure, 1_100)
+        .await;
+    let (tx, _rx) = mpsc::channel();
+    let root = tempfile::tempdir().unwrap();
+    let app = router(
+        ApiContext::new(dashboard(), tx, "secret", root.path().to_path_buf())
+            .with_host_context(host_context),
+    );
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/host-context")
+                .header("host", "127.0.0.1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(body["identity"]["machine_pool"], "devbig");
+    assert_eq!(body["tupperware"]["data"][0]["task_id"], "3");
+    assert_eq!(body["charts"][0]["state"], "ready");
+
+    let image = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/host-charts/cpu-pressure.png?revision=1100")
+                .header("host", "127.0.0.1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(image.status(), StatusCode::OK);
+    assert_eq!(image.headers()["content-type"], "image/png");
+    assert_eq!(
+        image.headers()["cache-control"],
+        "private, max-age=31536000, immutable"
+    );
+    assert_eq!(
+        image.into_body().collect().await.unwrap().to_bytes(),
+        b"\x89PNG\r\n\x1a\npng-data".as_slice()
+    );
+
+    let get_open = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/host-charts/scheduler-delay/open")
+                .header("host", "127.0.0.1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(get_open.status(), StatusCode::METHOD_NOT_ALLOWED);
+
+    let unauthorized_open = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/host-charts/scheduler-delay/open")
+                .header("host", "127.0.0.1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unauthorized_open.status(), StatusCode::UNAUTHORIZED);
+
+    let open = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/host-charts/scheduler-delay/open")
+                .header("host", "127.0.0.1")
+                .header(CSRF_HEADER, "secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(open.status(), StatusCode::OK);
+    let body: Value =
+        serde_json::from_slice(&open.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(body["url"], "https://fburl.com/ods/fresh");
 }

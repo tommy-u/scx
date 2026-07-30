@@ -97,7 +97,7 @@ test("nested workspace routes are canonical and legacy hashes remain compatible"
   });
 });
 
-test("overview model summarizes existing runtime payloads without new thresholds", () => {
+test("overview model summarizes runtime payloads without inventing health thresholds", () => {
   const context = {
     scheduler_attach_seq: 7,
     scheduler_active: true,
@@ -106,7 +106,7 @@ test("overview model summarizes existing runtime payloads without new thresholds
     fairness: "vtime",
     callback_sample_rate: 64,
   };
-  assert.deepEqual(overviewModel({
+  const model = overviewModel({
     snapshot: {
       context,
       total: 90,
@@ -144,45 +144,163 @@ test("overview model summarizes existing runtime payloads without new thresholds
     control: { context, policy_id: "cell-min-vtime.toml" },
     topology: { numeric_order: [0, 1] },
     errors: ["Callback polling failed", null],
-  }), {
-    runtime: {
-      synchronizing: false,
-      statusLabel: "Snake active · Attach #7",
-      detailLabel: "cell-min-vtime.toml · VTIME · policy gen 12 · rung set 1 · sampling 1/64",
-    },
-    warnings: [
-      "2 pair-map failures · 0 task-state failures",
-      "Callback polling failed",
-    ],
-    activity: {
-      available: true,
-      total: 90,
-      ratePerSecond: 3.5,
-      activePairs: 2,
-      observedMs: 9_500,
-      windowMs: 10_000,
-      busiestRoute: { from: 1, to: 3, count: 60 },
-    },
-    callbacks: {
-      available: true,
-      sampleRate: 64,
-      generation: 12,
-      sampleCount: 32,
-      slowest: { callback: "enqueue", samples: 12, p99Ns: 1_400 },
-    },
-    policy: {
-      available: true,
-      policyId: "cell-min-vtime.toml",
-      fairness: "vtime",
-      generation: 12,
-      activeSlot: 1,
-      queueLayout: "cell",
-      cpuRouteCount: 2,
-      expectedCpuCount: 2,
-      routesComplete: true,
-    },
-    cells: { available: true, cellCount: 2, taskCount: 3 },
   });
+  assert.equal(model.runtime.statusLabel, "Snake active · Attach #7");
+  assert.deepEqual(model.warnings, [
+    "2 pair-map failures · 0 task-state failures",
+    "Callback polling failed",
+  ]);
+  assert.deepEqual(model.activity.busiestRoute, { from: 1, to: 3, count: 60 });
+  assert.deepEqual(model.callbacks.slowest, {
+    callback: "enqueue",
+    samples: 12,
+    p99Ns: 1_400,
+  });
+  assert.equal(model.policy.routesComplete, true);
+  assert.deepEqual(model.cells, { available: true, cellCount: 2, taskCount: 3 });
+});
+
+test("overview ranks tuning signals within their own domains and groups host context", () => {
+  const fastRungBuckets = Array(64).fill(0);
+  fastRungBuckets[5] = 100;
+  const slowRungBuckets = Array(64).fill(0);
+  slowRungBuckets[11] = 100;
+  const context = {
+    scheduler_attach_seq: 7,
+    scheduler_active: true,
+    policy_generation: 12,
+    active_slot: 1,
+    fairness: "vtime",
+    callback_sample_rate: 64,
+  };
+  const model = overviewModel({
+    snapshot: {
+      context,
+      cell_stats: {
+        status: "ready",
+        source_policy_generation: 12,
+        observed_ms: 10_000,
+        cells: [
+          { id: 1, owned_utilization_pct: 42, borrowed_pct: 5, lent_pct: 12 },
+          { id: 2, owned_utilization_pct: 88, borrowed_pct: 20, lent_pct: 1 },
+        ],
+      },
+    },
+    callbackTiming: {
+      sample_rate: 64,
+      callbacks: [
+        { callback: "select_cpu", samples: 100, p99_ns: 900 },
+        { callback: "dispatch", samples: 100, p99_ns: 4_000 },
+      ],
+    },
+    inspection: {
+      context,
+      cells: [],
+      task_mappings: [],
+      slots: [{
+        slot: 1,
+        state: "active",
+        generation: 12,
+        metrics: { select_calls: 100, direct_dispatches: 80, ladder_exhaustions: 20 },
+        policy: { rungs: [
+          { index: 0, operation: "claim_idle", timing: { total_ns: 6_300, buckets: fastRungBuckets } },
+          { index: 1, operation: "load_any", timing: { total_ns: 409_500, buckets: slowRungBuckets } },
+        ] },
+      }],
+    },
+    queueTiming: {
+      status: "ready",
+      sample_rate: 64,
+      context,
+      capture: {
+        state: "collecting",
+        policy_generation: 12,
+        dropped_samples: 2,
+        dsqs: [
+          {
+            dsq_id: 20,
+            queue_class: "normal",
+            residence: { samples: 100, p99_ns: 7_000 },
+            depth: { samples: 100, p95: 4 },
+          },
+          {
+            dsq_id: 10,
+            queue_class: "normal",
+            residence: { samples: 100, p99_ns: 12_000 },
+            depth: { samples: 100, p95: 9 },
+          },
+        ],
+      },
+    },
+    hostContext: {
+      identity: {
+        hostname: "devbig008.atn3.facebook.com",
+        ods_entity: "devbig008.atn3",
+        cpu_count: 316,
+        datacenter: "atn3",
+        machine_pool: "devbig",
+        hardware: "T2_TRN",
+      },
+      resource_browser: { state: "ready", fetched_at_ms: 1_000, message: null },
+      tupperware: {
+        state: "ready",
+        fetched_at_ms: 1_000,
+        message: null,
+        data: [
+          { job_handle: "tsp_atn/team/job", task_id: "3" },
+          { job_handle: "tsp_atn/team/job", task_id: "1" },
+        ],
+      },
+      allotments: {
+        state: "ready",
+        fetched_at_ms: 1_000,
+        message: null,
+        data: [
+          { shape: "M55", ownership: "GUARANTEED", state: "IN_USE", owner: "tsp_atn.2" },
+          { shape: "M55", ownership: "GUARANTEED", state: "READY_TO_RUN_TASKS", owner: null },
+        ],
+      },
+      charts: [{ metric: "cpu-pressure", state: "ready" }],
+    },
+  });
+
+  assert.deepEqual(model.tuning.cells.ranked.map((cell) => cell.id), [2, 1]);
+  assert.deepEqual(model.tuning.cells.borrowers.map((cell) => cell.id), [2, 1]);
+  assert.deepEqual(model.tuning.cells.lenders.map((cell) => cell.id), [1, 2]);
+  assert.deepEqual(model.tuning.queues.ranked.map((queue) => queue.dsqId), [10, 20]);
+  assert.deepEqual(model.tuning.callbacks.ranked.map((callback) => callback.callback), [
+    "dispatch",
+    "select_cpu",
+  ]);
+  assert.deepEqual(model.tuning.rungs.ranked.map((rung) => rung.index), [1, 0]);
+  assert.equal(model.activity.directDispatchPct, 80);
+  assert.equal(model.activity.exhaustionPct, 20);
+  assert.match(model.warnings.join(" "), /2 queue timing samples dropped/);
+  assert.equal(model.host.jobs[0].jobHandle, "tsp_atn/team/job");
+  assert.deepEqual(model.host.jobs[0].taskIds, ["1", "3"]);
+  assert.deepEqual(model.host.allotmentGroups, [
+    { shape: "M55", ownership: "GUARANTEED", state: "IN_USE", count: 1, owners: ["tsp_atn.2"] },
+    { shape: "M55", ownership: "GUARANTEED", state: "READY_TO_RUN_TASKS", count: 1, owners: [] },
+  ]);
+  assert.equal(model.host.charts[0].metric, "cpu-pressure");
+});
+
+test("overview ranks an idle cell by lending against owned CPU capacity", () => {
+  const model = overviewModel({
+    snapshot: {
+      cell_stats: {
+        status: "ready",
+        observed_ms: 1_000,
+        cells: [
+          { id: 1, primary_cpu_count: 2, runtime_ns: 0, lent_runtime_ns: 1_000_000_000 },
+          { id: 2, primary_cpu_count: 2, runtime_ns: 1_000_000_000, lent_runtime_ns: 200_000_000 },
+        ],
+      },
+    },
+  });
+
+  assert.deepEqual(model.tuning.cells.lenders.map((cell) => cell.id), [1, 2]);
+  assert.equal(model.tuning.cells.lenders[0].lentPct, 50);
 });
 
 test("overview model has explicit empty states before the first poll", () => {
@@ -340,6 +458,16 @@ test("page shell exposes grouped navigation and separate diagnostic workspaces",
     'href="#/inspect/cells"',
     'href="#/debugging"',
     'id="overviewView"',
+    'id="overviewWindowSelect"',
+    'id="overviewScopeMode"',
+    'id="overviewContext"',
+    'id="overviewFaults"',
+    'id="overviewPlacement"',
+    'id="overviewCellBalance"',
+    'id="overviewQueueing"',
+    'id="overviewOverhead"',
+    'id="overviewHost"',
+    'id="overviewCharts"',
     'id="queueTopologyView"',
     'id="debuggingView"',
     'data-view="configure"',
@@ -347,6 +475,15 @@ test("page shell exposes grouped navigation and separate diagnostic workspaces",
     assert.match(page, new RegExp(fragment), `missing ${fragment}`);
   }
   assert.doesNotMatch(page, /id="schedulerPolicy"/);
+  assert.match(page, /CPU pressure/);
+  assert.match(page, /Scheduling delay/);
+  assert.match(script, /\/api\/host-context/);
+  assert.match(script, /method: "POST"/);
+  assert.match(script, /data-open-ods/);
+  assert.match(script, /overviewScopeDirty/);
+  assert.match(page, /Window and scope filter live migration activity/);
+  assert.match(script, /queueTiming: state\.queueTiming/);
+  assert.match(script, /hostContext: state\.hostContext/);
 });
 
 test("feedback is a drawer with a visible draft count", () => {

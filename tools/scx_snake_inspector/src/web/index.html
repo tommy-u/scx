@@ -65,47 +65,92 @@
         <header class="view-heading">
           <div>
             <h2 id="overviewTitle">Overview</h2>
-            <p>Current scheduler context and diagnostic coverage</p>
+            <p>Host pressure, scheduler outcomes, and the highest-impact tuning signals</p>
           </div>
         </header>
-        <div class="overview-summary">
-          <section class="overview-section" aria-labelledby="overviewRuntimeTitle" data-feedback-key="Overview:Runtime">
+        <section class="overview-controls" aria-label="Overview controls" data-feedback-key="Overview:Controls">
+          <label class="control-field">
+            <span>Window</span>
+            <select id="overviewWindowSelect" aria-label="Overview rolling time window"></select>
+          </label>
+          <label class="control-field">
+            <span>Scope</span>
+            <select id="overviewScopeMode" aria-label="Overview task scope">
+              <option value="all">All Snake tasks</option>
+              <option value="tgids">TGIDs</option>
+              <option value="cgroup">Cgroup subtree</option>
+            </select>
+          </label>
+          <label class="control-field overview-scope-value hidden" id="overviewScopeValueField">
+            <span id="overviewScopeValueLabel">Value</span>
+            <input id="overviewScopeValue" type="text" autocomplete="off">
+          </label>
+          <button class="apply-button" id="overviewApplyScope" type="button">Apply scope</button>
+          <p class="control-message hidden" id="overviewControlNotice" role="status"></p>
+          <p class="overview-control-scope-note">Window and scope filter live migration activity. Cell, queue, callback, policy-rung, and ODS ranges are labeled separately.</p>
+        </section>
+
+        <section class="overview-context" id="overviewContext" aria-live="polite" data-feedback-key="Overview:Context">
+          Waiting for host and scheduler context
+        </section>
+        <section class="overview-faults hidden" id="overviewFaults" aria-live="polite" data-feedback-key="Overview:Faults"></section>
+
+        <div class="overview-tuning-grid">
+          <section class="overview-tuning-card" aria-labelledby="overviewPlacementTitle" data-feedback-key="Overview:Placement">
             <div class="overview-section-heading">
-              <h3 id="overviewRuntimeTitle">Runtime</h3>
-              <a href="#/configure">Open configuration</a>
+              <h3 id="overviewPlacementTitle">Placement</h3>
+              <a href="#/observe/placement">Inspect placement</a>
             </div>
-            <div class="overview-diagnostic" id="overviewRuntime">Waiting for Snake</div>
-            <div class="overview-warnings" id="overviewWarnings" aria-live="polite"></div>
+            <div id="overviewPlacement">Waiting for migration data</div>
           </section>
-          <section class="overview-section" aria-labelledby="overviewActivityTitle" data-feedback-key="Overview:Activity">
+          <section class="overview-tuning-card" aria-labelledby="overviewCellBalanceTitle" data-feedback-key="Overview:Cell-balance">
             <div class="overview-section-heading">
-              <h3 id="overviewActivityTitle">Placement activity</h3>
-              <a href="#/observe/placement">Open placement</a>
+              <h3 id="overviewCellBalanceTitle">Cell balance</h3>
+              <a href="#/inspect/cells">Inspect cells</a>
             </div>
-            <div class="overview-diagnostic" id="overviewActivity">Waiting for migration data</div>
+            <div id="overviewCellBalance">Waiting for cell statistics</div>
           </section>
-          <section class="overview-section" aria-labelledby="overviewCallbacksTitle" data-feedback-key="Overview:Callbacks">
+          <section class="overview-tuning-card" aria-labelledby="overviewQueueingTitle" data-feedback-key="Overview:Queueing">
             <div class="overview-section-heading">
-              <h3 id="overviewCallbacksTitle">Callback performance</h3>
-              <a href="#/observe/callbacks">Open callback performance</a>
+              <h3 id="overviewQueueingTitle">Queueing</h3>
+              <a href="#/inspect/queue-topology">Inspect queues</a>
             </div>
-            <div class="overview-diagnostic" id="overviewCallbacks">Waiting for callback samples</div>
+            <div id="overviewQueueing">Waiting for queue timing</div>
           </section>
-          <section class="overview-section" aria-labelledby="overviewPolicyTitle" data-feedback-key="Overview:Policy">
+          <section class="overview-tuning-card" aria-labelledby="overviewOverheadTitle" data-feedback-key="Overview:Overhead">
             <div class="overview-section-heading">
-              <h3 id="overviewPolicyTitle">Policy and queues</h3>
-              <a href="#/inspect/policy-slots">Open policy rungs</a>
+              <h3 id="overviewOverheadTitle">Scheduler overhead</h3>
+              <a href="#/observe/callbacks">Inspect callbacks</a>
             </div>
-            <div class="overview-diagnostic" id="overviewPolicy">Waiting for policy inspection</div>
-          </section>
-          <section class="overview-section" aria-labelledby="overviewCellsTitle" data-feedback-key="Overview:Cells">
-            <div class="overview-section-heading">
-              <h3 id="overviewCellsTitle">Cells and tasks</h3>
-              <a href="#/inspect/cells">Open cells and tasks</a>
-            </div>
-            <div class="overview-diagnostic" id="overviewCells">Waiting for cell inspection</div>
+            <div id="overviewOverhead">Waiting for callback timing</div>
           </section>
         </div>
+
+        <section class="overview-wide-section" aria-labelledby="overviewChartsTitle" data-feedback-key="Overview:Host-pressure">
+          <div class="overview-section-heading">
+            <div>
+              <h3 id="overviewChartsTitle">Host pressure</h3>
+              <p>ODS · last 3 hours · 5-minute average · host-wide</p>
+            </div>
+          </div>
+          <div class="overview-chart-grid" id="overviewCharts">
+            <article class="overview-chart-card">
+              <header><h4>CPU pressure</h4><span title="Host-wide PSI some: percent of time at least one runnable task lacked CPU. ODS is delayed by roughly 1–2 minutes.">What this means</span></header>
+              <div id="overviewCpuPressureChart">Waiting for ODS</div>
+            </article>
+            <article class="overview-chart-card">
+              <header><h4>Scheduling delay</h4><span title="Host-wide aggregate run-queue wait in milliseconds per second, not per-task latency. ODS is delayed by roughly 1–2 minutes.">What this means</span></header>
+              <div id="overviewSchedulerDelayChart">Waiting for ODS</div>
+            </article>
+          </div>
+        </section>
+
+        <section class="overview-wide-section" aria-labelledby="overviewHostTitle" data-feedback-key="Overview:Host-workload">
+          <div class="overview-section-heading">
+            <h3 id="overviewHostTitle">Host workload and capacity</h3>
+          </div>
+          <div id="overviewHost">Loading host metadata</div>
+        </section>
       </section>
 
       <section class="view-panel hidden" id="activityView" data-view="observe/placement" aria-labelledby="placementTitle">

@@ -25,6 +25,7 @@ use crate::collector::{
     QueueTimingControlResponse, StatsResetResponse,
 };
 use crate::dashboard::{Dashboard, RuntimeContextView};
+use crate::host_context::{ChartMetric, HostContextService};
 use crate::launcher::{LaunchFairness, LaunchOptions, LaunchRequest, SnakeLauncher};
 use crate::policies::PolicyActivation;
 use crate::scope::{resolve_scope, ScopeRequest};
@@ -45,6 +46,7 @@ pub struct ApiContext {
     cgroup_root: Arc<PathBuf>,
     initial_window_ms: u64,
     launcher: Option<SnakeLauncher>,
+    host_context: Option<HostContextService>,
 }
 
 impl ApiContext {
@@ -61,6 +63,7 @@ impl ApiContext {
             cgroup_root: Arc::new(cgroup_root),
             initial_window_ms: 10_000,
             launcher: None,
+            host_context: None,
         }
     }
 
@@ -73,6 +76,11 @@ impl ApiContext {
         self.launcher = Some(launcher);
         self
     }
+
+    pub fn with_host_context(mut self, host_context: HostContextService) -> Self {
+        self.host_context = Some(host_context);
+        self
+    }
 }
 
 pub fn router(context: ApiContext) -> Router {
@@ -83,6 +91,20 @@ pub fn router(context: ApiContext) -> Router {
         .route("/assets/inspection.js", get(inspection_script))
         .route("/assets/style.css", get(stylesheet))
         .route("/api/topology", get(topology))
+        .route("/api/host-context", get(host_context))
+        .route("/api/host-charts/cpu-pressure.png", get(cpu_pressure_chart))
+        .route(
+            "/api/host-charts/scheduler-delay.png",
+            get(scheduler_delay_chart),
+        )
+        .route(
+            "/api/host-charts/cpu-pressure/open",
+            post(open_cpu_pressure_chart),
+        )
+        .route(
+            "/api/host-charts/scheduler-delay/open",
+            post(open_scheduler_delay_chart),
+        )
         .route("/api/snapshot", get(snapshot))
         .route("/api/inspection", get(inspection))
         .route(
@@ -187,8 +209,95 @@ struct SnapshotQuery {
     window_ms: u64,
 }
 
+#[derive(Deserialize)]
+struct ChartImageQuery {
+    revision: Option<u64>,
+}
+
 async fn topology(State(context): State<ApiContext>) -> impl IntoResponse {
     Json((*context.dashboard.topology()).clone())
+}
+
+async fn host_context(State(context): State<ApiContext>) -> Result<impl IntoResponse, ApiError> {
+    context
+        .host_context
+        .as_ref()
+        .map(|host_context| Json(host_context.snapshot()))
+        .ok_or_else(|| ApiError::unavailable("host context is unavailable"))
+}
+
+async fn cpu_pressure_chart(
+    State(context): State<ApiContext>,
+    Query(query): Query<ChartImageQuery>,
+) -> Result<Response, ApiError> {
+    host_chart(context, ChartMetric::CpuPressure, query.revision)
+}
+
+async fn scheduler_delay_chart(
+    State(context): State<ApiContext>,
+    Query(query): Query<ChartImageQuery>,
+) -> Result<Response, ApiError> {
+    host_chart(context, ChartMetric::SchedulerDelay, query.revision)
+}
+
+fn host_chart(
+    context: ApiContext,
+    metric: ChartMetric,
+    requested_revision: Option<u64>,
+) -> Result<Response, ApiError> {
+    let (revision, bytes) = context
+        .host_context
+        .as_ref()
+        .and_then(|host_context| host_context.chart_payload(metric))
+        .ok_or_else(|| ApiError::unavailable("ODS chart is unavailable"))?;
+    let cache_control = if requested_revision == Some(revision) {
+        "private, max-age=31536000, immutable"
+    } else {
+        "no-cache"
+    };
+    Ok((
+        [
+            (header::CONTENT_TYPE, "image/png"),
+            (header::CACHE_CONTROL, cache_control),
+        ],
+        bytes,
+    )
+        .into_response())
+}
+
+#[derive(Serialize)]
+struct OpenHostChartResponse {
+    url: String,
+}
+
+async fn open_cpu_pressure_chart(
+    State(context): State<ApiContext>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, ApiError> {
+    open_host_chart(context, headers, ChartMetric::CpuPressure).await
+}
+
+async fn open_scheduler_delay_chart(
+    State(context): State<ApiContext>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, ApiError> {
+    open_host_chart(context, headers, ChartMetric::SchedulerDelay).await
+}
+
+async fn open_host_chart(
+    context: ApiContext,
+    headers: HeaderMap,
+    metric: ChartMetric,
+) -> Result<Json<OpenHostChartResponse>, ApiError> {
+    require_session_token(&headers, &context.token)?;
+    let url = context
+        .host_context
+        .as_ref()
+        .ok_or_else(|| ApiError::unavailable("host context is unavailable"))?
+        .fresh_chart_url(metric)
+        .await
+        .map_err(ApiError::unavailable)?;
+    Ok(Json(OpenHostChartResponse { url }))
 }
 
 async fn snapshot(
