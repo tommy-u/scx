@@ -18,9 +18,9 @@ enum snake_membership_kind {
 static __always_inline u32 queue_task_cell_index(struct task_struct *p)
 {
 	struct snake_queue_header *header = queue_config();
-	struct snake_task_cell    *annotation;
-	u32			   *encoded;
-	u32			    cell_id, index;
+	struct snake_task_cell	  *annotation;
+	u32			  *encoded;
+	u32			   cell_id, index;
 
 	if (!header || !header->nr_cells)
 		return 0;
@@ -40,9 +40,9 @@ static __always_inline u32 queue_task_cell_index(struct task_struct *p)
 static __always_inline u32 queue_task_membership_kind(struct task_struct *p)
 {
 	struct snake_queue_header *header = queue_config();
-	struct snake_task_cell    *annotation;
-	u32			   *encoded;
-	u32			    cell_id;
+	struct snake_task_cell	  *annotation;
+	u32			  *encoded;
+	u32			   cell_id;
 
 	annotation = task_annotation(p);
 	if (!annotation)
@@ -60,7 +60,7 @@ static __always_inline u32 queue_task_membership_kind(struct task_struct *p)
 
 static __always_inline void
 queue_account_task_membership(const struct snake_ladder_ctx *ctx,
-			      struct task_struct *p)
+			      struct task_struct	    *p)
 {
 	switch (queue_task_membership_kind(p)) {
 	case SNAKE_MEMBERSHIP_NO_CELL:
@@ -86,17 +86,16 @@ queue_mask_contains(const struct snake_mask_data *mask, u32 cpu)
 	return mask->bits[byte] & (1U << bit);
 }
 
-static __always_inline bool
-queue_primary_subset(const struct cpumask *primary,
-		     const struct task_struct *p)
+static __always_inline bool queue_primary_subset(const struct cpumask *primary,
+						 const struct task_struct *p)
 {
 	return primary && bpf_cpumask_subset(primary, p->cpus_ptr);
 }
 
-static __always_inline s32
-queue_pick_primary_cpu(const struct cpumask *primary,
-		       struct bpf_cpumask *scratch, const struct task_struct *p,
-		       s32 preferred)
+static __always_inline s32 queue_pick_primary_cpu(const struct cpumask *primary,
+						  struct bpf_cpumask   *scratch,
+						  const struct task_struct *p,
+						  s32 preferred)
 {
 	u32 cpu;
 
@@ -112,11 +111,34 @@ queue_pick_primary_cpu(const struct cpumask *primary,
 	return cpu < nr_cpu_ids ? cpu : -ENOENT;
 }
 
-static __always_inline s32
-queue_pick_allowed_cpu(const struct task_struct *p, s32 preferred)
+struct snake_queue_pick_allowed_loop_ctx {
+	const struct task_struct *p;
+	u32			  start;
+	s32			  result;
+};
+
+static long queue_pick_allowed_cpu_callback(
+	u32 offset, struct snake_queue_pick_allowed_loop_ctx *loop_ctx)
 {
-	s32 current;
-	u32 offset, start;
+	u32 cpu;
+
+	if (offset >= SNAKE_MAX_CPUS || offset >= nr_cpu_ids)
+		return 1;
+	cpu = (loop_ctx->start + offset) % nr_cpu_ids;
+	if (queue_cpu(cpu) &&
+	    bpf_cpumask_test_cpu(cpu, loop_ctx->p->cpus_ptr)) {
+		loop_ctx->result = cpu;
+		return 1;
+	}
+	return 0;
+}
+
+static __always_inline s32 queue_pick_allowed_cpu(const struct task_struct *p,
+						  s32 preferred)
+{
+	struct snake_queue_pick_allowed_loop_ctx loop_ctx;
+	s32					 current;
+	long					 nr_loops;
 
 	if (preferred >= 0 && preferred < nr_cpu_ids && queue_cpu(preferred) &&
 	    bpf_cpumask_test_cpu(preferred, p->cpus_ptr))
@@ -125,18 +147,14 @@ queue_pick_allowed_cpu(const struct task_struct *p, s32 preferred)
 	if (current >= 0 && current < nr_cpu_ids && queue_cpu(current) &&
 	    bpf_cpumask_test_cpu(current, p->cpus_ptr))
 		return current;
-	start = bpf_get_prandom_u32() % nr_cpu_ids;
-	bpf_for(offset, 0, SNAKE_MAX_CPUS)
-	{
-		u32 cpu;
-
-		if (offset >= nr_cpu_ids)
-			break;
-		cpu = (start + offset) % nr_cpu_ids;
-		if (queue_cpu(cpu) && bpf_cpumask_test_cpu(cpu, p->cpus_ptr))
-			return cpu;
-	}
-	return -ENOENT;
+	loop_ctx = (struct snake_queue_pick_allowed_loop_ctx){
+		.p	= p,
+		.start	= bpf_get_prandom_u32() % nr_cpu_ids,
+		.result = -ENOENT,
+	};
+	nr_loops = bpf_loop(SNAKE_MAX_CPUS, queue_pick_allowed_cpu_callback,
+			    &loop_ctx, 0);
+	return nr_loops < 0 ? nr_loops : loop_ctx.result;
 }
 
 #endif /* __SCX_SNAKE_QUEUE_H */

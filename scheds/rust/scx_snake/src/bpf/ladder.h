@@ -72,10 +72,11 @@ static __always_inline bool rung_is_valid(const struct snake_rung *rung,
 	       (rung->opcode == SNAKE_OP_PICK_RANDOM_IDLE &&
 		(((rung->flags == 0 ||
 		   rung->flags == SNAKE_RUNG_F_PICK_IDLE_CORE) &&
-		  rung->input == SNAKE_INPUT_MASK_TASK_ALLOWED && !rung->data) ||
+		  rung->input == SNAKE_INPUT_MASK_TASK_ALLOWED &&
+		  !rung->data) ||
 		 ((rung->flags == SNAKE_RUNG_F_INTERSECT_TASK_ALLOWED ||
 		   rung->flags == (SNAKE_RUNG_F_INTERSECT_TASK_ALLOWED |
-				  SNAKE_RUNG_F_PICK_IDLE_CORE)) &&
+				   SNAKE_RUNG_F_PICK_IDLE_CORE)) &&
 		  (rung->input == SNAKE_INPUT_CPU_PREV ||
 		   rung->input == SNAKE_INPUT_TASK_CELL) &&
 		  rung->data < nr_mask_tables))) ||
@@ -93,14 +94,14 @@ static __always_inline bool rung_is_valid(const struct snake_rung *rung,
 				 SNAKE_RUNG_F_PICK_IDLE_CORE)) &&
 		rung->data < nr_mask_tables) ||
 	       (rung->opcode == SNAKE_OP_PICK_IDLE_QUEUE_MASK &&
-		   rung->input == SNAKE_INPUT_QUEUE_CELL &&
-		   (rung->flags == 0 ||
-		    rung->flags == SNAKE_RUNG_F_PICK_IDLE_CORE ||
-		    rung->flags == SNAKE_RUNG_F_PICK_RANDOM ||
-		    rung->flags == (SNAKE_RUNG_F_PICK_RANDOM |
-				    SNAKE_RUNG_F_PICK_IDLE_CORE)) &&
-		   (rung->data == SNAKE_QUEUE_MASK_PRIMARY ||
-		    rung->data == SNAKE_QUEUE_MASK_BORROWABLE));
+		rung->input == SNAKE_INPUT_QUEUE_CELL &&
+		(rung->flags == 0 ||
+		 rung->flags == SNAKE_RUNG_F_PICK_IDLE_CORE ||
+		 rung->flags == SNAKE_RUNG_F_PICK_RANDOM ||
+		 rung->flags == (SNAKE_RUNG_F_PICK_RANDOM |
+				 SNAKE_RUNG_F_PICK_IDLE_CORE)) &&
+		(rung->data == SNAKE_QUEUE_MASK_PRIMARY ||
+		 rung->data == SNAKE_QUEUE_MASK_BORROWABLE));
 }
 
 struct snake_rung_exec_args {
@@ -110,15 +111,23 @@ struct snake_rung_exec_args {
 	u32 *queue_cell_index;
 };
 
+struct snake_ladder_walk_args {
+	s32 prev_cpu;
+	u32 queue_cell_index;
+	u64 wake_flags;
+	u64 dispatch_flags;
+	u64 callback_started_at;
+};
+
 /* Execute one validated rung and return an idle CPU or a miss. */
 static __noinline s32 execute_rung(const struct snake_ladder_ctx *ctx,
-					struct task_struct *p,
-					const struct snake_rung *rung,
-					struct snake_rung_exec_args *args)
+				   struct task_struct		 *p,
+				   const struct snake_rung	 *rung,
+				   struct snake_rung_exec_args	 *args)
 {
-	s32 prev_cpu = args->prev_cpu;
-	u64 wake_flags = args->wake_flags;
-	u64 *dispatch_flags = args->dispatch_flags;
+	s32  prev_cpu	      = args->prev_cpu;
+	u64  wake_flags	      = args->wake_flags;
+	u64 *dispatch_flags   = args->dispatch_flags;
 	u32 *queue_cell_index = args->queue_cell_index;
 
 	switch (rung->opcode) {
@@ -138,7 +147,7 @@ static __noinline s32 execute_rung(const struct snake_ladder_ctx *ctx,
 	case SNAKE_OP_PICK_RANDOM_IDLE:
 		if (rung->input == SNAKE_INPUT_TASK_CELL) {
 			struct snake_task_cell *cell;
-			s32			  exists, cpu;
+			s32			exists, cpu;
 
 			cell = task_annotation(p);
 			if (!cell)
@@ -161,8 +170,8 @@ static __noinline s32 execute_rung(const struct snake_ladder_ctx *ctx,
 			return pick_random_idle_from_mask_table(
 				ctx, p, rung->data, prev_cpu,
 				rung->flags & SNAKE_RUNG_F_PICK_IDLE_CORE);
-		return pick_random_idle(
-			p, rung->flags & SNAKE_RUNG_F_PICK_IDLE_CORE);
+		return pick_random_idle(p, rung->flags &
+						   SNAKE_RUNG_F_PICK_IDLE_CORE);
 	case SNAKE_OP_KERNEL_DEFAULT: {
 		bool is_idle = false;
 		s32  cpu;
@@ -171,12 +180,12 @@ static __noinline s32 execute_rung(const struct snake_ladder_ctx *ctx,
 		return is_idle ? cpu : -ENOENT;
 	}
 	case SNAKE_OP_SYNC_WAKE_AFFINE:
-		return try_sync_wake_affine(ctx, p, prev_cpu, wake_flags, rung->data,
-					    dispatch_flags);
+		return try_sync_wake_affine(ctx, p, prev_cpu, wake_flags,
+					    rung->data, dispatch_flags);
 	case SNAKE_OP_PICK_IDLE_MASK_TABLE:
 		if (rung->input == SNAKE_INPUT_TASK_CELL) {
 			struct snake_task_cell *cell;
-			s32			  exists, cpu;
+			s32			exists, cpu;
 
 			cell = task_annotation(p);
 			if (!cell)
@@ -195,8 +204,9 @@ static __noinline s32 execute_rung(const struct snake_ladder_ctx *ctx,
 			}
 			return cpu;
 		}
-		return pick_idle_from_mask_table(ctx, p, rung->data, prev_cpu,
-						 rung->flags & SNAKE_RUNG_F_PICK_IDLE_CORE);
+		return pick_idle_from_mask_table(
+			ctx, p, rung->data, prev_cpu,
+			rung->flags & SNAKE_RUNG_F_PICK_IDLE_CORE);
 	case SNAKE_OP_PICK_IDLE_QUEUE_MASK: {
 		s32 cpu;
 
@@ -216,136 +226,190 @@ static __noinline s32 execute_rung(const struct snake_ladder_ctx *ctx,
 	return -ENOENT;
 }
 
-/* Keep annotated runnable tasks on CPUs selected by their task-cell rungs. */
-static __always_inline s32 try_enqueue_task_cell(struct snake_ladder_ctx *ctx,
-					  struct task_struct *p,
-					  u64 enq_flags, u64 slice,
-					  const struct snake_fine_timing_ctx *fine,
-					  u64 callback_started_at)
+struct snake_task_cell_enqueue_loop_ctx {
+	struct snake_ladder_ctx	     ladder_ctx;
+	struct task_struct	    *p;
+	struct snake_fine_timing_ctx fine;
+	u64			     enq_flags;
+	u64			     slice;
+	u64			     callback_started_at;
+	s32			     result;
+};
+
+static long try_enqueue_task_cell_callback(
+	u32 i, struct snake_task_cell_enqueue_loop_ctx *loop_ctx)
 {
-	struct snake_task_cell *cell;
-	bool			 rehome_pending;
-	u32			 i;
+	struct snake_rung	    rung;
+	u64			    dispatch_flags   = 0;
+	u32			    queue_cell_index = SNAKE_QUEUE_CELL_NONE;
+	struct snake_rung_exec_args args	     = {
+			    .prev_cpu	      = -1,
+			    .wake_flags	      = 0,
+			    .dispatch_flags   = &dispatch_flags,
+			    .queue_cell_index = &queue_cell_index,
+	};
+	s32 cpu;
+	u64 rung_started_at;
+
+	if (i >= SNAKE_MAX_RUNGS || i >= loop_ctx->ladder_ctx.ladder->nr_rungs)
+		return 1;
+	rung = loop_ctx->ladder_ctx.ladder->rungs[i];
+	if (rung.input != SNAKE_INPUT_TASK_CELL)
+		return 0;
+
+	stat_inc(&loop_ctx->ladder_ctx, SNAKE_STAT_RUNG_ATTEMPT_BASE + i);
+	rung_started_at = rung_timing_start(loop_ctx->callback_started_at);
+	cpu = execute_rung(&loop_ctx->ladder_ctx, loop_ctx->p, &rung, &args);
+	rung_timing_finish(&loop_ctx->ladder_ctx, SNAKE_RUNG_LADDER_IDLE, i,
+			   rung_started_at);
+	if (cpu >= 0 && cpu < nr_cpu_ids) {
+		stat_inc(&loop_ctx->ladder_ctx, SNAKE_STAT_RUNG_HIT_BASE + i);
+		if (!dsq_insert(loop_ctx->p, dsq_local_on(cpu), loop_ctx->slice,
+				loop_ctx->enq_flags, &loop_ctx->fine)) {
+			stat_inc(&loop_ctx->ladder_ctx,
+				 SNAKE_STAT_INVALID_ERRORS);
+			loop_ctx->result = -EINVAL;
+			return 1;
+		}
+		queue_timing_record_insert(&loop_ctx->ladder_ctx, loop_ctx->p,
+					   dsq_local_on(cpu),
+					   SNAKE_QUEUE_CELL_NONE,
+					   &loop_ctx->fine);
+		loop_ctx->result = 1;
+		return 1;
+	}
+	if (cpu < 0 && cpu != -ENOENT) {
+		stat_inc(&loop_ctx->ladder_ctx, SNAKE_STAT_RUNG_ERROR_BASE + i);
+		stat_inc(&loop_ctx->ladder_ctx, SNAKE_STAT_INVALID_ERRORS);
+		loop_ctx->result = cpu;
+		return 1;
+	}
+	stat_inc(&loop_ctx->ladder_ctx, SNAKE_STAT_RUNG_MISS_BASE + i);
+	return 0;
+}
+
+/* Keep annotated runnable tasks on CPUs selected by their task-cell rungs. */
+static __always_inline s32 try_enqueue_task_cell(
+	struct snake_ladder_ctx *ctx, struct task_struct *p, u64 enq_flags,
+	u64 slice, const struct snake_fine_timing_ctx *fine,
+	u64 callback_started_at)
+{
+	struct snake_task_cell		       *cell;
+	struct snake_task_cell_enqueue_loop_ctx loop_ctx = {
+		.ladder_ctx = *ctx,
+		.p	    = p,
+		.fine	    = fine ? *fine : (struct snake_fine_timing_ctx){},
+		.enq_flags  = enq_flags,
+		.slice	    = slice,
+		.callback_started_at = callback_started_at,
+		.result		     = 0,
+	};
+	bool rehome_pending;
+	long nr_loops;
 
 	cell = task_annotation(p);
 	if (!cell)
 		return 0;
 	rehome_pending = READ_ONCE(cell->needs_rehome);
 
-	bpf_for(i, 0, SNAKE_MAX_RUNGS)
-	{
-		struct snake_rung rung;
-		u64		  dispatch_flags = 0;
-		u32		  queue_cell_index = SNAKE_QUEUE_CELL_NONE;
-		struct snake_rung_exec_args args = {
-			.prev_cpu = -1,
-			.wake_flags = 0,
-			.dispatch_flags = &dispatch_flags,
-			.queue_cell_index = &queue_cell_index,
-		};
-		s32		  cpu;
-		u64		  rung_started_at;
+	nr_loops = bpf_loop(SNAKE_MAX_RUNGS, try_enqueue_task_cell_callback,
+			    &loop_ctx, 0);
+	if (nr_loops < 0) {
+		stat_inc(ctx, SNAKE_STAT_INVALID_ERRORS);
+		return nr_loops;
+	}
+	if (!loop_ctx.result && rehome_pending)
+		stat_inc(ctx, SNAKE_STAT_CELL_REHOME_MISSES);
+	return loop_ctx.result;
+}
 
-		if (i >= ctx->ladder->nr_rungs)
-			break;
-		rung = ctx->ladder->rungs[i];
-		if (rung.input != SNAKE_INPUT_TASK_CELL)
-			continue;
+static __noinline s32 walk_policy_rung(struct snake_ladder_ctx *ctx,
+				       struct task_struct *p, u32 i,
+				       struct snake_ladder_walk_args *walk_args)
+{
+	struct snake_rung	    rung;
+	u64			    dispatch_flags   = 0;
+	u32			    queue_cell_index = SNAKE_QUEUE_CELL_NONE;
+	struct snake_rung_exec_args args	     = {
+			    .prev_cpu	      = walk_args->prev_cpu,
+			    .wake_flags	      = walk_args->wake_flags,
+			    .dispatch_flags   = &dispatch_flags,
+			    .queue_cell_index = &queue_cell_index,
+	};
+	s32 cpu;
+	u64 rung_started_at;
 
-		stat_inc(ctx, SNAKE_STAT_RUNG_ATTEMPT_BASE + i);
-		rung_started_at = rung_timing_start(callback_started_at);
-		cpu = execute_rung(ctx, p, &rung, &args);
-		rung_timing_finish(ctx, SNAKE_RUNG_LADDER_IDLE, i,
-				   rung_started_at);
-		if (cpu >= 0 && cpu < nr_cpu_ids) {
-			stat_inc(ctx, SNAKE_STAT_RUNG_HIT_BASE + i);
-			if (!dsq_insert(p, dsq_local_on(cpu), slice, enq_flags,
-					fine)) {
-				stat_inc(ctx, SNAKE_STAT_INVALID_ERRORS);
-				scx_bpf_error(
-					"snake failed to enqueue pid %d on cell CPU %d",
-					p->pid, cpu);
-				return -EINVAL;
-			}
-			queue_timing_record_insert(
-				ctx, p, dsq_local_on(cpu), SNAKE_QUEUE_CELL_NONE,
-				fine);
-			return 1;
-		}
-		if (cpu < 0 && cpu != -ENOENT) {
-			stat_inc(ctx, SNAKE_STAT_RUNG_ERROR_BASE + i);
-			stat_inc(ctx, SNAKE_STAT_INVALID_ERRORS);
-			scx_bpf_error("snake cell rehome rung %u failed: %d", i,
-				      cpu);
-			return cpu;
-		}
-		stat_inc(ctx, SNAKE_STAT_RUNG_MISS_BASE + i);
+	rung = ctx->ladder->rungs[i];
+	stat_inc(ctx, SNAKE_STAT_RUNG_ATTEMPT_BASE + i);
+
+	if (!rung_is_valid(&rung, ctx->ladder->nr_mask_tables)) {
+		stat_inc(ctx, SNAKE_STAT_RUNG_ERROR_BASE + i);
+		stat_inc(ctx, SNAKE_STAT_INVALID_ERRORS);
+		scx_bpf_error("snake invalid rung %u: opcode=%u input=%u", i,
+			      rung.opcode, rung.input);
+		return -1;
 	}
 
-	if (rehome_pending)
-		stat_inc(ctx, SNAKE_STAT_CELL_REHOME_MISSES);
-	return 0;
+	rung_started_at = rung_timing_start(walk_args->callback_started_at);
+	cpu		= execute_rung(ctx, p, &rung, &args);
+	walk_args->dispatch_flags   = dispatch_flags;
+	walk_args->queue_cell_index = queue_cell_index;
+	rung_timing_finish(ctx, SNAKE_RUNG_LADDER_IDLE, i, rung_started_at);
+	if (cpu < 0 && cpu != -ENOENT) {
+		stat_inc(ctx, SNAKE_STAT_RUNG_ERROR_BASE + i);
+		stat_inc(ctx, SNAKE_STAT_INVALID_ERRORS);
+		scx_bpf_error("snake rung %u execution failed: %d", i, cpu);
+		return cpu;
+	}
+	if (cpu >= 0 && cpu < nr_cpu_ids &&
+	    bpf_cpumask_test_cpu(cpu, p->cpus_ptr)) {
+		stat_inc(ctx, SNAKE_STAT_RUNG_HIT_BASE + i);
+		return cpu;
+	}
+
+	stat_inc(ctx, SNAKE_STAT_RUNG_MISS_BASE + i);
+	return -ENOENT;
+}
+
+struct snake_ladder_walk_loop_ctx {
+	struct snake_ladder_ctx	      ladder_ctx;
+	struct task_struct	     *p;
+	struct snake_ladder_walk_args walk_args;
+	s32			      result;
+};
+
+static long
+walk_policy_ladder_callback(u32 i, struct snake_ladder_walk_loop_ctx *loop_ctx)
+{
+	if (i >= SNAKE_MAX_RUNGS || i >= loop_ctx->ladder_ctx.ladder->nr_rungs)
+		return 1;
+	loop_ctx->result = walk_policy_rung(&loop_ctx->ladder_ctx, loop_ctx->p,
+					    i, &loop_ctx->walk_args);
+	return loop_ctx->result != -ENOENT;
 }
 
 /* Evaluate the configured rungs in order until one returns a valid hint. */
-static __always_inline s32 walk_policy_ladder(struct snake_ladder_ctx *ctx,
-					      struct task_struct *p, s32 prev_cpu,
-					      u64 wake_flags, u64 *dispatch_flags,
-					      u32 *queue_cell_index,
-					      u64 callback_started_at)
+static __noinline s32
+walk_policy_ladder(struct snake_ladder_ctx *ctx, struct task_struct *p,
+		   struct snake_ladder_walk_args *walk_args)
 {
-	u32 i;
+	struct snake_ladder_walk_loop_ctx loop_ctx = {
+		.ladder_ctx = *ctx,
+		.p	    = p,
+		.walk_args  = *walk_args,
+		.result	    = -ENOENT,
+	};
+	long nr_loops;
 
-	bpf_for(i, 0, SNAKE_MAX_RUNGS)
-	{
-		struct snake_rung rung;
-		struct snake_rung_exec_args args = {
-			.prev_cpu = prev_cpu,
-			.wake_flags = wake_flags,
-			.dispatch_flags = dispatch_flags,
-			.queue_cell_index = queue_cell_index,
-		};
-		s32		  cpu;
-		u64		  rung_started_at;
-
-		if (i >= ctx->ladder->nr_rungs)
-			break;
-
-		rung = ctx->ladder->rungs[i];
-		stat_inc(ctx, SNAKE_STAT_RUNG_ATTEMPT_BASE + i);
-
-		if (!rung_is_valid(&rung, ctx->ladder->nr_mask_tables)) {
-			stat_inc(ctx, SNAKE_STAT_RUNG_ERROR_BASE + i);
-			stat_inc(ctx, SNAKE_STAT_INVALID_ERRORS);
-			scx_bpf_error(
-				"snake invalid rung %u: opcode=%u input=%u", i,
-				rung.opcode, rung.input);
-			return -1;
-		}
-
-		*dispatch_flags = 0;
-		*queue_cell_index = SNAKE_QUEUE_CELL_NONE;
-		rung_started_at = rung_timing_start(callback_started_at);
-		cpu = execute_rung(ctx, p, &rung, &args);
-		rung_timing_finish(ctx, SNAKE_RUNG_LADDER_IDLE, i,
-				   rung_started_at);
-		if (cpu < 0 && cpu != -ENOENT) {
-			stat_inc(ctx, SNAKE_STAT_RUNG_ERROR_BASE + i);
-			stat_inc(ctx, SNAKE_STAT_INVALID_ERRORS);
-			scx_bpf_error("snake rung %u execution failed: %d", i,
-				      cpu);
-			return cpu;
-		}
-		if (cpu >= 0 && cpu < nr_cpu_ids &&
-		    bpf_cpumask_test_cpu(cpu, p->cpus_ptr)) {
-			stat_inc(ctx, SNAKE_STAT_RUNG_HIT_BASE + i);
-			return cpu;
-		}
-
-		stat_inc(ctx, SNAKE_STAT_RUNG_MISS_BASE + i);
+	nr_loops   = bpf_loop(SNAKE_MAX_RUNGS, walk_policy_ladder_callback,
+			      &loop_ctx, 0);
+	*walk_args = loop_ctx.walk_args;
+	if (nr_loops < 0) {
+		stat_inc(ctx, SNAKE_STAT_INVALID_ERRORS);
+		scx_bpf_error("snake policy ladder loop failed: %ld", nr_loops);
+		return nr_loops;
 	}
-
-	return -ENOENT;
+	return loop_ctx.result;
 }
 
 #endif /* __SCX_SNAKE_LADDER_H */

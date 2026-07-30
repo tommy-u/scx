@@ -156,15 +156,66 @@ out:
 	return ret;
 }
 
+struct snake_queue_enqueue_loop_ctx {
+	struct snake_ladder_ctx	     ladder_ctx;
+	struct task_struct	    *p;
+	struct snake_task_runtime   *runtime;
+	struct snake_fine_timing_ctx fine;
+	s32			     selected_cpu;
+	u64			     enq_flags;
+	u64			     callback_started_at;
+	s32			     result;
+};
+
+static long
+queue_ladder_enqueue_callback(u32				   i,
+			      struct snake_queue_enqueue_loop_ctx *loop_ctx)
+{
+	const struct snake_queue_rung *rung;
+	s32			       ret;
+	u64			       rung_started_at;
+
+	if (i >= SNAKE_MAX_QUEUE_RUNGS ||
+	    i >= loop_ctx->ladder_ctx.ladder->nr_enqueue_rungs)
+		return 1;
+	rung = MEMBER_VPTR(loop_ctx->ladder_ctx.ladder->enqueue_rungs, [i]);
+	if (!rung) {
+		loop_ctx->result = -EINVAL;
+		return 1;
+	}
+	rung_started_at = rung_timing_start(loop_ctx->callback_started_at);
+	if (rung->opcode == SNAKE_ENQUEUE_OP_CELL)
+		ret = queue_fairness_enqueue_cell(
+			&loop_ctx->ladder_ctx, loop_ctx->p, loop_ctx->runtime,
+			loop_ctx->selected_cpu, loop_ctx->enq_flags,
+			&loop_ctx->fine);
+	else if (rung->opcode == SNAKE_ENQUEUE_OP_AFFINITY)
+		ret = queue_fairness_enqueue_affinity(
+			&loop_ctx->ladder_ctx, loop_ctx->p, loop_ctx->runtime,
+			loop_ctx->selected_cpu, loop_ctx->enq_flags,
+			&loop_ctx->fine);
+	else {
+		loop_ctx->result = -EINVAL;
+		return 1;
+	}
+	rung_timing_finish(&loop_ctx->ladder_ctx, SNAKE_RUNG_LADDER_ENQUEUE, i,
+			   rung_started_at);
+	if (ret == -ENOENT)
+		return 0;
+	loop_ctx->result = ret;
+	return 1;
+}
+
 static __always_inline int
 queue_ladder_enqueue(struct snake_ladder_ctx *ctx, struct task_struct *p,
 		     u64 enq_flags, const struct snake_fine_timing_ctx *fine,
 		     u64 callback_started_at)
 {
-	struct snake_task_runtime *runtime;
-	s32			   selected_cpu = -1;
-	u32			   i;
-	u64			   stage_started_at;
+	struct snake_task_runtime	   *runtime;
+	struct snake_queue_enqueue_loop_ctx loop_ctx;
+	s32				    selected_cpu;
+	u64				    stage_started_at;
+	long				    nr_loops;
 
 	stage_started_at = fine_timing_start(fine);
 	queue_fairness_cancel_direct(ctx, p);
@@ -177,35 +228,23 @@ queue_ladder_enqueue(struct snake_ladder_ctx *ctx, struct task_struct *p,
 	if (!runtime)
 		return -EINVAL;
 	selected_cpu = task_route_take_selected_cpu(runtime, p);
-
-	bpf_for(i, 0, SNAKE_MAX_QUEUE_RUNGS)
-	{
-		const struct snake_queue_rung *rung;
-		s32			       ret;
-		u64			       rung_started_at;
-
-		if (i >= ctx->ladder->nr_enqueue_rungs)
-			break;
-		rung = MEMBER_VPTR(ctx->ladder->enqueue_rungs, [i]);
-		if (!rung)
-			return -EINVAL;
-		rung_started_at = rung_timing_start(callback_started_at);
-		if (rung->opcode == SNAKE_ENQUEUE_OP_CELL)
-			ret = queue_fairness_enqueue_cell(
-				ctx, p, runtime, selected_cpu, enq_flags, fine);
-		else if (rung->opcode == SNAKE_ENQUEUE_OP_AFFINITY)
-			ret = queue_fairness_enqueue_affinity(
-				ctx, p, runtime, selected_cpu, enq_flags, fine);
-		else
-			return -EINVAL;
-		rung_timing_finish(ctx, SNAKE_RUNG_LADDER_ENQUEUE, i,
-				   rung_started_at);
-		if (!ret)
-			return 0;
-		if (ret != -ENOENT)
-			return ret;
+	loop_ctx     = (struct snake_queue_enqueue_loop_ctx){
+		    .ladder_ctx	  = *ctx,
+		    .p		  = p,
+		    .runtime	  = runtime,
+		    .fine	  = fine ? *fine : (struct snake_fine_timing_ctx){},
+		    .selected_cpu = selected_cpu,
+		    .enq_flags	  = enq_flags,
+		    .callback_started_at = callback_started_at,
+		    .result		 = -ENOENT,
+	};
+	nr_loops = bpf_loop(SNAKE_MAX_QUEUE_RUNGS,
+			    queue_ladder_enqueue_callback, &loop_ctx, 0);
+	if (nr_loops < 0) {
+		stat_inc(ctx, SNAKE_STAT_INVALID_ERRORS);
+		return nr_loops;
 	}
-	return -ENOENT;
+	return loop_ctx.result;
 }
 
 #endif /* __SCX_SNAKE_QUEUE_ENQUEUE_H */

@@ -10,8 +10,8 @@ extern u64 select_fine_timing_session_id;
 struct snake_fine_timing_ctx {
 	u64 session_id;
 	u32 callback;
-	u32 active;
-	u32 sampled;
+	u8  active;
+	u8  sampled;
 };
 
 struct {
@@ -180,21 +180,25 @@ fine_timing_record_elapsed(const struct snake_fine_timing_ctx *ctx, u32 stage,
 {
 	struct snake_fine_timing_config *config;
 	struct snake_fine_timing_event	 event = {};
-	u32				 key   = 0, mask;
+	u32				 callback, key = 0, mask;
 
-	if (!ctx || !ctx->active || !fine_timing_stage_valid(ctx, stage))
+	if (!ctx || !ctx->active)
+		return;
+	callback = ctx->callback;
+	if (callback >= SNAKE_NR_FINE_TIMING_CALLBACKS ||
+	    !fine_timing_stage_valid(ctx, stage))
 		return;
 	config = bpf_map_lookup_elem(&fine_timing_config, &key);
 	if (!config)
 		return;
-	if (ctx->callback == SNAKE_FINE_TIMING_CALLBACK_SELECT_CPU)
+	if (callback == SNAKE_FINE_TIMING_CALLBACK_SELECT_CPU)
 		mask = SNAKE_FINE_TIMING_SELECT_CPU;
-	else if (ctx->callback == SNAKE_FINE_TIMING_CALLBACK_ENQUEUE)
+	else if (callback == SNAKE_FINE_TIMING_CALLBACK_ENQUEUE)
 		mask = SNAKE_FINE_TIMING_ENQUEUE;
 	else
 		mask = SNAKE_FINE_TIMING_DISPATCH;
 	if (!(READ_ONCE(config->enabled_mask) & mask) ||
-	    READ_ONCE(config->session_ids[ctx->callback]) != ctx->session_id)
+	    READ_ONCE(config->session_ids[callback]) != ctx->session_id)
 		return;
 	event.session_id = ctx->session_id;
 	event.elapsed_ns = elapsed_ns;
@@ -208,23 +212,26 @@ fine_timing_record_dsq_operation(const struct snake_fine_timing_ctx   *ctx,
 {
 	struct snake_fine_timing_config *config;
 	struct snake_fine_timing_event	 event;
-	u32				 key = 0, mask;
+	u32				 callback, key = 0, mask;
 
 	if (!ctx || !ctx->active || !sample ||
 	    sample->operation == SNAKE_DSQ_OP_NONE ||
 	    sample->outcome == SNAKE_DSQ_OUTCOME_NONE)
 		return;
+	callback = ctx->callback;
+	if (callback >= SNAKE_NR_FINE_TIMING_CALLBACKS)
+		return;
 	config = bpf_map_lookup_elem(&fine_timing_config, &key);
 	if (!config)
 		return;
-	if (ctx->callback == SNAKE_FINE_TIMING_CALLBACK_SELECT_CPU)
+	if (callback == SNAKE_FINE_TIMING_CALLBACK_SELECT_CPU)
 		mask = SNAKE_FINE_TIMING_SELECT_CPU;
-	else if (ctx->callback == SNAKE_FINE_TIMING_CALLBACK_ENQUEUE)
+	else if (callback == SNAKE_FINE_TIMING_CALLBACK_ENQUEUE)
 		mask = SNAKE_FINE_TIMING_ENQUEUE;
 	else
 		mask = SNAKE_FINE_TIMING_DISPATCH;
 	if (!(READ_ONCE(config->enabled_mask) & mask) ||
-	    READ_ONCE(config->session_ids[ctx->callback]) != ctx->session_id)
+	    READ_ONCE(config->session_ids[callback]) != ctx->session_id)
 		return;
 	event		 = *sample;
 	event.session_id = ctx->session_id;

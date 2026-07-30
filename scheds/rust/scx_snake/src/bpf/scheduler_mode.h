@@ -33,7 +33,9 @@ scheduler_mode_enqueue(struct snake_ladder_ctx *ctx, struct task_struct *p,
 	slice	      = fairness_dispatch_slice(ctx, p, true);
 	cell_enqueued = try_enqueue_task_cell(ctx, p, enq_flags, slice, fine,
 					      callback_started_at);
-	if (cell_enqueued)
+	if (cell_enqueued < 0)
+		return cell_enqueued;
+	if (cell_enqueued > 0)
 		return 0;
 	return fairness_enqueue(ctx, p, enq_flags, fine);
 }

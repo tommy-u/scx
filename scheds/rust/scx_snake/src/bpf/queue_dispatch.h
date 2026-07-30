@@ -91,7 +91,7 @@ queue_fairness_normal_candidate(struct snake_cpu_queue		   *cpuq,
 	if (!found) {
 		stage_started_at = fine_timing_start(fine);
 		found		 = queue_fairness_remote_normal(
-			cell, normal_index, &normal_index, &candidate->vtime);
+			   cell, normal_index, &normal_index, &candidate->vtime);
 		fine_timing_finish(fine, queue_fairness_remote_scan_stage(cell),
 				   stage_started_at);
 		if (!found)
@@ -118,9 +118,11 @@ queue_fairness_affinity_candidate(s32				cpu,
 	return 0;
 }
 
-static __always_inline s32 queue_fairness_keep_running(
-	struct snake_ladder_ctx *ctx, struct snake_cpu_queue *cpuq,
-	struct task_struct *prev, u32 class, u64 candidate_vtime)
+static __noinline s32 queue_fairness_keep_running(struct snake_ladder_ctx *ctx,
+						  struct snake_cpu_queue  *cpuq,
+						  struct task_struct	  *prev,
+						  u32 class,
+						  u64 candidate_vtime)
 {
 	struct snake_task_runtime *runtime;
 	u64			   current, delta, projected, service, vruntime;
@@ -224,15 +226,24 @@ static __always_inline s32 queue_fairness_keep_running_min(
 	return 1;
 }
 
-static __always_inline s32 queue_fairness_dispatch_min(
-	struct snake_ladder_ctx *ctx, struct snake_cpu_queue *cpuq, s32 cpu,
-	struct task_struct *prev, u32 *equal_preference,
-	const struct snake_fine_timing_ctx *fine)
+struct snake_queue_dispatch_min_args {
+	const struct snake_fine_timing_ctx *fine;
+	u32				   *equal_preference;
+	s32				    cpu;
+};
+
+static __noinline s32 queue_fairness_dispatch_min(
+	struct snake_ladder_ctx *ctx, struct snake_cpu_queue *cpuq,
+	struct task_struct			   *prev,
+	const struct snake_queue_dispatch_min_args *args)
 {
-	struct snake_queue_candidate  normal = {}, affinity = {};
-	struct snake_queue_candidate *winner, *loser;
-	s32			      keep, ret;
-	u64			      stage_started_at;
+	struct snake_queue_candidate	    normal = {}, affinity = {};
+	struct snake_queue_candidate	   *winner, *loser;
+	const struct snake_fine_timing_ctx *fine = args->fine;
+	u32 *equal_preference			 = args->equal_preference;
+	s32  cpu				 = args->cpu;
+	s32  keep, ret;
+	u64  stage_started_at;
 
 	if (!equal_preference)
 		return -EINVAL;
@@ -364,15 +375,80 @@ static __always_inline s32 queue_fairness_dispatch_source(
 	return keep ? 1 : 0;
 }
 
+struct snake_queue_dispatch_loop_ctx {
+	struct snake_ladder_ctx	     ladder_ctx;
+	struct task_struct	    *prev;
+	struct snake_fine_timing_ctx fine;
+	s32			     cpu;
+	s32			     result;
+	u64			     callback_started_at;
+};
+
+static long
+queue_ladder_dispatch_callback(u32				     step,
+			       struct snake_queue_dispatch_loop_ctx *loop_ctx)
+{
+	const struct snake_queue_rung *rung;
+	struct snake_queue_cpu_state  *state;
+	struct snake_cpu_queue	      *cpuq;
+	u32			       key = 0;
+	u32			       index;
+	s32			       result;
+	u64			       rung_started_at;
+
+	if (step >= SNAKE_MAX_QUEUE_RUNGS ||
+	    step >= loop_ctx->ladder_ctx.ladder->nr_dispatch_rungs)
+		return 1;
+	cpuq = queue_cpu(loop_ctx->cpu);
+	if (!cpuq) {
+		loop_ctx->result = -EINVAL;
+		return 1;
+	}
+	state = bpf_map_lookup_elem(&queue_cpu_states, &key);
+	if (!state) {
+		loop_ctx->result = -EINVAL;
+		return 1;
+	}
+	index = state->next_dispatch_rung + step;
+	if (index >= loop_ctx->ladder_ctx.ladder->nr_dispatch_rungs)
+		index -= loop_ctx->ladder_ctx.ladder->nr_dispatch_rungs;
+	rung = MEMBER_VPTR(
+		loop_ctx->ladder_ctx.ladder->dispatch_rungs, [index]);
+	if (!rung) {
+		loop_ctx->result = -EINVAL;
+		return 1;
+	}
+	rung_started_at = rung_timing_start(loop_ctx->callback_started_at);
+	result = queue_fairness_dispatch_source(&loop_ctx->ladder_ctx, cpuq,
+						loop_ctx->cpu, loop_ctx->prev,
+						rung->opcode, &loop_ctx->fine);
+	rung_timing_finish(&loop_ctx->ladder_ctx, SNAKE_RUNG_LADDER_DISPATCH,
+			   index, rung_started_at);
+	if (result < 0) {
+		loop_ctx->result = result;
+		return 1;
+	}
+	if (!result)
+		return 0;
+	index++;
+	if (index >= loop_ctx->ladder_ctx.ladder->nr_dispatch_rungs)
+		index = 0;
+	state->next_dispatch_rung = index;
+	loop_ctx->result	  = result;
+	return 1;
+}
+
 static __always_inline int queue_ladder_dispatch(
 	struct snake_ladder_ctx *ctx, s32 cpu, struct task_struct *prev,
 	const struct snake_fine_timing_ctx *fine, u64 callback_started_at)
 {
-	struct snake_queue_cpu_state *state;
-	struct snake_cpu_queue	     *cpuq;
-	u32			      key = 0, step, start;
-	s32			      local_queued;
-	u64			      stage_started_at;
+	struct snake_queue_cpu_state	    *state;
+	struct snake_cpu_queue		    *cpuq;
+	struct snake_queue_dispatch_loop_ctx loop_ctx;
+	u32				     key = 0;
+	s32				     local_queued;
+	u64				     stage_started_at;
+	long				     nr_loops;
 
 	stage_started_at = fine_timing_start(fine);
 	cpuq		 = queue_cpu(cpu);
@@ -409,17 +485,22 @@ static __always_inline int queue_ladder_dispatch(
 	if (ctx->ladder->nr_dispatch_rungs == 1) {
 		const struct snake_queue_rung *only =
 			MEMBER_VPTR(ctx->ladder->dispatch_rungs, [0]);
-		s32 result;
-		u64 rung_started_at;
+		struct snake_queue_dispatch_min_args args;
+		s32				     result;
+		u64				     rung_started_at;
 
 		if (!only)
 			return -EINVAL;
 		if (only->opcode == SNAKE_DISPATCH_OP_MIN_VTIME) {
+			args = (struct snake_queue_dispatch_min_args){
+				.fine		  = fine,
+				.equal_preference = &state->next_equal_class,
+				.cpu		  = cpu,
+			};
 			rung_started_at =
 				rung_timing_start(callback_started_at);
-			result = queue_fairness_dispatch_min(
-				ctx, cpuq, cpu, prev, &state->next_equal_class,
-				fine);
+			result = queue_fairness_dispatch_min(ctx, cpuq, prev,
+							     &args);
 			rung_timing_finish(ctx, SNAKE_RUNG_LADDER_DISPATCH, 0,
 					   rung_started_at);
 			if (result < 0)
@@ -434,38 +515,24 @@ static __always_inline int queue_ladder_dispatch(
 			return result;
 		}
 	}
-	start = state->next_dispatch_rung;
-
-	bpf_for(step, 0, SNAKE_MAX_QUEUE_RUNGS)
-	{
-		const struct snake_queue_rung *rung;
-		u32			       index;
-		s32			       result;
-		u64			       rung_started_at;
-
-		if (step >= ctx->ladder->nr_dispatch_rungs)
-			break;
-		index = start + step;
-		if (index >= ctx->ladder->nr_dispatch_rungs)
-			index -= ctx->ladder->nr_dispatch_rungs;
-		rung = MEMBER_VPTR(ctx->ladder->dispatch_rungs, [index]);
-		if (!rung)
-			return -EINVAL;
-		rung_started_at = rung_timing_start(callback_started_at);
-		result = queue_fairness_dispatch_source(ctx, cpuq, cpu, prev,
-							rung->opcode, fine);
-		rung_timing_finish(ctx, SNAKE_RUNG_LADDER_DISPATCH, index,
-				   rung_started_at);
-		if (result < 0)
-			return result;
-		if (!result)
-			continue;
-		index++;
-		if (index >= ctx->ladder->nr_dispatch_rungs)
-			index = 0;
-		state->next_dispatch_rung = index;
-		return 0;
+	loop_ctx = (struct snake_queue_dispatch_loop_ctx){
+		.ladder_ctx = *ctx,
+		.prev	    = prev,
+		.fine	    = fine ? *fine : (struct snake_fine_timing_ctx){},
+		.cpu	    = cpu,
+		.result	    = 0,
+		.callback_started_at = callback_started_at,
+	};
+	nr_loops = bpf_loop(SNAKE_MAX_QUEUE_RUNGS,
+			    queue_ladder_dispatch_callback, &loop_ctx, 0);
+	if (nr_loops < 0) {
+		stat_inc(ctx, SNAKE_STAT_INVALID_ERRORS);
+		return nr_loops;
 	}
+	if (loop_ctx.result < 0)
+		return loop_ctx.result;
+	if (loop_ctx.result > 0)
+		return 0;
 	stage_started_at = fine_timing_start(fine);
 	local_queued	 = queue_fairness_replenish(ctx, cpuq, prev);
 	fine_timing_finish(fine, SNAKE_FINE_TIMING_DISPATCH_REPLENISH,

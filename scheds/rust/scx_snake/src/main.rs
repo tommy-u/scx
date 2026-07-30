@@ -3311,7 +3311,8 @@ scope = "task_allowed"
                 "scheduler_mode_enqueue(",
                 "fairness_dispatch_slice(",
                 "try_enqueue_task_cell(",
-                "if (cell_enqueued)",
+                "if (cell_enqueued < 0)",
+                "if (cell_enqueued > 0)",
                 "fairness_enqueue(",
             ],
         );
@@ -3414,6 +3415,256 @@ scope = "task_allowed"
                 "snake fairness dispatch failed",
             ],
         );
+    }
+
+    #[test]
+    fn select_policy_walk_has_a_bounded_verifier_interface() {
+        let bpf_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bpf");
+        let ladder = fs::read_to_string(bpf_dir.join("ladder.h")).unwrap();
+        let main = fs::read_to_string(bpf_dir.join("main.bpf.c")).unwrap();
+        let normalized_ladder = ladder.split_whitespace().collect::<Vec<_>>().join(" ");
+        let walk_context = ladder
+            .split_once("struct snake_ladder_walk_args {")
+            .and_then(|(_, body)| body.split_once("};"))
+            .map(|(body, _)| body)
+            .expect("policy-walk context should have one definition");
+
+        for field in [
+            "s32 prev_cpu;",
+            "u32 queue_cell_index;",
+            "u64 wake_flags;",
+            "u64 dispatch_flags;",
+            "u64 callback_started_at;",
+        ] {
+            assert!(
+                normalized_ladder.contains(field),
+                "policy-walk context is missing {field}"
+            );
+        }
+        assert!(!walk_context.contains('*'));
+        assert_eq!(walk_context.matches(';').count(), 5);
+        assert!(normalized_ladder.contains(
+            "static __noinline s32 walk_policy_ladder(struct snake_ladder_ctx *ctx, struct task_struct *p, struct snake_ladder_walk_args *walk_args)"
+        ));
+        assert!(normalized_ladder.contains(
+            "static __noinline s32 walk_policy_rung(struct snake_ladder_ctx *ctx, struct task_struct *p, u32 i, struct snake_ladder_walk_args *walk_args)"
+        ));
+        let walk = ladder
+            .split_once("walk_policy_ladder(struct snake_ladder_ctx *ctx")
+            .and_then(|(_, body)| body.split_once("#endif"))
+            .map(|(body, _)| body)
+            .expect("policy walker should have one definition");
+        assert!(normalized_ladder
+            .contains("bpf_loop(SNAKE_MAX_RUNGS, walk_policy_ladder_callback, &loop_ctx, 0)"));
+        assert!(normalized_ladder.contains(
+            "walk_policy_rung(&loop_ctx->ladder_ctx, loop_ctx->p, i, &loop_ctx->walk_args)"
+        ));
+        assert!(normalized_ladder.contains(
+            "if (i >= SNAKE_MAX_RUNGS || i >= loop_ctx->ladder_ctx.ladder->nr_rungs) return 1;"
+        ));
+        assert!(!walk.contains("execute_rung(ctx, p, &rung, &args)"));
+        assert!(!walk.contains("rung_is_valid(&rung"));
+        assert!(!walk.contains("bpf_for(i, 0, SNAKE_MAX_RUNGS)"));
+
+        let select = main
+            .split_once("BPF_STRUCT_OPS(snake_select_cpu")
+            .and_then(|(_, body)| body.split_once("BPF_STRUCT_OPS(snake_enqueue"))
+            .map(|(body, _)| body)
+            .unwrap();
+        let normalized_select = select.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(normalized_select.contains("struct snake_ladder_walk_args walk_args = {"));
+        assert!(normalized_select.contains("walk_policy_ladder(&ladder_ctx, p, &walk_args)"));
+        assert!(normalized_select.contains("dispatch_flags = walk_args.dispatch_flags;"));
+        assert!(normalized_select.contains("queue_cell_index = walk_args.queue_cell_index;"));
+        assert!(!normalized_select.contains("walk_policy_ladder(&ladder_ctx, p, prev_cpu"));
+    }
+
+    #[test]
+    fn task_cell_enqueue_walk_has_a_bounded_verifier_interface() {
+        let ladder =
+            fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bpf/ladder.h"))
+                .unwrap();
+        let normalized = ladder.split_whitespace().collect::<Vec<_>>().join(" ");
+        let enqueue_walk = ladder
+            .split_once("try_enqueue_task_cell(")
+            .and_then(|(_, body)| body.split_once("walk_policy_rung("))
+            .map(|(body, _)| body)
+            .expect("task-cell enqueue walker should have one definition");
+
+        assert!(normalized
+            .contains("bpf_loop(SNAKE_MAX_RUNGS, try_enqueue_task_cell_callback, &loop_ctx, 0)"));
+        assert!(normalized.contains(
+            "if (i >= SNAKE_MAX_RUNGS || i >= loop_ctx->ladder_ctx.ladder->nr_rungs) return 1;"
+        ));
+        assert!(!enqueue_walk.contains("bpf_for(i, 0, SNAKE_MAX_RUNGS)"));
+    }
+
+    #[test]
+    fn queue_enqueue_walk_has_a_bounded_verifier_interface() {
+        let queue_enqueue = fs::read_to_string(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bpf/queue_enqueue.h"),
+        )
+        .unwrap();
+        let normalized = queue_enqueue
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        let enqueue_walk = queue_enqueue
+            .split_once("queue_ladder_enqueue(")
+            .and_then(|(_, body)| body.split_once("#endif"))
+            .map(|(body, _)| body)
+            .expect("queue enqueue walker should have one definition");
+
+        assert!(normalized.contains(
+            "bpf_loop(SNAKE_MAX_QUEUE_RUNGS, queue_ladder_enqueue_callback, &loop_ctx, 0)"
+        ));
+        assert!(normalized.contains(
+            "if (i >= SNAKE_MAX_QUEUE_RUNGS || i >= loop_ctx->ladder_ctx.ladder->nr_enqueue_rungs) return 1;"
+        ));
+        assert!(!enqueue_walk.contains("bpf_for(i, 0, SNAKE_MAX_QUEUE_RUNGS)"));
+    }
+
+    #[test]
+    fn queue_allowed_cpu_scan_has_a_bounded_verifier_interface() {
+        let queue =
+            fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bpf/queue.h"))
+                .unwrap();
+        let normalized = queue.split_whitespace().collect::<Vec<_>>().join(" ");
+        let allowed_scan = queue
+            .split_once("queue_pick_allowed_cpu(")
+            .and_then(|(_, body)| body.split_once("#endif"))
+            .map(|(body, _)| body)
+            .expect("queue allowed-CPU picker should have one definition");
+
+        assert!(normalized
+            .contains("bpf_loop(SNAKE_MAX_CPUS, queue_pick_allowed_cpu_callback, &loop_ctx, 0)"));
+        assert!(
+            normalized.contains("if (offset >= SNAKE_MAX_CPUS || offset >= nr_cpu_ids) return 1;")
+        );
+        assert!(!allowed_scan.contains("bpf_for(offset, 0, SNAKE_MAX_CPUS)"));
+    }
+
+    #[test]
+    fn queue_dispatch_walk_has_a_bounded_verifier_interface() {
+        let queue_dispatch = fs::read_to_string(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bpf/queue_dispatch.h"),
+        )
+        .unwrap();
+        let normalized = queue_dispatch
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        let dispatch_walk = queue_dispatch
+            .split_once("queue_ladder_dispatch(")
+            .and_then(|(_, body)| body.split_once("#endif"))
+            .map(|(body, _)| body)
+            .expect("queue dispatch walker should have one definition");
+
+        assert!(normalized.contains(
+            "bpf_loop(SNAKE_MAX_QUEUE_RUNGS, queue_ladder_dispatch_callback, &loop_ctx, 0)"
+        ));
+        assert!(normalized.contains(
+            "if (step >= SNAKE_MAX_QUEUE_RUNGS || step >= loop_ctx->ladder_ctx.ladder->nr_dispatch_rungs) return 1;"
+        ));
+        assert!(!dispatch_walk.contains("bpf_for(step, 0, SNAKE_MAX_QUEUE_RUNGS)"));
+    }
+
+    #[test]
+    fn fine_timing_context_stays_compact_for_loop_callbacks() {
+        let timing =
+            fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bpf/timing.h"))
+                .unwrap();
+        let context = timing
+            .split_once("struct snake_fine_timing_ctx {")
+            .and_then(|(_, body)| body.split_once("};"))
+            .map(|(body, _)| body)
+            .expect("fine-timing context should have one definition");
+        let normalized = context.split_whitespace().collect::<Vec<_>>().join(" ");
+
+        assert!(normalized.contains("u8 active;"));
+        assert!(normalized.contains("u8 sampled;"));
+        assert!(!normalized.contains("u32 active;"));
+        assert!(!normalized.contains("u32 sampled;"));
+    }
+
+    #[test]
+    fn queue_dispatch_keep_running_has_a_stack_boundary() {
+        let queue_dispatch = fs::read_to_string(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bpf/queue_dispatch.h"),
+        )
+        .unwrap();
+        let normalized = queue_dispatch
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        assert!(normalized.contains(
+            "static __noinline s32 queue_fairness_keep_running(struct snake_ladder_ctx *ctx, struct snake_cpu_queue *cpuq, struct task_struct *prev, u32 class, u64 candidate_vtime)"
+        ));
+    }
+
+    #[test]
+    fn queue_dispatch_min_vtime_has_a_stack_boundary() {
+        let queue_dispatch = fs::read_to_string(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bpf/queue_dispatch.h"),
+        )
+        .unwrap();
+        let normalized = queue_dispatch
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        assert!(normalized.contains("static __noinline s32 queue_fairness_dispatch_min("));
+        assert!(normalized.contains("const struct snake_queue_dispatch_min_args *args)"));
+    }
+
+    #[test]
+    fn fine_timing_recorders_bound_callback_indices() {
+        let timing =
+            fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bpf/timing.h"))
+                .unwrap();
+
+        assert!(
+            timing
+                .matches("callback >= SNAKE_NR_FINE_TIMING_CALLBACKS")
+                .count()
+                >= 2,
+            "each fine-timing recorder must validate callback before indexing session_ids",
+        );
+        assert!(timing.matches("config->session_ids[callback]").count() >= 2);
+    }
+
+    #[test]
+    fn task_cell_enqueue_errors_reach_the_root_reporter() {
+        let bpf_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bpf");
+        let scheduler = fs::read_to_string(bpf_dir.join("scheduler_mode.h")).unwrap();
+        let ladder = fs::read_to_string(bpf_dir.join("ladder.h")).unwrap();
+        let normalized_scheduler = scheduler.split_whitespace().collect::<Vec<_>>().join(" ");
+        let task_cell_path = ladder
+            .split_once("try_enqueue_task_cell_callback(")
+            .and_then(|(_, body)| body.split_once("walk_policy_rung("))
+            .map(|(body, _)| body)
+            .expect("task-cell enqueue path should have one definition");
+
+        assert!(normalized_scheduler.contains(
+            "if (cell_enqueued < 0) return cell_enqueued; if (cell_enqueued > 0) return 0;"
+        ));
+        assert!(!task_cell_path.contains("scx_bpf_error"));
+    }
+
+    #[test]
+    fn queue_loop_errors_defer_to_root_reporters() {
+        let bpf_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bpf");
+        for file in ["queue_enqueue.h", "queue_dispatch.h"] {
+            let source = fs::read_to_string(bpf_dir.join(file)).unwrap();
+            let loop_error = source
+                .split_once("if (nr_loops < 0) {")
+                .and_then(|(_, body)| body.split_once('}'))
+                .map(|(body, _)| body)
+                .expect("queue loop should check bpf_loop errors");
+            assert!(loop_error.contains("return nr_loops;"));
+            assert!(!loop_error.contains("scx_bpf_error"));
+        }
     }
 
     fn raw_percpu_stats() -> Vec<Vec<Vec<u8>>> {

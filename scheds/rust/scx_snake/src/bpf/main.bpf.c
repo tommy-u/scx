@@ -87,8 +87,15 @@ s32 BPF_STRUCT_OPS(snake_select_cpu, struct task_struct *p, s32 prev_cpu,
 {
 	struct snake_ladder_ctx	     ladder_ctx = {};
 	struct snake_fine_timing_ctx fine_timing;
-	u64 callback_started_at = callback_timing_start();
-	u64 dispatch_flags	= 0;
+	u64 callback_started_at			= callback_timing_start();
+	struct snake_ladder_walk_args walk_args = {
+		.prev_cpu	     = prev_cpu,
+		.queue_cell_index    = SNAKE_QUEUE_CELL_NONE,
+		.wake_flags	     = wake_flags,
+		.dispatch_flags	     = 0,
+		.callback_started_at = callback_started_at,
+	};
+	u64 dispatch_flags = 0;
 	u64 fine_stage_started_at =
 		fine_timing_select_start(callback_started_at);
 	u64 select_started_at = bpf_ktime_get_ns();
@@ -110,9 +117,9 @@ s32 BPF_STRUCT_OPS(snake_select_cpu, struct task_struct *p, s32 prev_cpu,
 	stat_inc(&ladder_ctx, SNAKE_STAT_SELECT_CALLS);
 
 	fine_stage_started_at = fine_timing_select_start(callback_started_at);
-	cpu = walk_policy_ladder(&ladder_ctx, p, prev_cpu, wake_flags,
-				 &dispatch_flags, &queue_cell_index,
-				 callback_started_at);
+	cpu		      = walk_policy_ladder(&ladder_ctx, p, &walk_args);
+	dispatch_flags	      = walk_args.dispatch_flags;
+	queue_cell_index      = walk_args.queue_cell_index;
 	fine_timing_finish_select(SNAKE_FINE_TIMING_SELECT_POLICY_LADDER,
 				  fine_stage_started_at);
 	if (cpu >= 0) {
