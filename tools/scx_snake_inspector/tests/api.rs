@@ -1516,7 +1516,7 @@ async fn queue_timing_endpoint_summarizes_capture_and_controls_it_with_a_token()
     assert_eq!(body["started_samples"], 120);
     assert_eq!(body["completed_samples"], 100);
     assert_eq!(body["dropped_samples"], 2);
-    assert_eq!(dsq["dsq_id"], 8192);
+    assert_eq!(dsq["dsq_id"], "8192");
     assert_eq!(dsq["cell_index"], 1);
     assert_eq!(dsq["queue_class"], "normal");
     assert_eq!(dsq["residence"]["samples"], 100);
@@ -1584,13 +1584,10 @@ fn queue_timing_availability_and_validation_are_explicit() {
     );
 
     dashboard.set_scheduler("snake", true, 4);
-    let mut placement = callback_timing_snapshot(7, 0, 0);
-    placement["queue_topology"] = Value::Null;
-    dashboard.set_inspection(Some(placement), None);
-    assert_eq!(
-        dashboard.queue_timing().status,
-        QueueTimingStatus::NotApplicable
-    );
+    let mut no_topology = queue_timing_snapshot();
+    no_topology["queue_topology"] = Value::Null;
+    dashboard.set_inspection(Some(no_topology), None);
+    assert_eq!(dashboard.queue_timing().status, QueueTimingStatus::Ready);
 
     dashboard.set_inspection(Some(queue_topology_snapshot(7)), None);
     assert_eq!(
@@ -1609,6 +1606,11 @@ fn queue_timing_availability_and_validation_are_explicit() {
     let invalid = dashboard.queue_timing();
     assert_eq!(invalid.status, QueueTimingStatus::Unavailable);
     assert!(invalid.error.unwrap().contains("queue class"));
+
+    let mut fairness = queue_timing_snapshot();
+    fairness["queue_timing"]["dsqs"][0]["queue_class"] = json!("fairness");
+    dashboard.set_inspection(Some(fairness), None);
+    assert_eq!(dashboard.queue_timing().status, QueueTimingStatus::Ready);
 
     let mut malformed = queue_timing_snapshot();
     malformed["queue_timing"]["dsqs"][0]["residence"]["buckets"] = json!(vec![0_u64; 63]);

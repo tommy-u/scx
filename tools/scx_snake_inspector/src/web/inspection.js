@@ -447,9 +447,12 @@ function normalizeQueueTimingDsq(dsq) {
   const depth = dsq?.depth || {};
   const samples = Math.max(0, finiteValue(residence.samples, dsq?.samples) ?? 0);
   const depthSamples = Math.max(0, finiteValue(depth.samples, samples) ?? 0);
+  const dsqId = dsq?.dsq_id ?? dsq?.id ?? null;
   return {
-    dsqId: dsq?.dsq_id ?? dsq?.id ?? null,
-    dsqKey: canonicalDsqKey(dsq?.dsq_id ?? dsq?.id),
+    dsqId,
+    dsqKey: canonicalDsqKey(dsqId),
+    label: formatDsqId(dsqId),
+    kind: dsqKind(dsqId),
     queueClass: String(dsq?.queue_class || dsq?.kind || "unknown").toLowerCase(),
     cpu: finiteValue(dsq?.cpu),
     cellId: finiteValue(dsq?.cell_id, dsq?.cell_index),

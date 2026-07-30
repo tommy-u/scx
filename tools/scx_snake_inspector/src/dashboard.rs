@@ -246,7 +246,7 @@ pub struct QueueDepthView {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct QueueTimingDsqView {
-    pub dsq_id: u64,
+    pub dsq_id: String,
     pub cell_index: u32,
     pub queue_class: String,
     pub residence: QueueResidenceView,
@@ -766,15 +766,6 @@ impl Dashboard {
         let Some(snapshot) = &live.inspection else {
             return empty_queue_timing_view(&live, QueueTimingStatus::Unavailable, None);
         };
-        match snapshot.get("queue_topology") {
-            Some(topology) if topology.is_null() => {
-                return empty_queue_timing_view(&live, QueueTimingStatus::NotApplicable, None);
-            }
-            None => {
-                return empty_queue_timing_view(&live, QueueTimingStatus::Unsupported, None);
-            }
-            Some(_) => {}
-        }
         let Some(payload) = snapshot.get("queue_timing") else {
             return empty_queue_timing_view(&live, QueueTimingStatus::Unsupported, None);
         };
@@ -1105,7 +1096,7 @@ struct QueueDepthPayload {
 fn validate_queue_timing(payload: QueueTimingPayload) -> Result<QueueTimingPayload, String> {
     let mut dsq_ids = BTreeMap::new();
     for dsq in &payload.dsqs {
-        if !matches!(dsq.queue_class.as_str(), "normal" | "affinity") {
+        if !matches!(dsq.queue_class.as_str(), "normal" | "affinity" | "fairness") {
             return Err(format!("invalid queue class `{}`", dsq.queue_class));
         }
         if dsq.residence.buckets.len() != QUEUE_RESIDENCE_BUCKETS {
@@ -1168,7 +1159,7 @@ fn queue_timing_view(live: &LiveData, payload: QueueTimingPayload) -> QueueTimin
             .map(|dsq| {
                 let residence = summarize_callback_timing(&dsq.residence);
                 QueueTimingDsqView {
-                    dsq_id: dsq.dsq_id,
+                    dsq_id: dsq.dsq_id.to_string(),
                     cell_index: dsq.cell_index,
                     queue_class: dsq.queue_class,
                     residence: QueueResidenceView {

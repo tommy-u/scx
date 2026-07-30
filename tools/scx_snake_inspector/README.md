@@ -56,12 +56,12 @@ inspector's rolling histories, and clears fine-grained capture history. It
 does not reload the scheduler or alter queues, clocks, membership, or task-cell
 assignments.
 
-In queue mode, the Policy view shows fairness and clock mode, synthetic cell 0,
-dense cell indices, allocated primary and borrowable masks, cell/LLC normal DSQ
-shards, and every CPU's owner, normal DSQ, and affinity DSQ. It does not yet
-attach runtime queue depth, enqueue/dispatch, borrowing/lending, or clock
-transition metrics to those topology rows; use scheduler statistics for those
-counters.
+The Queue topology view shows fairness and clock mode, synthetic cell 0, dense
+cell indices, allocated primary and borrowable masks, cell/LLC normal DSQ
+shards, and every CPU's owner, normal DSQ, and affinity DSQ. Its Observed DSQs
+table groups sampled insert success/error and removal success/miss latency by
+DSQ. Successful moves are attributed to both queues, so FIFO mode shows the
+shared source and each observed per-CPU local destination.
 
 An aligned strip above the matrix shows per-CPU utilization reported by
 Snake's stats socket. The strip always covers all Snake tasks; TGID and cgroup
@@ -85,9 +85,8 @@ the same sample decision. Snake folds bounded ring-buffer samples into fixed
 per-stage histograms and does not retain individual events. An unchecked
 capture remains visible as **Historical**; a policy update freezes every active
 capture before activating the next generation. Select CPU capture is available
-whenever callback sampling is enabled; enqueue and dispatch capture additionally
-require queue topology mode. Unavailable switches remain visible but disabled
-with the requirement shown.
+whenever callback sampling is enabled, as are enqueue and dispatch capture.
+Unavailable switches remain visible but disabled with the requirement shown.
 
 ## Build and run
 

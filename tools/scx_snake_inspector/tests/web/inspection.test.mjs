@@ -2353,6 +2353,24 @@ test("queue timing model gates controls and low-sample percentiles", () => {
   assert.deepEqual(synchronizing.counts, { started: 0, completed: 0, dropped: 0 });
 });
 
+test("queue timing preserves and labels built-in local DSQ identities", () => {
+  const localDsq = "13835058055282163719";
+  const model = inspectionState.queueTimingModel({
+    ...collectingQueueTimingFixture,
+    dsqs: [{
+      ...collectingQueueTimingFixture.dsqs[0],
+      dsq_id: localDsq,
+      queue_class: "fairness",
+      cell_index: 4_294_967_295,
+    }],
+  });
+
+  assert.equal(model.dsqs[0].dsqId, localDsq);
+  assert.equal(model.dsqs[0].dsqKey, localDsq);
+  assert.equal(model.dsqs[0].kind, "Local CPU 7");
+  assert.equal(model.dsqs[0].label, "0xc000000000000007");
+});
+
 test("queue timing joins normal DSQs and per-CPU affinity routes by DSQ identity", () => {
   assert.equal(typeof inspectionState.mergeQueueTimingTopology, "function");
   const topology = queueTopologyModel(
