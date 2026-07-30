@@ -1664,10 +1664,7 @@ export function schedulerCurrentLaunch(control) {
     fairness: schedulerEffectiveSetting(control, "fairness")
       ?? control?.context?.fairness
       ?? null,
-    callback_timing_sample_rate: schedulerEffectiveSetting(
-      control,
-      "callback_timing_sample_rate",
-    ) ?? control?.context?.callback_sample_rate ?? null,
+    callback_timing_sample_rate: control?.launch?.callback_timing_sample_rate ?? null,
     exit_dump_len: control?.launch?.exit_dump_len ?? null,
     verbose: Boolean(control?.launch?.verbose),
   };
@@ -1683,11 +1680,18 @@ export function schedulerLifecycleRequest(control, values) {
   });
 }
 
-export function schedulerCommandPreview(request, preservedArgs = []) {
+export function schedulerCommandPreview(request, preservedArgs = [], currentCommand = []) {
   if (!request?.policy_id) {
     return "scx_snake --policy <select a policy>";
   }
-  const args = ["scx_snake", "--policy", shellWord(request.policy_id)];
+  const executable = Array.isArray(currentCommand) && currentCommand.length > 0
+    ? currentCommand[0]
+    : "scx_snake";
+  const currentPolicy = commandOptionValue(currentCommand, "--policy");
+  const policy = currentPolicy?.includes("/") && !request.policy_id.includes("/")
+    ? `${currentPolicy.slice(0, currentPolicy.lastIndexOf("/") + 1)}${request.policy_id}`
+    : request.policy_id;
+  const args = [shellWord(executable), "--policy", shellWord(policy)];
   if (request.fairness != null) {
     args.push("--fairness", shellWord(request.fairness));
   }
@@ -1702,6 +1706,22 @@ export function schedulerCommandPreview(request, preservedArgs = []) {
   }
   args.push(...preservedArgs.map(shellWord));
   return args.join(" ");
+}
+
+function commandOptionValue(argv, option) {
+  if (!Array.isArray(argv)) {
+    return null;
+  }
+  for (let index = 1; index < argv.length; index += 1) {
+    const argument = String(argv[index]);
+    if (argument === option) {
+      return argv[index + 1] == null ? null : String(argv[index + 1]);
+    }
+    if (argument.startsWith(`${option}=`)) {
+      return argument.slice(option.length + 1) || null;
+    }
+  }
+  return null;
 }
 
 export function launchDiff(current, proposed) {
@@ -1952,24 +1972,40 @@ export function schedulerControlModel(control, pending, hasPolicy) {
   };
 }
 
-export function policyInlineActionModel(policy, candidate, pending = false) {
-  const expanded = policy?.actionKind === "activate"
-    && candidate?.actionKind === "activate"
-    && candidate.policyId === policy.id
-    && candidate.fairness === policy.selectedFairness;
+export function policyInlineActionModel(policy, candidate, pending = false, control = null) {
+  const valid = policy?.actionKind !== "invalid" && policy?.changeMode !== "invalid";
+  const expanded = valid
+    && candidate?.policyId === policy.id
+    && candidate?.fairness === policy.selectedFairness;
+  const liveVisible = policy?.actionKind === "activate";
+  const active = Boolean(control?.active);
   return {
     expanded,
-    label: policy?.actionLabel || "Apply live",
-    disabled: Boolean(pending) || Boolean(policy?.disabled),
+    liveVisible,
+    liveLabel: "Apply live",
+    liveDisabled: Boolean(pending) || !liveVisible || Boolean(policy?.disabled),
+    lifecycleVisible: valid,
+    lifecycleLabel: active ? "Apply Restart" : "Apply Start",
+    lifecycleDisabled: Boolean(pending)
+      || !valid
+      || (active ? !control?.controllable : Boolean(control?.managed)),
   };
 }
 
 export function nextPolicyCandidate(current, next) {
-  const sameLiveCandidate = next?.actionKind === "activate"
-    && current?.actionKind === "activate"
+  const sameCandidate = next != null
+    && current != null
     && current.policyId === next.policyId
     && current.fairness === next.fairness;
-  return sameLiveCandidate ? null : next;
+  return sameCandidate ? null : next;
+}
+
+export function policyReviewSelection(current, next) {
+  return {
+    candidate: nextPolicyCandidate(current, next),
+    lifecyclePolicyId: next.policyId,
+    lifecycleFairness: next.fairness,
+  };
 }
 
 function isPowerOfTwo(value) {

@@ -1438,11 +1438,18 @@ button:focus-visible {
   min-width: 0;
   padding: 10px 0 1px;
   grid-column: 1 / -1;
+  display: grid;
+  gap: 8px;
+  border-top: 1px solid var(--border);
+}
+
+.policy-review-action-row {
+  min-width: 0;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: 14px;
-  border-top: 1px solid var(--border);
 }
 
 .policy-live-action-panel strong,
@@ -1461,7 +1468,7 @@ button:focus-visible {
   line-height: 1.35;
 }
 
-.policy-live-action-panel .apply-button {
+.policy-review-action-row .apply-button {
   flex: 0 0 auto;
   white-space: nowrap;
 }

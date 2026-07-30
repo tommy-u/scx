@@ -33,11 +33,11 @@ import {
   formatFeedbackTranscript,
   ladderPercentages,
   launchDiff,
-  nextPolicyCandidate,
   parseFeedbackEntries,
   policyCategoryGroups,
   policyInlineActionModel,
   policyLibraryModels,
+  policyReviewSelection,
   policySlotComparison,
   queueLadderSections,
   queueTimingModel,
@@ -280,6 +280,7 @@ const state = {
   queueTimingPending: false,
   schedulerControl: null,
   schedulerControlError: null,
+  schedulerMutationError: null,
   schedulerControlLoading: false,
   schedulerControlPending: false,
   schedulerFormInitialized: false,
@@ -567,6 +568,19 @@ function bindControls() {
     }
   });
   elements.policyChoices.addEventListener("click", (event) => {
+    const restartApply = event.target.closest("[data-policy-restart-apply]");
+    if (restartApply && !restartApply.disabled) {
+      state.selectedLifecyclePolicyId = restartApply.dataset.policyRestartApply;
+      state.selectedLifecycleFairness = restartApply.dataset.policyFairness;
+      state.schedulerFormInitialized = true;
+      renderSchedulerControl();
+      if (state.schedulerControl?.active) {
+        restartScheduler();
+      } else {
+        startScheduler();
+      }
+      return;
+    }
     const liveApply = event.target.closest("[data-policy-live-apply]");
     if (liveApply && !liveApply.disabled) {
       openPolicyDialog(liveApply.dataset.policyLiveApply);
@@ -587,12 +601,11 @@ function bindControls() {
       fairness: control.dataset.policyFairness,
       actionKind: control.dataset.policyAction,
     };
-    state.policyCandidate = nextPolicyCandidate(state.policyCandidate, nextCandidate);
-    if (nextCandidate.actionKind === "lifecycle") {
-      state.selectedLifecyclePolicyId = control.dataset.policyId;
-      state.selectedLifecycleFairness = control.dataset.policyFairness;
-      state.schedulerFormInitialized = true;
-    }
+    const selection = policyReviewSelection(state.policyCandidate, nextCandidate);
+    state.policyCandidate = selection.candidate;
+    state.selectedLifecyclePolicyId = selection.lifecyclePolicyId;
+    state.selectedLifecycleFairness = selection.lifecycleFairness;
+    state.schedulerFormInitialized = true;
     renderPolicyLibrary();
     renderSchedulerControl();
   });
@@ -1444,6 +1457,7 @@ function renderOverview() {
       state.queueTimingError,
       state.policyCatalogError,
       state.schedulerControlError,
+      state.schedulerMutationError,
       state.hostContextError,
     ],
   });
@@ -2054,7 +2068,10 @@ function renderSchedulerControl() {
   elements.schedulerControlState.className = `scheduler-state ${model.stateName}`;
   elements.schedulerControlState.textContent = model.stateLabel;
 
-  const message = schedulerControlMessage(control, state.schedulerControlError);
+  const message = schedulerControlMessage(
+    control,
+    state.schedulerMutationError || state.schedulerControlError,
+  );
   if (message) {
     showElementNotice(elements.schedulerControlNotice, message);
   } else if (state.policyCandidate?.actionKind === "activate") {
@@ -2137,6 +2154,7 @@ function renderSchedulerCommandPreview() {
     elements.schedulerCommandPreview.textContent = schedulerCommandPreview(
       request,
       state.schedulerControl?.launch?.preserved_args || [],
+      state.schedulerControl?.current_command || [],
     );
     const current = schedulerCurrentLaunch(state.schedulerControl);
     const changes = launchDiff(current, request);
@@ -2192,9 +2210,6 @@ async function restartScheduler() {
     showElementNotice(elements.schedulerControlNotice, error.message);
     return;
   }
-  if (!window.confirm("Restart the attached Snake scheduler with this configuration?")) {
-    return;
-  }
   await schedulerMutation("/api/scheduler/restart", request);
 }
 
@@ -2210,7 +2225,7 @@ async function schedulerMutation(path, payload) {
     return;
   }
   state.schedulerControlPending = true;
-  state.schedulerControlError = null;
+  state.schedulerMutationError = null;
   renderSchedulerControl();
   try {
     const response = await fetch(path, {
@@ -2225,12 +2240,15 @@ async function schedulerMutation(path, payload) {
     if (!response.ok) {
       throw new Error(body.error || `Scheduler control failed (${response.status})`);
     }
+    state.schedulerControl = body;
+    state.schedulerMutationError = null;
+    state.lastSchedulerControlAt = Date.now();
     state.selectedLifecyclePolicyId = null;
     state.selectedLifecycleFairness = null;
     state.schedulerFormInitialized = false;
     await loadSchedulerControl();
   } catch (error) {
-    state.schedulerControlError = error.message;
+    state.schedulerMutationError = error.message;
   } finally {
     state.schedulerControlPending = false;
     renderSchedulerControl();
@@ -2900,6 +2918,7 @@ function renderPolicyLibrary() {
           policy,
           state.policyCandidate,
           state.policyActivationPending,
+          state.schedulerControl,
         );
         const inlineActionId = `policy-live-action-${policy.id}-${selectedFairness}`;
         const appliesLiveClass = policy.changeMode === "dynamic" && !policy.active
@@ -2927,19 +2946,33 @@ function renderPolicyLibrary() {
             data-policy-fairness="${escapeHtml(selectedFairness)}"
             data-render-key="policy-choice:${escapeHtml(selectedFairness)}:${escapeHtml(policy.id)}:select"
             data-policy-action="${escapeHtml(policy.actionKind)}" aria-pressed="${selected}"
-            aria-expanded="${inlineAction.expanded}"${inlineAction.expanded ? ` aria-controls="${escapeHtml(inlineActionId)}"` : ""}>
+            aria-expanded="${inlineAction.expanded}"${inlineAction.expanded ? ` aria-controls="${escapeHtml(inlineActionId)}"` : ""}${policy.changeMode === "invalid" ? " disabled" : ""}>
             ${inlineAction.expanded ? "Close" : selected ? "Selected" : "Review"}
           </button>
         </div>
         ${inlineAction.expanded ? `
-          <section class="policy-live-action-panel" id="${escapeHtml(inlineActionId)}" aria-label="Apply ${escapeHtml(policy.name)} live">
-            <div>
-              <strong>Apply without restarting Snake</strong>
-              <span>Install this policy as the next generation while the scheduler keeps running.</span>
-            </div>
-            <button class="apply-button" type="button"
-              data-policy-live-apply="${escapeHtml(policy.id)}"
-              ${inlineAction.disabled ? "disabled" : ""}>${escapeHtml(inlineAction.label)}</button>
+          <section class="policy-live-action-panel" id="${escapeHtml(inlineActionId)}" aria-label="Apply ${escapeHtml(policy.name)}">
+            ${inlineAction.liveVisible ? `
+              <div class="policy-review-action-row">
+                <div>
+                  <strong>Apply without restarting Snake</strong>
+                  <span>Install this policy as the next generation while the scheduler keeps running.</span>
+                </div>
+                <button class="apply-button" type="button"
+                  data-policy-live-apply="${escapeHtml(policy.id)}"
+                  ${inlineAction.liveDisabled ? "disabled" : ""}>${escapeHtml(inlineAction.liveLabel)}</button>
+              </div>` : ""}
+            ${inlineAction.lifecycleVisible ? `
+              <div class="policy-review-action-row">
+                <div>
+                  <strong>Apply with scheduler restart</strong>
+                  <span>Start a new Snake attachment using the command shown in Next start or restart.</span>
+                </div>
+                <button class="apply-button" type="button"
+                  data-policy-restart-apply="${escapeHtml(policy.id)}"
+                  data-policy-fairness="${escapeHtml(selectedFairness)}"
+                  ${inlineAction.lifecycleDisabled ? "disabled" : ""}>${escapeHtml(inlineAction.lifecycleLabel)}</button>
+              </div>` : ""}
           </section>` : ""}
       </article>`;
       }).join("");

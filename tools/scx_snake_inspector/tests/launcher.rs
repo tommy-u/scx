@@ -440,6 +440,55 @@ fn external_restart_replaces_policy_and_preserves_other_arguments() {
 }
 
 #[test]
+fn external_restart_with_unchanged_request_still_replaces_the_process() {
+    let (root, launcher, ops, proc_root) = external_fixture();
+    let binary = root.path().join("scx_snake");
+    let policy = root.path().join("policies/basic.toml");
+    let mut external = register_external_process(
+        &binary,
+        &proc_root,
+        &[
+            "--policy",
+            policy.to_str().unwrap(),
+            "--fairness",
+            "fifo",
+            "--stats",
+            "1",
+        ],
+    );
+    let original_pid = external.id();
+    wait_until(Duration::from_secs(2), || {
+        fs::read_to_string(&ops).unwrap().trim() == "snake_test"
+    });
+    let proc_executable = proc_root.join(original_pid.to_string()).join("exe");
+    fs::remove_file(&proc_executable).unwrap();
+    std::os::unix::fs::symlink(format!("{} (deleted)", binary.display()), proc_executable).unwrap();
+
+    let restarted = launcher
+        .restart(LaunchRequest {
+            policy_id: "basic.toml".into(),
+            fairness: Some(LaunchFairness::Fifo),
+            callback_timing_sample_rate: None,
+            exit_dump_len: None,
+            verbose: false,
+        })
+        .unwrap();
+
+    assert!(external.wait().unwrap().success());
+    assert_ne!(restarted.pid, Some(original_pid));
+    assert_eq!(restarted.policy_id.as_deref(), Some("basic.toml"));
+    assert!(restarted
+        .current_command
+        .as_ref()
+        .is_some_and(|argv| argv.contains(&policy.canonicalize().unwrap().display().to_string())));
+    assert_eq!(
+        restarted.launch.unwrap().preserved_args,
+        vec!["--stats", "1"]
+    );
+    launcher.stop().unwrap();
+}
+
+#[test]
 fn external_lifecycle_refuses_ambiguous_snake_processes() {
     let (root, launcher, ops, proc_root) = external_fixture();
     let binary = root.path().join("scx_snake");

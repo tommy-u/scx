@@ -447,8 +447,17 @@ test("scheduler command preview shows required policy and selected flags", () =>
     schedulerCommandPreview(
       { policy_id: "cell-borrowing.toml", fairness: "vtime", verbose: false },
       ["--stats", "1"],
+      [
+        "/opt/scx/bin/scx_snake",
+        "--policy",
+        "/etc/scx/snake/kernel-default-sim.toml",
+        "--fairness",
+        "fifo",
+        "--stats",
+        "1",
+      ],
     ),
-    "scx_snake --policy cell-borrowing.toml --fairness vtime --stats 1",
+    "/opt/scx/bin/scx_snake --policy /etc/scx/snake/cell-borrowing.toml --fairness vtime --stats 1",
   );
   assert.deepEqual(
     schedulerLaunchRequest({
@@ -460,7 +469,7 @@ test("scheduler command preview shows required policy and selected flags", () =>
   );
 });
 
-test("lifecycle requests preserve effective callback sampling only across restarts", () => {
+test("lifecycle requests preserve callback launch overrides without materializing defaults", () => {
   const active = {
     active: true,
     policy_id: "basic.toml",
@@ -473,7 +482,7 @@ test("lifecycle requests preserve effective callback sampling only across restar
   assert.deepEqual(schedulerCurrentLaunch(active), {
     policy_id: "basic.toml",
     fairness: "vtime",
-    callback_timing_sample_rate: 128,
+    callback_timing_sample_rate: null,
     exit_dump_len: 0,
     verbose: false,
   });
@@ -487,16 +496,18 @@ test("lifecycle requests preserve effective callback sampling only across restar
     {
       policy_id: "cell.toml",
       fairness: "eevdf",
-      callback_timing_sample_rate: 128,
       verbose: true,
     },
   );
   for (const sampleRate of [0, 64, 128]) {
     assert.equal(
-      schedulerLifecycleRequest({ ...active, settings: [
-        { name: "fairness", effective: "vtime" },
-        { name: "callback_timing_sample_rate", effective: sampleRate },
-      ] }, {
+      schedulerLifecycleRequest({
+        ...active,
+        launch: {
+          ...active.launch,
+          callback_timing_sample_rate: sampleRate,
+        },
+      }, {
         policy_id: "cell.toml",
         fairness: "vtime",
         exit_dump_len_enabled: false,
@@ -748,6 +759,20 @@ test("control client uses the scheduler lifecycle endpoints", () => {
   );
 });
 
+test("scheduler mutation errors survive successful control polls", () => {
+  const script = readFileSync(
+    new URL("../../src/web/app.js", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(script, /schedulerMutationError:\s*null/);
+  assert.match(
+    script,
+    /schedulerControlMessage\(\s*control,\s*state\.schedulerMutationError \|\| state\.schedulerControlError,?\s*\)/,
+  );
+  assert.match(script, /state\.schedulerMutationError = error\.message/);
+});
+
 test("callback reset supersedes an in-flight pre-reset timing request", () => {
   const script = readFileSync(
     new URL("../../src/web/app.js", import.meta.url),
@@ -907,7 +932,7 @@ test("policy library separates dynamic, restart-required, and invalid choices", 
   ]);
 });
 
-test("only the selected live-applicable policy exposes its inline action", () => {
+test("policy review populates lifecycle state and exposes restart for every valid policy", () => {
   const current = {
     policyId: "random.toml",
     fairness: "fifo",
@@ -921,13 +946,35 @@ test("only the selected live-applicable policy exposes its inline action", () =>
     disabled: false,
   };
 
-  assert.deepEqual(policyInlineActionModel(live, current), {
+  const control = { active: true, controllable: true };
+  assert.deepEqual(policyInlineActionModel(live, current, false, control), {
     expanded: true,
-    label: "Apply live",
-    disabled: false,
+    liveVisible: true,
+    liveLabel: "Apply live",
+    liveDisabled: false,
+    lifecycleVisible: true,
+    lifecycleLabel: "Apply Restart",
+    lifecycleDisabled: false,
   });
-  assert.equal(policyInlineActionModel({ ...live, id: "basic.toml" }, current).expanded, false);
-  assert.equal(policyInlineActionModel({ ...live, actionKind: "lifecycle" }, current).expanded, false);
+  assert.equal(policyInlineActionModel({ ...live, id: "basic.toml" }, current, false, control).expanded, false);
+  assert.deepEqual(
+    policyInlineActionModel({ ...live, actionKind: "lifecycle" }, current, false, control),
+    {
+      expanded: true,
+      liveVisible: false,
+      liveLabel: "Apply live",
+      liveDisabled: true,
+      lifecycleVisible: true,
+      lifecycleLabel: "Apply Restart",
+      lifecycleDisabled: false,
+    },
+  );
+
+  assert.deepEqual(inspectionState.policyReviewSelection(null, current), {
+    candidate: current,
+    lifecyclePolicyId: "random.toml",
+    lifecycleFairness: "fifo",
+  });
 
   const replacement = {
     policyId: "basic.toml",
@@ -936,6 +983,8 @@ test("only the selected live-applicable policy exposes its inline action", () =>
   };
   assert.deepEqual(nextPolicyCandidate(current, replacement), replacement);
   assert.equal(nextPolicyCandidate(current, { ...current }), null);
+  const lifecycle = { ...current, actionKind: "lifecycle" };
+  assert.equal(nextPolicyCandidate(lifecycle, { ...lifecycle }), null);
 });
 
 test("live policy selection renders one inline Apply live panel", () => {
@@ -950,13 +999,22 @@ test("live policy selection renders one inline Apply live panel", () => {
 
   assert.match(script, /class="policy-live-action-panel"/);
   assert.match(script, /data-policy-live-apply/);
+  assert.match(script, /data-policy-restart-apply/);
   assert.match(script, /openPolicyDialog\(liveApply\.dataset\.policyLiveApply\)/);
-  assert.match(
-    script,
-    /if \(nextCandidate\.actionKind === "lifecycle"\) \{[\s\S]*?state\.selectedLifecyclePolicyId = control\.dataset\.policyId/,
-  );
+  assert.match(script, /policyReviewSelection\(state\.policyCandidate, nextCandidate\)/);
   assert.match(script, /candidate\.id === state\.policyCandidate\.policyId/);
   assert.match(stylesheet, /\.policy-live-action-panel\s*\{/);
+});
+
+test("restart actions do not depend on native confirmation and consume returned control state", () => {
+  const script = readFileSync(
+    new URL("../../src/web/app.js", import.meta.url),
+    "utf8",
+  );
+  const restartBody = script.match(/async function restartScheduler\(\) \{[\s\S]*?\n\}/)?.[0] || "";
+
+  assert.doesNotMatch(restartBody, /window\.confirm/);
+  assert.match(script, /state\.schedulerControl = body/);
 });
 
 test("policy library resolves at most one active policy when sources are duplicated", () => {

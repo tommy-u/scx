@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 use crate::policies::discover_policy_files;
 
 const DEFAULT_OPS_PATH: &str = "/sys/kernel/sched_ext/root/ops";
+const DELETED_EXECUTABLE_SUFFIX: &[u8] = b" (deleted)";
 const STOP_TIMEOUT: Duration = Duration::from_secs(8);
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -416,8 +417,17 @@ impl Supervisor {
             if read_cmdline(&entry.path().join("cmdline")).ok().as_ref() != Some(&cmdline) {
                 continue;
             }
-            let executable = fs::read_link(entry.path().join("exe"))
+            let proc_executable = fs::read_link(entry.path().join("exe"))
                 .with_context(|| format!("reading executable for Snake PID {pid}"))?;
+            let executable = if proc_executable
+                .as_os_str()
+                .as_encoded_bytes()
+                .ends_with(DELETED_EXECUTABLE_SUFFIX)
+            {
+                PathBuf::from(&cmdline[0])
+            } else {
+                proc_executable
+            };
             let (policy_id, launch) = parse_external_launch(&self.policy_dir, &cmdline)?;
             candidates.push(ExternalProcess {
                 pid,
