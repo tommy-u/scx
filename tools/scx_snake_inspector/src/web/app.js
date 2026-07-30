@@ -153,6 +153,8 @@ const elements = {
   debuggingSettingsRows: document.querySelector("#debuggingSettingsRows"),
   debuggingSnapshot: document.querySelector("#debuggingSnapshot"),
   debuggingView: document.querySelector("#debuggingView"),
+  operationsView: document.querySelector("#operationsView"),
+  roadmapView: document.querySelector("#roadmapView"),
   policyFreshness: document.querySelector("#policyFreshness"),
   policyActivationNotice: document.querySelector("#policyActivationNotice"),
   policyActiveContext: document.querySelector("#policyActiveContext"),
@@ -1379,6 +1381,8 @@ function renderRoute({ focusHeading = false } = {}) {
     elements.cellsView,
     elements.schedulerControlView,
     elements.debuggingView,
+    elements.operationsView,
+    elements.roadmapView,
   ]) {
     view.classList.toggle("hidden", view.dataset.view !== state.route);
   }

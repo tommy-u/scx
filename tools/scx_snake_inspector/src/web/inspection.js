@@ -12,6 +12,8 @@ const ROUTES = new Set([
   "inspect/queue-topology",
   "inspect/cells",
   "debugging",
+  "project/operations",
+  "project/roadmap",
 ]);
 const LEGACY_ROUTES = new Map([
   ["activity", "observe/placement"],

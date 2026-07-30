@@ -20,6 +20,22 @@ const script = readFileSync(
   new URL("../../src/web/app.js", import.meta.url),
   "utf8",
 );
+const reviewIndex = readFileSync(
+  new URL("../../../../docs/snake-review/README.md", import.meta.url),
+  "utf8",
+);
+const featureReview = readFileSync(
+  new URL("../../../../docs/snake-review/feature-completeness.md", import.meta.url),
+  "utf8",
+);
+const validationReview = readFileSync(
+  new URL("../../../../docs/snake-review/validation-and-risk-plan.md", import.meta.url),
+  "utf8",
+);
+const mitosisReview = readFileSync(
+  new URL("../../../../docs/snake-review/mitosis-compatibility.md", import.meta.url),
+  "utf8",
+);
 
 test("workspace reorganization preserves every existing inspector surface", () => {
   for (const id of [
@@ -65,6 +81,8 @@ test("nested workspace routes are canonical and legacy hashes remain compatible"
     "inspect/queue-topology",
     "inspect/cells",
     "debugging",
+    "project/operations",
+    "project/roadmap",
   ]) {
     assert.deepEqual(parseInspectorRoute(`#/${route}`), {
       route,
@@ -457,6 +475,8 @@ test("page shell exposes grouped navigation and separate diagnostic workspaces",
     'href="#/inspect/queue-topology"',
     'href="#/inspect/cells"',
     'href="#/debugging"',
+    'href="#/project/operations"',
+    'href="#/project/roadmap"',
     'id="overviewView"',
     'id="overviewWindowSelect"',
     'id="overviewScopeMode"',
@@ -471,6 +491,8 @@ test("page shell exposes grouped navigation and separate diagnostic workspaces",
     'id="schedulerUptime"',
     'id="queueTopologyView"',
     'id="debuggingView"',
+    'id="operationsView"',
+    'id="roadmapView"',
     'data-view="configure"',
   ]) {
     assert.match(page, new RegExp(fragment), `missing ${fragment}`);
@@ -497,6 +519,8 @@ test("each workspace heading matches its Explorer label", () => {
     "inspect/queue-topology",
     "inspect/cells",
     "debugging",
+    "project/operations",
+    "project/roadmap",
   ];
   const visibleText = (value) => value.replace(/&amp;/g, "&").trim();
 
@@ -512,6 +536,212 @@ test("each workspace heading matches its Explorer label", () => {
     assert.ok(workspace, `missing workspace heading for ${route}`);
     assert.equal(visibleText(workspace[1]), visibleText(explorer[1]), route);
   }
+});
+
+test("project navigation is available in both desktop and mobile explorers", () => {
+  for (const route of ["project/operations", "project/roadmap"]) {
+    const occurrences = page.match(
+      new RegExp(`data-route="${route.replace("/", "\\/")}"`, "g"),
+    ) || [];
+    assert.equal(occurrences.length, 2, route);
+  }
+});
+
+test("project roadmap exposes the dated review scores without drifting from the report", () => {
+  const reviewDate = reviewIndex.match(/^Review date: (.+)$/m)?.[1];
+  const baselineCommit = reviewIndex.match(/^Committed baseline: `([0-9a-f]+)`$/m)?.[1];
+  assert.ok(reviewDate, "review date missing from report");
+  assert.ok(baselineCommit, "baseline commit missing from report");
+  assert.match(page, /data-view="project\/roadmap"/);
+  assert.match(page, new RegExp(`data-assessment-date="${reviewDate}"`));
+  assert.match(page, new RegExp(`data-assessment-commit="${baselineCommit}"`));
+  assert.match(page, /Engineering estimate, not test coverage/);
+  assert.match(page, /docs\/snake-review\/README\.md/);
+
+  const scores = new Map([
+    ["experimental-completeness", [80, "Snake experimental feature implementation", reviewIndex]],
+    ["production-readiness", [35, "Snake production readiness", reviewIndex]],
+    ["mitosis-parity", [55, "Overall end-to-end Mitosis behavior parity", reviewIndex]],
+    ["rollout-validation", [25, "Overall production validation readiness", validationReview]],
+    ["policy-engine", [91, "Policy engine", featureReview]],
+    ["placement", [89, "Placement", featureReview]],
+    ["observability", [87, "Observability", featureReview]],
+    ["lifecycle", [84, "Lifecycle", featureReview]],
+    ["inspector", [80, "Inspector", featureReview]],
+    ["validation", [78, "Validation/testing", featureReview]],
+    ["queue-features", [75, "Queue features", featureReview]],
+    ["topology", [73, "Topology", featureReview]],
+    ["fairness", [71, "Fairness", featureReview]],
+    ["static-identity", [68, "Task identity/cgroups within declared static scope", featureReview]],
+    ["dynamic-identity", [22, "Mitosis-style dynamic identity and lifecycle", featureReview]],
+  ]);
+
+  for (const [key, [value, reportLabel, source]] of scores) {
+    assert.match(
+      page,
+      new RegExp(`data-score-key="${key}"[^>]+data-score-value="${value}"`),
+      `${key} missing from roadmap`,
+    );
+    assert.match(
+      source,
+      new RegExp(`${reportLabel.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[^\\n]*${value}%`),
+      `${key} drifted from the deep-dive report`,
+    );
+  }
+});
+
+test("roadmap completion bars expose their numeric meaning to assistive technology", () => {
+  for (const [key, value] of [
+    ["policy-engine", 91],
+    ["placement", 89],
+    ["observability", 87],
+    ["lifecycle", 84],
+    ["inspector", 80],
+    ["validation", 78],
+    ["queue-features", 75],
+    ["topology", 73],
+    ["fairness", 71],
+    ["static-identity", 68],
+    ["dynamic-identity", 22],
+  ]) {
+    assert.match(
+      page,
+      new RegExp(`<div class="roadmap-score-row" data-score-key="${key}" data-score-value="${value}"><div>[\\s\\S]*?<\\/div><progress[^>]+value="${value}"[^>]+aria-label="[^"]+"`),
+      key,
+    );
+  }
+});
+
+test("Mitosis diagram percentages retain stable keys and report provenance", () => {
+  for (const [key, value, label] of [
+    ["mitosis-static-data-plane", 73, "Static scheduling data plane"],
+    ["mitosis-dynamic-control", 33, "Dynamic cell/resource control"],
+    ["mitosis-operations", 67, "Operations and diagnostics"],
+    ["mitosis-overall", 55, "Weighted end-to-end behavior"],
+  ]) {
+    assert.match(
+      page,
+      new RegExp(`data-score-key="${key}"[^>]+data-score-value="${value}"`),
+      `${key} missing from Mitosis diagram`,
+    );
+    assert.match(
+      mitosisReview,
+      new RegExp(`\\| ${label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} \\| \\*\\*${value}%`),
+      `${key} drifted from Mitosis review`,
+    );
+  }
+  const equivalent = page.match(
+    /<table[^>]+data-diagram-equivalent="mitosis-capability-coverage"[\s\S]*?<\/table>/,
+  )?.[0] || "";
+  for (const value of ["73%", "33%", "67%", "55% ±5"]) {
+    assert.match(equivalent, new RegExp(value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  }
+});
+
+test("project roadmap leads with prioritized goals before concrete features", () => {
+  assert.match(reviewIndex, /## Roadmap priorities/);
+  assert.match(page, /id="roadmapGoals"[\s\S]*id="roadmapFeatures"/);
+  for (const priority of ["P0", "P1", "P2", "P3"]) {
+    assert.match(page, new RegExp(`data-priority="${priority}"`));
+    assert.match(page, new RegExp(`${priority}[^<]+`));
+  }
+  for (const [goal, label, priority] of [
+    ["correctness-forward-progress", "Correctness & forward progress", "P0"],
+    ["production-readiness", "Production readiness & safe operations", "P0"],
+    ["mitosis-parity", "Feature parity with Mitosis", "P1"],
+    ["inspector-scalability", "Inspector scalability & contracts", "P1"],
+    ["validation-rollout", "Validation & rollout evidence", "P1"],
+    ["policy-research", "Policy research & selective prior art", "P2"],
+  ]) {
+    assert.match(
+      page,
+      new RegExp(`data-goal-key="${goal}"[^>]+data-priority="${priority}"`),
+    );
+    const escapedLabel = label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    assert.match(
+      reviewIndex,
+      new RegExp(`\\| ${escapedLabel} \\| \\*\\*${priority}\\*\\* \\|`),
+      `${goal} priority drifted from report`,
+    );
+  }
+  for (const [feature, priority] of [
+    ["eevdf-shares", "P0"],
+    ["queued-work-progress", "P0"],
+    ["hotplug-contract", "P0"],
+    ["observer-isolation", "P0"],
+    ["cgroup-identity", "P1"],
+    ["complete-config-bank", "P1"],
+    ["queue-drain", "P1"],
+    ["cpuset-allocation", "P1"],
+    ["inspector-scaling", "P1"],
+    ["typed-protocol", "P1"],
+    ["browser-vm-ci", "P1"],
+    ["demand-controller", "P2"],
+    ["numa-distance-order", "P2"],
+    ["pinned-latency", "P3"],
+    ["pick-two", "P3"],
+  ]) {
+    const featureBlock = page.match(
+      new RegExp(`<article[^>]+data-feature-key="${feature}"[\\s\\S]*?<\\/article>`),
+    )?.[0] || "";
+    assert.match(featureBlock, new RegExp(`data-priority="${priority}"`), `${feature} missing ${priority} sticker`);
+    assert.match(
+      reviewIndex,
+      new RegExp("\\| `" + feature + "` \\|[^\\n]+\\| \\*\\*" + priority + "\\*\\* \\|"),
+      `${feature} priority drifted from report`,
+    );
+  }
+});
+
+test("roadmap exposes stable release-blocker and ordered milestone keys", () => {
+  for (const blocker of [
+    "eevdf-weighted-fairness",
+    "queued-work-conservation",
+    "hotplug-dynamic-owner-contract",
+    "observer-isolation",
+  ]) {
+    assert.match(page, new RegExp(`data-blocker-key="${blocker}"`), blocker);
+  }
+
+  const milestones = [
+    "correctness-gates",
+    "dynamic-cgroup-identity",
+    "fixed-resource-envelope",
+    "cpuset-cell0-allocation",
+    "drain-live-publication",
+    "demand-rebalance",
+    "hardening",
+  ];
+  const positions = milestones.map((milestone) => {
+    const occurrences = page.match(new RegExp(`data-milestone-key="${milestone}"`, "g")) || [];
+    assert.equal(occurrences.length, 2, `${milestone} must label diagram and text equivalent`);
+    return page.indexOf(`data-milestone-key="${milestone}"`);
+  });
+  assert.deepEqual([...positions].sort((left, right) => left - right), positions);
+});
+
+test("project pages use accessible static diagrams with canonical workspace links", () => {
+  for (const diagram of [
+    "inspector-data-flow",
+    "operator-workflow",
+    "mitosis-capability-coverage",
+    "mitosis-implementation-path",
+  ]) {
+    const block = page.match(
+      new RegExp(`<svg[^>]+data-diagram-key="${diagram}"[\\s\\S]*?<\\/svg>`),
+    )?.[0] || "";
+    assert.match(block, /role="group"/, `${diagram} interactive group role`);
+    assert.match(block, /aria-labelledby="[^"]+"/, `${diagram} label`);
+    assert.match(block, /<title[^>]*>[^<]+<\/title>/, `${diagram} title`);
+    assert.match(block, /<desc[^>]*>[^<]+<\/desc>/, `${diagram} description`);
+    assert.match(block, /<a href="#\/(?:overview|observe|configure|inspect|debugging)/, `${diagram} deep link`);
+  }
+  assert.match(page, /data-diagram-equivalent="inspector-data-flow"/);
+  assert.match(page, /data-diagram-equivalent="operator-workflow"/);
+  assert.match(page, /data-diagram-equivalent="mitosis-capability-coverage"/);
+  assert.match(page, /data-diagram-equivalent="mitosis-implementation-path"/);
+  assert.match(page, /Dashboard owns the joined state and rolling histories/);
+  assert.doesNotMatch(page, /collector owns the joined snapshot/i);
 });
 
 test("feedback is a drawer with a visible draft count", () => {

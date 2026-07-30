@@ -59,6 +59,11 @@
             <a href="#/inspect/queue-topology" data-route="inspect/queue-topology">Queue topology</a>
             <a href="#/inspect/cells" data-route="inspect/cells">Cells &amp; tasks</a>
           </div>
+          <div class="navigation-group">
+            <span class="navigation-group-label">Project</span>
+            <a href="#/project/operations" data-route="project/operations">Operations</a>
+            <a href="#/project/roadmap" data-route="project/roadmap">Roadmap</a>
+          </div>
           <a class="navigation-debugging" href="#/debugging" data-route="debugging">Debugging</a>
         </nav>
         <button class="workspace-feedback-button" id="openFeedback" type="button" data-open-feedback aria-controls="feedbackDrawer">
@@ -486,6 +491,381 @@
         </div>
       </section>
 
+      <section class="view-panel hidden project-view" id="operationsView" data-view="project/operations" aria-labelledby="operationsTitle">
+        <header class="view-heading">
+          <div>
+            <h2 id="operationsTitle">Operations</h2>
+            <p>How Snake, the inspector, and the live workspaces fit together</p>
+          </div>
+          <span class="project-snapshot-label">Current operating model</span>
+        </header>
+
+        <div class="project-page">
+          <section class="project-lead" aria-labelledby="operationsPurposeTitle" data-feedback-key="Project:Operations-purpose">
+            <div>
+              <span class="project-eyebrow">Operator guide</span>
+              <h3 id="operationsPurposeTitle">Start with symptoms, then follow the owning signal</h3>
+              <p>Overview is the triage surface. Placement, callback timing, queue topology, cells, policy state, and debugging provide the evidence needed to explain a scheduling result.</p>
+            </div>
+            <nav class="project-quick-links" aria-label="Operations quick links">
+              <a href="#/overview">Open Overview</a>
+              <a href="#/configure">Review scheduler controls</a>
+              <a href="#/debugging">Copy a debugging snapshot</a>
+            </nav>
+          </section>
+
+          <section class="project-section" aria-labelledby="operationsDataFlowTitle" data-feedback-key="Project:Operations-data-flow">
+            <header class="project-section-heading">
+              <div>
+                <span class="project-eyebrow">System map</span>
+                <h3 id="operationsDataFlowTitle">Inspector data flow</h3>
+              </div>
+              <p>Live scheduler state and tracepoint activity meet in one collector before reaching the browser.</p>
+            </header>
+            <div class="project-diagram-scroll">
+              <svg class="project-diagram project-data-flow-diagram" data-diagram-key="inspector-data-flow" role="group" aria-labelledby="inspectorDataFlowTitle inspectorDataFlowDesc" viewBox="0 0 1120 310">
+                <title id="inspectorDataFlowTitle">Snake inspector data flow</title>
+                <desc id="inspectorDataFlowDesc">Scheduler tracepoints and the Snake statistics socket feed the inspector collector. The collector updates the dashboard, placement stream, operational workspaces, and debugging snapshot.</desc>
+                <defs>
+                  <marker id="operationsArrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                    <path d="M 0 0 L 10 5 L 0 10 z"></path>
+                  </marker>
+                </defs>
+                <path class="project-diagram-edge" marker-end="url(#operationsArrow)" d="M180 82 H240"></path>
+                <path class="project-diagram-edge" marker-end="url(#operationsArrow)" d="M420 82 H480"></path>
+                <path class="project-diagram-edge" marker-end="url(#operationsArrow)" d="M660 82 H720"></path>
+                <path class="project-diagram-edge" marker-end="url(#operationsArrow)" d="M900 82 H960"></path>
+                <path class="project-diagram-edge" marker-end="url(#operationsArrow)" d="M420 232 H450 Q480 232 480 202 V115"></path>
+                <g class="project-diagram-node project-diagram-source">
+                  <rect x="20" y="42" width="160" height="80" rx="8"></rect>
+                  <text x="100" y="75" text-anchor="middle">sched_switch</text>
+                  <text class="project-diagram-node-detail" x="100" y="98" text-anchor="middle">Tracepoint</text>
+                </g>
+                <a href="#/observe/placement" tabindex="0" focusable="true" aria-label="Open Placement workspace">
+                  <g class="project-diagram-node project-diagram-linked">
+                    <rect x="240" y="42" width="180" height="80" rx="8"></rect>
+                    <text x="330" y="75" text-anchor="middle">Inspector BPF</text>
+                    <text class="project-diagram-node-detail" x="330" y="98" text-anchor="middle">CPU and task maps</text>
+                  </g>
+                </a>
+                <a href="#/overview" tabindex="0" focusable="true" aria-label="Open Overview workspace">
+                  <g class="project-diagram-node project-diagram-linked">
+                    <rect x="480" y="42" width="180" height="80" rx="8"></rect>
+                    <text x="570" y="75" text-anchor="middle">Collector</text>
+                    <text class="project-diagram-node-detail" x="570" y="98" text-anchor="middle">Single collector thread</text>
+                  </g>
+                </a>
+                <a href="#/overview" tabindex="0" focusable="true" aria-label="Open dashboard Overview">
+                  <g class="project-diagram-node project-diagram-linked">
+                    <rect x="720" y="42" width="180" height="80" rx="8"></rect>
+                    <text x="810" y="75" text-anchor="middle">Dashboard</text>
+                    <text class="project-diagram-node-detail" x="810" y="98" text-anchor="middle">State and histories</text>
+                  </g>
+                </a>
+                <a href="#/debugging" tabindex="0" focusable="true" aria-label="Open operational and debugging workspaces">
+                  <g class="project-diagram-node project-diagram-linked">
+                    <rect x="960" y="42" width="140" height="80" rx="8"></rect>
+                    <text x="1030" y="75" text-anchor="middle">Workspaces</text>
+                    <text class="project-diagram-node-detail" x="1030" y="98" text-anchor="middle">REST and SSE</text>
+                  </g>
+                </a>
+                <a href="#/observe/callbacks" tabindex="0" focusable="true" aria-label="Open Callback performance workspace">
+                  <g class="project-diagram-node project-diagram-linked">
+                    <rect x="240" y="192" width="180" height="80" rx="8"></rect>
+                    <text x="330" y="225" text-anchor="middle">Snake socket</text>
+                    <text class="project-diagram-node-detail" x="330" y="248" text-anchor="middle">Stats and controls</text>
+                  </g>
+                </a>
+              </svg>
+            </div>
+            <ol class="project-diagram-equivalent" data-diagram-equivalent="inspector-data-flow">
+              <li><code>sched_switch</code> activity enters the <a href="#/observe/placement">Placement</a> probe.</li>
+              <li>The Snake statistics and control socket supplies <a href="#/observe/callbacks">callback timing</a>, policy, queue, and task state.</li>
+              <li>Dashboard owns the joined state and rolling histories supplied by the collector to <a href="#/overview">Overview</a> and the detailed workspaces.</li>
+              <li><a href="#/debugging">Debugging</a> packages the exact runtime context for escalation.</li>
+            </ol>
+          </section>
+
+          <section class="project-section" aria-labelledby="operationsWorkflowTitle" data-feedback-key="Project:Operations-workflow">
+            <header class="project-section-heading">
+              <div>
+                <span class="project-eyebrow">Triage path</span>
+                <h3 id="operationsWorkflowTitle">Operator workflow</h3>
+              </div>
+              <p>Follow the symptom to its owning workspace; avoid changing policy before the signal is understood.</p>
+            </header>
+            <div class="project-diagram-scroll">
+              <svg class="project-diagram project-workflow-diagram" data-diagram-key="operator-workflow" role="group" aria-labelledby="operatorWorkflowTitle operatorWorkflowDesc" viewBox="0 0 1180 360">
+                <title id="operatorWorkflowTitle">Recommended operator workflow</title>
+                <desc id="operatorWorkflowDesc">Begin in Overview, branch to placement, callback, queue, or cell evidence, inspect policy rungs, review configuration, and finish by copying a debugging snapshot when escalation is needed.</desc>
+                <defs>
+                  <marker id="workflowArrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                    <path d="M 0 0 L 10 5 L 0 10 z"></path>
+                  </marker>
+                </defs>
+                <path class="project-diagram-edge" marker-end="url(#workflowArrow)" d="M190 78 H250"></path>
+                <path class="project-diagram-edge" marker-end="url(#workflowArrow)" d="M190 78 Q220 78 220 148 H250"></path>
+                <path class="project-diagram-edge" marker-end="url(#workflowArrow)" d="M190 78 Q220 78 220 218 H250"></path>
+                <path class="project-diagram-edge" marker-end="url(#workflowArrow)" d="M190 78 Q220 78 220 288 H250"></path>
+                <path class="project-diagram-edge" marker-end="url(#workflowArrow)" d="M440 78 H530"></path>
+                <path class="project-diagram-edge" marker-end="url(#workflowArrow)" d="M440 148 Q485 148 485 100 H530"></path>
+                <path class="project-diagram-edge" marker-end="url(#workflowArrow)" d="M440 218 Q485 218 485 122 H530"></path>
+                <path class="project-diagram-edge" marker-end="url(#workflowArrow)" d="M440 288 Q485 288 485 144 H530"></path>
+                <path class="project-diagram-edge" marker-end="url(#workflowArrow)" d="M720 108 H790"></path>
+                <path class="project-diagram-edge" marker-end="url(#workflowArrow)" d="M980 108 H1030"></path>
+                <a href="#/overview" tabindex="0" focusable="true" aria-label="Start in Overview">
+                  <g class="project-diagram-node project-diagram-linked project-diagram-primary">
+                    <rect x="20" y="38" width="170" height="80" rx="8"></rect>
+                    <text x="105" y="72" text-anchor="middle">Overview</text>
+                    <text class="project-diagram-node-detail" x="105" y="95" text-anchor="middle">Find the symptom</text>
+                  </g>
+                </a>
+                <a href="#/observe/placement" tabindex="0" focusable="true" aria-label="Inspect placement evidence"><g class="project-diagram-node project-diagram-linked"><rect x="250" y="38" width="190" height="70" rx="8"></rect><text x="345" y="70" text-anchor="middle">Placement</text><text class="project-diagram-node-detail" x="345" y="91" text-anchor="middle">Migration and CPU use</text></g></a>
+                <a href="#/observe/callbacks" tabindex="0" focusable="true" aria-label="Inspect callback performance"><g class="project-diagram-node project-diagram-linked"><rect x="250" y="118" width="190" height="70" rx="8"></rect><text x="345" y="150" text-anchor="middle">Callback performance</text><text class="project-diagram-node-detail" x="345" y="171" text-anchor="middle">Scheduler overhead</text></g></a>
+                <a href="#/inspect/queue-topology" tabindex="0" focusable="true" aria-label="Inspect queue topology"><g class="project-diagram-node project-diagram-linked"><rect x="250" y="198" width="190" height="70" rx="8"></rect><text x="345" y="230" text-anchor="middle">Queue topology</text><text class="project-diagram-node-detail" x="345" y="251" text-anchor="middle">Backlog and routing</text></g></a>
+                <a href="#/inspect/cells" tabindex="0" focusable="true" aria-label="Inspect cells and tasks"><g class="project-diagram-node project-diagram-linked"><rect x="250" y="278" width="190" height="70" rx="8"></rect><text x="345" y="310" text-anchor="middle">Cells &amp; tasks</text><text class="project-diagram-node-detail" x="345" y="331" text-anchor="middle">Ownership and identity</text></g></a>
+                <a href="#/inspect/policy-slots" tabindex="0" focusable="true" aria-label="Inspect policy rungs"><g class="project-diagram-node project-diagram-linked"><rect x="530" y="68" width="190" height="80" rx="8"></rect><text x="625" y="102" text-anchor="middle">Policy rungs</text><text class="project-diagram-node-detail" x="625" y="125" text-anchor="middle">Explain the decision</text></g></a>
+                <a href="#/configure" tabindex="0" focusable="true" aria-label="Review scheduler and policy controls"><g class="project-diagram-node project-diagram-linked"><rect x="790" y="68" width="190" height="80" rx="8"></rect><text x="885" y="102" text-anchor="middle">Scheduler &amp; policies</text><text class="project-diagram-node-detail" x="885" y="125" text-anchor="middle">Review before change</text></g></a>
+                <a href="#/debugging" tabindex="0" focusable="true" aria-label="Copy a debugging snapshot"><g class="project-diagram-node project-diagram-linked"><rect x="1030" y="68" width="130" height="80" rx="8"></rect><text x="1095" y="102" text-anchor="middle">Debugging</text><text class="project-diagram-node-detail" x="1095" y="125" text-anchor="middle">Escalate</text></g></a>
+              </svg>
+            </div>
+            <ol class="project-diagram-equivalent" data-diagram-equivalent="operator-workflow">
+              <li>Begin in <a href="#/overview">Overview</a> and identify whether the dominant signal is placement, callback cost, queueing, or cell ownership.</li>
+              <li>Open the matching detailed workspace, then use <a href="#/inspect/policy-slots">Policy rungs</a> to explain the decision path.</li>
+              <li>Use <a href="#/configure">Scheduler &amp; policies</a> only after the evidence is understood.</li>
+              <li>Capture <a href="#/debugging">Debugging</a> state before escalation or restart.</li>
+            </ol>
+          </section>
+
+          <section class="project-section" aria-labelledby="operationsBoundariesTitle" data-feedback-key="Project:Operations-boundaries">
+            <header class="project-section-heading">
+              <div>
+                <span class="project-eyebrow">Operating boundaries</span>
+                <h3 id="operationsBoundariesTitle">What changes live and what does not</h3>
+              </div>
+            </header>
+            <div class="project-card-grid">
+              <article class="project-info-card">
+                <h4>Fairness status</h4>
+                <p>FIFO is the default. VTIME and EEVDF remain experimental; EEVDF weighted shares are a known correctness blocker.</p>
+                <a href="#/configure">Review fairness choices</a>
+              </article>
+              <article class="project-info-card">
+                <h4>Dynamic changes</h4>
+                <p>Compatible policy ladders, callback sampling, timing captures, and task-cell annotations can change without reattaching Snake.</p>
+                <a href="#/inspect/policy-slots">Inspect live policy slots</a>
+              </article>
+              <article class="project-info-card">
+                <h4>Restart boundaries</h4>
+                <p>Fairness, queue topology, cells, membership, CPU masks, weights, and DSQ layout are attachment-time state.</p>
+                <a href="#/configure">Preview the restart command</a>
+              </article>
+              <article class="project-info-card">
+                <h4>State lifetime</h4>
+                <p>Unapplied UI drafts and disclosure state do not survive refresh. Task annotations do not survive scheduler restart. Feedback drafts use tab session storage.</p>
+              </article>
+              <article class="project-info-card">
+                <h4>Scale limits</h4>
+                <p>CPU IDs are bounded below 1,024. Queue mode supports 31 declared cells plus synthetic cell 0. Large-host inspector paths still need systematic scale evidence.</p>
+              </article>
+              <article class="project-info-card">
+                <h4>Forward progress</h4>
+                <p>Direct borrowing helps newly runnable work, but already queued cross-cell backlog is not stolen. CPU hotplug and live owner changes are unsupported.</p>
+                <a href="#/inspect/queue-topology">Inspect queue consumers</a>
+              </article>
+            </div>
+          </section>
+        </div>
+      </section>
+
+      <section class="view-panel hidden project-view" id="roadmapView" data-view="project/roadmap" aria-labelledby="roadmapTitle" data-assessment-date="2026-07-29" data-assessment-commit="d8185bc3477e05425f56bd50ee5cef73cdd96c88">
+        <header class="view-heading">
+          <div>
+            <h2 id="roadmapTitle">Roadmap</h2>
+            <p>Completion estimates, priority judgments, and the path toward Mitosis parity</p>
+          </div>
+          <span class="project-snapshot-label">Assessment · 2026-07-29 · d8185bc3</span>
+        </header>
+
+        <div class="project-page">
+          <section class="project-assessment-note" aria-label="Assessment provenance" data-feedback-key="Project:Roadmap-provenance">
+            <strong>Engineering estimate, not test coverage.</strong>
+            <span>This is a dated review snapshot. Priority stickers are initial engineering judgments, not delivery commitments.</span>
+            <span>Source: <code>docs/snake-review/README.md</code></span>
+          </section>
+
+          <section class="project-section" aria-labelledby="roadmapHeadlineTitle" data-feedback-key="Project:Roadmap-headline-scores">
+            <header class="project-section-heading">
+              <div>
+                <span class="project-eyebrow">Headline assessment</span>
+                <h3 id="roadmapHeadlineTitle">How complete is Snake?</h3>
+              </div>
+              <p>Feature breadth is substantially ahead of production validation and dynamic control.</p>
+            </header>
+            <div class="roadmap-headline-grid">
+              <article class="roadmap-headline-score" data-score-key="experimental-completeness" data-score-value="80">
+                <span>Experimental platform</span><strong>80%</strong><p>Declared policy and observability scope</p>
+              </article>
+              <article class="roadmap-headline-score roadmap-score-caution" data-score-key="production-readiness" data-score-value="35">
+                <span>Production readiness</span><strong>35%</strong><p>Correctness, scale, soak, and rollout</p>
+              </article>
+              <article class="roadmap-headline-score" data-score-key="mitosis-parity" data-score-value="55">
+                <span>Mitosis behavior parity</span><strong>55% <small>±5</small></strong><p>Static data plane is ahead of control plane</p>
+              </article>
+              <article class="roadmap-headline-score roadmap-score-caution" data-score-key="rollout-validation" data-score-value="25">
+                <span>Rollout validation</span><strong>25%</strong><p>Automation and production evidence</p>
+              </article>
+            </div>
+          </section>
+
+          <section class="project-section" aria-labelledby="roadmapCompletionTitle" data-feedback-key="Project:Roadmap-completion">
+            <header class="project-section-heading">
+              <div>
+                <span class="project-eyebrow">Major areas</span>
+                <h3 id="roadmapCompletionTitle">Completion profile</h3>
+              </div>
+              <p>Each bar is a rounded expert assessment with different remaining risks.</p>
+            </header>
+            <div class="roadmap-score-list">
+              <div class="roadmap-score-row" data-score-key="policy-engine" data-score-value="91"><div><span>Policy engine</span><strong>91%</strong></div><progress max="100" value="91" aria-label="Policy engine completion: 91 percent">91%</progress></div>
+              <div class="roadmap-score-row" data-score-key="placement" data-score-value="89"><div><span>Placement</span><strong>89%</strong></div><progress max="100" value="89" aria-label="Placement completion: 89 percent">89%</progress></div>
+              <div class="roadmap-score-row" data-score-key="observability" data-score-value="87"><div><span>Observability</span><strong>87%</strong></div><progress max="100" value="87" aria-label="Observability completion: 87 percent">87%</progress></div>
+              <div class="roadmap-score-row" data-score-key="lifecycle" data-score-value="84"><div><span>Lifecycle and control</span><strong>84%</strong></div><progress max="100" value="84" aria-label="Lifecycle and control completion: 84 percent">84%</progress></div>
+              <div class="roadmap-score-row" data-score-key="inspector" data-score-value="80"><div><span>Inspector</span><strong>80%</strong></div><progress max="100" value="80" aria-label="Inspector completion: 80 percent">80%</progress></div>
+              <div class="roadmap-score-row" data-score-key="validation" data-score-value="78"><div><span>Validation and testing</span><strong>78%</strong></div><progress max="100" value="78" aria-label="Validation and testing completion: 78 percent">78%</progress></div>
+              <div class="roadmap-score-row" data-score-key="queue-features" data-score-value="75"><div><span>Queue features</span><strong>75%</strong></div><progress max="100" value="75" aria-label="Queue features completion: 75 percent">75%</progress></div>
+              <div class="roadmap-score-row" data-score-key="topology" data-score-value="73"><div><span>Topology</span><strong>73%</strong></div><progress max="100" value="73" aria-label="Topology completion: 73 percent">73%</progress></div>
+              <div class="roadmap-score-row" data-score-key="fairness" data-score-value="71"><div><span>Fairness</span><strong>71%</strong></div><progress max="100" value="71" aria-label="Fairness completion: 71 percent">71%</progress></div>
+              <div class="roadmap-score-row" data-score-key="static-identity" data-score-value="68"><div><span>Static task identity and cgroups</span><strong>68%</strong></div><progress max="100" value="68" aria-label="Static task identity and cgroups completion: 68 percent">68%</progress></div>
+              <div class="roadmap-score-row" data-score-key="dynamic-identity" data-score-value="22"><div><span>Mitosis-style dynamic identity</span><strong>22%</strong></div><progress max="100" value="22" aria-label="Mitosis-style dynamic identity completion: 22 percent">22%</progress></div>
+            </div>
+          </section>
+
+          <section class="project-section" id="roadmapGoals" aria-labelledby="roadmapGoalsTitle" data-feedback-key="Project:Roadmap-goals">
+            <header class="project-section-heading">
+              <div>
+                <span class="project-eyebrow">High-level goals</span>
+                <h3 id="roadmapGoalsTitle">What the project is trying to achieve</h3>
+              </div>
+              <div class="priority-legend" aria-label="Priority legend">
+                <span class="priority-badge priority-p0" data-priority="P0">P0 · Release blocker</span>
+                <span class="priority-badge priority-p1" data-priority="P1">P1 · Major enabler</span>
+                <span class="priority-badge priority-p2" data-priority="P2">P2 · Follow-on</span>
+                <span class="priority-badge priority-p3" data-priority="P3">P3 · Exploratory</span>
+              </div>
+            </header>
+            <div class="roadmap-goal-grid">
+              <article class="roadmap-goal" data-goal-key="correctness-forward-progress" data-priority="P0"><span class="priority-badge priority-p0">P0</span><h4>Correctness &amp; forward progress</h4><p>Prove weighted fairness and guarantee that runnable work cannot strand.</p></article>
+              <article class="roadmap-goal" data-goal-key="production-readiness" data-priority="P0"><span class="priority-badge priority-p0">P0</span><h4>Production readiness &amp; safe operations</h4><p>Isolate observers, define hotplug behavior, and build safe fallback contracts.</p></article>
+              <article class="roadmap-goal" data-goal-key="mitosis-parity" data-priority="P1"><span class="priority-badge priority-p1">P1</span><h4>Feature parity with Mitosis</h4><p>Add dynamic cgroup identity, resource ownership, drain, and demand control without weakening Snake transactions.</p></article>
+              <article class="roadmap-goal" data-goal-key="inspector-scalability" data-priority="P1"><span class="priority-badge priority-p1">P1</span><h4>Inspector scalability &amp; contracts</h4><p>Bound large-host costs and replace duplicated wire interpretation with typed interfaces.</p></article>
+              <article class="roadmap-goal" data-goal-key="validation-rollout" data-priority="P1"><span class="priority-badge priority-p1">P1</span><h4>Validation &amp; rollout evidence</h4><p>Gate changes with browser, VM, churn, performance, and failure-injection campaigns.</p></article>
+              <article class="roadmap-goal" data-goal-key="policy-research" data-priority="P2"><span class="priority-badge priority-p2">P2</span><h4>Policy research &amp; selective prior art</h4><p>Pull in narrowly useful ideas only when measurements justify the added semantics.</p></article>
+            </div>
+          </section>
+
+          <section class="project-section" id="roadmapFeatures" aria-labelledby="roadmapFeaturesTitle" data-feedback-key="Project:Roadmap-features">
+            <header class="project-section-heading">
+              <div>
+                <span class="project-eyebrow">Concrete work</span>
+                <h3 id="roadmapFeaturesTitle">Feature priorities</h3>
+              </div>
+              <p>Priority reflects dependency and risk reduction, not estimated effort.</p>
+            </header>
+            <div class="roadmap-feature-list">
+              <article data-feature-key="eevdf-shares" data-blocker-key="eevdf-weighted-fairness"><span class="priority-badge priority-p0" data-priority="P0">P0</span><div><h4>Correct EEVDF weighted shares</h4><p>Fix or disable the mode until nice-weight service ratios pass mandatory VM validation.</p></div></article>
+              <article data-feature-key="queued-work-progress" data-blocker-key="queued-work-conservation"><span class="priority-badge priority-p0" data-priority="P0">P0</span><div><h4>Queued-work forward progress</h4><p>Prevent an undersized cell backlog from stalling while foreign CPUs are idle.</p></div></article>
+              <article data-feature-key="hotplug-contract" data-blocker-key="hotplug-dynamic-owner-contract"><span class="priority-badge priority-p0" data-priority="P0">P0</span><div><h4>Hotplug and dynamic-topology contract</h4><p>Define safe behavior before CPU ownership or topology can change live.</p></div></article>
+              <article data-feature-key="observer-isolation" data-blocker-key="observer-isolation"><span class="priority-badge priority-p0" data-priority="P0">P0</span><div><h4>Observer isolation</h4><p>Ensure inspection and client failures cannot unwind the scheduler loop.</p></div></article>
+              <article data-feature-key="cgroup-identity"><span class="priority-badge priority-p1" data-priority="P1">P1</span><div><h4>Cgroup-native identity</h4><p>Give direct children stable logical identities inherited in BPF.</p></div></article>
+              <article data-feature-key="complete-config-bank"><span class="priority-badge priority-p1" data-priority="P1">P1</span><div><h4>Complete configuration bank</h4><p>Publish policy, resources, and identity bindings as one coherent old-or-new transaction.</p></div></article>
+              <article data-feature-key="cpuset-allocation"><span class="priority-badge priority-p1" data-priority="P1">P1</span><div><h4>Cpuset-aware allocation and cell 0</h4><p>Compute feasible plans with explicit admission and fail-safe behavior.</p></div></article>
+              <article data-feature-key="queue-drain"><span class="priority-badge priority-p1" data-priority="P1">P1</span><div><h4>Queue drain and live owner moves</h4><p>Quiesce backlog, readers, running tasks, and clock epochs before resource reuse.</p></div></article>
+              <article data-feature-key="inspector-scaling"><span class="priority-badge priority-p1" data-priority="P1">P1</span><div><h4>Inspector large-host scaling</h4><p>Remove CPU-pair full-map scans, dense browser work, and duplicated polling.</p></div></article>
+              <article data-feature-key="typed-protocol"><span class="priority-badge priority-p1" data-priority="P1">P1</span><div><h4>Typed Snake protocol</h4><p>Parse inspection payloads once and stop inferring behavior from human error text.</p></div></article>
+              <article data-feature-key="browser-vm-ci"><span class="priority-badge priority-p1" data-priority="P1">P1</span><div><h4>Browser, VM, and failure CI</h4><p>Automate critical workflows and the existing privileged gauntlet.</p></div></article>
+              <article data-feature-key="demand-controller"><span class="priority-badge priority-p2" data-priority="P2">P2</span><div><h4>Demand EWMA and rebalance</h4><p>Move CPUs only after identity, publication, allocation, and drain are safe.</p></div></article>
+              <article data-feature-key="numa-distance-order"><span class="priority-badge priority-p2" data-priority="P2">P2</span><div><h4>Distance-ordered NUMA candidates</h4><p>Adapt LAVD's bounded topology ordering as an explicit policy operation.</p></div></article>
+              <article data-feature-key="pinned-latency"><span class="priority-badge priority-p3" data-priority="P3">P3</span><div><h4>Pinned-task latency control</h4><p>Benchmark before importing waiter-aware slice shrinking.</p></div></article>
+              <article data-feature-key="pick-two"><span class="priority-badge priority-p3" data-priority="P3">P3</span><div><h4>Pick-two remote balancing</h4><p>Consider only as an explicit approximate policy after a load signal exists.</p></div></article>
+            </div>
+          </section>
+
+          <section class="project-section" aria-labelledby="mitosisCoverageTitle" data-feedback-key="Project:Roadmap-mitosis-coverage">
+            <header class="project-section-heading">
+              <div>
+                <span class="project-eyebrow">Parity map</span>
+                <h3 id="mitosisCoverageTitle">Where Mitosis parity stands</h3>
+              </div>
+              <p>Static queues and clocks are much further along than dynamic identity and resource control.</p>
+            </header>
+            <div class="project-diagram-scroll">
+              <svg class="project-diagram project-capability-diagram" data-diagram-key="mitosis-capability-coverage" role="group" aria-labelledby="mitosisCapabilityTitle mitosisCapabilityDesc" viewBox="0 0 1160 390">
+                <title id="mitosisCapabilityTitle">Mitosis capability coverage</title>
+                <desc id="mitosisCapabilityDesc">Snake has present cell and affinity queues, partial lifecycle, cpuset, borrowing, and latency behavior, and a missing demand controller. Static data-plane parity is 73 percent, dynamic control is 33 percent, operations are 67 percent, and overall parity is 55 percent plus or minus five.</desc>
+                <a href="#/inspect/cells" tabindex="0" focusable="true" aria-label="Inspect cells and tasks for lifecycle and identity"><g class="project-diagram-node project-capability-partial project-diagram-linked"><rect x="20" y="35" width="250" height="82" rx="8"></rect><text x="145" y="69" text-anchor="middle">Lifecycle &amp; identity</text><text class="project-diagram-status" x="145" y="94" text-anchor="middle">PARTIAL</text></g></a>
+                <a href="#/inspect/cells" tabindex="0" focusable="true" aria-label="Inspect cells for cpuset allocation"><g class="project-diagram-node project-capability-partial project-diagram-linked"><rect x="305" y="35" width="250" height="82" rx="8"></rect><text x="430" y="69" text-anchor="middle">Cpuset allocation</text><text class="project-diagram-status" x="430" y="94" text-anchor="middle">PARTIAL</text></g></a>
+                <a href="#/overview" tabindex="0" focusable="true" aria-label="Open Overview for current resource counters"><g class="project-diagram-node project-capability-missing project-diagram-linked"><rect x="590" y="35" width="250" height="82" rx="8"></rect><text x="715" y="69" text-anchor="middle">Demand controller</text><text class="project-diagram-status" x="715" y="94" text-anchor="middle">MISSING</text></g></a>
+                <a href="#/inspect/queue-topology" tabindex="0" focusable="true" aria-label="Inspect cell and LLC queues"><g class="project-diagram-node project-capability-present project-diagram-linked"><rect x="875" y="35" width="250" height="82" rx="8"></rect><text x="1000" y="69" text-anchor="middle">Cell / LLC queues</text><text class="project-diagram-status" x="1000" y="94" text-anchor="middle">PRESENT</text></g></a>
+                <a href="#/inspect/queue-topology" tabindex="0" focusable="true" aria-label="Inspect affinity queues"><g class="project-diagram-node project-capability-present project-diagram-linked"><rect x="20" y="145" width="250" height="82" rx="8"></rect><text x="145" y="179" text-anchor="middle">Affinity queues</text><text class="project-diagram-status" x="145" y="204" text-anchor="middle">PRESENT</text></g></a>
+                <a href="#/inspect/queue-topology" tabindex="0" focusable="true" aria-label="Inspect borrowing and queue routing"><g class="project-diagram-node project-capability-partial project-diagram-linked"><rect x="305" y="145" width="250" height="82" rx="8"></rect><text x="430" y="179" text-anchor="middle">Wake / enqueue borrowing</text><text class="project-diagram-status" x="430" y="204" text-anchor="middle">PARTIAL</text></g></a>
+                <a href="#/observe/callbacks" tabindex="0" focusable="true" aria-label="Inspect latency and callback timing"><g class="project-diagram-node project-capability-partial project-diagram-linked"><rect x="590" y="145" width="250" height="82" rx="8"></rect><text x="715" y="179" text-anchor="middle">Pinned latency control</text><text class="project-diagram-status" x="715" y="204" text-anchor="middle">PARTIAL</text></g></a>
+                <a href="#/debugging" tabindex="0" focusable="true" aria-label="Open debugging and diagnostics"><g class="project-diagram-node project-capability-present project-diagram-linked"><rect x="875" y="145" width="250" height="82" rx="8"></rect><text x="1000" y="179" text-anchor="middle">Metrics &amp; inspection</text><text class="project-diagram-status" x="1000" y="204" text-anchor="middle">PRESENT · managed gaps</text></g></a>
+                <g class="project-parity-score" data-score-key="mitosis-static-data-plane" data-score-value="73"><text x="145" y="300" text-anchor="middle">Static data plane</text><text x="145" y="344" text-anchor="middle">73%</text></g>
+                <g class="project-parity-score" data-score-key="mitosis-dynamic-control" data-score-value="33"><text x="430" y="300" text-anchor="middle">Dynamic control</text><text x="430" y="344" text-anchor="middle">33%</text></g>
+                <g class="project-parity-score" data-score-key="mitosis-operations" data-score-value="67"><text x="715" y="300" text-anchor="middle">Operations</text><text x="715" y="344" text-anchor="middle">67%</text></g>
+                <g class="project-parity-score project-parity-overall" data-score-key="mitosis-overall" data-score-value="55"><text x="1000" y="300" text-anchor="middle">Overall behavior</text><text x="1000" y="344" text-anchor="middle">55% ±5</text></g>
+              </svg>
+            </div>
+            <table class="project-diagram-equivalent project-capability-table" data-diagram-equivalent="mitosis-capability-coverage">
+              <caption>Parity summary: static data plane 73%; dynamic control 33%; operations 67%; overall behavior 55% ±5.</caption>
+              <thead><tr><th scope="col">Area</th><th scope="col">Status</th><th scope="col">Where to inspect</th></tr></thead>
+              <tbody>
+                <tr><th scope="row">Lifecycle, identity, and cpusets</th><td>Partial</td><td><a href="#/inspect/cells">Cells &amp; tasks</a></td></tr>
+                <tr><th scope="row">Demand controller</th><td>Missing</td><td><a href="#/overview">Current counters</a></td></tr>
+                <tr><th scope="row">Cell, LLC, and affinity queues</th><td>Present</td><td><a href="#/inspect/queue-topology">Queue topology</a></td></tr>
+                <tr><th scope="row">Borrowing and pinned latency</th><td>Partial</td><td><a href="#/observe/callbacks">Callback performance</a></td></tr>
+                <tr><th scope="row">Metrics and inspection</th><td>Present, with managed-control gaps</td><td><a href="#/debugging">Debugging</a></td></tr>
+              </tbody>
+            </table>
+          </section>
+
+          <section class="project-section" aria-labelledby="implementationPathTitle" data-feedback-key="Project:Roadmap-implementation-path">
+            <header class="project-section-heading">
+              <div>
+                <span class="project-eyebrow">Dependency order</span>
+                <h3 id="implementationPathTitle">Mitosis implementation path</h3>
+              </div>
+              <p>The allocator can be built early, but live ownership must wait for coherent publication and drain.</p>
+            </header>
+            <div class="project-diagram-scroll">
+              <svg class="project-diagram project-path-diagram" data-diagram-key="mitosis-implementation-path" role="group" aria-labelledby="mitosisPathTitle mitosisPathDesc" viewBox="0 0 1500 230">
+                <title id="mitosisPathTitle">Ordered path to Mitosis parity</title>
+                <desc id="mitosisPathDesc">Correctness gates precede cgroup identity, a stable resource envelope, pure cpuset allocation, queue drain and live publication, demand rebalance, and operational hardening.</desc>
+                <defs><marker id="pathArrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z"></path></marker></defs>
+                <path class="project-diagram-edge" marker-end="url(#pathArrow)" d="M190 105 H225"></path><path class="project-diagram-edge" marker-end="url(#pathArrow)" d="M400 105 H435"></path><path class="project-diagram-edge" marker-end="url(#pathArrow)" d="M610 105 H645"></path><path class="project-diagram-edge" marker-end="url(#pathArrow)" d="M820 105 H855"></path><path class="project-diagram-edge" marker-end="url(#pathArrow)" d="M1030 105 H1065"></path><path class="project-diagram-edge" marker-end="url(#pathArrow)" d="M1240 105 H1275"></path>
+                <a href="#/configure" data-milestone-key="correctness-gates" tabindex="0" focusable="true" aria-label="Review correctness gates"><g class="project-diagram-node project-path-node project-diagram-linked"><rect x="15" y="60" width="175" height="90" rx="8"></rect><text x="102" y="91" text-anchor="middle">0 · Correctness</text><text class="project-diagram-node-detail" x="102" y="114" text-anchor="middle">Shares · progress</text><text class="project-diagram-node-detail" x="102" y="133" text-anchor="middle">hotplug · observers</text></g></a>
+                <a href="#/inspect/cells" data-milestone-key="dynamic-cgroup-identity" tabindex="0" focusable="true" aria-label="Inspect dynamic cgroup identity"><g class="project-diagram-node project-path-node project-diagram-linked"><rect x="225" y="60" width="175" height="90" rx="8"></rect><text x="312" y="91" text-anchor="middle">1 · Identity</text><text class="project-diagram-node-detail" x="312" y="114" text-anchor="middle">Direct children</text><text class="project-diagram-node-detail" x="312" y="133" text-anchor="middle">stable epochs</text></g></a>
+                <a href="#/inspect/queue-topology" data-milestone-key="fixed-resource-envelope" tabindex="0" focusable="true" aria-label="Inspect stable resource envelope"><g class="project-diagram-node project-path-node project-diagram-linked"><rect x="435" y="60" width="175" height="90" rx="8"></rect><text x="522" y="91" text-anchor="middle">2 · Envelope</text><text class="project-diagram-node-detail" x="522" y="114" text-anchor="middle">Fixed DSQ pool</text><text class="project-diagram-node-detail" x="522" y="133" text-anchor="middle">complete banks</text></g></a>
+                <a href="#/inspect/cells" data-milestone-key="cpuset-cell0-allocation" tabindex="0" focusable="true" aria-label="Inspect cpuset allocation"><g class="project-diagram-node project-path-node project-diagram-linked"><rect x="645" y="60" width="175" height="90" rx="8"></rect><text x="732" y="91" text-anchor="middle">3 · Allocation</text><text class="project-diagram-node-detail" x="732" y="114" text-anchor="middle">Cpuset · cell 0</text><text class="project-diagram-node-detail" x="732" y="133" text-anchor="middle">pure plan only</text></g></a>
+                <a href="#/inspect/queue-topology" data-milestone-key="drain-live-publication" tabindex="0" focusable="true" aria-label="Inspect queue drain and publication"><g class="project-diagram-node project-path-node project-diagram-linked"><rect x="855" y="60" width="175" height="90" rx="8"></rect><text x="942" y="91" text-anchor="middle">4 · Drain</text><text class="project-diagram-node-detail" x="942" y="114" text-anchor="middle">Quiesce queues</text><text class="project-diagram-node-detail" x="942" y="133" text-anchor="middle">publish owners</text></g></a>
+                <a href="#/overview" data-milestone-key="demand-rebalance" tabindex="0" focusable="true" aria-label="Inspect demand and rebalance state"><g class="project-diagram-node project-path-node project-diagram-linked"><rect x="1065" y="60" width="175" height="90" rx="8"></rect><text x="1152" y="91" text-anchor="middle">5 · Demand</text><text class="project-diagram-node-detail" x="1152" y="114" text-anchor="middle">EWMA · cooldown</text><text class="project-diagram-node-detail" x="1152" y="133" text-anchor="middle">rebalance</text></g></a>
+                <a href="#/debugging" data-milestone-key="hardening" tabindex="0" focusable="true" aria-label="Inspect operational hardening"><g class="project-diagram-node project-path-node project-diagram-linked"><rect x="1275" y="60" width="195" height="90" rx="8"></rect><text x="1372" y="91" text-anchor="middle">6 · Hardening</text><text class="project-diagram-node-detail" x="1372" y="114" text-anchor="middle">Diagnostics · churn</text><text class="project-diagram-node-detail" x="1372" y="133" text-anchor="middle">scale · latency</text></g></a>
+              </svg>
+            </div>
+            <ol class="project-diagram-equivalent project-path-list" data-diagram-equivalent="mitosis-implementation-path">
+              <li data-milestone-key="correctness-gates"><a href="#/configure">Correctness and semantics</a></li>
+              <li data-milestone-key="dynamic-cgroup-identity"><a href="#/inspect/cells">Cgroup-native identity</a></li>
+              <li data-milestone-key="fixed-resource-envelope"><a href="#/inspect/queue-topology">Stable dynamic resource envelope</a></li>
+              <li data-milestone-key="cpuset-cell0-allocation"><a href="#/inspect/cells">Pure cpuset and cell-0 allocation</a></li>
+              <li data-milestone-key="drain-live-publication"><a href="#/inspect/queue-topology">Queue drain, then live ownership publication</a></li>
+              <li data-milestone-key="demand-rebalance"><a href="#/overview">Demand EWMA and controlled rebalance</a></li>
+              <li data-milestone-key="hardening"><a href="#/debugging">Data-plane and operational hardening</a></li>
+            </ol>
+          </section>
+        </div>
+      </section>
+
       <section class="view-panel hidden" id="debuggingView" data-view="debugging" aria-labelledby="debuggingTitle">
         <header class="view-heading">
           <div>
@@ -566,6 +946,11 @@
             <a href="#/inspect/policy-slots" data-route="inspect/policy-slots">Policy rungs</a>
             <a href="#/inspect/queue-topology" data-route="inspect/queue-topology">Queue topology</a>
             <a href="#/inspect/cells" data-route="inspect/cells">Cells &amp; tasks</a>
+          </div>
+          <div class="navigation-group">
+            <span class="navigation-group-label">Project</span>
+            <a href="#/project/operations" data-route="project/operations">Operations</a>
+            <a href="#/project/roadmap" data-route="project/roadmap">Roadmap</a>
           </div>
           <a class="navigation-debugging" href="#/debugging" data-route="debugging">Debugging</a>
         </nav>

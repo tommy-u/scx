@@ -4117,6 +4117,527 @@ body {
   padding: 16px 12px;
 }
 
+.project-view {
+  min-height: calc(100vh - 64px);
+  background: var(--background);
+}
+
+.project-snapshot-label {
+  color: var(--muted);
+  font-size: 0.68rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.project-page {
+  padding: 20px clamp(16px, 3vw, 40px) 40px;
+  display: grid;
+  gap: 18px;
+}
+
+.project-lead,
+.project-section,
+.project-assessment-note {
+  min-width: 0;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.project-lead {
+  padding: 20px 22px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  border-left: 4px solid var(--active);
+}
+
+.project-lead h3,
+.project-lead p,
+.project-section h3,
+.project-section h4,
+.project-section p,
+.project-assessment-note p {
+  margin: 0;
+}
+
+.project-lead h3 {
+  margin-top: 3px;
+  font-size: 1.08rem;
+}
+
+.project-lead p {
+  max-width: 760px;
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.5;
+}
+
+.project-eyebrow {
+  color: var(--active);
+  font-size: 0.62rem;
+  font-weight: 780;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.project-quick-links {
+  min-width: 220px;
+  display: grid;
+  gap: 6px;
+}
+
+.project-quick-links a,
+.project-info-card a,
+.project-diagram-equivalent a {
+  color: var(--accent);
+  font-weight: 680;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+}
+
+.project-quick-links a {
+  padding: 7px 9px;
+  background: #edf4f9;
+  border-radius: 4px;
+  font-size: 0.72rem;
+  text-decoration: none;
+}
+
+.project-quick-links a:hover,
+.project-quick-links a:focus-visible {
+  background: #dcebf5;
+}
+
+.project-section {
+  overflow: hidden;
+}
+
+.project-section-heading {
+  padding: 16px 18px;
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 24px;
+  border-bottom: 1px solid var(--border);
+}
+
+.project-section-heading h3 {
+  margin-top: 2px;
+  font-size: 0.94rem;
+}
+
+.project-section-heading > p {
+  max-width: 560px;
+  color: var(--muted);
+  font-size: 0.7rem;
+  line-height: 1.45;
+  text-align: right;
+}
+
+.project-card-grid,
+.roadmap-goal-grid {
+  padding: 16px;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  background: var(--surface-muted);
+}
+
+.project-info-card,
+.roadmap-goal {
+  min-width: 0;
+  padding: 14px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+}
+
+.project-info-card h4,
+.roadmap-goal h4,
+.roadmap-feature-list h4 {
+  font-size: 0.76rem;
+}
+
+.project-info-card p,
+.roadmap-goal p,
+.roadmap-feature-list p {
+  margin-top: 5px;
+  color: var(--muted);
+  font-size: 0.69rem;
+  line-height: 1.45;
+}
+
+.project-info-card a {
+  margin-top: 10px;
+  display: inline-block;
+  font-size: 0.68rem;
+}
+
+.project-diagram-scroll {
+  padding: 16px 18px;
+  overflow-x: auto;
+  background: #f8fafb;
+  border-bottom: 1px solid var(--border);
+}
+
+.project-diagram {
+  width: 100%;
+  min-width: 780px;
+  height: auto;
+  display: block;
+  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+}
+
+.project-path-diagram {
+  min-width: 1180px;
+}
+
+.project-diagram-edge {
+  fill: none;
+  stroke: #8d9ba5;
+  stroke-width: 2;
+}
+
+.project-diagram marker path {
+  fill: #8d9ba5;
+}
+
+.project-diagram-node rect {
+  fill: var(--surface);
+  stroke: var(--border-strong);
+  stroke-width: 1.5;
+}
+
+.project-diagram-node text {
+  fill: var(--ink);
+  font-size: 14px;
+  font-weight: 720;
+}
+
+.project-diagram-node .project-diagram-node-detail {
+  fill: var(--muted);
+  font-size: 11px;
+  font-weight: 620;
+}
+
+.project-diagram-linked rect {
+  stroke: #6d9cbc;
+}
+
+.project-diagram-linked:hover rect,
+.project-diagram a:focus-visible .project-diagram-linked rect {
+  fill: #e8f1f8;
+  stroke: var(--accent);
+  stroke-width: 3;
+}
+
+.project-diagram a:focus-visible {
+  outline: none;
+}
+
+.project-diagram-primary rect {
+  fill: #e8f5f0;
+  stroke: var(--active);
+}
+
+.project-diagram-equivalent {
+  margin: 0;
+  padding: 14px 22px 16px 40px;
+  color: var(--muted);
+  font-size: 0.7rem;
+  line-height: 1.5;
+}
+
+.project-diagram-equivalent li + li {
+  margin-top: 4px;
+}
+
+.project-assessment-note {
+  padding: 13px 16px;
+  display: flex;
+  align-items: baseline;
+  gap: 12px 18px;
+  flex-wrap: wrap;
+  color: #6f4500;
+  background: #fff8e9;
+  border-color: #e7c786;
+  font-size: 0.7rem;
+}
+
+.project-assessment-note strong {
+  font-size: 0.76rem;
+}
+
+.project-assessment-note code {
+  font-size: 0.66rem;
+}
+
+.roadmap-headline-grid {
+  padding: 16px;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  background: #edf4f1;
+}
+
+.roadmap-headline-score {
+  min-width: 0;
+  padding: 15px;
+  background: var(--surface);
+  border: 1px solid #a7c9bd;
+  border-top: 4px solid var(--active);
+  border-radius: 5px;
+}
+
+.roadmap-headline-score > span,
+.roadmap-headline-score > strong,
+.roadmap-headline-score > p {
+  display: block;
+}
+
+.roadmap-headline-score > span {
+  color: var(--muted);
+  font-size: 0.65rem;
+  font-weight: 700;
+}
+
+.roadmap-headline-score > strong {
+  margin-top: 4px;
+  color: var(--active);
+  font-size: 1.9rem;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+
+.roadmap-headline-score > strong small {
+  font-size: 0.9rem;
+}
+
+.roadmap-headline-score > p {
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 0.65rem;
+  line-height: 1.35;
+}
+
+.roadmap-headline-score.roadmap-score-caution {
+  border-color: #e0bd83;
+  border-top-color: var(--waiting);
+}
+
+.roadmap-headline-score.roadmap-score-caution > strong {
+  color: var(--waiting);
+}
+
+.roadmap-score-list {
+  padding: 16px 18px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px 24px;
+}
+
+.roadmap-score-row {
+  min-width: 0;
+}
+
+.roadmap-score-row > div {
+  margin-bottom: 5px;
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 0.7rem;
+}
+
+.roadmap-score-row strong {
+  font-variant-numeric: tabular-nums;
+}
+
+.roadmap-score-row progress {
+  width: 100%;
+  height: 9px;
+  display: block;
+  overflow: hidden;
+  appearance: none;
+  background: var(--surface-muted);
+  border: 0;
+  border-radius: 5px;
+}
+
+.roadmap-score-row progress::-webkit-progress-bar {
+  background: var(--surface-muted);
+  border-radius: 5px;
+}
+
+.roadmap-score-row progress::-webkit-progress-value {
+  background: var(--active);
+  border-radius: 5px;
+}
+
+.roadmap-score-row progress::-moz-progress-bar {
+  background: var(--active);
+  border-radius: 5px;
+}
+
+.priority-legend {
+  display: flex;
+  justify-content: flex-end;
+  gap: 5px;
+  flex-wrap: wrap;
+}
+
+.priority-badge {
+  min-width: 31px;
+  padding: 3px 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  font-size: 0.58rem;
+  font-weight: 800;
+  line-height: 1.1;
+  white-space: nowrap;
+}
+
+.priority-p0 {
+  color: #8e1c14;
+  background: #fde9e7;
+  border-color: #e6aaa5;
+}
+
+.priority-p1 {
+  color: #7d4400;
+  background: #fff3de;
+  border-color: #e8c58e;
+}
+
+.priority-p2 {
+  color: #174f7c;
+  background: #e7f1f8;
+  border-color: #a9c8dd;
+}
+
+.priority-p3 {
+  color: #53616c;
+  background: #eef1f3;
+  border-color: #c9d0d6;
+}
+
+.roadmap-goal {
+  position: relative;
+  padding-top: 40px;
+}
+
+.roadmap-goal > .priority-badge {
+  position: absolute;
+  top: 12px;
+  left: 13px;
+}
+
+.roadmap-feature-list {
+  padding: 6px 18px 14px;
+}
+
+.roadmap-feature-list article {
+  padding: 10px 0;
+  display: grid;
+  grid-template-columns: 38px minmax(0, 1fr);
+  gap: 9px;
+  align-items: start;
+  border-top: 1px solid var(--border);
+}
+
+.roadmap-feature-list article:first-child {
+  border-top: 0;
+}
+
+.roadmap-feature-list .priority-badge {
+  margin-top: 1px;
+}
+
+.project-capability-present rect {
+  fill: #e8f5f0;
+  stroke: #6cae98;
+}
+
+.project-capability-partial rect {
+  fill: #fff5e5;
+  stroke: #d6a655;
+}
+
+.project-capability-missing rect {
+  fill: #fdebea;
+  stroke: #d68e88;
+}
+
+.project-diagram-node .project-diagram-status {
+  fill: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+}
+
+.project-parity-score text:first-child {
+  fill: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.project-parity-score text:last-child {
+  fill: var(--active);
+  font-size: 28px;
+  font-weight: 780;
+}
+
+.project-parity-score.project-parity-overall text:last-child {
+  fill: var(--accent);
+}
+
+.project-capability-table {
+  width: 100%;
+  padding: 0;
+  border-collapse: collapse;
+  color: var(--ink);
+}
+
+.project-capability-table th,
+.project-capability-table td {
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.68rem;
+  text-align: left;
+}
+
+.project-capability-table caption {
+  padding: 10px 12px;
+  color: var(--muted);
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  font-size: 0.68rem;
+  text-align: left;
+}
+
+.project-capability-table thead th {
+  color: var(--muted);
+  background: var(--surface-muted);
+  font-size: 0.6rem;
+  text-transform: uppercase;
+}
+
+.project-path-list {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 8px;
+  padding: 14px 18px 16px 34px;
+}
+
+.project-path-list li {
+  padding-right: 8px;
+}
+
 .feedback-drawer .feedback-workspace {
   min-height: 0;
   padding: 18px;
@@ -4152,6 +4673,16 @@ body {
   .configure-master {
     border-right: 0;
     border-bottom: 1px solid var(--border);
+  }
+
+  .roadmap-headline-grid,
+  .project-card-grid,
+  .roadmap-goal-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .project-path-list {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
 }
@@ -4337,5 +4868,52 @@ body {
 
   .debugging-snapshot {
     min-height: 300px;
+  }
+
+  .project-page {
+    padding: 14px 10px 28px;
+    gap: 12px;
+  }
+
+  .project-snapshot-label {
+    display: none;
+  }
+
+  .project-lead,
+  .project-section-heading {
+    padding: 14px;
+    display: grid;
+    align-items: start;
+    gap: 10px;
+  }
+
+  .project-quick-links {
+    min-width: 0;
+  }
+
+  .project-section-heading > p {
+    text-align: left;
+  }
+
+  .project-card-grid,
+  .roadmap-headline-grid,
+  .roadmap-score-list,
+  .roadmap-goal-grid,
+  .project-path-list {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .project-diagram-scroll {
+    padding: 10px;
+  }
+
+  .project-assessment-note {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 5px;
+  }
+
+  .priority-legend {
+    justify-content: flex-start;
   }
 }
