@@ -486,6 +486,33 @@ test("page shell exposes grouped navigation and separate diagnostic workspaces",
   assert.match(script, /hostContext: state\.hostContext/);
 });
 
+test("each workspace heading matches its Explorer label", () => {
+  const routes = [
+    "overview",
+    "observe/placement",
+    "observe/callbacks",
+    "configure",
+    "inspect/policy-slots",
+    "inspect/queue-topology",
+    "inspect/cells",
+    "debugging",
+  ];
+  const visibleText = (value) => value.replace(/&amp;/g, "&").trim();
+
+  for (const route of routes) {
+    const escapedRoute = route.replace("/", "\\/");
+    const explorer = page.match(
+      new RegExp(`<a[^>]+data-route="${escapedRoute}"[^>]*>([^<]+)</a>`),
+    );
+    const workspace = page.match(
+      new RegExp(`<section[^>]+data-view="${escapedRoute}"[^>]*>[\\s\\S]*?<h2[^>]*>([^<]+)</h2>`),
+    );
+    assert.ok(explorer, `missing Explorer entry for ${route}`);
+    assert.ok(workspace, `missing workspace heading for ${route}`);
+    assert.equal(visibleText(workspace[1]), visibleText(explorer[1]), route);
+  }
+});
+
 test("feedback is a drawer with a visible draft count", () => {
   assert.match(page, /<dialog[^>]+id="feedbackDrawer"/);
   assert.match(page, /id="feedbackCount"/);
