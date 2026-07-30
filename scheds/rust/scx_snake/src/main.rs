@@ -3125,24 +3125,115 @@ scope = "task_allowed"
     }
 
     #[test]
-    fn queue_timing_covers_fairness_and_direct_local_paths() {
+    fn bpf_queue_timing_has_one_owner_and_preserves_state_machine() {
         let bpf_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bpf");
-        let fairness = fs::read_to_string(bpf_dir.join("fairness.h")).unwrap();
-        let queue_fairness = fs::read_to_string(bpf_dir.join("queue_fairness.h")).unwrap();
+        let owner = fs::read_to_string(bpf_dir.join("queue_timing.h"))
+            .expect("queue timing should have a dedicated owner");
         let main = fs::read_to_string(bpf_dir.join("main.bpf.c")).unwrap();
-        let ladder = fs::read_to_string(bpf_dir.join("ladder.h")).unwrap();
 
-        assert!(fairness.contains("static __noinline void\nqueue_timing_record_sample"));
-        assert!(fairness.matches("queue_timing_record_insert(").count() >= 4);
-        assert!(fairness.contains("queue_timing_complete(runtime);"));
-        assert!(
-            queue_fairness
-                .matches("queue_timing_record_insert(")
-                .count()
-                >= 3
+        assert!(owner.contains("#include \"fairness_common.h\""));
+        assert!(owner.contains("#include \"dsq.h\""));
+        for symbol in [
+            "extern u64",
+            "queue_timing_events",
+            "queue_timing_record_sample(",
+            "queue_timing_record_insert(",
+            "queue_timing_cancel_runtime(",
+            "queue_timing_cancel(",
+            "queue_timing_complete(",
+            "queue_timing_complete_pending(",
+        ] {
+            assert!(
+                owner.contains(symbol),
+                "queue timing owner is missing {symbol}"
+            );
+        }
+        assert_eq!(main.matches("u64 queue_timing_session_id;").count(), 1);
+        assert_eq!(
+            main.matches("struct snake_queue_timing_counters queue_timing_counters;")
+                .count(),
+            1
         );
-        assert!(main.contains("queue_timing_record_insert("));
-        assert!(ladder.contains("queue_timing_record_insert("));
+
+        let sources = bpf_sources(&bpf_dir);
+        for (path, source) in &sources {
+            let name = path.file_name().unwrap().to_string_lossy();
+            if name != "queue_timing.h" && name != "task_state.h" {
+                assert!(
+                    !source.contains("->queue_timing_"),
+                    "{} bypasses queue-timing state transitions",
+                    path.display()
+                );
+            }
+        }
+        let outside_owner = sources
+            .iter()
+            .filter(|(path, _)| path.file_name().unwrap() != "queue_timing.h")
+            .map(|(_, source)| source.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            outside_owner
+                .iter()
+                .map(|source| source.matches("queue_timing_record_insert(").count())
+                .sum::<usize>(),
+            8
+        );
+        assert_eq!(
+            outside_owner
+                .iter()
+                .map(|source| source.matches("queue_timing_complete_pending(").count())
+                .sum::<usize>(),
+            2
+        );
+        assert_eq!(
+            outside_owner
+                .iter()
+                .map(|source| source.matches("queue_timing_cancel_runtime(").count())
+                .sum::<usize>(),
+            1
+        );
+        assert_eq!(
+            outside_owner
+                .iter()
+                .map(|source| source
+                    .matches("queue_timing_cancel(&ladder_ctx, p)")
+                    .count())
+                .sum::<usize>(),
+            1
+        );
+
+        let record = owner
+            .split_once("queue_timing_record_sample(")
+            .and_then(|(_, body)| body.split_once("queue_timing_record_insert("))
+            .map(|(body, _)| body)
+            .unwrap();
+        assert_text_order(
+            record,
+            &[
+                "READ_ONCE(queue_timing_session_id) != session_id",
+                "runtime->queue_timing_dsq_id",
+                "runtime->queue_timing_enqueued_at_ns",
+                "runtime->queue_timing_cell_index",
+                "runtime->queue_timing_depth_after_insert",
+                "runtime->queue_timing_queue_class",
+                "runtime->queue_timing_session_id",
+                "queue_timing_counters.started_samples",
+            ],
+        );
+        let complete = owner
+            .split_once("queue_timing_complete(struct")
+            .and_then(|(_, body)| body.split_once("queue_timing_complete_pending("))
+            .map(|(body, _)| body)
+            .unwrap();
+        assert_text_order(
+            complete,
+            &[
+                "runtime->queue_timing_session_id = 0",
+                "READ_ONCE(queue_timing_session_id)",
+                "bpf_ringbuf_output(&queue_timing_events",
+            ],
+        );
+
         let rust =
             fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/main.rs"))
                 .unwrap();

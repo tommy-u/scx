@@ -246,7 +246,7 @@ queue_fairness_cancel_direct(struct snake_ladder_ctx *ctx,
 
 	if (runtime) {
 		runtime->direct_cell_valid = 0;
-		runtime->queue_timing_session_id = 0;
+		queue_timing_cancel_runtime(runtime);
 	}
 }
 
@@ -893,8 +893,7 @@ queue_fairness_running(struct snake_ladder_ctx *ctx, struct task_struct *p)
 
 	active_weight = runtime && runtime->active_weight ?
 				runtime->active_weight : fairness_task_weight(p);
-	if (runtime && runtime->queue_timing_session_id)
-		queue_timing_complete(runtime);
+	queue_timing_complete_pending(runtime);
 
 	if (runtime && runtime->direct_cell_valid) {
 		u32 direct_cell_index = runtime->direct_cell_index;

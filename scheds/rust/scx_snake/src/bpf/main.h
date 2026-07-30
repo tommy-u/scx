@@ -7,17 +7,7 @@
 #include "policy_bank.h"
 #include "stats.h"
 #include "timing.h"
-
-extern u64				  queue_timing_session_id;
-extern struct snake_queue_timing_counters queue_timing_counters;
-
-/* Queue residence events are independent from fine timing stage events. */
-struct {
-	__uint(type, BPF_MAP_TYPE_RINGBUF);
-	__uint(max_entries, 1024 * 1024);
-} queue_timing_events SEC(".maps");
-
-#include "dsq.h"
+#include "queue_timing.h"
 
 /* Choose an affinity-safe CPU after every configured rung misses. */
 static __always_inline s32 fallback_cpu(const struct snake_ladder_ctx *ctx,
