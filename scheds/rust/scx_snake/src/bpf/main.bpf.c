@@ -186,6 +186,9 @@ s32 BPF_STRUCT_OPS(snake_select_cpu, struct task_struct *p, s32 prev_cpu,
 			release_timed_callback(&ladder_ctx, SNAKE_CALLBACK_SELECT_CPU, callback_started_at);
 			return -1;
 		}
+		queue_timing_record_insert(
+			&ladder_ctx, p, dsq_local_on(cpu), SNAKE_QUEUE_CELL_NONE,
+			&fine_timing);
 		stat_inc(&ladder_ctx, SNAKE_STAT_DIRECT_DISPATCHES);
 		finish_select(&ladder_ctx, select_started_at,
 			      callback_started_at);

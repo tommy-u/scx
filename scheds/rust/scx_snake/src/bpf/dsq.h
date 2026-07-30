@@ -134,10 +134,13 @@ static __always_inline dsq_id_t dsq_local_on(u32 cpu)
 
 static __always_inline u32 dsq_queue_class(dsq_id_t dsq)
 {
-	return !dsq.builtin.builtin &&
-	       dsq.user.type == SNAKE_DSQ_TYPE_AFFINITY ?
-		       SNAKE_QUEUE_CLASS_AFFINITY :
-		       SNAKE_QUEUE_CLASS_NORMAL;
+	if (dsq.builtin.builtin)
+		return SNAKE_QUEUE_CLASS_FAIRNESS;
+	if (dsq.user.type == SNAKE_DSQ_TYPE_AFFINITY)
+		return SNAKE_QUEUE_CLASS_AFFINITY;
+	if (dsq.user.type == SNAKE_DSQ_TYPE_NORMAL)
+		return SNAKE_QUEUE_CLASS_NORMAL;
+	return SNAKE_QUEUE_CLASS_FAIRNESS;
 }
 
 static __always_inline s32 dsq_nr_queued(dsq_id_t dsq)

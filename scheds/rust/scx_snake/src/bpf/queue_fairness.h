@@ -250,65 +250,6 @@ queue_fairness_cancel_direct(struct snake_ladder_ctx *ctx,
 	}
 }
 
-static __always_inline void
-queue_timing_record_insert(struct snake_task_runtime *runtime, dsq_id_t dsq,
-			   u32 cell_index, u32 queue_class,
-			   const struct snake_fine_timing_ctx *fine)
-{
-	u64 session_id, enqueued_at_ns;
-	s32 depth;
-
-	if (!runtime || !fine || !fine->sampled)
-		return;
-	session_id = READ_ONCE(queue_timing_session_id);
-	if (!session_id)
-		return;
-	enqueued_at_ns = bpf_ktime_get_ns();
-	depth = dsq_nr_queued(dsq);
-	if (depth < 0 || READ_ONCE(queue_timing_session_id) != session_id)
-		return;
-	runtime->queue_timing_dsq_id = dsq.raw;
-	runtime->queue_timing_enqueued_at_ns = enqueued_at_ns;
-	runtime->queue_timing_cell_index = cell_index;
-	runtime->queue_timing_depth_after_insert = depth;
-	runtime->queue_timing_queue_class = queue_class;
-	runtime->queue_timing_session_id = session_id;
-	__sync_fetch_and_add(&queue_timing_counters.started_samples, 1);
-}
-
-static __noinline void
-queue_timing_complete(struct snake_task_runtime *runtime)
-{
-	struct snake_queue_timing_event event = {};
-	u64 session_id, now;
-	s32 depth;
-
-	if (!runtime)
-		return;
-	session_id = runtime->queue_timing_session_id;
-	if (!session_id)
-		return;
-	event.session_id = session_id;
-	event.dsq_id = runtime->queue_timing_dsq_id;
-	event.cell_index = runtime->queue_timing_cell_index;
-	event.queue_class = runtime->queue_timing_queue_class;
-	event.depth_after_insert = runtime->queue_timing_depth_after_insert;
-	event.residence_ns = runtime->queue_timing_enqueued_at_ns;
-	runtime->queue_timing_session_id = 0;
-	if (session_id != READ_ONCE(queue_timing_session_id))
-		return;
-	now = bpf_ktime_get_ns();
-	event.residence_ns = now - event.residence_ns;
-	depth = dsq_nr_queued(dsq_from_raw(event.dsq_id));
-	if (depth < 0)
-		return;
-	event.depth_after_dispatch = depth;
-	if (bpf_ringbuf_output(&queue_timing_events, &event, sizeof(event), 0))
-		__sync_fetch_and_add(&queue_timing_counters.dropped_samples, 1);
-	else
-		__sync_fetch_and_add(&queue_timing_counters.completed_samples, 1);
-}
-
 static __always_inline int
 queue_fairness_prepare_affinity(struct snake_ladder_ctx *ctx,
 				struct snake_task_runtime *runtime,
@@ -392,6 +333,7 @@ queue_fairness_direct_borrow(struct snake_ladder_ctx *ctx, struct task_struct *p
 			      fairness_vtime_slice(runtime->active_weight), 0,
 			      fine))
 		return -EINVAL;
+	queue_timing_record_insert(ctx, p, dsq_local_on(cpu), cell_index, fine);
 	return 0;
 }
 
@@ -450,8 +392,7 @@ queue_fairness_enqueue_cell(struct snake_ladder_ctx *ctx, struct task_struct *p,
 				   stage_started_at);
 		return -EINVAL;
 	}
-	queue_timing_record_insert(runtime, dsq, runtime->cell_index,
-				   SNAKE_QUEUE_CLASS_NORMAL, fine);
+	queue_timing_record_insert(ctx, p, dsq, runtime->cell_index, fine);
 	fine_timing_finish(fine, SNAKE_FINE_TIMING_ENQUEUE_NORMAL_DSQ_INSERT,
 			   stage_started_at);
 	stage_started_at = fine_timing_start(fine);
@@ -502,8 +443,7 @@ queue_fairness_enqueue_affinity(struct snake_ladder_ctx *ctx,
 		ret = -EINVAL;
 		goto out;
 	}
-	queue_timing_record_insert(runtime, dsq, runtime->cell_index,
-				   SNAKE_QUEUE_CLASS_AFFINITY, fine);
+	queue_timing_record_insert(ctx, p, dsq, runtime->cell_index, fine);
 	fine_timing_finish(fine,
 			   SNAKE_FINE_TIMING_ENQUEUE_AFFINITY_DSQ_INSERT,
 			   insert_started_at);
@@ -957,7 +897,8 @@ queue_fairness_running(struct snake_ladder_ctx *ctx, struct task_struct *p)
 
 	active_weight = runtime && runtime->active_weight ?
 				runtime->active_weight : fairness_task_weight(p);
-	queue_timing_complete(runtime);
+	if (runtime && runtime->queue_timing_session_id)
+		queue_timing_complete(runtime);
 
 	if (runtime && runtime->direct_cell_valid) {
 		u32 direct_cell_index = runtime->direct_cell_index;

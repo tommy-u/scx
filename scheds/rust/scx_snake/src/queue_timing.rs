@@ -12,6 +12,7 @@ pub const DEPTH_BUCKETS: usize = 256;
 pub enum QueueClass {
     Normal,
     Affinity,
+    Fairness,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -28,12 +29,9 @@ pub enum QueueTimingCaptureState {
     Historical,
 }
 
-pub fn validate_capture_start(sample_rate: u32, has_queue_topology: bool) -> Result<(), String> {
+pub fn validate_capture_start(sample_rate: u32) -> Result<(), String> {
     if sample_rate == 0 {
         return Err("queue timing requires callback timing sampling to be enabled".into());
-    }
-    if !has_queue_topology {
-        return Err("queue timing requires queue topology mode".into());
     }
     Ok(())
 }
@@ -45,6 +43,7 @@ impl TryFrom<u32> for QueueClass {
         match value {
             0 => Ok(Self::Normal),
             1 => Ok(Self::Affinity),
+            2 => Ok(Self::Fairness),
             _ => Err(format!("unknown queue class {value}")),
         }
     }
@@ -481,15 +480,12 @@ mod tests {
     }
 
     #[test]
-    fn capture_start_requires_sampling_and_queue_topology() {
+    fn capture_start_requires_sampling_but_not_queue_topology() {
         assert_eq!(
-            validate_capture_start(0, true),
+            validate_capture_start(0),
             Err("queue timing requires callback timing sampling to be enabled".into())
         );
-        assert_eq!(
-            validate_capture_start(64, false),
-            Err("queue timing requires queue topology mode".into())
-        );
-        assert_eq!(validate_capture_start(64, true), Ok(()));
+        assert_eq!(validate_capture_start(64), Ok(()));
+        assert_eq!(QueueClass::try_from(2), Ok(QueueClass::Fairness));
     }
 }

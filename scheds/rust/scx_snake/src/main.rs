@@ -2095,11 +2095,8 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
     ) -> Result<queue_timing::QueueTimingControlResponse> {
         self.drain_timing_events()?;
         if enabled {
-            queue_timing::validate_capture_start(
-                self.callback_timing_sample_rate,
-                self.queue_topology.is_some(),
-            )
-            .map_err(anyhow::Error::msg)?;
+            queue_timing::validate_capture_start(self.callback_timing_sample_rate)
+                .map_err(anyhow::Error::msg)?;
         }
         if self.queue_timing_state.is_enabled() == enabled {
             return Ok(queue_timing::QueueTimingControlResponse {
@@ -2233,9 +2230,7 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
         }
         let mut snapshot = self.inspector.snapshot(self.metrics()?, task_mappings);
         snapshot.fine_timing = self.fine_timing_inspection()?;
-        if self.queue_topology.is_some() {
-            snapshot.queue_timing = Some(self.queue_timing_inspection()?);
-        }
+        snapshot.queue_timing = Some(self.queue_timing_inspection()?);
         Ok(snapshot)
     }
 
@@ -2562,6 +2557,34 @@ scope = "task_allowed"
             .expect("shared DSQ helpers should be readable");
         assert!(shared.contains("fine_timing_record_dsq_operation"));
         assert!(shared.contains("static __noinline bool\ndsq_move_to_local"));
+    }
+
+    #[test]
+    fn queue_timing_covers_fairness_and_direct_local_paths() {
+        let bpf_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bpf");
+        let fairness = fs::read_to_string(bpf_dir.join("fairness.h")).unwrap();
+        let queue_fairness = fs::read_to_string(bpf_dir.join("queue_fairness.h")).unwrap();
+        let main = fs::read_to_string(bpf_dir.join("main.bpf.c")).unwrap();
+        let ladder = fs::read_to_string(bpf_dir.join("ladder.h")).unwrap();
+
+        assert!(fairness.contains("static __noinline void\nqueue_timing_record_sample"));
+        assert!(fairness.matches("queue_timing_record_insert(").count() >= 4);
+        assert!(fairness.contains("queue_timing_complete(runtime);"));
+        assert!(
+            queue_fairness
+                .matches("queue_timing_record_insert(")
+                .count()
+                >= 3
+        );
+        assert!(main.contains("queue_timing_record_insert("));
+        assert!(ladder.contains("queue_timing_record_insert("));
+        let rust =
+            fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/main.rs"))
+                .unwrap();
+        assert!(rust.contains("snapshot.queue_timing = Some(self.queue_timing_inspection()?);"));
+        assert!(
+            !rust.contains("if self.queue_topology.is_some() {\n            snapshot.queue_timing")
+        );
     }
 
     fn set_stat(raw: &mut [Vec<Vec<u8>>], index: u32, cpu_values: &[u64]) {

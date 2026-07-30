@@ -293,6 +293,9 @@ static __always_inline s32 try_enqueue_task_cell(struct snake_ladder_ctx *ctx,
 					p->pid, cpu);
 				return -EINVAL;
 			}
+			queue_timing_record_insert(
+				ctx, p, dsq_local_on(cpu), SNAKE_QUEUE_CELL_NONE,
+				fine);
 			return 1;
 		}
 		if (cpu < 0 && cpu != -ENOENT) {
