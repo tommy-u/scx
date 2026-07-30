@@ -26,6 +26,7 @@ import {
   decorateCells,
   fieldReferenceGroups,
   fineTimingCaptureModels,
+  fineTimingDsqModels,
   freshnessModel,
   formatCallbackDuration,
   formatCellMetric,
@@ -1745,6 +1746,8 @@ async function loadFineTiming() {
   renderRuntimeContext();
   if (state.route === "observe/callbacks") {
     renderFineTiming();
+  } else if (state.route === "inspect/queue-topology") {
+    renderResolvedQueueTopology();
   }
 }
 
@@ -2526,6 +2529,9 @@ function renderResolvedQueueTopology() {
     : timing.state === "historical" && !timing.topologyCompatible
       ? `<p class="notice queue-capture-notice">Historical capture policy generation ${formatNullableCount(timing.capture?.policy_generation)} does not match the current queue topology; DSQ measurements are not joined.</p>`
       : "";
+  const observedDsqOperations = renderObservedDsqOperations(
+    fineTimingDsqModels(state.fineTiming),
+  );
   if (!model.layout) {
     replaceKeyedHtml(elements.queueTopology, `
       <header class="queue-topology-heading">
@@ -2534,6 +2540,7 @@ function renderResolvedQueueTopology() {
       </header>
       ${summary}
       ${captureNotice}
+      ${observedDsqOperations}
       <p class="queue-topology-empty">No resolved cell queue topology is installed.</p>`);
     return;
   }
@@ -2572,6 +2579,7 @@ function renderResolvedQueueTopology() {
     ${summary}
     ${captureNotice}
     ${routeWarning}
+    ${observedDsqOperations}
     <section class="queue-topology-table-section">
       <h4>Cell allocation</h4>
       <div class="queue-topology-table-wrap" data-render-key="queue:${generation}:cell-allocation:scroll">
@@ -2596,6 +2604,36 @@ function renderResolvedQueueTopology() {
         </thead><tbody>${routes}</tbody></table>
       </div>
     </details>`);
+}
+
+function renderObservedDsqOperations(dsqs) {
+  const rows = dsqs.map((dsq) => `
+    <tr>
+      <th scope="row"><code>${escapeHtml(dsq.label)}</code></th>
+      <td>${escapeHtml(dsq.kind)}</td>
+      ${renderDsqOperationTimingCells(dsq.insertSuccess)}
+      <td>${formatCount(dsq.insertError.samples)}</td>
+      ${renderDsqOperationTimingCells(dsq.moveSuccess)}
+      ${renderDsqOperationTimingCells(dsq.moveMiss)}
+    </tr>`).join("");
+  const body = rows || '<tr><td colspan="12" class="callback-empty">No sampled DSQ operations.</td></tr>';
+  return `
+    <details class="queue-topology-details" open data-render-key="queue:observed-dsq-operations">
+      <summary data-render-key="queue:observed-dsq-operations:summary">Observed DSQs (${formatCount(dsqs.length)})</summary>
+      <div class="queue-topology-table-wrap" data-render-key="queue:observed-dsq-operations:scroll">
+        <table class="queue-timing-table"><thead>
+          <tr><th rowspan="2">DSQ</th><th rowspan="2">Kind</th><th colspan="3">Insert success</th><th rowspan="2">Insert errors</th><th colspan="3">Remove success</th><th colspan="3">Remove miss</th></tr>
+          <tr><th>Samples</th><th>Mean</th><th>p99</th><th>Samples</th><th>Mean</th><th>p99</th><th>Samples</th><th>Mean</th><th>p99</th></tr>
+        </thead><tbody>${body}</tbody></table>
+      </div>
+    </details>`;
+}
+
+function renderDsqOperationTimingCells(timing) {
+  return `
+    <td>${formatCount(timing.samples)}</td>
+    <td class="${callbackDurationClass(timing.meanNs)}">${escapeHtml(formatCallbackDuration(timing.meanNs))}</td>
+    <td class="${callbackDurationClass(timing.p99Ns)}">${escapeHtml(formatCallbackDuration(timing.p99Ns))}</td>`;
 }
 
 function renderQueueCaptureHeader(timing) {

@@ -15,6 +15,7 @@ import {
   decorateCells,
   fieldReferenceGroups,
   fineTimingCaptureModels,
+  fineTimingDsqModels,
   formatCallbackDuration,
   ladderPercentages,
   nextPolicyCandidate,
@@ -1224,6 +1225,99 @@ test("fine timing controls preserve independent collecting and historical states
       },
     ],
   );
+});
+
+test("fine timing DSQ operations merge insert and removal outcomes by queue", () => {
+  const timing = (samples, meanNs, p99Ns) => ({
+    samples,
+    mean_ns: meanNs,
+    p50_ns: meanNs,
+    p95_ns: p99Ns,
+    p99_ns: p99Ns,
+  });
+  const dsqs = fineTimingDsqModels({
+    captures: [
+      {
+        callback: "enqueue",
+        dsq_operations: [{
+          dsq_id: 805306368,
+          operation: "insert",
+          outcome: "success",
+          ...timing(100, 800, 2047),
+        }],
+      },
+      {
+        callback: "dispatch",
+        dsq_operations: [
+          {
+            dsq_id: 805306368,
+            operation: "remove",
+            outcome: "success",
+            ...timing(20, 12_000, 32_767),
+          },
+          {
+            dsq_id: 805306368,
+            operation: "remove",
+            outcome: "miss",
+            ...timing(200, 300, 511),
+          },
+        ],
+      },
+    ],
+  });
+
+  assert.equal(dsqs.length, 1);
+  assert.equal(dsqs[0].dsqId, "805306368");
+  assert.equal(dsqs[0].label, "0x30000000");
+  assert.equal(dsqs[0].kind, "FIFO global");
+  assert.equal(dsqs[0].insertSuccess.samples, 100);
+  assert.equal(dsqs[0].moveSuccess.p99Ns, 32_767);
+  assert.equal(dsqs[0].moveMiss.samples, 200);
+  assert.equal(dsqs[0].moveMiss.meanNs, 300);
+});
+
+test("fine timing DSQ operations preserve and classify per-CPU local DSQ IDs", () => {
+  const localCpu7 = "13835058055282163719";
+  const dsqs = fineTimingDsqModels({
+    captures: [{
+      callback: "dispatch",
+      dsq_operations: [{
+        dsq_id: localCpu7,
+        operation: "insert",
+        outcome: "success",
+        samples: 100,
+        mean_ns: 800,
+        p50_ns: 511,
+        p95_ns: 2047,
+        p99_ns: 4095,
+      }],
+    }],
+  });
+
+  assert.equal(dsqs.length, 1);
+  assert.equal(dsqs[0].dsqId, localCpu7);
+  assert.equal(dsqs[0].label, "0xc000000000000007");
+  assert.equal(dsqs[0].kind, "Local CPU 7");
+  assert.equal(dsqs[0].insertSuccess.samples, 100);
+});
+
+test("fine timing DSQ operations exclude historical policy generations", () => {
+  const dsqs = fineTimingDsqModels({
+    context: { policy_generation: 9 },
+    captures: [{
+      callback: "dispatch",
+      policy_generation: 8,
+      dsq_operations: [{
+        dsq_id: 805306368,
+        operation: "remove",
+        outcome: "miss",
+        samples: 100,
+        mean_ns: 200,
+      }],
+    }],
+  });
+
+  assert.deepEqual(dsqs, []);
 });
 
 test("callback page contains the fine timing panel host", () => {

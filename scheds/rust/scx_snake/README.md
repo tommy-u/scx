@@ -272,7 +272,7 @@ changing it stops active fine-grained and queue-timing captures so each capture
 has one sampling rate.
 
 The inspector can independently enable fine-grained timing for `select_cpu`,
-queue-mode `enqueue`, and queue-mode `dispatch`. Fine timing reuses the same
+`enqueue`, and `dispatch` in every fairness mode. Fine timing reuses the same
 sample decision. Sampled stages emit fixed-size records through a bounded BPF
 ring buffer, and Snake immediately folds them into one fixed histogram per
 stage; individual events are not retained. Select timing separates active
@@ -282,7 +282,13 @@ and breaks out task storage, cell-clock, and credit-clamp work. Dispatch groups
 remote normal-queue scans by queue fanout without adding work inside the scan
 loop, measures affinity DSQ insertion separately from the full affinity path,
 and measures the kernel move-to-local helper both in aggregate and by
-normal/affinity success/miss outcome using the same elapsed duration.
+normal/affinity success/miss outcome using the same elapsed duration. All BPF
+DSQ operations use the typed constructors and shared wrappers in `bpf/dsq.h`.
+The mutation wrappers retain both source and destination IDs, allowing
+userspace to attribute removal timing to the source and insertion timing to the
+destination, including built-in per-CPU local DSQs. The timer stops before one
+sampled operation record is emitted; userspace derives both per-queue views and
+the aggregate outcome histograms from that record.
 Disabling a capture freezes it as historical. Starting a new capture resets
 only that callback's histograms, and activating another policy automatically
 stops active captures before the generation changes.

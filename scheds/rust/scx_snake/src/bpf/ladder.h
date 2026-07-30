@@ -64,7 +64,7 @@ static __always_inline s32 try_sync_wake_affine(
 	waker = bpf_get_current_task_btf();
 	if (!waker || !bpf_cpumask_test_cpu(waker_cpu, p->cpus_ptr) ||
 	    (waker->flags & PF_EXITING) ||
-	    scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | waker_cpu) != 0)
+	    dsq_nr_queued(dsq_local_on(waker_cpu)) != 0)
 		return -ENOENT;
 
 	idle = scx_bpf_get_idle_cpumask();
@@ -246,6 +246,7 @@ static __noinline s32 execute_rung(const struct snake_ladder_ctx *ctx,
 static __always_inline s32 try_enqueue_task_cell(struct snake_ladder_ctx *ctx,
 					  struct task_struct *p,
 					  u64 enq_flags, u64 slice,
+					  const struct snake_fine_timing_ctx *fine,
 					  u64 callback_started_at)
 {
 	struct snake_task_cell *cell;
@@ -284,8 +285,8 @@ static __always_inline s32 try_enqueue_task_cell(struct snake_ladder_ctx *ctx,
 				   rung_started_at);
 		if (cpu >= 0 && cpu < nr_cpu_ids) {
 			stat_inc(ctx, SNAKE_STAT_RUNG_HIT_BASE + i);
-			if (!scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL_ON | cpu,
-					    slice, enq_flags)) {
+			if (!dsq_insert(p, dsq_local_on(cpu), slice, enq_flags,
+					fine)) {
 				stat_inc(ctx, SNAKE_STAT_INVALID_ERRORS);
 				scx_bpf_error(
 					"snake failed to enqueue pid %d on cell CPU %d",

@@ -922,6 +922,115 @@ export function fineTimingCaptureModels(payload) {
   });
 }
 
+function emptyDsqOperationTiming() {
+  return {
+    samples: 0,
+    meanNs: null,
+    p50Ns: null,
+    p95Ns: null,
+    p99Ns: null,
+  };
+}
+
+function normalizeDsqOperationTiming(operation) {
+  return {
+    samples: Math.max(0, finiteValue(operation?.samples) ?? 0),
+    meanNs: finiteValue(operation?.mean_ns),
+    p50Ns: finiteValue(operation?.p50_ns),
+    p95Ns: finiteValue(operation?.p95_ns),
+    p99Ns: finiteValue(operation?.p99_ns),
+  };
+}
+
+function dsqKind(dsqId) {
+  let id;
+  try {
+    id = BigInt(String(dsqId));
+  } catch {
+    return "Custom";
+  }
+  if ((id & 0xffffffff00000000n) === 0xc000000000000000n) {
+    return `Local CPU ${id & 0xffffffffn}`;
+  }
+  if (id === 0x8000000000000002n) {
+    return "Local CPU";
+  }
+  if (id === 0x30000000n) {
+    return "FIFO global";
+  }
+  if (id >= 0x10000000n && id < 0x10000000n + 1024n) {
+    return "Affinity";
+  }
+  if (id >= 0x20000000n && id < 0x20000000n + 1024n) {
+    return "Normal";
+  }
+  if (id === 0n) {
+    return "EEVDF eligible";
+  }
+  if (id === 1n) {
+    return "EEVDF future";
+  }
+  if (id === 2n) {
+    return "VTIME global";
+  }
+  if (id >= 3n && id < 3n + 1024n) {
+    return "VTIME CPU";
+  }
+  return "Custom";
+}
+
+export function fineTimingDsqModels(payload) {
+  const rows = new Map();
+  const currentGeneration = finiteValue(payload?.context?.policy_generation);
+  for (const capture of payload?.captures || []) {
+    const captureGeneration = finiteValue(capture?.policy_generation);
+    if (
+      currentGeneration !== null
+      && captureGeneration !== null
+      && captureGeneration !== currentGeneration
+    ) {
+      continue;
+    }
+    for (const operation of capture?.dsq_operations || []) {
+      const dsqId = canonicalDsqKey(operation?.dsq_id);
+      if (dsqId === null) {
+        continue;
+      }
+      const key = canonicalDsqKey(dsqId);
+      if (!rows.has(key)) {
+        rows.set(key, {
+          dsqId,
+          label: formatDsqId(dsqId),
+          kind: dsqKind(dsqId),
+          insertSuccess: emptyDsqOperationTiming(),
+          insertError: emptyDsqOperationTiming(),
+          moveSuccess: emptyDsqOperationTiming(),
+          moveMiss: emptyDsqOperationTiming(),
+        });
+      }
+      const row = rows.get(key);
+      const timing = normalizeDsqOperationTiming(operation);
+      if (operation.operation === "insert" && operation.outcome === "success") {
+        row.insertSuccess = timing;
+      } else if (operation.operation === "insert" && operation.outcome === "error") {
+        row.insertError = timing;
+      } else if (
+        operation.operation === "remove"
+        && operation.outcome === "success"
+      ) {
+        row.moveSuccess = timing;
+      } else if (operation.operation === "remove" && operation.outcome === "miss") {
+        row.moveMiss = timing;
+      }
+    }
+  }
+  return [...rows.values()].sort((left, right) => {
+    const leftId = BigInt(left.dsqId);
+    const rightId = BigInt(right.dsqId);
+    return leftId < rightId ? -1 : leftId > rightId ? 1 : 0;
+  });
+}
+
 function restartReasonLabel(reason) {
   const text = String(reason || "").trim();
   const lower = text.toLowerCase();
@@ -1728,10 +1837,16 @@ function shellWord(value) {
 }
 
 function formatDsqId(value) {
-  const number = Number(value);
-  return Number.isSafeInteger(number) && number >= 0
-    ? `0x${number.toString(16).padStart(8, "0")}`
-    : "unknown";
+  try {
+    const number = BigInt(String(value));
+    if (number < 0n) {
+      return "unknown";
+    }
+    const width = number > 0xffffffffn ? 16 : 8;
+    return `0x${number.toString(16).padStart(width, "0")}`;
+  } catch {
+    return "unknown";
+  }
 }
 
 export function compactCpuList(cpus) {

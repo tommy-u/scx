@@ -173,6 +173,18 @@ pub struct FineTimingStageView {
 }
 
 #[derive(Clone, Debug, Serialize)]
+pub struct FineTimingDsqOperationView {
+    pub dsq_id: String,
+    pub operation: String,
+    pub outcome: String,
+    pub samples: u64,
+    pub mean_ns: Option<u64>,
+    pub p50_ns: Option<u64>,
+    pub p95_ns: Option<u64>,
+    pub p99_ns: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize)]
 pub struct FineTimingCaptureView {
     pub callback: String,
     pub available: bool,
@@ -183,6 +195,7 @@ pub struct FineTimingCaptureView {
     pub started_at_ms: Option<u64>,
     pub stopped_at_ms: Option<u64>,
     pub stages: Vec<FineTimingStageView>,
+    pub dsq_operations: Vec<FineTimingDsqOperationView>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -667,9 +680,6 @@ impl Dashboard {
         let Some(payload) = snapshot.get("fine_timing") else {
             return empty_fine_timing_view(&live, FineTimingStatus::Unsupported, None);
         };
-        let queue_topology_active = snapshot
-            .get("queue_topology")
-            .is_some_and(|topology| !topology.is_null());
         match serde_json::from_value::<FineTimingPayload>(payload.clone())
             .map_err(|error| format!("invalid fine timing data: {error}"))
             .and_then(validate_fine_timing)
@@ -689,8 +699,6 @@ impl Dashboard {
                                 "Enable callback sampling to collect fine-grained timestamps."
                                     .to_owned(),
                             )
-                        } else if capture.callback != "select_cpu" && !queue_topology_active {
-                            Some("Requires queue topology mode.".to_owned())
                         } else {
                             None
                         };
@@ -710,6 +718,23 @@ impl Dashboard {
                                     let summary = summarize_callback_timing(&counters);
                                     FineTimingStageView {
                                         stage,
+                                        samples: summary.samples,
+                                        mean_ns: summary.mean_ns,
+                                        p50_ns: summary.p50_ns,
+                                        p95_ns: summary.p95_ns,
+                                        p99_ns: summary.p99_ns,
+                                    }
+                                })
+                                .collect(),
+                            dsq_operations: capture
+                                .dsq_operations
+                                .into_iter()
+                                .map(|operation| {
+                                    let summary = summarize_callback_timing(&operation.timing);
+                                    FineTimingDsqOperationView {
+                                        dsq_id: operation.dsq_id.to_string(),
+                                        operation: operation.operation,
+                                        outcome: operation.outcome,
                                         samples: summary.samples,
                                         mean_ns: summary.mean_ns,
                                         p50_ns: summary.p50_ns,
@@ -1227,6 +1252,16 @@ struct FineTimingCapturePayload {
     started_at_ms: Option<u64>,
     stopped_at_ms: Option<u64>,
     stages: BTreeMap<String, CallbackTimingCounters>,
+    #[serde(default)]
+    dsq_operations: Vec<FineTimingDsqOperationPayload>,
+}
+
+#[derive(Deserialize)]
+struct FineTimingDsqOperationPayload {
+    dsq_id: u64,
+    operation: String,
+    outcome: String,
+    timing: CallbackTimingCounters,
 }
 
 fn validate_fine_timing(payload: FineTimingPayload) -> Result<FineTimingPayload, String> {
@@ -1249,6 +1284,23 @@ fn validate_fine_timing(payload: FineTimingPayload) -> Result<FineTimingPayload,
         return Err(format!(
             "fine timing histograms must contain {FINE_TIMING_BUCKETS} buckets"
         ));
+    }
+    for operation in payload
+        .captures
+        .iter()
+        .flat_map(|capture| &capture.dsq_operations)
+    {
+        if !matches!(operation.operation.as_str(), "insert" | "remove") {
+            return Err(format!("invalid DSQ operation `{}`", operation.operation));
+        }
+        if !matches!(operation.outcome.as_str(), "success" | "miss" | "error") {
+            return Err(format!("invalid DSQ outcome `{}`", operation.outcome));
+        }
+        if operation.timing.buckets.len() != FINE_TIMING_BUCKETS {
+            return Err(format!(
+                "DSQ operation histograms must contain {FINE_TIMING_BUCKETS} buckets"
+            ));
+        }
     }
     Ok(payload)
 }

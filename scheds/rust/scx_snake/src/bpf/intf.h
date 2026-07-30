@@ -135,6 +135,21 @@ enum snake_fine_timing_stage {
 	SNAKE_NR_FINE_TIMING_STAGES,
 };
 
+enum snake_dsq_operation {
+	SNAKE_DSQ_OP_NONE = 0,
+	SNAKE_DSQ_OP_INSERT,
+	SNAKE_DSQ_OP_MOVE,
+	SNAKE_DSQ_OP_MOVE_TO_LOCAL,
+	SNAKE_DSQ_OP_REMOVE,
+};
+
+enum snake_dsq_outcome {
+	SNAKE_DSQ_OUTCOME_NONE = 0,
+	SNAKE_DSQ_OUTCOME_SUCCESS,
+	SNAKE_DSQ_OUTCOME_MISS,
+	SNAKE_DSQ_OUTCOME_ERROR,
+};
+
 struct snake_fine_timing_config {
 	u64 session_ids[SNAKE_NR_FINE_TIMING_CALLBACKS];
 	u32 enabled_mask;
@@ -144,8 +159,12 @@ struct snake_fine_timing_config {
 struct snake_fine_timing_event {
 	u64 session_id;
 	u64 elapsed_ns;
+	u64 source_dsq_id;
+	u64 target_dsq_id;
 	u32 stage;
-	u32 reserved;
+	u32 operation;
+	u32 outcome;
+	u32 queue_class;
 };
 
 struct snake_queue_timing_counters {

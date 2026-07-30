@@ -195,11 +195,6 @@ static __always_inline struct snake_vtime_domain *fairness_vtime_domain(void)
 	return bpf_map_lookup_elem(&vtime_domain, &key);
 }
 
-static __always_inline u64 fairness_vtime_cpu_dsq(s32 cpu)
-{
-	return SNAKE_VTIME_CPU_DSQ_BASE + (u64)cpu;
-}
-
 static __always_inline s32
 fairness_vtime_distribute_cpu(const struct task_struct *p)
 {
@@ -381,18 +376,18 @@ static __noinline u64 fairness_dispatch_slice(struct snake_ladder_ctx *ctx,
 
 static __always_inline int fairness_enqueue(struct snake_ladder_ctx *ctx,
 					    struct task_struct	    *p,
-					    u64			     enq_flags)
+					    u64			     enq_flags,
+					    const struct snake_fine_timing_ctx *fine)
 {
 	struct snake_task_runtime *runtime;
 	struct snake_eevdf_domain *domain;
 	u64			   virtual_time, flags, slice;
 	s32			   target_cpu;
-	u64			   dsq_id;
+	dsq_id_t		   dsq;
 
 	if (fairness_mode == SNAKE_FAIRNESS_FIFO) {
 		flags = enq_flags & ~SCX_ENQ_PREEMPT;
-		if (!scx_bpf_dsq_insert(p, SNAKE_FIFO_DSQ, SCX_SLICE_DFL,
-					    flags)) {
+		if (!dsq_insert(p, dsq_fifo(), SCX_SLICE_DFL, flags, fine)) {
 			stat_inc(ctx, SNAKE_STAT_INVALID_ERRORS);
 			return -EINVAL;
 		}
@@ -406,7 +401,7 @@ static __always_inline int fairness_enqueue(struct snake_ladder_ctx *ctx,
 	}
 	if (fairness_is_vtime()) {
 		target_cpu = -1;
-		dsq_id	   = SNAKE_VTIME_GLOBAL_DSQ;
+		dsq = dsq_vtime_global();
 		fairness_vtime_prepare_runnable(ctx, p);
 		runtime = fairness_prepare_task(ctx, p);
 		if (!runtime) {
@@ -423,13 +418,13 @@ static __always_inline int fairness_enqueue(struct snake_ladder_ctx *ctx,
 				stat_inc(ctx, SNAKE_STAT_INVALID_ERRORS);
 				return target_cpu;
 			}
-			dsq_id = fairness_vtime_cpu_dsq(target_cpu);
+			dsq = dsq_vtime_cpu(target_cpu);
 			stat_inc(ctx, SNAKE_STAT_VTIME_CPU_ENQUEUES);
 		}
-		if (!scx_bpf_dsq_insert_vtime(p, dsq_id,
-					       fairness_vtime_slice(
-						       runtime->active_weight),
-					       runtime->vruntime, flags)) {
+		if (!dsq_insert_vtime(
+			    p, dsq,
+			    fairness_vtime_slice(runtime->active_weight),
+			    runtime->vruntime, flags, fine)) {
 			stat_inc(ctx, SNAKE_STAT_INVALID_ERRORS);
 			return -EINVAL;
 		}
@@ -453,15 +448,15 @@ static __always_inline int fairness_enqueue(struct snake_ladder_ctx *ctx,
 	flags		    = enq_flags & ~SCX_ENQ_PREEMPT;
 	slice = runtime->request_remaining_ns ?: SNAKE_EEVDF_SLICE_NS;
 	if (fairness_eligible(runtime->vruntime, virtual_time)) {
-		if (!scx_bpf_dsq_insert_vtime(p, SNAKE_EEVDF_ELIGIBLE_DSQ,
-					       slice, runtime->deadline, flags)) {
+		if (!dsq_insert_vtime(p, dsq_eevdf_eligible(), slice,
+				      runtime->deadline, flags, fine)) {
 			stat_inc(ctx, SNAKE_STAT_INVALID_ERRORS);
 			return -EINVAL;
 		}
 		stat_inc(ctx, SNAKE_STAT_EEVDF_ELIGIBLE_ENQUEUES);
 	} else {
-		if (!scx_bpf_dsq_insert_vtime(p, SNAKE_EEVDF_FUTURE_DSQ,
-					       slice, runtime->vruntime, flags)) {
+		if (!dsq_insert_vtime(p, dsq_eevdf_future(), slice,
+				      runtime->vruntime, flags, fine)) {
 			stat_inc(ctx, SNAKE_STAT_INVALID_ERRORS);
 			return -EINVAL;
 		}
@@ -470,13 +465,14 @@ static __always_inline int fairness_enqueue(struct snake_ladder_ctx *ctx,
 	return 0;
 }
 
-static __always_inline u32 fairness_promote(struct snake_ladder_ctx *ctx,
-					    u64 virtual_time)
+static __always_inline u32
+fairness_promote(struct snake_ladder_ctx *ctx, u64 virtual_time,
+		 const struct snake_fine_timing_ctx *fine)
 {
 	struct task_struct *p;
 	u32		    moved = 0;
 
-	bpf_for_each(scx_dsq, p, SNAKE_EEVDF_FUTURE_DSQ, 0) {
+	bpf_for_each(scx_dsq, p, dsq_eevdf_future().raw, 0) {
 		struct snake_task_runtime *runtime;
 		u64			   slice;
 
@@ -490,11 +486,10 @@ static __always_inline u32 fairness_promote(struct snake_ladder_ctx *ctx,
 		if (!fairness_eligible(runtime->vruntime, virtual_time))
 			break;
 		slice = runtime->request_remaining_ns ?: SNAKE_EEVDF_SLICE_NS;
-		scx_bpf_dsq_move_set_slice(BPF_FOR_EACH_ITER, slice);
-		scx_bpf_dsq_move_set_vtime(BPF_FOR_EACH_ITER,
-					   runtime->deadline);
-		if (scx_bpf_dsq_move_vtime(BPF_FOR_EACH_ITER, p,
-					   SNAKE_EEVDF_ELIGIBLE_DSQ, 0))
+		dsq_move_set_slice(BPF_FOR_EACH_ITER, slice);
+		dsq_move_set_vtime(BPF_FOR_EACH_ITER, runtime->deadline);
+		if (dsq_move_vtime(BPF_FOR_EACH_ITER, p, dsq_eevdf_future(),
+				   dsq_eevdf_eligible(), 0, fine))
 			moved++;
 	}
 	stat_add(ctx, SNAKE_STAT_EEVDF_PROMOTIONS, moved);
@@ -512,7 +507,7 @@ fairness_advance_to_cpu_future(struct snake_ladder_ctx *ctx, s32 cpu)
 	if (!domain)
 		return false;
 	bpf_rcu_read_lock();
-	bpf_for_each(scx_dsq, p, SNAKE_EEVDF_FUTURE_DSQ, 0) {
+	bpf_for_each(scx_dsq, p, dsq_eevdf_future().raw, 0) {
 		struct snake_task_runtime *runtime;
 		struct task_struct	  *task;
 
@@ -545,13 +540,14 @@ fairness_advance_to_cpu_future(struct snake_ladder_ctx *ctx, s32 cpu)
 }
 
 static __always_inline bool
-fairness_dispatch_eligible(struct snake_ladder_ctx *ctx, s32 cpu)
+fairness_dispatch_eligible(struct snake_ladder_ctx *ctx, s32 cpu,
+			   const struct snake_fine_timing_ctx *fine)
 {
 	struct task_struct *p;
 	bool		    dispatched = false;
 
 	bpf_rcu_read_lock();
-	bpf_for_each(scx_dsq, p, SNAKE_EEVDF_ELIGIBLE_DSQ, 0) {
+	bpf_for_each(scx_dsq, p, dsq_eevdf_eligible().raw, 0) {
 		/* Reacquire the iterator task for verifier-safe affinity access. */
 		p = bpf_task_from_pid(p->pid);
 		if (!p)
@@ -560,8 +556,9 @@ fairness_dispatch_eligible(struct snake_ladder_ctx *ctx, s32 cpu)
 			bpf_task_release(p);
 			continue;
 		}
-		dispatched = scx_bpf_dsq_move(BPF_FOR_EACH_ITER, p,
-					      SCX_DSQ_LOCAL_ON | cpu, 0);
+		dispatched = dsq_move(BPF_FOR_EACH_ITER, p,
+				      dsq_eevdf_eligible(), dsq_local_on(cpu),
+				      0, fine);
 		bpf_task_release(p);
 		if (dispatched) {
 			stat_inc(ctx, SNAKE_STAT_EEVDF_DISPATCHES);
@@ -601,9 +598,9 @@ fairness_vtime_keep_running(struct snake_ladder_ctx *ctx,
 	return true;
 }
 
-static __always_inline bool fairness_vtime_head(u64 dsq_id, u64 *vtime)
+static __always_inline bool fairness_vtime_head(dsq_id_t dsq, u64 *vtime)
 {
-	struct task_struct *p = __COMPAT_scx_bpf_dsq_peek(dsq_id);
+	struct task_struct *p = dsq_peek(dsq);
 
 	if (!p)
 		return false;
@@ -612,33 +609,35 @@ static __always_inline bool fairness_vtime_head(u64 dsq_id, u64 *vtime)
 }
 
 static __always_inline bool
-fairness_vtime_move_local(struct snake_ladder_ctx *ctx, u64 dsq_id)
+fairness_vtime_move_local(struct snake_ladder_ctx *ctx, dsq_id_t dsq, s32 cpu,
+			  const struct snake_fine_timing_ctx *fine)
 {
-	if (!scx_bpf_dsq_move_to_local(dsq_id, 0))
+	if (!dsq_move_to_local(dsq, cpu, fine))
 		return false;
 	stat_inc(ctx, SNAKE_STAT_VTIME_DISPATCHES);
-	if (dsq_id != SNAKE_VTIME_GLOBAL_DSQ)
+	if (dsq.raw != dsq_vtime_global().raw)
 		stat_inc(ctx, SNAKE_STAT_VTIME_CPU_DISPATCHES);
 	return true;
 }
 
 static __always_inline bool
 fairness_dispatch_vtime(struct snake_ladder_ctx *ctx, s32 cpu,
-			struct task_struct *prev)
+			struct task_struct *prev,
+			const struct snake_fine_timing_ctx *fine)
 {
-	u64  cpu_dsq = fairness_vtime_cpu_dsq(cpu);
-	u64  cpu_vtime = 0, global_vtime = 0;
-	u64  first_dsq, second_dsq = 0, candidate_vtime;
+	dsq_id_t cpu_dsq = dsq_vtime_cpu(cpu);
+	dsq_id_t global_dsq = dsq_vtime_global();
+	dsq_id_t first_dsq, second_dsq = dsq_invalid();
+	u64  cpu_vtime = 0, global_vtime = 0, candidate_vtime;
 	bool cpu_found, global_found;
 
 	cpu_found = fairness_vtime_head(cpu_dsq, &cpu_vtime);
-	global_found = fairness_vtime_head(SNAKE_VTIME_GLOBAL_DSQ,
-					   &global_vtime);
+	global_found = fairness_vtime_head(global_dsq, &global_vtime);
 	if (!cpu_found && !global_found)
 		goto keep_running;
 	if (global_found &&
 	    (!cpu_found || time_before(global_vtime, cpu_vtime))) {
-		first_dsq = SNAKE_VTIME_GLOBAL_DSQ;
+		first_dsq = global_dsq;
 		candidate_vtime = global_vtime;
 		if (cpu_found)
 			second_dsq = cpu_dsq;
@@ -646,13 +645,14 @@ fairness_dispatch_vtime(struct snake_ladder_ctx *ctx, s32 cpu,
 		first_dsq = cpu_dsq;
 		candidate_vtime = cpu_vtime;
 		if (global_found)
-			second_dsq = SNAKE_VTIME_GLOBAL_DSQ;
+			second_dsq = global_dsq;
 	}
 	if (fairness_vtime_keep_running(ctx, prev, candidate_vtime))
 		return false;
-	if (fairness_vtime_move_local(ctx, first_dsq))
+	if (fairness_vtime_move_local(ctx, first_dsq, cpu, fine))
 		return true;
-	if (second_dsq && fairness_vtime_move_local(ctx, second_dsq))
+	if (!dsq_is_invalid(second_dsq) &&
+	    fairness_vtime_move_local(ctx, second_dsq, cpu, fine))
 		return true;
 
 keep_running:
@@ -669,7 +669,8 @@ keep_running:
 
 static __always_inline int fairness_dispatch(struct snake_ladder_ctx *ctx,
 					     s32		      cpu,
-					     struct task_struct *prev)
+					     struct task_struct *prev,
+					     const struct snake_fine_timing_ctx *fine)
 {
 	struct snake_eevdf_domain *domain;
 	u64			   virtual_time;
@@ -677,16 +678,16 @@ static __always_inline int fairness_dispatch(struct snake_ladder_ctx *ctx,
 
 	if (fairness_is_vtime()) {
 		/* Local DSQs are FIFO; pre-filling one would discard VTIME order. */
-		local_queued = scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | cpu);
+		local_queued = dsq_nr_queued(dsq_local_on(cpu));
 		if (local_queued < 0)
 			return local_queued;
 		if (local_queued > 0)
 			return 0;
-		fairness_dispatch_vtime(ctx, cpu, prev);
+		fairness_dispatch_vtime(ctx, cpu, prev, fine);
 		return 0;
 	}
 	if (fairness_mode == SNAKE_FAIRNESS_FIFO) {
-		if (scx_bpf_dsq_move_to_local(SNAKE_FIFO_DSQ, 0))
+		if (dsq_move_to_local(dsq_fifo(), cpu, fine))
 			stat_inc(ctx, SNAKE_STAT_FIFO_SHARED_DISPATCHES);
 		return 0;
 	}
@@ -699,8 +700,8 @@ static __always_inline int fairness_dispatch(struct snake_ladder_ctx *ctx,
 	bpf_spin_lock(&domain->lock);
 	virtual_time = domain->virtual_time;
 	bpf_spin_unlock(&domain->lock);
-	fairness_promote(ctx, virtual_time);
-	if (fairness_dispatch_eligible(ctx, cpu))
+	fairness_promote(ctx, virtual_time, fine);
+	if (fairness_dispatch_eligible(ctx, cpu, fine))
 		return 0;
 	/*
 	 * The global eligible DSQ may contain only tasks which cannot run on
@@ -711,8 +712,8 @@ static __always_inline int fairness_dispatch(struct snake_ladder_ctx *ctx,
 		bpf_spin_lock(&domain->lock);
 		virtual_time = domain->virtual_time;
 		bpf_spin_unlock(&domain->lock);
-		fairness_promote(ctx, virtual_time);
-		fairness_dispatch_eligible(ctx, cpu);
+		fairness_promote(ctx, virtual_time, fine);
+		fairness_dispatch_eligible(ctx, cpu, fine);
 	}
 	return 0;
 }
@@ -885,21 +886,20 @@ static __always_inline int fairness_init(void)
 	int ret;
 
 	if (fairness_mode == SNAKE_FAIRNESS_FIFO)
-		return scx_bpf_create_dsq(SNAKE_FIFO_DSQ, -1);
+		return dsq_create(dsq_fifo(), -1);
 	if (fairness_is_vtime()) {
 		if (queue_topology_enabled())
 			return 0;
 		if (nr_cpu_ids > SNAKE_MAX_CPUS)
 			return -E2BIG;
-		ret = scx_bpf_create_dsq(SNAKE_VTIME_GLOBAL_DSQ, -1);
+		ret = dsq_create(dsq_vtime_global(), -1);
 		if (ret)
 			return ret;
 		bpf_for(cpu, 0, SNAKE_MAX_CPUS)
 		{
 			if (cpu >= nr_cpu_ids)
 				break;
-			ret = scx_bpf_create_dsq(fairness_vtime_cpu_dsq(cpu),
-						 -1);
+			ret = dsq_create(dsq_vtime_cpu(cpu), -1);
 			if (ret)
 				return ret;
 		}
@@ -907,12 +907,12 @@ static __always_inline int fairness_init(void)
 	}
 	if (!fairness_is_eevdf())
 		return -EINVAL;
-	ret = scx_bpf_create_dsq(SNAKE_EEVDF_ELIGIBLE_DSQ, -1);
+	ret = dsq_create(dsq_eevdf_eligible(), -1);
 	if (ret)
 		return ret;
-	ret = scx_bpf_create_dsq(SNAKE_EEVDF_FUTURE_DSQ, -1);
+	ret = dsq_create(dsq_eevdf_future(), -1);
 	if (ret)
-		scx_bpf_destroy_dsq(SNAKE_EEVDF_ELIGIBLE_DSQ);
+		dsq_destroy(dsq_eevdf_eligible());
 	return ret;
 }
 

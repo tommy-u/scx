@@ -343,12 +343,15 @@ struct FineTimingAccumulator {
     sessions: [Option<u64>; 3],
     active: [bool; 3],
     metrics: BTreeMap<(u64, u32), CallbackTimingMetrics>,
+    dsq_metrics: BTreeMap<(u64, u64, u32, u32), CallbackTimingMetrics>,
 }
 
 impl FineTimingAccumulator {
     fn reset(&mut self, callback: fine_timing::FineTimingCallback, session_id: u64) {
         if let Some(previous) = self.sessions[callback.index()].replace(session_id) {
             self.metrics.retain(|(session, _), _| *session != previous);
+            self.dsq_metrics
+                .retain(|(session, _, _, _), _| *session != previous);
         }
         self.active[callback.index()] = true;
         for stage in fine_timing::stages(callback) {
@@ -376,14 +379,102 @@ impl FineTimingAccumulator {
         let Some(metrics) = self.metrics.get_mut(&(session_id, stage)) else {
             return;
         };
-        let bucket = if elapsed_ns > 1 {
-            (u64::BITS - 1 - elapsed_ns.leading_zeros()) as usize
-        } else {
-            0
+        record_timing_sample(metrics, elapsed_ns);
+    }
+
+    fn record_dsq_operation(
+        &mut self,
+        session_id: u64,
+        source_dsq_id: u64,
+        target_dsq_id: u64,
+        operation: u32,
+        outcome: u32,
+        queue_class: u32,
+        elapsed_ns: u64,
+    ) {
+        let Some(callback_index) = self
+            .sessions
+            .iter()
+            .position(|session| *session == Some(session_id))
+        else {
+            return;
+        };
+        if !self.active[callback_index] || dsq_outcome_label(outcome).is_none() {
+            return;
         }
-        .min(metrics.buckets.len() - 1);
-        metrics.total_ns = metrics.total_ns.saturating_add(elapsed_ns);
-        metrics.buckets[bucket] = metrics.buckets[bucket].saturating_add(1);
+        match operation {
+            bpf_intf::snake_dsq_operation_SNAKE_DSQ_OP_INSERT => {
+                self.record_dsq_metric(
+                    session_id,
+                    target_dsq_id,
+                    bpf_intf::snake_dsq_operation_SNAKE_DSQ_OP_INSERT,
+                    outcome,
+                    elapsed_ns,
+                );
+            }
+            bpf_intf::snake_dsq_operation_SNAKE_DSQ_OP_MOVE
+            | bpf_intf::snake_dsq_operation_SNAKE_DSQ_OP_MOVE_TO_LOCAL => {
+                self.record_dsq_metric(
+                    session_id,
+                    source_dsq_id,
+                    bpf_intf::snake_dsq_operation_SNAKE_DSQ_OP_REMOVE,
+                    outcome,
+                    elapsed_ns,
+                );
+                if outcome == bpf_intf::snake_dsq_outcome_SNAKE_DSQ_OUTCOME_SUCCESS {
+                    self.record_dsq_metric(
+                        session_id,
+                        target_dsq_id,
+                        bpf_intf::snake_dsq_operation_SNAKE_DSQ_OP_INSERT,
+                        outcome,
+                        elapsed_ns,
+                    );
+                }
+            }
+            _ => return,
+        }
+        if operation == bpf_intf::snake_dsq_operation_SNAKE_DSQ_OP_MOVE_TO_LOCAL {
+            self.record(
+                session_id,
+                bpf_intf::snake_fine_timing_stage_SNAKE_FINE_TIMING_DISPATCH_MOVE_TO_LOCAL,
+                elapsed_ns,
+            );
+            if let Some(stage) = dsq_move_stage(queue_class, outcome) {
+                self.record(session_id, stage, elapsed_ns);
+            }
+        }
+    }
+
+    fn record_dsq_metric(
+        &mut self,
+        session_id: u64,
+        dsq_id: u64,
+        operation: u32,
+        outcome: u32,
+        elapsed_ns: u64,
+    ) {
+        let metrics = self
+            .dsq_metrics
+            .entry((session_id, dsq_id, operation, outcome))
+            .or_insert_with(empty_fine_timing_metrics);
+        record_timing_sample(metrics, elapsed_ns);
+    }
+
+    fn dsq_operations(&self, session_id: u64) -> Vec<inspection::DsqOperationTimingInspectionView> {
+        self.dsq_metrics
+            .iter()
+            .filter_map(|(&(session, dsq_id, operation, outcome), timing)| {
+                if session != session_id {
+                    return None;
+                }
+                Some(inspection::DsqOperationTimingInspectionView {
+                    dsq_id,
+                    operation: dsq_operation_label(operation)?.to_owned(),
+                    outcome: dsq_outcome_label(outcome)?.to_owned(),
+                    timing: timing.clone(),
+                })
+            })
+            .collect()
     }
 
     fn stop(&mut self, callback: fine_timing::FineTimingCallback) {
@@ -394,16 +485,71 @@ impl FineTimingAccumulator {
         self.sessions = [None, None, None];
         self.active = [false; 3];
         self.metrics.clear();
+        self.dsq_metrics.clear();
     }
 
     fn metrics(&self, session_id: u64, stage: u32) -> CallbackTimingMetrics {
         self.metrics
             .get(&(session_id, stage))
             .cloned()
-            .unwrap_or_else(|| CallbackTimingMetrics {
-                total_ns: 0,
-                buckets: vec![0; bpf_intf::SNAKE_FINE_TIMING_BUCKETS as usize],
-            })
+            .unwrap_or_else(empty_fine_timing_metrics)
+    }
+}
+
+fn empty_fine_timing_metrics() -> CallbackTimingMetrics {
+    CallbackTimingMetrics {
+        total_ns: 0,
+        buckets: vec![0; bpf_intf::SNAKE_FINE_TIMING_BUCKETS as usize],
+    }
+}
+
+fn record_timing_sample(metrics: &mut CallbackTimingMetrics, elapsed_ns: u64) {
+    let bucket = if elapsed_ns > 1 {
+        (u64::BITS - 1 - elapsed_ns.leading_zeros()) as usize
+    } else {
+        0
+    }
+    .min(metrics.buckets.len() - 1);
+    metrics.total_ns = metrics.total_ns.saturating_add(elapsed_ns);
+    metrics.buckets[bucket] = metrics.buckets[bucket].saturating_add(1);
+}
+
+fn dsq_operation_label(operation: u32) -> Option<&'static str> {
+    match operation {
+        bpf_intf::snake_dsq_operation_SNAKE_DSQ_OP_INSERT => Some("insert"),
+        bpf_intf::snake_dsq_operation_SNAKE_DSQ_OP_REMOVE => Some("remove"),
+        _ => None,
+    }
+}
+
+fn dsq_outcome_label(outcome: u32) -> Option<&'static str> {
+    match outcome {
+        bpf_intf::snake_dsq_outcome_SNAKE_DSQ_OUTCOME_SUCCESS => Some("success"),
+        bpf_intf::snake_dsq_outcome_SNAKE_DSQ_OUTCOME_MISS => Some("miss"),
+        bpf_intf::snake_dsq_outcome_SNAKE_DSQ_OUTCOME_ERROR => Some("error"),
+        _ => None,
+    }
+}
+
+fn dsq_move_stage(queue_class: u32, outcome: u32) -> Option<u32> {
+    match (queue_class, outcome) {
+        (
+            bpf_intf::SNAKE_QUEUE_CLASS_AFFINITY,
+            bpf_intf::snake_dsq_outcome_SNAKE_DSQ_OUTCOME_SUCCESS,
+        ) => {
+            Some(bpf_intf::snake_fine_timing_stage_SNAKE_FINE_TIMING_DISPATCH_MOVE_AFFINITY_SUCCESS)
+        }
+        (
+            bpf_intf::SNAKE_QUEUE_CLASS_AFFINITY,
+            bpf_intf::snake_dsq_outcome_SNAKE_DSQ_OUTCOME_MISS,
+        ) => Some(bpf_intf::snake_fine_timing_stage_SNAKE_FINE_TIMING_DISPATCH_MOVE_AFFINITY_MISS),
+        (_, bpf_intf::snake_dsq_outcome_SNAKE_DSQ_OUTCOME_SUCCESS) => {
+            Some(bpf_intf::snake_fine_timing_stage_SNAKE_FINE_TIMING_DISPATCH_MOVE_NORMAL_SUCCESS)
+        }
+        (_, bpf_intf::snake_dsq_outcome_SNAKE_DSQ_OUTCOME_MISS) => {
+            Some(bpf_intf::snake_fine_timing_stage_SNAKE_FINE_TIMING_DISPATCH_MOVE_NORMAL_MISS)
+        }
+        _ => None,
     }
 }
 
@@ -413,9 +559,26 @@ fn relay_fine_timing(data: &[u8], accumulator: &Mutex<FineTimingAccumulator>) ->
     }
     let session_id = u64::from_ne_bytes(data[0..8].try_into().unwrap());
     let elapsed_ns = u64::from_ne_bytes(data[8..16].try_into().unwrap());
-    let stage = u32::from_ne_bytes(data[16..20].try_into().unwrap());
+    let source_dsq_id = u64::from_ne_bytes(data[16..24].try_into().unwrap());
+    let target_dsq_id = u64::from_ne_bytes(data[24..32].try_into().unwrap());
+    let stage = u32::from_ne_bytes(data[32..36].try_into().unwrap());
+    let operation = u32::from_ne_bytes(data[36..40].try_into().unwrap());
+    let outcome = u32::from_ne_bytes(data[40..44].try_into().unwrap());
+    let queue_class = u32::from_ne_bytes(data[44..48].try_into().unwrap());
     if let Ok(mut accumulator) = accumulator.lock() {
-        accumulator.record(session_id, stage, elapsed_ns);
+        if operation == bpf_intf::snake_dsq_operation_SNAKE_DSQ_OP_NONE {
+            accumulator.record(session_id, stage, elapsed_ns);
+        } else {
+            accumulator.record_dsq_operation(
+                session_id,
+                source_dsq_id,
+                target_dsq_id,
+                operation,
+                outcome,
+                queue_class,
+                elapsed_ns,
+            );
+        }
     }
     0
 }
@@ -1296,6 +1459,14 @@ struct Scheduler<'object, 'policy> {
     queue_timing_counters: queue_timing::QueueTimingCounters,
 }
 
+fn fine_timing_available(
+    _callback: fine_timing::FineTimingCallback,
+    _fairness: FairnessMode,
+    _has_queue_topology: bool,
+) -> bool {
+    true
+}
+
 impl<'object, 'policy> Scheduler<'object, 'policy> {
     fn drain_timing_events(&self) -> Result<()> {
         loop {
@@ -1635,9 +1806,7 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
         if enabled && self.callback_timing_sample_rate == 0 {
             bail!("fine timing requires callback timing sampling to be enabled");
         }
-        if enabled
-            && callback != fine_timing::FineTimingCallback::SelectCpu
-            && self.queue_topology.is_none()
+        if enabled && !fine_timing_available(callback, self.fairness, self.queue_topology.is_some())
         {
             bail!("enqueue and dispatch fine timing require queue topology mode");
         }
@@ -1861,6 +2030,14 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
                     started_at_ms: session.map(|session| session.started_at_ms),
                     stopped_at_ms: session.and_then(|session| session.stopped_at_ms),
                     stages,
+                    dsq_operations: match session {
+                        Some(session) => self
+                            .fine_timing_accumulator
+                            .lock()
+                            .map_err(|_| anyhow!("fine timing accumulator lock poisoned"))?
+                            .dsq_operations(session.session_id),
+                        None => Vec::new(),
+                    },
                 })
             })
             .collect::<Result<Vec<_>>>()?;
@@ -2306,6 +2483,7 @@ fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::mem::{offset_of, size_of};
     use std::path::PathBuf;
 
@@ -2343,6 +2521,47 @@ scope = "task_allowed"
         for value in ["3", "63", "4097", "8192", "not-a-number"] {
             assert!(parse_callback_timing_sample_rate(value).is_err(), "{value}");
         }
+    }
+
+    #[test]
+    fn bpf_dsq_operations_stay_behind_the_shared_helpers() {
+        const RAW_OPERATIONS: &[&str] = &[
+            "scx_bpf_dsq_insert(",
+            "scx_bpf_dsq_insert_vtime(",
+            "scx_bpf_dsq_move(",
+            "scx_bpf_dsq_move_vtime(",
+            "scx_bpf_dsq_move_set_slice(",
+            "scx_bpf_dsq_move_set_vtime(",
+            "scx_bpf_dsq_move_to_local(",
+            "scx_bpf_dsq_nr_queued(",
+            "__COMPAT_scx_bpf_dsq_peek(",
+            "scx_bpf_create_dsq(",
+            "scx_bpf_destroy_dsq(",
+        ];
+        let bpf_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bpf");
+        for entry in fs::read_dir(&bpf_dir).expect("BPF source directory should exist") {
+            let path = entry.expect("BPF source entry should be readable").path();
+            if path.file_name().and_then(|name| name.to_str()) == Some("dsq.h")
+                || !matches!(
+                    path.extension().and_then(|ext| ext.to_str()),
+                    Some("h" | "c")
+                )
+            {
+                continue;
+            }
+            let source = fs::read_to_string(&path).expect("BPF source should be readable");
+            for operation in RAW_OPERATIONS {
+                assert!(
+                    !source.contains(operation),
+                    "{} bypasses dsq.h with {operation}",
+                    path.display()
+                );
+            }
+        }
+        let shared = fs::read_to_string(bpf_dir.join("dsq.h"))
+            .expect("shared DSQ helpers should be readable");
+        assert!(shared.contains("fine_timing_record_dsq_operation"));
+        assert!(shared.contains("static __noinline bool\ndsq_move_to_local"));
     }
 
     fn set_stat(raw: &mut [Vec<Vec<u8>>], index: u32, cpu_values: &[u64]) {
@@ -2445,7 +2664,7 @@ scope = "task_allowed"
         assert_eq!(bpf_intf::SNAKE_ABI_VERSION, 20);
         assert_eq!(size_of::<bpf_intf::snake_callback_timing>(), 520);
         assert_eq!(size_of::<bpf_intf::snake_fine_timing_config>(), 32);
-        assert_eq!(size_of::<bpf_intf::snake_fine_timing_event>(), 24);
+        assert_eq!(size_of::<bpf_intf::snake_fine_timing_event>(), 48);
         assert_eq!(size_of::<bpf_intf::snake_queue_timing_counters>(), 24);
         assert_eq!(size_of::<bpf_intf::snake_queue_timing_event>(), 40);
         assert_eq!(size_of::<bpf_intf::snake_compiled_ladder>(), 352);
@@ -3350,6 +3569,32 @@ scope = "task_allowed"
     }
 
     #[test]
+    fn dsq_fine_timing_is_available_for_every_fairness_mode() {
+        use crate::fine_timing::FineTimingCallback;
+
+        assert!(fine_timing_available(
+            FineTimingCallback::Dispatch,
+            FairnessMode::Fifo,
+            false,
+        ));
+        assert!(fine_timing_available(
+            FineTimingCallback::Enqueue,
+            FairnessMode::Fifo,
+            false,
+        ));
+        assert!(fine_timing_available(
+            FineTimingCallback::Dispatch,
+            FairnessMode::Vtime,
+            false,
+        ));
+        assert!(fine_timing_available(
+            FineTimingCallback::Dispatch,
+            FairnessMode::Vtime,
+            true,
+        ));
+    }
+
+    #[test]
     fn fine_timing_accumulator_filters_sessions_and_buckets_samples() {
         use crate::fine_timing::{stages, FineTimingCallback};
 
@@ -3369,6 +3614,58 @@ scope = "task_allowed"
         accumulator.stop(FineTimingCallback::SelectCpu);
         accumulator.record(7, stage, 2_000);
         assert_eq!(accumulator.metrics(7, stage), metrics);
+    }
+
+    #[test]
+    fn fine_timing_accumulator_expands_moves_into_source_and_target_operations() {
+        use crate::fine_timing::FineTimingCallback;
+
+        let accumulator = Mutex::new(FineTimingAccumulator::default());
+        accumulator
+            .lock()
+            .expect("accumulator should lock")
+            .reset(FineTimingCallback::Dispatch, 17);
+        let event = bpf_intf::snake_fine_timing_event {
+            session_id: 17,
+            elapsed_ns: 131_072,
+            source_dsq_id: u64::from(bpf_intf::SNAKE_FIFO_DSQ),
+            target_dsq_id: 13_835_058_055_282_163_719,
+            stage: 0,
+            operation: bpf_intf::snake_dsq_operation_SNAKE_DSQ_OP_MOVE_TO_LOCAL,
+            outcome: bpf_intf::snake_dsq_outcome_SNAKE_DSQ_OUTCOME_SUCCESS,
+            queue_class: bpf_intf::SNAKE_QUEUE_CLASS_NORMAL,
+        };
+        assert_eq!(relay_fine_timing(bytes_of(&event), &accumulator), 0);
+
+        let operations = accumulator
+            .lock()
+            .expect("accumulator should lock")
+            .dsq_operations(17);
+        assert_eq!(operations.len(), 2);
+        assert_eq!(operations[0].dsq_id, u64::from(bpf_intf::SNAKE_FIFO_DSQ));
+        assert_eq!(operations[0].operation, "remove");
+        assert_eq!(operations[0].outcome, "success");
+        assert_eq!(operations[0].timing.total_ns, 131_072);
+        assert_eq!(operations[0].timing.buckets.iter().sum::<u64>(), 1);
+        assert_eq!(operations[1].dsq_id, 13_835_058_055_282_163_719);
+        assert_eq!(operations[1].operation, "insert");
+        assert_eq!(operations[1].outcome, "success");
+        let helper = accumulator
+            .lock()
+            .expect("accumulator should lock")
+            .metrics(
+                17,
+                bpf_intf::snake_fine_timing_stage_SNAKE_FINE_TIMING_DISPATCH_MOVE_TO_LOCAL,
+            );
+        let success = accumulator
+            .lock()
+            .expect("accumulator should lock")
+            .metrics(
+                17,
+                bpf_intf::snake_fine_timing_stage_SNAKE_FINE_TIMING_DISPATCH_MOVE_NORMAL_SUCCESS,
+            );
+        assert_eq!(helper.buckets.iter().sum::<u64>(), 1);
+        assert_eq!(success.buckets.iter().sum::<u64>(), 1);
     }
 
     #[test]

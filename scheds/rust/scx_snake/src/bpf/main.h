@@ -395,6 +395,37 @@ fine_timing_record_elapsed(const struct snake_fine_timing_ctx *ctx, u32 stage,
 	bpf_ringbuf_output(&fine_timing_events, &event, sizeof(event), 0);
 }
 
+static __noinline void
+fine_timing_record_dsq_operation(const struct snake_fine_timing_ctx *ctx,
+				 const struct snake_fine_timing_event *sample)
+{
+	struct snake_fine_timing_config *config;
+	struct snake_fine_timing_event event;
+	u32 key = 0, mask;
+
+	if (!ctx || !ctx->active || !sample ||
+	    sample->operation == SNAKE_DSQ_OP_NONE ||
+	    sample->outcome == SNAKE_DSQ_OUTCOME_NONE)
+		return;
+	config = bpf_map_lookup_elem(&fine_timing_config, &key);
+	if (!config)
+		return;
+	if (ctx->callback == SNAKE_FINE_TIMING_CALLBACK_SELECT_CPU)
+		mask = SNAKE_FINE_TIMING_SELECT_CPU;
+	else if (ctx->callback == SNAKE_FINE_TIMING_CALLBACK_ENQUEUE)
+		mask = SNAKE_FINE_TIMING_ENQUEUE;
+	else
+		mask = SNAKE_FINE_TIMING_DISPATCH;
+	if (!(READ_ONCE(config->enabled_mask) & mask) ||
+	    READ_ONCE(config->session_ids[ctx->callback]) != ctx->session_id)
+		return;
+	event = *sample;
+	event.session_id = ctx->session_id;
+	bpf_ringbuf_output(&fine_timing_events, &event, sizeof(event), 0);
+}
+
+#include "dsq.h"
+
 static __always_inline void
 fine_timing_finish(const struct snake_fine_timing_ctx *ctx, u32 stage,
 		   u64 started_at)
@@ -402,28 +433,6 @@ fine_timing_finish(const struct snake_fine_timing_ctx *ctx, u32 stage,
 	if (!started_at)
 		return;
 	fine_timing_record_elapsed(ctx, stage, bpf_ktime_get_ns() - started_at);
-}
-
-static __noinline void
-fine_timing_finish_move(const struct snake_fine_timing_ctx *ctx, u32 class,
-			bool moved, u64 started_at)
-{
-	u64 elapsed_ns;
-	u32 stage;
-
-	if (!started_at)
-		return;
-	elapsed_ns = bpf_ktime_get_ns() - started_at;
-	fine_timing_record_elapsed(
-		ctx, SNAKE_FINE_TIMING_DISPATCH_MOVE_TO_LOCAL, elapsed_ns);
-	if (class == SNAKE_QUEUE_CLASS_AFFINITY)
-		stage = moved ?
-				SNAKE_FINE_TIMING_DISPATCH_MOVE_AFFINITY_SUCCESS :
-				SNAKE_FINE_TIMING_DISPATCH_MOVE_AFFINITY_MISS;
-	else
-		stage = moved ? SNAKE_FINE_TIMING_DISPATCH_MOVE_NORMAL_SUCCESS :
-				SNAKE_FINE_TIMING_DISPATCH_MOVE_NORMAL_MISS;
-	fine_timing_record_elapsed(ctx, stage, elapsed_ns);
 }
 
 static __always_inline void

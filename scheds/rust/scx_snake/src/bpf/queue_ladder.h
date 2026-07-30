@@ -151,7 +151,7 @@ queue_ladder_dispatch(struct snake_ladder_ctx *ctx, s32 cpu,
 	if (!cpuq)
 		return -EINVAL;
 	stage_started_at = fine_timing_start(fine);
-	local_queued = scx_bpf_dsq_nr_queued(SCX_DSQ_LOCAL_ON | cpu);
+	local_queued = dsq_nr_queued(dsq_local_on(cpu));
 	fine_timing_finish(fine, SNAKE_FINE_TIMING_DISPATCH_LOCAL_DSQ_CHECK,
 			   stage_started_at);
 	if (local_queued < 0)

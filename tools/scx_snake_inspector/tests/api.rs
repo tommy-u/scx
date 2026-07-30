@@ -119,9 +119,12 @@ fn callback_timing_snapshot(
 
 fn fine_timing_snapshot() -> Value {
     let mut snapshot = callback_timing_snapshot(7, 0, 0);
+    snapshot["fairness"] = json!({"mode_name": "fifo"});
     let mut dispatch_buckets = vec![0_u64; 32];
+    let mut dsq_buckets = vec![0_u64; 32];
     let empty_buckets = vec![0_u64; 32];
     dispatch_buckets[5] = 100;
+    dsq_buckets[17] = 100;
     snapshot["fine_timing"] = json!({
         "sample_rate": 64,
         "captures": [
@@ -154,7 +157,13 @@ fn fine_timing_snapshot() -> Value {
                 "stopped_at_ms": 900,
                 "stages": {
                     "remote_normal_scan": {"total_ns": 6300, "buckets": dispatch_buckets}
-                }
+                },
+                "dsq_operations": [{
+                    "dsq_id": 13835058055282163719_u64,
+                    "operation": "insert",
+                    "outcome": "success",
+                    "timing": {"total_ns": 13107200, "buckets": dsq_buckets}
+                }]
             }
         ]
     });
@@ -1389,6 +1398,12 @@ async fn fine_timing_endpoint_summarizes_stages_and_controls_callbacks_independe
         .iter()
         .find(|capture| capture["callback"] == "dispatch")
         .unwrap();
+    let enqueue = body["captures"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|capture| capture["callback"] == "enqueue")
+        .unwrap();
     let select_cpu = body["captures"]
         .as_array()
         .unwrap()
@@ -1398,15 +1413,22 @@ async fn fine_timing_endpoint_summarizes_stages_and_controls_callbacks_independe
     assert_eq!(body["status"], "ready");
     assert_eq!(select_cpu["available"], true);
     assert_eq!(select_cpu["unavailable_reason"], Value::Null);
-    assert_eq!(dispatch["available"], false);
-    assert_eq!(
-        dispatch["unavailable_reason"],
-        "Requires queue topology mode."
-    );
+    assert_eq!(enqueue["available"], true);
+    assert_eq!(enqueue["unavailable_reason"], Value::Null);
+    assert_eq!(dispatch["available"], true);
+    assert_eq!(dispatch["unavailable_reason"], Value::Null);
     assert_eq!(dispatch["state"], "historical");
     assert_eq!(dispatch["stages"][0]["stage"], "remote_normal_scan");
     assert_eq!(dispatch["stages"][0]["samples"], 100);
     assert_eq!(dispatch["stages"][0]["mean_ns"], 63);
+    assert_eq!(
+        dispatch["dsq_operations"][0]["dsq_id"],
+        "13835058055282163719"
+    );
+    assert_eq!(dispatch["dsq_operations"][0]["operation"], "insert");
+    assert_eq!(dispatch["dsq_operations"][0]["outcome"], "success");
+    assert_eq!(dispatch["dsq_operations"][0]["samples"], 100);
+    assert_eq!(dispatch["dsq_operations"][0]["p99_ns"], 262143);
 
     let responder = std::thread::spawn(move || {
         let CollectorCommand::SetFineTiming {
@@ -1612,12 +1634,21 @@ fn queue_timing_availability_and_validation_are_explicit() {
 }
 
 #[test]
-fn fine_timing_availability_tracks_queue_topology_and_callback_sampling() {
+fn fine_timing_availability_tracks_callback_sampling() {
     let dashboard = dashboard();
     let mut snapshot = fine_timing_snapshot();
     snapshot["queue_topology"] = json!({});
     dashboard.set_inspection(Some(snapshot.clone()), None);
 
+    let view = serde_json::to_value(dashboard.fine_timing()).unwrap();
+    assert!(view["captures"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|capture| capture["available"] == true));
+
+    snapshot["queue_topology"] = Value::Null;
+    dashboard.set_inspection(Some(snapshot.clone()), None);
     let view = serde_json::to_value(dashboard.fine_timing()).unwrap();
     assert!(view["captures"]
         .as_array()

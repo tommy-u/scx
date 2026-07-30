@@ -39,16 +39,6 @@ static __always_inline bool queue_topology_enabled(void)
 	return header && READ_ONCE(header->layout) != SNAKE_QUEUE_LAYOUT_NONE;
 }
 
-static __always_inline u64 queue_affinity_dsq(u32 cpu)
-{
-	return SNAKE_AFFINITY_DSQ_BASE + (u64)cpu;
-}
-
-static __always_inline u64 queue_normal_dsq(u32 queue_index)
-{
-	return SNAKE_NORMAL_DSQ_BASE + (u64)queue_index;
-}
-
 static __always_inline struct snake_queue_cell *queue_cell(u32 cell_index)
 {
 	struct snake_queue_header *header = queue_config();
@@ -375,7 +365,7 @@ static __always_inline int create_queue_topology_dsqs(void)
 			break;
 		if (!queue_cpu(i))
 			continue;
-		ret = scx_bpf_create_dsq(queue_affinity_dsq(i), -1);
+		ret = dsq_create(dsq_affinity(i), -1);
 		if (ret)
 			return ret;
 	}
@@ -383,7 +373,7 @@ static __always_inline int create_queue_topology_dsqs(void)
 	{
 		if (i >= header->nr_normal_queues)
 			break;
-		ret = scx_bpf_create_dsq(queue_normal_dsq(i), -1);
+		ret = dsq_create(dsq_normal(i), -1);
 		if (ret)
 			return ret;
 	}

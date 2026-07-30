@@ -83,6 +83,7 @@ s32 BPF_STRUCT_OPS(snake_select_cpu, struct task_struct *p, s32 prev_cpu,
 		   u64 wake_flags)
 {
 	struct snake_ladder_ctx ladder_ctx = {};
+	struct snake_fine_timing_ctx fine_timing;
 	u64 callback_started_at = callback_timing_start();
 	u64 dispatch_flags = 0;
 	u64 fine_stage_started_at =
@@ -91,6 +92,8 @@ s32 BPF_STRUCT_OPS(snake_select_cpu, struct task_struct *p, s32 prev_cpu,
 	u32 queue_cell_index = SNAKE_QUEUE_CELL_NONE;
 	s32 cpu, ret;
 
+	fine_timing = fine_timing_begin(SNAKE_FINE_TIMING_CALLBACK_SELECT_CPU,
+					callback_started_at);
 	if (acquire_active_ladder(&ladder_ctx)) {
 		fine_timing_finish_select(
 			SNAKE_FINE_TIMING_SELECT_ACQUIRE_LADDER,
@@ -115,9 +118,10 @@ s32 BPF_STRUCT_OPS(snake_select_cpu, struct task_struct *p, s32 prev_cpu,
 					fine_timing_select_start(callback_started_at);
 				ret = queue_cell_index == SNAKE_QUEUE_CELL_NONE ?
 					      -EINVAL :
-					      queue_fairness_direct_borrow(
-						      &ladder_ctx, p, cpu,
-						      queue_cell_index);
+						      queue_fairness_direct_borrow(
+							      &ladder_ctx, p, cpu,
+							      queue_cell_index,
+							      &fine_timing);
 				fine_timing_finish_select(
 					SNAKE_FINE_TIMING_SELECT_QUEUE_TARGET,
 					fine_stage_started_at);
@@ -168,10 +172,10 @@ s32 BPF_STRUCT_OPS(snake_select_cpu, struct task_struct *p, s32 prev_cpu,
 		}
 		fine_stage_started_at =
 			fine_timing_select_start(callback_started_at);
-		ret = scx_bpf_dsq_insert(
-			p, SCX_DSQ_LOCAL,
+		ret = dsq_insert_local(
+			p, cpu,
 			fairness_dispatch_slice(&ladder_ctx, p, true),
-			dispatch_flags);
+			dispatch_flags, &fine_timing);
 		fine_timing_finish_select(SNAKE_FINE_TIMING_SELECT_DIRECT_INSERT,
 					  fine_stage_started_at);
 		if (!ret) {
@@ -255,10 +259,10 @@ void BPF_STRUCT_OPS(snake_enqueue, struct task_struct *p, u64 enq_flags)
 	}
 	slice = fairness_dispatch_slice(&ladder_ctx, p, true);
 	cell_enqueued = try_enqueue_task_cell(&ladder_ctx, p, enq_flags, slice,
-				      callback_started_at);
+				      &fine_timing, callback_started_at);
 	if (cell_enqueued)
 		goto out;
-	ret = fairness_enqueue(&ladder_ctx, p, enq_flags);
+	ret = fairness_enqueue(&ladder_ctx, p, enq_flags, &fine_timing);
 out:
 	release_timed_callback(&ladder_ctx, SNAKE_CALLBACK_ENQUEUE, callback_started_at);
 	if (cell_enqueued)
@@ -301,7 +305,7 @@ void BPF_STRUCT_OPS(snake_dispatch, s32 cpu, struct task_struct *prev)
 		release_timed_callback(&ladder_ctx, SNAKE_CALLBACK_DISPATCH, callback_started_at);
 		return;
 	}
-	ret = fairness_dispatch(&ladder_ctx, cpu, prev);
+	ret = fairness_dispatch(&ladder_ctx, cpu, prev, &fine_timing);
 	release_timed_callback(&ladder_ctx, SNAKE_CALLBACK_DISPATCH, callback_started_at);
 	if (ret)
 		scx_bpf_error("snake fairness dispatch failed on CPU %d: %d", cpu,
