@@ -3030,6 +3030,14 @@ scope = "task_allowed"
     }
 
     #[test]
+    fn eevdf_dispatch_has_a_verifier_boundary() {
+        let bpf_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bpf");
+        let eevdf = fs::read_to_string(bpf_dir.join("fairness_eevdf.h")).unwrap();
+
+        assert!(eevdf.contains("static __noinline int\nfairness_eevdf_dispatch("));
+    }
+
+    #[test]
     fn bpf_fairness_facade_vectors_to_separate_policy_modules() {
         const CALLBACKS: &[&str] = &[
             "runnable",

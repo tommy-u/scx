@@ -260,7 +260,7 @@ fairness_eevdf_dispatch_eligible(struct snake_ladder_ctx *ctx, s32 cpu,
 	return dispatched;
 }
 
-static __always_inline int
+static __noinline int
 fairness_eevdf_dispatch(struct snake_ladder_ctx *ctx, s32 cpu,
 			struct task_struct		   *prev,
 			const struct snake_fine_timing_ctx *fine)
