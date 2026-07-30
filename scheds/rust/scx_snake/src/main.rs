@@ -3090,6 +3090,40 @@ scope = "task_allowed"
     }
 
     #[test]
+    fn bpf_dsq_head_peek_has_one_shared_implementation() {
+        let bpf_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bpf");
+        let sources = bpf_sources(&bpf_dir);
+        let owners = sources
+            .iter()
+            .filter(|(_, source)| source.contains("scx.dsq_vtime"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(owners.len(), 1, "DSQ vtime head reads must have one owner");
+        assert_eq!(owners[0].0.file_name().unwrap(), "dsq.h");
+        assert!(owners[0].1.contains("dsq_vtime_head("));
+        let helper = owners[0]
+            .1
+            .split_once("dsq_vtime_head(")
+            .and_then(|(_, body)| body.split_once("dsq_create("))
+            .map(|(body, _)| body)
+            .unwrap();
+        assert_text_order(
+            helper,
+            &[
+                "dsq_peek(dsq)",
+                "if (!p)",
+                "return false",
+                "READ_ONCE(p->scx.dsq_vtime)",
+                "return true",
+            ],
+        );
+        for (_, source) in &sources {
+            assert!(!source.contains("fairness_vtime_head("));
+            assert!(!source.contains("queue_fairness_head("));
+        }
+    }
+
+    #[test]
     fn bpf_dsq_identity_is_independent_from_dsq_operations() {
         let bpf_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bpf");
         let identity = fs::read_to_string(bpf_dir.join("dsq_id.h"))

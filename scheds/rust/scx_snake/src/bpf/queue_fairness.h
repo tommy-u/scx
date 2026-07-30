@@ -454,16 +454,6 @@ out:
 	return ret;
 }
 
-static __always_inline bool queue_fairness_head(dsq_id_t dsq, u64 *vtime)
-{
-	struct task_struct *p = dsq_peek(dsq);
-
-	if (!p)
-		return false;
-	*vtime = READ_ONCE(p->scx.dsq_vtime);
-	return true;
-}
-
 static __always_inline bool
 queue_fairness_remote_normal(struct snake_queue_cell *cell, u32 local_queue,
 			     u32 *queue_index, u64 *vtime)
@@ -480,7 +470,7 @@ queue_fairness_remote_normal(struct snake_queue_cell *cell, u32 local_queue,
 			break;
 		index = cell->first_normal_queue + offset;
 		if (index == local_queue ||
-			    !queue_fairness_head(dsq_normal(index), &candidate))
+		    !dsq_vtime_head(dsq_normal(index), &candidate))
 			continue;
 		if (!found || time_before(candidate, *vtime)) {
 			*queue_index = index;
@@ -545,7 +535,7 @@ queue_fairness_normal_candidate(struct snake_cpu_queue *cpuq,
 	normal_index = cpuq->normal_queue_index;
 	candidate->dsq = dsq_normal(normal_index);
 	stage_started_at = fine_timing_start(fine);
-	found = queue_fairness_head(candidate->dsq, &candidate->vtime);
+	found = dsq_vtime_head(candidate->dsq, &candidate->vtime);
 	fine_timing_finish(fine, SNAKE_FINE_TIMING_DISPATCH_NORMAL_HEAD_PEEK,
 			   stage_started_at);
 	if (!found) {
@@ -572,7 +562,7 @@ queue_fairness_affinity_candidate(s32 cpu,
 		return -EINVAL;
 	candidate->valid = 0;
 	candidate->dsq = dsq_affinity(cpu);
-	if (!queue_fairness_head(candidate->dsq, &candidate->vtime))
+	if (!dsq_vtime_head(candidate->dsq, &candidate->vtime))
 		return 0;
 	candidate->class = SNAKE_QUEUE_CLASS_AFFINITY;
 	candidate->valid = 1;
@@ -807,7 +797,7 @@ queue_fairness_dispatch_source(struct snake_ladder_ctx *ctx,
 		normal_index = cpuq->normal_queue_index;
 		dsq = dsq_normal(normal_index);
 		stage_started_at = fine_timing_start(fine);
-		found = queue_fairness_head(dsq, &candidate_vtime);
+		found = dsq_vtime_head(dsq, &candidate_vtime);
 		fine_timing_finish(fine,
 				   SNAKE_FINE_TIMING_DISPATCH_NORMAL_HEAD_PEEK,
 				   stage_started_at);
@@ -826,7 +816,7 @@ queue_fairness_dispatch_source(struct snake_ladder_ctx *ctx,
 	} else if (opcode == SNAKE_DISPATCH_OP_AFFINITY) {
 		dsq = dsq_affinity(cpu);
 		stage_started_at = fine_timing_start(fine);
-		found = queue_fairness_head(dsq, &candidate_vtime);
+		found = dsq_vtime_head(dsq, &candidate_vtime);
 		fine_timing_finish(fine,
 				   SNAKE_FINE_TIMING_DISPATCH_AFFINITY_HEAD_PEEK,
 				   stage_started_at);

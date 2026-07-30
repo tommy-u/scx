@@ -523,16 +523,6 @@ fairness_vtime_keep_running(struct snake_ladder_ctx *ctx,
 	return true;
 }
 
-static __always_inline bool fairness_vtime_head(dsq_id_t dsq, u64 *vtime)
-{
-	struct task_struct *p = dsq_peek(dsq);
-
-	if (!p)
-		return false;
-	*vtime = READ_ONCE(p->scx.dsq_vtime);
-	return true;
-}
-
 static __always_inline bool
 fairness_vtime_move_local(struct snake_ladder_ctx *ctx, dsq_id_t dsq, s32 cpu,
 			  const struct snake_fine_timing_ctx *fine)
@@ -556,8 +546,8 @@ fairness_dispatch_vtime(struct snake_ladder_ctx *ctx, s32 cpu,
 	u64  cpu_vtime = 0, global_vtime = 0, candidate_vtime;
 	bool cpu_found, global_found;
 
-	cpu_found = fairness_vtime_head(cpu_dsq, &cpu_vtime);
-	global_found = fairness_vtime_head(global_dsq, &global_vtime);
+	cpu_found = dsq_vtime_head(cpu_dsq, &cpu_vtime);
+	global_found = dsq_vtime_head(global_dsq, &global_vtime);
 	if (!cpu_found && !global_found)
 		goto keep_running;
 	if (global_found &&

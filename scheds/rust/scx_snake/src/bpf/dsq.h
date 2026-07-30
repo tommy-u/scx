@@ -15,6 +15,16 @@ static __always_inline struct task_struct *dsq_peek(dsq_id_t dsq)
 	return __COMPAT_scx_bpf_dsq_peek(dsq.raw);
 }
 
+static __always_inline bool dsq_vtime_head(dsq_id_t dsq, u64 *vtime)
+{
+	struct task_struct *p = dsq_peek(dsq);
+
+	if (!p)
+		return false;
+	*vtime = READ_ONCE(p->scx.dsq_vtime);
+	return true;
+}
+
 static __always_inline s32 dsq_create(dsq_id_t dsq, s32 node)
 {
 	return scx_bpf_create_dsq(dsq.raw, node);
