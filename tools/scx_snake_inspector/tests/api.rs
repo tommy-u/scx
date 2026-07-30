@@ -535,6 +535,7 @@ async fn scheduler_control_lists_policies_while_stopped_and_manages_an_owned_chi
     assert_eq!(body["managed"], true);
     assert_eq!(body["controllable"], true);
     assert_eq!(body["policy_id"], "basic.toml");
+    assert!(body["uptime_ms"].as_u64().is_some());
     let current_command = body["current_command"]
         .as_array()
         .expect("managed command must expose argv");

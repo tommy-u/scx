@@ -88,6 +88,7 @@ pub struct LauncherStatus {
     pub active: bool,
     pub scheduler_name: Option<String>,
     pub pid: Option<u32>,
+    pub uptime_ms: Option<u64>,
     pub current_command: Option<Vec<String>>,
     pub policy_id: Option<String>,
     pub launch: Option<LaunchOptions>,
@@ -278,17 +279,19 @@ impl Supervisor {
             options
         });
         let external_launch = external_process.map(|process| process.launch.clone());
+        let pid = self
+            .child
+            .as_ref()
+            .map(|owned| owned.child.id())
+            .or_else(|| external_process.map(|process| process.pid));
         Ok(LauncherStatus {
             managed: self.child.is_some(),
             controllable: self.child.is_some() || external_process.is_some(),
             control_error,
             active: scheduler_name.is_some(),
             scheduler_name,
-            pid: self
-                .child
-                .as_ref()
-                .map(|owned| owned.child.id())
-                .or_else(|| external_process.map(|process| process.pid)),
+            pid,
+            uptime_ms: pid.and_then(|pid| process_uptime_ms(&self.proc_root, pid)),
             current_command: self
                 .child
                 .as_ref()
@@ -467,6 +470,27 @@ impl Supervisor {
         }
         self.child = None;
     }
+}
+
+fn process_uptime_ms(proc_root: &Path, pid: u32) -> Option<u64> {
+    let stat = fs::read_to_string(proc_root.join(pid.to_string()).join("stat")).ok()?;
+    let (_, fields) = stat.rsplit_once(')')?;
+    let started_ticks = fields.split_whitespace().nth(19)?.parse::<u64>().ok()?;
+    let ticks_per_second = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+    if ticks_per_second <= 0 {
+        return None;
+    }
+    let system_uptime_seconds = fs::read_to_string(proc_root.join("uptime"))
+        .ok()?
+        .split_whitespace()
+        .next()?
+        .parse::<f64>()
+        .ok()?;
+    if !system_uptime_seconds.is_finite() || system_uptime_seconds < 0.0 {
+        return None;
+    }
+    let started_seconds = started_ticks as f64 / ticks_per_second as f64;
+    Some(((system_uptime_seconds - started_seconds).max(0.0) * 1_000.0) as u64)
 }
 
 struct ExternalProcess {

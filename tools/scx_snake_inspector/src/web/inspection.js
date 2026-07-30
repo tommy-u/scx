@@ -103,6 +103,44 @@ function finiteValue(...values) {
   return null;
 }
 
+export function schedulerUptimeLabel(
+  control,
+  lastSuccessAt,
+  now = Date.now(),
+  pollError = null,
+  pollIntervalMs = 2_000,
+) {
+  if (!control) {
+    return "—";
+  }
+  const elapsedSincePoll = Math.max(0, Number(now) - Number(lastSuccessAt || now));
+  const stale = elapsedSincePoll > pollIntervalMs * 2
+    || (Boolean(pollError) && elapsedSincePoll >= pollIntervalMs * 2);
+  if (!control.active && control.pid == null) {
+    return stale ? "Stale · stopped" : "Stopped";
+  }
+  const reported = finiteValue(control.uptime_ms);
+  if (reported === null) {
+    const state = control.active ? "unavailable" : "starting";
+    return stale
+      ? `Stale · ${state}`
+      : `${state[0].toUpperCase()}${state.slice(1)}`;
+  }
+  const totalSeconds = Math.floor(
+    (Math.max(0, reported) + (stale ? 0 : elapsedSincePoll)) / 1_000,
+  );
+  const days = Math.floor(totalSeconds / 86_400);
+  const hours = Math.floor((totalSeconds % 86_400) / 3_600);
+  const minutes = Math.floor((totalSeconds % 3_600) / 60);
+  const seconds = totalSeconds % 60;
+  const clock = `${days > 0 ? String(hours).padStart(2, "0") : hours}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+  const uptime = days > 0 ? `${days}d ${clock}` : clock;
+  if (stale) {
+    return `Stale · ${uptime}`;
+  }
+  return control.active ? uptime : `Starting · ${uptime}`;
+}
+
 function normalizedCell(cell, observedMs) {
   const raw = Object.fromEntries(
     CELL_COUNTER_FIELDS.map((field) => [field, Math.max(0, finiteValue(cell?.[field]) ?? 0)]),

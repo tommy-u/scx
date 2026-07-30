@@ -86,6 +86,7 @@ while :; do sleep 0.05; done
     fs::write(&ops, "\n").unwrap();
     let proc_root = root.path().join("proc");
     fs::create_dir(&proc_root).unwrap();
+    fs::write(proc_root.join("uptime"), "100.00 0.00\n").unwrap();
     let launcher = SnakeLauncher::with_paths(&binary, &policies, &ops, &proc_root).unwrap();
     (root, launcher, ops, proc_root)
 }
@@ -101,6 +102,15 @@ fn register_external_process(binary: &Path, proc_root: &Path, args: &[&str]) -> 
         cmdline.push(0);
     }
     fs::write(process.join("cmdline"), cmdline).unwrap();
+    let ticks_per_second = unsafe { libc::sysconf(libc::_SC_CLK_TCK) } as u64;
+    let mut stat_fields = vec!["S".to_owned()];
+    stat_fields.extend(std::iter::repeat_n("0".to_owned(), 18));
+    stat_fields.push((40 * ticks_per_second).to_string());
+    fs::write(
+        process.join("stat"),
+        format!("{} (scx snake) {}\n", child.id(), stat_fields.join(" ")),
+    )
+    .unwrap();
     std::os::unix::fs::symlink(binary, process.join("exe")).unwrap();
     child
 }
@@ -289,6 +299,7 @@ while :; do sleep 1; done
     };
     let first = launcher.start(request.clone()).unwrap();
     let pid = first.pid.unwrap();
+    assert!(first.uptime_ms.is_some_and(|uptime| uptime < 5_000));
     assert!(launcher
         .start(request)
         .unwrap_err()
@@ -352,7 +363,15 @@ fn externally_started_snake_is_controllable_and_can_be_stopped() {
     assert!(!status.managed);
     assert!(status.controllable);
     assert_eq!(status.pid, Some(child.id()));
+    assert_eq!(status.uptime_ms, Some(60_000));
     assert_eq!(status.launch.unwrap().preserved_args, vec!["--stats", "1"]);
+
+    fs::write(
+        proc_root.join(child.id().to_string()).join("stat"),
+        "malformed\n",
+    )
+    .unwrap();
+    assert_eq!(launcher.status().unwrap().uptime_ms, None);
 
     let stopped = launcher.stop().unwrap();
     assert!(!stopped.active);

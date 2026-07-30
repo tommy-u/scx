@@ -53,6 +53,7 @@ import {
   schedulerCurrentLaunch,
   schedulerDebugModel,
   schedulerLifecycleRequest,
+  schedulerUptimeLabel,
   schedulerSettingModels,
   statsResetDisabled,
   syncCallbackSampleRateControl,
@@ -136,6 +137,8 @@ const elements = {
   legendHigh: document.querySelector("#legendHigh"),
   legendLow: document.querySelector("#legendLow"),
   runtimeContextDetail: document.querySelector("#runtimeContextDetail"),
+  schedulerUptimeStatus: document.querySelector("#schedulerUptimeStatus"),
+  schedulerUptime: document.querySelector("#schedulerUptime"),
   migrationRate: document.querySelector("#migrationRate"),
   migrationPairInspection: document.querySelector("#migrationPairInspection"),
   notice: document.querySelector("#notice"),
@@ -328,6 +331,7 @@ async function start() {
   window.setInterval(loadFineTiming, 1_000);
   window.setInterval(loadPolicyCatalog, 5_000);
   window.setInterval(loadSchedulerControl, 2_000);
+  window.setInterval(renderSchedulerUptime, 1_000);
   window.setInterval(loadHostContext, 30_000);
 }
 
@@ -3570,6 +3574,26 @@ function renderRuntimeContext() {
   elements.runtimeContextDetail.classList.toggle(
     "synchronizing",
     model.synchronizing || Boolean(state.snapshotError),
+  );
+  renderSchedulerUptime();
+}
+
+function renderSchedulerUptime() {
+  const control = state.schedulerControl;
+  elements.schedulerUptime.textContent = schedulerUptimeLabel(
+    control,
+    state.lastSchedulerControlAt,
+    Date.now(),
+    state.schedulerControlError,
+  );
+  const label = elements.schedulerUptime.textContent;
+  const stale = label.startsWith("Stale");
+  elements.schedulerUptimeStatus.classList.toggle("active", Boolean(control?.active) && !stale);
+  elements.schedulerUptimeStatus.classList.toggle("stopped", Boolean(control && !control.active));
+  elements.schedulerUptimeStatus.classList.toggle("stale", stale);
+  elements.schedulerUptimeStatus.classList.toggle(
+    "unavailable",
+    label === "Unavailable",
   );
 }
 

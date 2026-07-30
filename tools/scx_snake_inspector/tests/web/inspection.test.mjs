@@ -30,6 +30,7 @@ import {
   schedulerCurrentLaunch,
   schedulerLaunchRequest,
   schedulerLifecycleRequest,
+  schedulerUptimeLabel,
   schedulerSettingModels,
   statsResetDisabled,
   rungLadderPercentages,
@@ -38,6 +39,41 @@ import {
   selectionRungHitFlow,
   workloadAssignmentRequest,
 } from "../../src/web/inspection.js";
+
+test("scheduler uptime labels tick from the latest control poll", () => {
+  assert.equal(schedulerUptimeLabel(null, 10_000, 12_000), "—");
+  assert.equal(schedulerUptimeLabel({ active: false }, 10_000, 12_000), "Stopped");
+  assert.equal(
+    schedulerUptimeLabel({ active: false, pid: 42, uptime_ms: 2_000 }, 10_000, 12_000),
+    "Starting · 0:00:04",
+  );
+  assert.equal(schedulerUptimeLabel({ active: true }, 10_000, 12_000), "Unavailable");
+  assert.equal(
+    schedulerUptimeLabel({ active: true, uptime_ms: 3_661_000 }, 10_000, 12_500),
+    "1:01:03",
+  );
+  assert.equal(
+    schedulerUptimeLabel({ active: true, uptime_ms: 90_061_000 }, 10_000, 12_000),
+    "1d 01:01:03",
+  );
+  assert.equal(
+    schedulerUptimeLabel(
+      { active: true, uptime_ms: 3_661_000 },
+      10_000,
+      15_000,
+      "control request failed",
+    ),
+    "Stale · 1:01:01",
+  );
+  assert.equal(
+    schedulerUptimeLabel({ active: false }, 10_000, 15_000, "control request failed"),
+    "Stale · stopped",
+  );
+  assert.equal(
+    schedulerUptimeLabel({ active: true }, 10_000, 15_000, "control request failed"),
+    "Stale · unavailable",
+  );
+});
 
 test("inspection routes default to overview and preserve legacy view aliases", () => {
   assert.equal(routeFromHash(""), "overview");

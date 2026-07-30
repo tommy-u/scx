@@ -21,9 +21,16 @@
         </div>
       </div>
       <div class="runtime-summary">
-        <div class="live-status waiting" id="liveStatus" role="status" aria-live="polite">
-          <span class="status-dot" aria-hidden="true"></span>
-          <span id="liveStatusText">Connecting</span>
+        <div class="runtime-primary">
+          <div class="live-status waiting" id="liveStatus" role="status" aria-live="polite">
+            <span class="status-dot" aria-hidden="true"></span>
+            <span id="liveStatusText">Connecting</span>
+          </div>
+          <div class="scheduler-uptime" id="schedulerUptimeStatus" title="Scheduler process uptime">
+            <span class="scheduler-uptime-label">Scheduler uptime</span>
+            <span class="scheduler-uptime-label-short" aria-hidden="true">Up</span>
+            <strong id="schedulerUptime">—</strong>
+          </div>
         </div>
         <span class="runtime-context-detail" id="runtimeContextDetail">Runtime context unavailable</span>
       </div>

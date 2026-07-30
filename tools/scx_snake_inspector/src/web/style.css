@@ -133,6 +133,47 @@ select {
   gap: 3px;
 }
 
+.runtime-primary {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+}
+
+.scheduler-uptime {
+  padding-left: 12px;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  color: var(--muted);
+  border-left: 1px solid var(--border);
+  font-size: 0.7rem;
+  white-space: nowrap;
+}
+
+.scheduler-uptime strong {
+  color: var(--ink);
+  font-size: 0.78rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.scheduler-uptime.active strong {
+  color: var(--active);
+}
+
+.scheduler-uptime.unavailable strong {
+  color: var(--waiting);
+}
+
+.scheduler-uptime.stale strong {
+  color: var(--waiting);
+}
+
+.scheduler-uptime-label-short {
+  display: none;
+}
+
 .runtime-context-detail {
   max-width: min(62vw, 760px);
   overflow: hidden;
@@ -4158,6 +4199,38 @@ body {
 
   .runtime-context-detail {
     display: none;
+  }
+
+  .runtime-primary {
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 1px;
+  }
+
+  .scheduler-uptime {
+    padding-left: 0;
+    gap: 4px;
+    border-left: 0;
+    font-size: 0.62rem;
+  }
+
+  .scheduler-uptime-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+  }
+
+  .scheduler-uptime-label-short {
+    display: inline;
+  }
+
+  .scheduler-uptime strong {
+    font-size: 0.66rem;
   }
 
   .live-status {
