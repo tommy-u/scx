@@ -45,3 +45,64 @@ fn snake_binary_can_be_overridden() {
 
     assert_eq!(args.snake_bin, std::path::PathBuf::from("/opt/scx_snake"));
 }
+
+#[test]
+fn vm_testing_is_opt_in_and_enforces_one_minute_cases() {
+    let defaults = Args::try_parse_from(["scx_snake_inspector"]).unwrap();
+    assert!(!defaults.enable_testing);
+    assert_eq!(defaults.testing_duration, Duration::from_secs(60));
+    assert_eq!(defaults.testing_shard_index, 0);
+    assert_eq!(defaults.testing_shard_count, 1);
+
+    let configured = Args::try_parse_from([
+        "scx_snake_inspector",
+        "--enable-testing",
+        "--testing-duration",
+        "90s",
+        "--testing-shard-index",
+        "3",
+        "--testing-shard-count",
+        "8",
+        "--testing-artifact-dir",
+        "/tmp/snake-matrix",
+    ])
+    .unwrap();
+    assert!(configured.enable_testing);
+    assert_eq!(configured.testing_duration, Duration::from_secs(90));
+    assert_eq!(configured.testing_shard_index, 3);
+    assert_eq!(configured.testing_shard_count, 8);
+    assert_eq!(
+        configured.testing_artifact_dir,
+        std::path::PathBuf::from("/tmp/snake-matrix")
+    );
+    assert!(configured.validate().is_ok());
+
+    let too_short = Args::try_parse_from([
+        "scx_snake_inspector",
+        "--enable-testing",
+        "--testing-duration",
+        "59s",
+    ])
+    .unwrap();
+    assert_eq!(
+        too_short.validate().unwrap_err(),
+        "--testing-duration must be at least 60s"
+    );
+
+    let aggregate = Args::try_parse_from([
+        "scx_snake_inspector",
+        "--enable-testing",
+        "--testing-shard-count",
+        "8",
+        "--testing-import-dir",
+        "/tmp/snake-campaign",
+        "--testing-isolated",
+    ])
+    .unwrap();
+    assert_eq!(
+        aggregate.testing_import_dir,
+        Some(std::path::PathBuf::from("/tmp/snake-campaign"))
+    );
+    assert!(aggregate.testing_isolated);
+    assert!(aggregate.validate().is_ok());
+}

@@ -16,6 +16,9 @@ use scx_snake_inspector::collector::{run_collector, CollectorCommand, CollectorO
 use scx_snake_inspector::dashboard::Dashboard;
 use scx_snake_inspector::host_context::HostContextService;
 use scx_snake_inspector::launcher::SnakeLauncher;
+use scx_snake_inspector::testing::{
+    discover_testing_catalog, MatrixConfig, TestingController, TestingExecutionConfig,
+};
 use scx_snake_inspector::topology::TopologyView;
 use tokio::net::TcpListener;
 
@@ -28,29 +31,61 @@ async fn main() -> Result<()> {
 
     let topology = TopologyView::discover()?;
     let host_context = HostContextService::system(hostname_from_environment(), topology.cpus.len());
-    host_context.spawn_refresh_tasks();
+    if !args.testing_isolated {
+        host_context.spawn_refresh_tasks();
+    }
     let dashboard = Dashboard::new(topology, max_window_ms);
     let launcher = SnakeLauncher::new(&args.snake_bin, &args.policy_dir)?;
+    let testing = if args.enable_testing {
+        let duration_secs = args.testing_duration.as_secs();
+        let matrix = MatrixConfig::new(
+            duration_secs,
+            args.testing_shard_index,
+            args.testing_shard_count,
+        )?;
+        let catalog = discover_testing_catalog(&args.snake_bin, &args.policy_dir)?;
+        let controller = TestingController::new(matrix).with_catalog(catalog);
+        Some(if let Some(import_dir) = &args.testing_import_dir {
+            controller.with_import_dir(import_dir)
+        } else {
+            controller.with_execution(TestingExecutionConfig::system(
+                &args.snake_bin,
+                &args.policy_dir,
+                &args.testing_artifact_dir,
+            ))
+        })
+    } else {
+        None
+    };
     let token = session_token()?;
     let (command_tx, command_rx) = mpsc::channel();
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
-    let collector_dashboard = dashboard.clone();
-    let collector_options = CollectorOptions {
-        policy_dir: args.policy_dir.clone(),
-        ..Default::default()
+    let collector = if args.testing_isolated {
+        drop(command_rx);
+        None
+    } else {
+        let collector_dashboard = dashboard.clone();
+        let collector_options = CollectorOptions {
+            policy_dir: args.policy_dir.clone(),
+            ..Default::default()
+        };
+        Some(
+            thread::Builder::new()
+                .name("snake-migration-collector".into())
+                .spawn(move || {
+                    let result =
+                        run_collector(collector_dashboard.clone(), command_rx, collector_options);
+                    if let Err(error) = &result {
+                        collector_dashboard.set_collector_health(Some(format!("{error:#}")), 0, 0);
+                    }
+                    result
+                })
+                .context("failed to start collector thread")?,
+        )
     };
-    let collector = thread::Builder::new()
-        .name("snake-migration-collector".into())
-        .spawn(move || {
-            let result = run_collector(collector_dashboard.clone(), command_rx, collector_options);
-            if let Err(error) = &result {
-                collector_dashboard.set_collector_health(Some(format!("{error:#}")), 0, 0);
-            }
-            result
-        })
-        .context("failed to start collector thread")?;
 
-    let context = ApiContext::new(
+    let mut context = ApiContext::new(
         dashboard,
         command_tx.clone(),
         token,
@@ -58,7 +93,11 @@ async fn main() -> Result<()> {
     )
     .with_initial_window_ms(initial_window_ms)
     .with_launcher(launcher.clone())
-    .with_host_context(host_context);
+    .with_host_context(host_context)
+    .with_shutdown(shutdown_rx);
+    if let Some(testing) = &testing {
+        context = context.with_testing(testing.clone());
+    }
     let listener = TcpListener::bind(args.listen)
         .await
         .with_context(|| format!("failed to bind dashboard to {}", args.listen))?;
@@ -72,17 +111,26 @@ async fn main() -> Result<()> {
         )
     );
 
+    let graceful_shutdown = async move {
+        shutdown_signal().await;
+        let _ = shutdown_tx.send(true);
+    };
     let server_result = axum::serve(listener, router(context))
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(graceful_shutdown)
         .await;
+    if let Some(testing) = testing {
+        testing.shutdown();
+    }
     launcher.shutdown();
     let _ = command_tx.send(CollectorCommand::Shutdown);
-    let collector_result = collector
-        .join()
-        .map_err(|_| anyhow::anyhow!("collector thread panicked"))?;
+    if let Some(collector) = collector {
+        collector
+            .join()
+            .map_err(|_| anyhow::anyhow!("collector thread panicked"))??;
+    }
 
     server_result.context("dashboard server failed")?;
-    collector_result
+    Ok(())
 }
 
 async fn shutdown_signal() {

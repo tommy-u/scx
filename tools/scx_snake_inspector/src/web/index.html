@@ -60,6 +60,10 @@
             <a href="#/inspect/cells" data-route="inspect/cells">Cells &amp; tasks</a>
           </div>
           <div class="navigation-group">
+            <span class="navigation-group-label">Validate</span>
+            <a href="#/validate/testing" data-route="validate/testing">Testing</a>
+          </div>
+          <div class="navigation-group">
             <span class="navigation-group-label">Project</span>
             <a href="#/project/operations" data-route="project/operations">Operations</a>
             <a href="#/project/roadmap" data-route="project/roadmap">Roadmap</a>
@@ -866,6 +870,44 @@
         </div>
       </section>
 
+      <section class="view-panel hidden" id="testingView" data-view="validate/testing" aria-labelledby="testingTitle">
+        <header class="view-heading">
+          <div>
+            <h2 id="testingTitle">Testing</h2>
+            <p>One-minute scheduler failure and runnable-stall matrix</p>
+          </div>
+          <span class="view-freshness" id="testingStatus">Waiting for test configuration</span>
+        </header>
+        <section class="control-band testing-controls" aria-label="Testing controls">
+          <button class="apply-button" id="runTesting" type="button">Run assigned shard</button>
+          <button class="secondary-button" id="stopTesting" type="button" disabled>Stop</button>
+          <p class="control-message hidden" id="testingNotice" role="status" aria-live="polite"></p>
+        </section>
+        <section class="summary-band testing-summary" aria-label="Testing summary">
+          <dl>
+            <div><dt>Passed</dt><dd id="testingPassed">0</dd></div>
+            <div><dt>Failed</dt><dd id="testingFailed">0</dd></div>
+            <div><dt>Running</dt><dd id="testingRunning">0</dd></div>
+            <div><dt>Pending</dt><dd id="testingPending">0</dd></div>
+          </dl>
+          <p id="testingShard">Shard unavailable</p>
+        </section>
+        <section class="testing-workspace" aria-labelledby="testingMatrixTitle">
+          <div class="section-heading">
+            <div>
+              <h3 id="testingMatrixTitle">Failure matrix</h3>
+              <p>Fairness and policy by workload</p>
+            </div>
+          </div>
+          <div class="testing-matrix-wrap">
+            <table class="testing-matrix" id="testingMatrix" data-sort-key="testing:matrix"></table>
+          </div>
+          <aside class="testing-detail" id="testingDetail" aria-live="polite">
+            Select a result to inspect its runtime and failure details.
+          </aside>
+        </section>
+      </section>
+
       <section class="view-panel hidden" id="debuggingView" data-view="debugging" aria-labelledby="debuggingTitle">
         <header class="view-heading">
           <div>
@@ -946,6 +988,10 @@
             <a href="#/inspect/policy-slots" data-route="inspect/policy-slots">Policy rungs</a>
             <a href="#/inspect/queue-topology" data-route="inspect/queue-topology">Queue topology</a>
             <a href="#/inspect/cells" data-route="inspect/cells">Cells &amp; tasks</a>
+          </div>
+          <div class="navigation-group">
+            <span class="navigation-group-label">Validate</span>
+            <a href="#/validate/testing" data-route="validate/testing">Testing</a>
           </div>
           <div class="navigation-group">
             <span class="navigation-group-label">Project</span>

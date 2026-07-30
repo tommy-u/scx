@@ -26,6 +26,7 @@ use scx_snake_inspector::launcher::SnakeLauncher;
 use scx_snake_inspector::model::{CellMetricCounters, CpuPair};
 use scx_snake_inspector::policies::{InvalidPolicy, PolicyCatalog, PolicyChoice};
 use scx_snake_inspector::scope::TaskScope;
+use scx_snake_inspector::testing::{MatrixConfig, TestingController};
 use scx_snake_inspector::topology::{CpuInfo, TopologyView};
 use serde_json::{json, Value};
 use tower::ServiceExt;
@@ -1872,6 +1873,264 @@ async fn policy_catalog_is_readable_and_activation_requires_the_session_token() 
 }
 
 #[tokio::test]
+async fn testing_matrix_endpoint_groups_compatible_policies_by_fairness() {
+    let dashboard = dashboard();
+    dashboard.set_policy_catalog(
+        Some(PolicyCatalog {
+            policies: vec![
+                PolicyChoice {
+                    id: "basic.toml".into(),
+                    name: "basic".into(),
+                    source: String::new(),
+                    rung_count: 1,
+                    mask_table_count: 0,
+                    cell_count: 0,
+                    queue_policy: false,
+                    summary: String::new(),
+                },
+                PolicyChoice {
+                    id: "cell-queues.toml".into(),
+                    name: "cell queues".into(),
+                    source: "[queues]\n".into(),
+                    rung_count: 1,
+                    mask_table_count: 0,
+                    cell_count: 2,
+                    queue_policy: true,
+                    summary: String::new(),
+                },
+            ],
+            invalid: Vec::new(),
+        }),
+        None,
+    );
+    let (tx, _rx) = mpsc::channel();
+    let root = tempfile::tempdir().unwrap();
+    let context = ApiContext::new(dashboard, tx, "secret", root.path().to_path_buf())
+        .with_testing(TestingController::new(MatrixConfig::new(60, 0, 8).unwrap()));
+
+    let response = router(context)
+        .oneshot(
+            Request::builder()
+                .uri("/api/testing/matrix")
+                .header("host", "127.0.0.1:8788")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let body: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(body["status"], "idle");
+    assert_eq!(body["matrix"]["duration_secs"], 60);
+    assert_eq!(body["matrix"]["shard_count"], 8);
+    assert_eq!(body["matrix"]["total_cases"], 16);
+    assert_eq!(body["matrix"]["groups"][0]["fairness"], "fifo");
+    assert_eq!(
+        body["matrix"]["groups"][0]["rows"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(body["matrix"]["groups"][1]["fairness"], "vtime");
+    assert_eq!(
+        body["matrix"]["groups"][1]["rows"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn testing_run_and_stop_require_the_session_token() {
+    let dashboard = dashboard();
+    dashboard.set_policy_catalog(
+        Some(PolicyCatalog {
+            policies: vec![PolicyChoice {
+                id: "basic.toml".into(),
+                name: "basic".into(),
+                source: String::new(),
+                rung_count: 1,
+                mask_table_count: 0,
+                cell_count: 0,
+                queue_policy: false,
+                summary: String::new(),
+            }],
+            invalid: Vec::new(),
+        }),
+        None,
+    );
+    let (tx, _rx) = mpsc::channel();
+    let root = tempfile::tempdir().unwrap();
+    let context = ApiContext::new(dashboard, tx, "secret", root.path().to_path_buf())
+        .with_testing(TestingController::new(MatrixConfig::new(60, 0, 1).unwrap()));
+
+    let unauthorized = router(context.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/testing/run")
+                .header("host", "127.0.0.1:8788")
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+    let started = router(context.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/testing/run")
+                .header("host", "127.0.0.1:8788")
+                .header("content-type", "application/json")
+                .header(CSRF_HEADER, "secret")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(started.status(), StatusCode::OK);
+    let body = started.into_body().collect().await.unwrap().to_bytes();
+    let body: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(body["status"], "running");
+
+    let stopped = router(context)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/testing/stop")
+                .header("host", "127.0.0.1:8788")
+                .header("content-type", "application/json")
+                .header(CSRF_HEADER, "secret")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(stopped.status(), StatusCode::OK);
+    let body = stopped.into_body().collect().await.unwrap().to_bytes();
+    let body: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(body["status"], "stopped");
+}
+
+#[tokio::test]
+async fn active_testing_run_locks_manual_scheduler_lifecycle() {
+    let (root, launcher) = launcher_fixture();
+    let dashboard = dashboard();
+    let catalog = PolicyCatalog {
+        policies: vec![PolicyChoice {
+            id: "basic.toml".into(),
+            name: "basic".into(),
+            source: String::new(),
+            rung_count: 1,
+            mask_table_count: 0,
+            cell_count: 0,
+            queue_policy: false,
+            summary: String::new(),
+        }],
+        invalid: Vec::new(),
+    };
+    dashboard.set_policy_catalog(Some(catalog.clone()), None);
+    let testing = TestingController::new(MatrixConfig::new(60, 0, 1).unwrap());
+    testing.start(&catalog).unwrap();
+    let (tx, _rx) = mpsc::channel();
+    let context = ApiContext::new(dashboard, tx, "secret", root.path().to_path_buf())
+        .with_launcher(launcher)
+        .with_testing(testing);
+
+    for endpoint in [
+        "/api/scheduler/start",
+        "/api/scheduler/restart",
+        "/api/scheduler/stop",
+    ] {
+        let body = if endpoint.ends_with("stop") {
+            "{}"
+        } else {
+            r#"{"policy_id":"basic.toml","fairness":"fifo","verbose":false}"#
+        };
+        let response = router(context.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(endpoint)
+                    .header("host", "127.0.0.1:8788")
+                    .header("content-type", "application/json")
+                    .header(CSRF_HEADER, "secret")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT, "{endpoint}");
+    }
+}
+
+#[tokio::test]
+async fn managed_scheduler_locks_testing_start_before_sched_ext_attach() {
+    let (root, launcher) = launcher_fixture();
+    let dashboard = dashboard();
+    dashboard.set_policy_catalog(
+        Some(PolicyCatalog {
+            policies: vec![PolicyChoice {
+                id: "basic.toml".into(),
+                name: "basic".into(),
+                source: String::new(),
+                rung_count: 1,
+                mask_table_count: 0,
+                cell_count: 0,
+                queue_policy: false,
+                summary: String::new(),
+            }],
+            invalid: Vec::new(),
+        }),
+        None,
+    );
+    let testing = TestingController::new(MatrixConfig::new(60, 0, 1).unwrap());
+    let (tx, _rx) = mpsc::channel();
+    let context = ApiContext::new(dashboard, tx, "secret", root.path().to_path_buf())
+        .with_launcher(launcher)
+        .with_testing(testing);
+
+    let scheduler = router(context.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/scheduler/start")
+                .header("host", "127.0.0.1:8788")
+                .header("content-type", "application/json")
+                .header(CSRF_HEADER, "secret")
+                .body(Body::from(
+                    r#"{"policy_id":"basic.toml","fairness":"fifo","verbose":false}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(scheduler.status(), StatusCode::OK);
+
+    let testing = router(context)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/testing/run")
+                .header("host", "127.0.0.1:8788")
+                .header("content-type", "application/json")
+                .header(CSRF_HEADER, "secret")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(testing.status(), StatusCode::CONFLICT);
+}
+
+#[tokio::test]
 async fn event_stream_emits_an_immediate_snapshot() {
     let dashboard = dashboard();
     dashboard.ingest(0, &BTreeMap::new());
@@ -1907,6 +2166,38 @@ async fn event_stream_emits_an_immediate_snapshot() {
     let data = frame.into_data().unwrap();
     let event = std::str::from_utf8(&data).unwrap();
     assert!(event.contains("\"total\":2"), "unexpected event: {event}");
+}
+
+#[tokio::test]
+async fn event_stream_closes_when_server_shutdown_starts() {
+    let dashboard = dashboard();
+    dashboard.ingest(0, &BTreeMap::new());
+    let (tx, _rx) = mpsc::channel();
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let root = tempfile::tempdir().unwrap();
+    let app = router(
+        ApiContext::new(dashboard, tx, "secret", root.path().to_path_buf())
+            .with_shutdown(shutdown_rx),
+    );
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/events?window_ms=1000")
+                .header("host", "127.0.0.1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let mut body = response.into_body();
+    assert!(body.frame().await.unwrap().unwrap().is_data());
+
+    shutdown_tx.send(true).unwrap();
+    let end = tokio::time::timeout(Duration::from_secs(1), body.frame())
+        .await
+        .unwrap();
+    assert!(end.is_none());
 }
 
 #[tokio::test]

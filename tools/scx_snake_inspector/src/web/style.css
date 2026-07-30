@@ -19,6 +19,125 @@
   letter-spacing: 0;
 }
 
+.testing-controls {
+  align-items: center;
+}
+
+.testing-workspace {
+  min-width: 0;
+  display: grid;
+  gap: 14px;
+}
+
+.testing-matrix-wrap {
+  min-width: 0;
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.testing-matrix {
+  width: 100%;
+  min-width: 780px;
+  border-collapse: collapse;
+  table-layout: fixed;
+  font-size: 0.8rem;
+}
+
+.testing-matrix th,
+.testing-matrix td {
+  height: 48px;
+  padding: 7px 9px;
+  border-right: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  text-align: center;
+  vertical-align: middle;
+}
+
+.testing-matrix th:first-child {
+  width: 220px;
+  position: sticky;
+  left: 0;
+  z-index: 2;
+  text-align: left;
+  background: var(--surface);
+}
+
+.testing-matrix .testing-fairness-row th {
+  height: 34px;
+  color: var(--ink);
+  background: var(--surface-muted);
+  font-size: 0.75rem;
+  text-transform: uppercase;
+}
+
+.testing-result {
+  width: 100%;
+  height: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  color: var(--muted);
+  background: transparent;
+  cursor: pointer;
+}
+
+.testing-result:hover,
+.testing-result:focus-visible {
+  border-color: var(--border-strong);
+  outline: 0;
+}
+
+.testing-result.passed {
+  color: var(--active);
+  background: #e8f5f0;
+  font-weight: 700;
+}
+
+.testing-result.failed {
+  color: var(--danger);
+  background: #fcebea;
+  font-weight: 700;
+}
+
+.testing-result.aborted {
+  color: var(--muted);
+  background: var(--surface-muted);
+}
+
+.testing-result.running {
+  color: var(--accent);
+  background: #eaf2fa;
+  font-weight: 650;
+}
+
+.testing-result.unassigned {
+  color: var(--border-strong);
+  cursor: default;
+}
+
+.testing-result-symbol {
+  font-size: 1.1rem;
+  line-height: 1;
+}
+
+.testing-detail {
+  min-height: 74px;
+  padding: 12px 14px;
+  border-left: 3px solid var(--border-strong);
+  background: var(--surface-muted);
+  color: var(--muted);
+  font-size: 0.82rem;
+  overflow-wrap: anywhere;
+}
+
+.testing-detail strong {
+  color: var(--ink);
+}
+
 * {
   box-sizing: border-box;
 }

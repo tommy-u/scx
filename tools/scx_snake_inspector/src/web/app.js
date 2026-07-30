@@ -65,6 +65,7 @@ import {
   rungPercentages,
   rungTimingSummary,
   selectionRungHitFlow,
+  testingMatrixModel,
   workloadAssignmentRequest,
 } from "/assets/inspection.js";
 
@@ -197,6 +198,18 @@ const elements = {
   statsResetNotice: document.querySelector("#statsResetNotice"),
   startScheduler: document.querySelector("#startScheduler"),
   stopScheduler: document.querySelector("#stopScheduler"),
+  testingDetail: document.querySelector("#testingDetail"),
+  testingFailed: document.querySelector("#testingFailed"),
+  testingMatrix: document.querySelector("#testingMatrix"),
+  testingNotice: document.querySelector("#testingNotice"),
+  testingPassed: document.querySelector("#testingPassed"),
+  testingPending: document.querySelector("#testingPending"),
+  testingRunning: document.querySelector("#testingRunning"),
+  testingShard: document.querySelector("#testingShard"),
+  testingStatus: document.querySelector("#testingStatus"),
+  testingView: document.querySelector("#testingView"),
+  runTesting: document.querySelector("#runTesting"),
+  stopTesting: document.querySelector("#stopTesting"),
   tgidField: document.querySelector("#tgidField"),
   tgidInput: document.querySelector("#tgidInput"),
   tooltip: document.querySelector("#heatmapTooltip"),
@@ -298,6 +311,11 @@ const state = {
   snapshot: null,
   snapshotError: null,
   topology: null,
+  testing: null,
+  testingError: null,
+  testingLoading: false,
+  testingPendingMutation: false,
+  selectedTestingCaseId: null,
   windowMs: initialWindowMs,
   zoom: 1,
 };
@@ -332,6 +350,7 @@ async function start() {
   await loadFineTiming();
   await loadPolicyCatalog();
   await loadSchedulerControl();
+  await loadTestingMatrix();
   await loadHostContext();
   window.setInterval(loadInspection, 1_000);
   window.setInterval(loadQueueTiming, 1_000);
@@ -339,6 +358,7 @@ async function start() {
   window.setInterval(loadFineTiming, 1_000);
   window.setInterval(loadPolicyCatalog, 5_000);
   window.setInterval(loadSchedulerControl, 2_000);
+  window.setInterval(loadTestingMatrix, 1_000);
   window.setInterval(renderSchedulerUptime, 1_000);
   window.setInterval(loadHostContext, 30_000);
 }
@@ -508,6 +528,15 @@ function bindControls() {
   elements.startScheduler.addEventListener("click", startScheduler);
   elements.restartScheduler.addEventListener("click", restartScheduler);
   elements.stopScheduler.addEventListener("click", stopScheduler);
+  elements.runTesting.addEventListener("click", () => testingMutation("/api/testing/run"));
+  elements.stopTesting.addEventListener("click", () => testingMutation("/api/testing/stop"));
+  elements.testingMatrix.addEventListener("click", (event) => {
+    const result = event.target.closest("[data-testing-case]");
+    if (result) {
+      state.selectedTestingCaseId = result.dataset.testingCase;
+      renderTesting();
+    }
+  });
   elements.resetAllStats.addEventListener("click", resetAllStats);
   elements.copyFeedback.addEventListener("click", copyFeedback);
   elements.clearFeedback.addEventListener("click", clearFeedback);
@@ -1398,6 +1427,7 @@ function renderRoute({ focusHeading = false } = {}) {
     elements.queueTopologyView,
     elements.cellsView,
     elements.schedulerControlView,
+    elements.testingView,
     elements.debuggingView,
     elements.operationsView,
     elements.roadmapView,
@@ -1419,6 +1449,8 @@ function renderRoute({ focusHeading = false } = {}) {
   } else if (state.route === "configure") {
     renderPolicyLibrary();
     renderSchedulerControl();
+  } else if (state.route === "validate/testing") {
+    renderTesting();
   } else if (state.route === "debugging") {
     renderDebugging();
   } else {
@@ -2034,6 +2066,129 @@ async function loadSchedulerControl() {
   }
 }
 
+async function loadTestingMatrix() {
+  if (state.testingLoading) {
+    return;
+  }
+  state.testingLoading = true;
+  try {
+    const response = await fetch("/api/testing/matrix", { cache: "no-store" });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(payload.error || `Testing matrix request failed (${response.status})`);
+    }
+    state.testing = payload;
+    state.testingError = null;
+  } catch (error) {
+    state.testingError = error.message;
+  } finally {
+    state.testingLoading = false;
+  }
+  if (state.route === "validate/testing") {
+    renderTesting();
+  } else if (state.route === "configure") {
+    renderSchedulerControl();
+  }
+}
+
+async function testingMutation(endpoint) {
+  if (state.testingPendingMutation) {
+    return;
+  }
+  state.testingPendingMutation = true;
+  hideElementNotice(elements.testingNotice);
+  renderTesting();
+  try {
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-snake-token": token,
+      },
+      body: "{}",
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(payload.error || `Testing request failed (${response.status})`);
+    }
+    state.testing = payload;
+    state.testingError = null;
+  } catch (error) {
+    state.testingError = error.message;
+    showElementNotice(elements.testingNotice, error.message, true);
+  } finally {
+    state.testingPendingMutation = false;
+    renderTesting();
+  }
+}
+
+function renderTesting() {
+  if (!state.testing) {
+    elements.testingStatus.textContent = state.testingError || "Loading testing matrix";
+    elements.runTesting.disabled = true;
+    elements.stopTesting.disabled = true;
+    elements.testingMatrix.innerHTML = "";
+    if (state.testingError) {
+      showElementNotice(elements.testingNotice, state.testingError, true);
+    }
+    return;
+  }
+  const model = testingMatrixModel(state.testing);
+  if (state.testingError) {
+    showElementNotice(elements.testingNotice, state.testingError, true);
+  } else {
+    hideElementNotice(elements.testingNotice);
+  }
+  const running = model.status === "running";
+  elements.testingStatus.textContent = `${model.statusLabel} · ${model.durationSecs}s per case`;
+  elements.testingPassed.textContent = numberFormat.format(model.summary.passed);
+  elements.testingFailed.textContent = numberFormat.format(model.summary.failed);
+  elements.testingRunning.textContent = numberFormat.format(model.summary.running);
+  elements.testingPending.textContent = numberFormat.format(model.summary.pending);
+  elements.testingShard.textContent = model.aggregate
+    ? `All shards · ${model.reportingShards} of ${model.shardCount} reporting · ${model.totalCases} cases`
+    : `Shard ${model.shardIndex + 1} of ${model.shardCount} · ${model.assignedCases} assigned of ${model.totalCases}`;
+  elements.runTesting.disabled = model.aggregate || running || state.testingPendingMutation;
+  elements.stopTesting.disabled = model.aggregate || !running || state.testingPendingMutation;
+  const headings = model.workloads
+    .map((workload) => `<th scope="col">${escapeHtml(workload.label)}</th>`)
+    .join("");
+  const rows = model.groups.map((group) => {
+    const groupRow = `<tr class="testing-fairness-row"><th colspan="${model.workloads.length + 1}" scope="rowgroup">${escapeHtml(group.label)}</th></tr>`;
+    const policyRows = group.rows.map((row) => {
+      const byWorkload = new Map(row.cases.map((testCase) => [testCase.workload, testCase]));
+      const cells = model.workloads.map((workload) => {
+        const testCase = byWorkload.get(workload.id);
+        if (!testCase) {
+          return '<td><span class="testing-result unassigned">—</span></td>';
+        }
+        const content = testCase.symbol
+          ? `<span class="testing-result-symbol" aria-hidden="true">${testCase.symbol}</span>`
+          : escapeHtml(testCase.label);
+        return `<td><button class="testing-result ${escapeHtml(testCase.className)}" type="button" data-testing-case="${escapeHtml(testCase.id)}" aria-label="${escapeHtml(`${row.policyName}, ${workload.label}: ${testCase.label}`)}" title="${escapeHtml(testCase.tooltip)}"${testCase.assigned ? "" : " disabled"}>${content}</button></td>`;
+      }).join("");
+      return `<tr><th scope="row">${escapeHtml(row.policyName)}</th>${cells}</tr>`;
+    }).join("");
+    return groupRow + policyRows;
+  }).join("");
+  elements.testingMatrix.innerHTML = `<thead><tr><th scope="col">Policy</th>${headings}</tr></thead><tbody>${rows}</tbody>`;
+
+  const selected = model.groups
+    .flatMap((group) => group.rows)
+    .flatMap((row) => row.cases.map((testCase) => ({ ...testCase, policyName: row.policyName })))
+    .find((testCase) => testCase.id === state.selectedTestingCaseId);
+  if (selected) {
+    const elapsed = selected.status === "running"
+      ? "In progress"
+      : (selected.elapsedMs ? `${(selected.elapsedMs / 1_000).toFixed(1)}s` : "Not started");
+    const workloadLabel = model.workloads.find((workload) => workload.id === selected.workload)?.label
+      || selected.workload;
+    elements.testingDetail.innerHTML = `<strong>${escapeHtml(selected.policyName)} · ${escapeHtml(workloadLabel)}</strong><br>Status: ${escapeHtml(selected.label)} · Runtime: ${escapeHtml(elapsed)}${selected.failure ? `<br>Failure: ${escapeHtml(selected.failure)}` : ""}`;
+  } else {
+    elements.testingDetail.textContent = "Select a result to inspect its runtime and failure details.";
+  }
+}
+
 function renderSchedulerControl() {
   const control = state.schedulerControl;
   if (control && !state.schedulerFormInitialized) {
@@ -2056,13 +2211,14 @@ function renderSchedulerControl() {
     state.schedulerControlPending,
     Boolean(state.selectedLifecyclePolicyId),
   );
-  const locked = model.configLocked;
+  const testingLocked = state.testing?.status === "running";
+  const locked = model.configLocked || testingLocked;
   elements.schedulerExitDumpEnabled.disabled = locked;
   elements.schedulerVerbose.disabled = locked;
   elements.schedulerExitDumpLen.disabled = locked || !elements.schedulerExitDumpEnabled.checked;
-  elements.startScheduler.disabled = model.startDisabled;
-  elements.restartScheduler.disabled = model.restartDisabled;
-  elements.stopScheduler.disabled = model.stopDisabled;
+  elements.startScheduler.disabled = model.startDisabled || testingLocked;
+  elements.restartScheduler.disabled = model.restartDisabled || testingLocked;
+  elements.stopScheduler.disabled = model.stopDisabled || testingLocked;
   renderStatsResetControl();
 
   elements.schedulerControlState.className = `scheduler-state ${model.stateName}`;
@@ -2072,7 +2228,13 @@ function renderSchedulerControl() {
     control,
     state.schedulerMutationError || state.schedulerControlError,
   );
-  if (message) {
+  if (testingLocked) {
+    showElementNotice(
+      elements.schedulerControlNotice,
+      "Scheduler controls are locked while the VM testing matrix is running.",
+      "info",
+    );
+  } else if (message) {
     showElementNotice(elements.schedulerControlNotice, message);
   } else if (state.policyCandidate?.actionKind === "activate") {
     const policy = control?.policies?.find(

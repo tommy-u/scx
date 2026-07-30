@@ -31,12 +31,49 @@ pub struct Args {
     /// Snake executable used for scheduler launches from the dashboard.
     #[arg(long, default_value = "target/release/scx_snake")]
     pub snake_bin: PathBuf,
+
+    /// Enable VM-only scheduler matrix execution from the dashboard.
+    #[arg(long)]
+    pub enable_testing: bool,
+
+    /// Runtime for each scheduler/workload combination.
+    #[arg(long, default_value = "60s", value_parser = parse_duration)]
+    pub testing_duration: Duration,
+
+    /// Zero-based matrix shard assigned to this inspector.
+    #[arg(long, default_value_t = 0)]
+    pub testing_shard_index: usize,
+
+    /// Total number of matrix shards.
+    #[arg(long, default_value_t = 1)]
+    pub testing_shard_count: usize,
+
+    /// Directory where case results and diagnostic logs are retained.
+    #[arg(long, default_value = "/tmp/scx-snake-testing")]
+    pub testing_artifact_dir: PathBuf,
+
+    /// Read-only campaign directory containing shard-N/run.json files.
+    #[arg(long, requires = "enable_testing")]
+    pub testing_import_dir: Option<PathBuf>,
+
+    /// Disable unrelated host integrations in dedicated test guests/viewers.
+    #[arg(long, requires = "enable_testing")]
+    pub testing_isolated: bool,
 }
 
 impl Args {
     pub fn validate(&self) -> Result<(), String> {
         if self.window > self.max_window {
             return Err("--window cannot exceed --max-window".into());
+        }
+        if self.enable_testing && self.testing_duration < Duration::from_secs(60) {
+            return Err("--testing-duration must be at least 60s".into());
+        }
+        if self.enable_testing && self.testing_shard_count == 0 {
+            return Err("--testing-shard-count must be greater than zero".into());
+        }
+        if self.enable_testing && self.testing_shard_index >= self.testing_shard_count {
+            return Err("--testing-shard-index must be less than --testing-shard-count".into());
         }
         Ok(())
     }

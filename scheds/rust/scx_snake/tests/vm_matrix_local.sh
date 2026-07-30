@@ -1,0 +1,141 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0-only
+
+set -euo pipefail
+
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+repo=${SNAKE_REPO:-$(cd -- "${script_dir}/../../../.." && pwd)}
+inspector_bin=${1:-${repo}/tools/scx_snake_inspector/target/release/scx_snake_inspector}
+snake_bin=${2:-${repo}/target/release/scx_snake}
+campaign_dir=${3:-/tmp/scx-snake-testing/campaign-$(date +%Y%m%d-%H%M%S)}
+shard_count=${SNAKE_TESTING_SHARDS:-8}
+guest_cpus=${SNAKE_TESTING_GUEST_CPUS:-8}
+guest_memory=${SNAKE_TESTING_GUEST_MEMORY:-4G}
+vm_timeout_secs=${SNAKE_TESTING_VM_TIMEOUT_SECS:-2700}
+vng=${VNG:-vng}
+pids=()
+
+fail() {
+    echo "Snake local VM matrix: $*" >&2
+    exit 1
+}
+
+cleanup() {
+    local pid
+
+    trap - EXIT INT TERM
+    for pid in "${pids[@]}"; do
+        kill "${pid}" 2>/dev/null || true
+    done
+    for pid in "${pids[@]}"; do
+        wait "${pid}" 2>/dev/null || true
+    done
+}
+trap cleanup EXIT INT TERM
+
+command -v "${vng}" >/dev/null || fail "virtme-ng is required (set VNG to override)"
+command -v jq >/dev/null || fail "jq is required"
+command -v stress-ng >/dev/null || fail "stress-ng is required"
+command -v timeout >/dev/null || fail "timeout is required"
+[[ -r /dev/kvm && -w /dev/kvm ]] || fail "/dev/kvm is not usable"
+[[ -r /sys/kernel/sched_ext/state ]] || fail "the host kernel does not expose sched_ext"
+[[ ${shard_count} =~ ^[1-9][0-9]*$ ]] || fail "SNAKE_TESTING_SHARDS must be positive"
+[[ ${guest_cpus} =~ ^[1-9][0-9]*$ ]] || fail "SNAKE_TESTING_GUEST_CPUS must be positive"
+[[ ${vm_timeout_secs} =~ ^[1-9][0-9]*$ ]] || fail "SNAKE_TESTING_VM_TIMEOUT_SECS must be positive"
+(( guest_cpus >= 2 )) || fail "each guest requires at least two CPUs"
+[[ -x ${inspector_bin} ]] || fail "inspector binary is not executable: ${inspector_bin}"
+[[ -x ${snake_bin} ]] || fail "Snake binary is not executable: ${snake_bin}"
+
+inspector_bin=$(realpath "${inspector_bin}")
+snake_bin=$(realpath "${snake_bin}")
+if [[ -e ${campaign_dir} ]]; then
+    [[ -d ${campaign_dir} ]] || fail "campaign path is not a directory: ${campaign_dir}"
+    [[ -z $(find "${campaign_dir}" -mindepth 1 -maxdepth 1 -print -quit) ]] ||
+        fail "campaign directory is not empty: ${campaign_dir}"
+else
+    mkdir -p "${campaign_dir}"
+fi
+campaign_dir=$(realpath "${campaign_dir}")
+
+echo "Campaign: ${campaign_dir}"
+echo "Aggregate UI command:"
+printf '  %q --listen 127.0.0.1:8788 --snake-bin %q --policy-dir %q --enable-testing --testing-isolated --testing-duration 60s --testing-shard-count %q --testing-import-dir %q\n' \
+    "${inspector_bin}" "${snake_bin}" "${repo}/scheds/rust/scx_snake/examples" \
+    "${shard_count}" "${campaign_dir}"
+
+declare -a shard_pids
+for ((shard = 0; shard < shard_count; shard++)); do
+    shard_dir=${campaign_dir}/shard-${shard}
+    mkdir -p "${shard_dir}"
+    printf -v shard_command '%q %q %q %q %q %q' \
+        "${script_dir}/vm_matrix_shard.sh" \
+        "${inspector_bin}" \
+        "${snake_bin}" \
+        "${shard}" \
+        "${shard_count}" \
+        "${shard_dir}"
+    printf -v vm_boot_command '%q --run --name %q --cpus %q --memory %q --user root --rwdir %q --exec %q' \
+        "${vng}" "snake-shard-${shard}" "${guest_cpus}" "${guest_memory}" \
+        "${campaign_dir}" "${shard_command}"
+    printf -v guest_command 'SNAKE_TESTING_VM_BOOT_COMMAND=%q %s' \
+        "${vm_boot_command}" "${shard_command}"
+    (
+        rc=0
+        marker=${campaign_dir}/shard-${shard}.exit
+        write_marker() {
+            printf '%s\n' "$1" >"${marker}.tmp"
+            mv "${marker}.tmp" "${marker}"
+        }
+        # Invoked indirectly by the signal trap.
+        # shellcheck disable=SC2317
+        stop_vm() {
+            trap - INT TERM
+            kill -TERM "${vm_pid}" 2>/dev/null || true
+            wait "${vm_pid}" 2>/dev/null || true
+            write_marker 143
+            exit 143
+        }
+        timeout --signal=TERM --kill-after=30s "${vm_timeout_secs}s" \
+            "${vng}" --run \
+            --name "snake-shard-${shard}" \
+            --cpus "${guest_cpus}" \
+            --memory "${guest_memory}" \
+            --user root \
+            --rwdir "${campaign_dir}" \
+            --exec "${guest_command}" \
+            </dev/null &
+        vm_pid=$!
+        trap stop_vm INT TERM
+        wait "${vm_pid}" || rc=$?
+        trap - INT TERM
+        write_marker "${rc}"
+        exit "${rc}"
+    ) >"${campaign_dir}/shard-${shard}-vm.log" 2>&1 &
+    pid=$!
+    pids+=("${pid}")
+    shard_pids[shard]=${pid}
+done
+
+failed_vms=0
+for ((shard = 0; shard < shard_count; shard++)); do
+    rc=0
+    wait "${shard_pids[shard]}" || rc=$?
+    (( rc == 0 )) || failed_vms=$((failed_vms + 1))
+done
+pids=()
+
+passed=0
+failed=0
+completed=0
+for ((shard = 0; shard < shard_count; shard++)); do
+    result=${campaign_dir}/shard-${shard}/run.json
+    [[ -f ${result} ]] || continue
+    passed=$((passed + $(jq '[.matrix.groups[].rows[].cases[] | select(.assigned and .status == "passed")] | length' "${result}")))
+    failed=$((failed + $(jq '[.matrix.groups[].rows[].cases[] | select(.assigned and (.status == "failed" or .status == "aborted"))] | length' "${result}")))
+    [[ $(jq -r '.status' "${result}") == completed ]] && completed=$((completed + 1))
+done
+
+echo "Matrix complete: ${passed} passed, ${failed} failed, ${completed}/${shard_count} shards completed"
+(( failed_vms == 0 )) || fail "${failed_vms} VM shards exited unsuccessfully"
+(( failed == 0 )) || fail "${failed} scheduler/workload cases failed"
+(( completed == shard_count )) || fail "only ${completed}/${shard_count} shards completed"

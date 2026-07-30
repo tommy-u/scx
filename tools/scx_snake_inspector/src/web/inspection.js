@@ -11,6 +11,7 @@ const ROUTES = new Set([
   "inspect/policy-slots",
   "inspect/queue-topology",
   "inspect/cells",
+  "validate/testing",
   "debugging",
   "project/operations",
   "project/roadmap",
@@ -188,6 +189,142 @@ export function parseInspectorRoute(hash) {
   return {
     route: ROUTES.has(route) ? route : "overview",
     feedbackOpen: false,
+  };
+}
+
+const TESTING_WORKLOAD_LABELS = {
+  cpu_saturation: "CPU saturation",
+  waker_wakee: "Waker / wakee",
+  mixed_affinity: "Mixed affinity",
+  fork_yield: "Fork / yield churn",
+};
+
+const TESTING_STATUS = {
+  pending: { label: "Pending", symbol: "", className: "pending" },
+  running: { label: "Running", symbol: "", className: "running" },
+  passed: { label: "Passed", symbol: "✓", className: "passed" },
+  failed: { label: "Failed", symbol: "×", className: "failed" },
+  aborted: { label: "Stopped", symbol: "", className: "aborted" },
+};
+
+function testingRuntimeLabel(status, elapsedMs) {
+  if (status === "running") return "In progress";
+  if (!elapsedMs) return "Not started";
+  return `${(elapsedMs / 1_000).toFixed(1)}s`;
+}
+
+function testingMemoryLabel(bytes) {
+  if (!bytes) return null;
+  return `${(bytes / (1024 ** 3)).toFixed(1)} GiB RAM`;
+}
+
+function testingCaseTooltip({
+  fairness,
+  policyName,
+  workload,
+  status,
+  statusLabel,
+  elapsedMs,
+  shard,
+  shardCount,
+  environment,
+}) {
+  const lines = [
+    `${String(fairness || "unknown").toUpperCase()} · ${policyName} · ${TESTING_WORKLOAD_LABELS[workload] || workload}`,
+    `Status: ${statusLabel}`,
+    `Runtime: ${testingRuntimeLabel(status, elapsedMs)}`,
+    `Shard: ${shard + 1} of ${shardCount}`,
+  ];
+  if (environment) {
+    const vm = [
+      environment.virtualization || "VM",
+      environment.cpu_count ? `${environment.cpu_count} vCPUs` : null,
+      testingMemoryLabel(Number(environment.memory_bytes || 0)),
+    ].filter(Boolean);
+    if (vm.length) lines.push(`VM: ${vm.join(" · ")}`);
+    if (environment.kernel_release) lines.push(`Kernel: ${environment.kernel_release}`);
+    if (environment.snake_version) lines.push(`Snake: ${environment.snake_version}`);
+    if (environment.boot_command) lines.push(`Boot: ${environment.boot_command}`);
+  }
+  return lines.join("\n");
+}
+
+export function testingMatrixModel(run) {
+  const matrix = run?.matrix || {};
+  const aggregate = Boolean(matrix.aggregate);
+  const environments = new Map(
+    (run?.shard_environments || []).map((item) => [
+      Number(item.shard_index),
+      item.environment,
+    ]),
+  );
+  if (!aggregate && run?.environment && !environments.has(Number(matrix.shard_index || 0))) {
+    environments.set(Number(matrix.shard_index || 0), run.environment);
+  }
+  const summary = { passed: 0, failed: 0, running: 0, pending: 0 };
+  const workloads = (matrix.workloads || []).map((id) => ({
+    id,
+    label: TESTING_WORKLOAD_LABELS[id] || id,
+  }));
+  const groups = (matrix.groups || []).map((group) => ({
+    fairness: group.fairness,
+    label: String(group.fairness || "unknown").toUpperCase(),
+    rows: (group.rows || []).map((row) => ({
+      policyId: row.policy_id,
+      policyName: row.policy_name || row.policy_id,
+      cases: (row.cases || []).map((testCase) => {
+        const shard = Number(testCase.shard ?? matrix.shard_index ?? 0);
+        const assigned = aggregate || testCase.assigned !== false;
+        const status = assigned ? (testCase.status || "pending") : "unassigned";
+        const presentation = assigned
+          ? (TESTING_STATUS[status] || TESTING_STATUS.pending)
+          : { label: "Other shard", symbol: "", className: "unassigned" };
+        if (assigned) {
+          if (status === "passed") summary.passed += 1;
+          else if (status === "failed") summary.failed += 1;
+          else if (status === "running") summary.running += 1;
+          else if (status === "pending") summary.pending += 1;
+        }
+        return {
+          id: testCase.id,
+          workload: testCase.workload,
+          assigned,
+          status,
+          label: presentation.label,
+          symbol: presentation.symbol,
+          className: presentation.className,
+          elapsedMs: Number(testCase.elapsed_ms || 0),
+          failure: testCase.failure || null,
+          shard,
+          tooltip: testingCaseTooltip({
+            fairness: group.fairness,
+            policyName: row.policy_name || row.policy_id,
+            workload: testCase.workload,
+            status,
+            statusLabel: presentation.label,
+            elapsedMs: Number(testCase.elapsed_ms || 0),
+            shard,
+            shardCount: Number(matrix.shard_count || 1),
+            environment: environments.get(shard),
+          }),
+        };
+      }),
+    })),
+  }));
+  const status = String(run?.status || "idle");
+  return {
+    status,
+    statusLabel: status.charAt(0).toUpperCase() + status.slice(1),
+    durationSecs: Number(matrix.duration_secs || 60),
+    shardIndex: Number(matrix.shard_index || 0),
+    shardCount: Number(matrix.shard_count || 1),
+    assignedCases: Number(matrix.assigned_cases || 0),
+    totalCases: Number(matrix.total_cases || 0),
+    aggregate,
+    reportingShards: Number(matrix.reporting_shards || 0),
+    workloads,
+    groups,
+    summary,
   };
 }
 

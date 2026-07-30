@@ -1,0 +1,65 @@
+name: Snake VM failure matrix
+
+on:
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: Runner label; each job boots one VM guest
+        required: true
+        default: ubuntu-24.04
+        type: string
+
+env:
+  BPF_CLANG: clang-19
+  SCX_PACKAGES: "pkg-config lld clang clang-19 llvm-19 libelf-dev libzstd-dev protobuf-compiler libseccomp-dev libcap-ng-dev stress-ng mold jq curl"
+  RUSTFLAGS: "-C linker=clang -C link-arg=-fuse-ld=mold"
+  RUSTC_WRAPPER: sccache
+  SCCACHE_GHA_ENABLED: "true"
+
+jobs:
+  snake-matrix:
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: mozilla-actions/sccache-action@v0.0.9
+        with:
+          disable_annotations: true
+      - uses: ./.github/actions/install-deps-action
+      - name: Build Snake and inspector
+        run: |
+          cargo build --profile ci --locked -p scx_snake
+          cargo build --profile ci --locked \
+            --manifest-path tools/scx_snake_inspector/Cargo.toml
+      - name: Run VM shard
+        uses: likewhatevs/vng-action@v0.7.0
+        with:
+          name: scx__stable__linux-rolling-stable__${{ runner.arch }}
+          kernel-url: https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git
+          kernel-tag: linux-rolling-stable
+          kconfig: kernel.config
+          version: v21
+          network: user
+          verbose: true
+          workspace-rw: true
+          run: |
+            export PS4='+ $(date "+%H:%M:%S") '
+            export SNAKE_TESTING_VM_BOOT_COMMAND="vng-action --kernel linux-rolling-stable --network user --workspace-rw"
+            set -x
+            scheds/rust/scx_snake/tests/vm_matrix_shard.sh \
+              tools/scx_snake_inspector/target/ci/scx_snake_inspector \
+              target/ci/scx_snake \
+              ${{ matrix.shard }} 8 \
+              "$GITHUB_WORKSPACE/artifacts/snake-testing/shard-${{ matrix.shard }}"
+      - name: Upload shard artifacts
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: snake-testing-shard-${{ matrix.shard }}
+          path: artifacts/snake-testing/shard-${{ matrix.shard }}
+          if-no-files-found: error

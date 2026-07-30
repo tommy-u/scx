@@ -21,6 +21,9 @@ The embedded interface is organized by purpose rather than a fixed view count:
   estimates, release blockers, Mitosis gaps, and implementation dependencies.
 - **Debugging** provides the exact scheduler identity, command, non-default
   configuration, installed policy, and a copyable escalation snapshot.
+- **Validate** contains **Testing**, a VM-only failure matrix grouped by FIFO,
+  VTIME, and EEVDF. Each compatible policy runs for one minute under CPU
+  saturation, waker/wakee switching, mixed affinity, and fork/yield churn.
 
 The Project pages are curated presentations of the review under
 [`docs/snake-review/`](../../docs/snake-review/README.md); that repository report
@@ -109,6 +112,70 @@ Useful options:
 --policy-dir scheds/rust/scx_snake/examples
 --snake-bin target/release/scx_snake
 ```
+
+## VM failure matrix
+
+The testing runner deliberately refuses to execute outside a VM. Start one
+shard inside a two-CPU-or-larger guest and use port 8788 when another
+inspector is already using the default port:
+
+```bash
+sudo tools/scx_snake_inspector/target/release/scx_snake_inspector \
+  --listen 127.0.0.1:8788 \
+  --enable-testing \
+  --testing-isolated \
+  --testing-duration 60s \
+  --testing-shard-index 0 \
+  --testing-shard-count 8 \
+  --testing-artifact-dir /tmp/scx-snake-testing/shard-0
+```
+
+Open `http://127.0.0.1:8788/#/validate/testing`, then choose **Run assigned
+shard**. A check means the scheduler and workload completed the full window
+without a kernel failure signature. An X means Snake exited or dmesg reported
+a runnable-task stall, sched_ext error/watchdog, BPF error, lockup, oops, or
+panic. Hover a case for its runtime, shard VM allocation, kernel and Snake
+build, and VM boot command. This first version does not grade fairness,
+throughput, or latency.
+
+For a headless guest, use
+`scheds/rust/scx_snake/tests/vm_matrix_shard.sh`. The manual GitHub workflow
+`snake-vm-matrix.yml` allocates eight independent guests and uploads one result
+tree per shard. Each guest atomically updates `shard-N/run.json` after every
+case. New runs record their schema, campaign, policy-catalog fingerprint,
+kernel release, Snake version, and Snake binary fingerprint; the aggregate
+viewer rejects mismatched shards.
+
+To watch shards that share a campaign directory, start one host Inspector in
+read-only aggregate mode:
+
+```bash
+tools/scx_snake_inspector/target/release/scx_snake_inspector \
+  --listen 127.0.0.1:8788 \
+  --enable-testing \
+  --testing-isolated \
+  --testing-duration 60s \
+  --testing-shard-count 8 \
+  --testing-import-dir /tmp/scx-snake-testing/campaign-1
+```
+
+The aggregate view polls all eight live `run.json` files and leaves cases from
+missing shards pending. Run and Stop are disabled there because each guest
+owns its scheduler lifecycle. `--testing-isolated` disables the unrelated
+host-context refreshers and tracing collector in dedicated guests/viewers.
+
+On a KVM host with `vng` and a sched_ext-enabled host kernel, launch the eight
+guests in parallel with:
+
+```bash
+scheds/rust/scx_snake/tests/vm_matrix_local.sh
+```
+
+The launcher prints the matching aggregate UI command and the campaign path.
+Override guest allocation with `SNAKE_TESTING_SHARDS`,
+`SNAKE_TESTING_GUEST_CPUS`, and `SNAKE_TESTING_GUEST_MEMORY`. Each VM has a
+45-minute host timeout by default; override it with
+`SNAKE_TESTING_VM_TIMEOUT_SECS`. Campaign directories must be new or empty.
 
 The listen address is intentionally restricted to loopback. The page remains
 available while Snake is stopped and starts a fresh history whenever Snake's

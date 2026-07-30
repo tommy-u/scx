@@ -16,9 +16,9 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use tokio_stream::wrappers::WatchStream;
-use tokio_stream::StreamExt;
 
 use crate::collector::{
     CallbackTimingRateResponse, CollectorCommand, FineTimingCallback, FineTimingControlResponse,
@@ -29,6 +29,7 @@ use crate::host_context::{ChartMetric, HostContextService};
 use crate::launcher::{LaunchFairness, LaunchOptions, LaunchRequest, SnakeLauncher};
 use crate::policies::PolicyActivation;
 use crate::scope::{resolve_scope, ScopeRequest};
+use crate::testing::{TestRun, TestingController};
 use crate::workload::{WorkloadCellResponse, WorkloadTarget};
 
 pub const CSRF_HEADER: &str = "x-snake-token";
@@ -47,6 +48,9 @@ pub struct ApiContext {
     initial_window_ms: u64,
     launcher: Option<SnakeLauncher>,
     host_context: Option<HostContextService>,
+    testing: Option<TestingController>,
+    lifecycle: Arc<tokio::sync::Mutex<()>>,
+    shutdown: Option<tokio::sync::watch::Receiver<bool>>,
 }
 
 impl ApiContext {
@@ -64,6 +68,9 @@ impl ApiContext {
             initial_window_ms: 10_000,
             launcher: None,
             host_context: None,
+            testing: None,
+            lifecycle: Arc::new(tokio::sync::Mutex::new(())),
+            shutdown: None,
         }
     }
 
@@ -79,6 +86,16 @@ impl ApiContext {
 
     pub fn with_host_context(mut self, host_context: HostContextService) -> Self {
         self.host_context = Some(host_context);
+        self
+    }
+
+    pub fn with_testing(mut self, testing: TestingController) -> Self {
+        self.testing = Some(testing);
+        self
+    }
+
+    pub fn with_shutdown(mut self, shutdown: tokio::sync::watch::Receiver<bool>) -> Self {
+        self.shutdown = Some(shutdown);
         self
     }
 }
@@ -122,12 +139,69 @@ pub fn router(context: ApiContext) -> Router {
         .route("/api/scheduler/start", post(start_scheduler))
         .route("/api/scheduler/restart", post(restart_scheduler))
         .route("/api/scheduler/stop", post(stop_scheduler))
+        .route("/api/testing/matrix", get(testing_matrix))
+        .route("/api/testing/run", post(start_testing))
+        .route("/api/testing/stop", post(stop_testing))
         .route("/api/stats/reset", post(reset_stats))
         .route("/api/events", get(events))
         .route("/api/scope", post(set_scope))
         .route("/api/cells/assignment", post(set_workload_cell))
         .layer(middleware::from_fn(require_loopback_host))
         .with_state(context)
+}
+
+async fn testing_matrix(State(context): State<ApiContext>) -> Result<Json<TestRun>, ApiError> {
+    let testing = context
+        .testing
+        .as_ref()
+        .ok_or_else(|| ApiError::unavailable("VM testing is not configured"))?;
+    let catalog = context.dashboard.policy_catalog();
+    testing
+        .snapshot_available(catalog.catalog.as_ref())
+        .map(Json)
+        .map_err(|error| ApiError::unavailable(format!("reading testing matrix: {error:#}")))
+}
+
+async fn start_testing(
+    State(context): State<ApiContext>,
+    headers: HeaderMap,
+    Json(_request): Json<EmptyRequest>,
+) -> Result<Json<TestRun>, ApiError> {
+    require_session_token(&headers, &context.token)?;
+    let _lifecycle = context.lifecycle.lock().await;
+    if context.launcher.is_some() {
+        let scheduler = scheduler_control_response(&context)?;
+        if scheduler.managed || scheduler.active {
+            return Err(ApiError::conflict(
+                "testing requires Snake and sched_ext to be stopped",
+            ));
+        }
+    }
+    let testing = context
+        .testing
+        .as_ref()
+        .ok_or_else(|| ApiError::unavailable("VM testing is not configured"))?;
+    let catalog = context.dashboard.policy_catalog();
+    testing
+        .start_available(catalog.catalog.as_ref())
+        .map(Json)
+        .map_err(|error| ApiError::bad_request(format!("starting testing matrix: {error:#}")))
+}
+
+async fn stop_testing(
+    State(context): State<ApiContext>,
+    headers: HeaderMap,
+    Json(_request): Json<EmptyRequest>,
+) -> Result<Json<TestRun>, ApiError> {
+    require_session_token(&headers, &context.token)?;
+    let _lifecycle = context.lifecycle.lock().await;
+    context
+        .testing
+        .as_ref()
+        .ok_or_else(|| ApiError::unavailable("VM testing is not configured"))?
+        .stop()
+        .map(Json)
+        .map_err(|error| ApiError::bad_request(format!("stopping testing matrix: {error:#}")))
 }
 
 async fn require_loopback_host(request: Request, next: Next) -> Response {
@@ -530,6 +604,8 @@ async fn start_scheduler(
     Json(request): Json<LaunchRequest>,
 ) -> Result<Json<SchedulerControl>, ApiError> {
     require_session_token(&headers, &context.token)?;
+    let _lifecycle = context.lifecycle.lock().await;
+    require_testing_idle(&context)?;
     let control = scheduler_control_response(&context)?;
     validate_lifecycle_policy(&control, &request, "started")?;
     let launcher = context
@@ -549,6 +625,8 @@ async fn restart_scheduler(
     Json(request): Json<LaunchRequest>,
 ) -> Result<Json<SchedulerControl>, ApiError> {
     require_session_token(&headers, &context.token)?;
+    let _lifecycle = context.lifecycle.lock().await;
+    require_testing_idle(&context)?;
     let control = scheduler_control_response(&context)?;
     validate_lifecycle_policy(&control, &request, "restarted")?;
     let launcher = context
@@ -572,6 +650,8 @@ async fn stop_scheduler(
     Json(_request): Json<EmptyRequest>,
 ) -> Result<Json<SchedulerControl>, ApiError> {
     require_session_token(&headers, &context.token)?;
+    let _lifecycle = context.lifecycle.lock().await;
+    require_testing_idle(&context)?;
     let launcher = context
         .launcher
         .clone()
@@ -977,6 +1057,7 @@ async fn events(
         .map_err(|error| ApiError::bad_request(error.to_string()))?;
 
     let receiver = context.dashboard.subscribe();
+    let mut shutdown = context.shutdown.clone();
     let dashboard = context.dashboard.clone();
     let window_ms = query.window_ms;
     let stream = WatchStream::new(receiver).map(move |_| {
@@ -992,6 +1073,17 @@ async fn events(
                 .data(serde_json::json!({ "error": error.to_string() }).to_string()),
         };
         Ok::<_, std::convert::Infallible>(event)
+    });
+    let stream = stream.take_until(async move {
+        let Some(shutdown) = shutdown.as_mut() else {
+            std::future::pending::<()>().await;
+            return;
+        };
+        while !*shutdown.borrow() {
+            if shutdown.changed().await.is_err() {
+                std::future::pending::<()>().await;
+            }
+        }
     });
 
     Ok(Sse::new(stream).keep_alive(
@@ -1057,6 +1149,19 @@ fn require_session_token(headers: &HeaderMap, token: &str) -> Result<(), ApiErro
     Ok(())
 }
 
+fn require_testing_idle(context: &ApiContext) -> Result<(), ApiError> {
+    if context
+        .testing
+        .as_ref()
+        .is_some_and(|testing| testing.is_running())
+    {
+        return Err(ApiError::conflict(
+            "scheduler lifecycle is locked while the testing matrix is running",
+        ));
+    }
+    Ok(())
+}
+
 struct ApiError {
     status: StatusCode,
     message: String,
@@ -1073,6 +1178,13 @@ impl ApiError {
     fn unauthorized(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::UNAUTHORIZED,
+            message: message.into(),
+        }
+    }
+
+    fn conflict(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
             message: message.into(),
         }
     }

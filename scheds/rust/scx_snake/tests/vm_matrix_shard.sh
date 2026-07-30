@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: GPL-2.0-only
+
+set -euo pipefail
+
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+repo=${SNAKE_REPO:-$(cd -- "${script_dir}/../../../.." && pwd)}
+inspector_bin=${1:-${repo}/tools/scx_snake_inspector/target/release/scx_snake_inspector}
+snake_bin=${2:-${repo}/target/release/scx_snake}
+shard_index=${3:-0}
+shard_count=${4:-8}
+artifact_dir=${5:-${repo}/artifacts/snake-testing/shard-${shard_index}}
+listen=${SNAKE_TESTING_LISTEN:-127.0.0.1:8788}
+base_url=http://${listen}
+inspector_pid=
+
+cleanup() {
+    local rc=$?
+
+    trap - EXIT INT TERM
+    if [[ -n ${inspector_pid} ]]; then
+        kill -INT "${inspector_pid}" 2>/dev/null || true
+        wait "${inspector_pid}" 2>/dev/null || true
+    fi
+    exit "${rc}"
+}
+trap cleanup EXIT INT TERM
+
+fail() {
+    echo "Snake VM matrix shard: $*" >&2
+    exit 1
+}
+
+(( EUID == 0 )) || fail "must run as root inside a VM"
+if command -v systemd-detect-virt >/dev/null; then
+    systemd-detect-virt --vm --quiet || fail "refusing to run outside a VM"
+else
+    grep -qw hypervisor /proc/cpuinfo || fail "refusing to run outside a VM"
+fi
+(( $(nproc) >= 2 )) || fail "requires at least two guest CPUs"
+[[ ${shard_count} =~ ^[1-9][0-9]*$ ]] || fail "shard count must be positive"
+[[ ${shard_index} =~ ^[0-9]+$ ]] || fail "shard index must be non-negative"
+(( shard_index < shard_count )) || fail "shard index must be less than shard count"
+[[ -x ${inspector_bin} ]] || fail "inspector binary is not executable: ${inspector_bin}"
+[[ -x ${snake_bin} ]] || fail "Snake binary is not executable: ${snake_bin}"
+command -v curl >/dev/null || fail "curl is required"
+command -v jq >/dev/null || fail "jq is required"
+
+mkdir -p "${artifact_dir}"
+"${inspector_bin}" \
+    --listen "${listen}" \
+    --snake-bin "${snake_bin}" \
+    --policy-dir "${repo}/scheds/rust/scx_snake/examples" \
+    --enable-testing \
+    --testing-isolated \
+    --testing-duration 60s \
+    --testing-shard-index "${shard_index}" \
+    --testing-shard-count "${shard_count}" \
+    --testing-artifact-dir "${artifact_dir}" \
+    >"${artifact_dir}/inspector.log" 2>&1 &
+inspector_pid=$!
+
+deadline=$((SECONDS + 30))
+while ! curl --fail --silent "${base_url}/api/testing/matrix" \
+    -H "host: ${listen}" >"${artifact_dir}/initial.json"; do
+    kill -0 "${inspector_pid}" 2>/dev/null || fail "inspector exited during startup"
+    (( SECONDS < deadline )) || fail "timed out waiting for the testing API"
+    sleep 0.2
+done
+
+token=$(curl --fail --silent "${base_url}/" -H "host: ${listen}" |
+    sed -n 's/.*name="snake-session-token" content="\([^"]*\)".*/\1/p')
+[[ -n ${token} ]] || fail "could not read the inspector session token"
+
+curl --fail --silent --show-error \
+    -X POST "${base_url}/api/testing/run" \
+    -H "host: ${listen}" \
+    -H "content-type: application/json" \
+    -H "x-snake-token: ${token}" \
+    -d '{}' >"${artifact_dir}/started.json"
+
+deadline=$((SECONDS + 2100))
+while :; do
+    kill -0 "${inspector_pid}" 2>/dev/null || fail "inspector exited during the test run"
+    curl --fail --silent "${base_url}/api/testing/matrix" \
+        -H "host: ${listen}" >"${artifact_dir}/latest.json"
+    status=$(jq -r '.status' "${artifact_dir}/latest.json")
+    case ${status} in
+        completed)
+            break
+            ;;
+        stopped)
+            fail "testing shard stopped before completion"
+            ;;
+        running)
+            ;;
+        *)
+            fail "unexpected testing status: ${status}"
+            ;;
+    esac
+    (( SECONDS < deadline )) || fail "testing shard exceeded 35 minutes"
+    sleep 1
+done
+
+cp "${artifact_dir}/latest.json" "${artifact_dir}/result.json"
+failed=$(jq '[.matrix.groups[].rows[].cases[] | select(.assigned and .status == "failed")] | length' \
+    "${artifact_dir}/result.json")
+passed=$(jq '[.matrix.groups[].rows[].cases[] | select(.assigned and .status == "passed")] | length' \
+    "${artifact_dir}/result.json")
+assigned=$(jq '.matrix.assigned_cases' "${artifact_dir}/result.json")
+echo "Shard ${shard_index}/${shard_count}: ${passed}/${assigned} passed, ${failed} failed"
+(( failed == 0 )) || fail "${failed} scheduler/workload cases failed"
+(( passed == assigned )) || fail "only ${passed} of ${assigned} assigned cases completed"
