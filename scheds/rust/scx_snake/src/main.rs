@@ -2611,6 +2611,153 @@ scope = "task_allowed"
 
     #[test]
     fn bpf_external_map_and_program_surface_is_stable() {
+        const EXPECTED_MAP_DEFINITIONS: &[&str] = &[
+            r#"struct {
+                __uint(type, BPF_MAP_TYPE_ARRAY);
+                __type(key, u32);
+                __type(value, struct snake_compiled_ladder);
+                __uint(max_entries, SNAKE_LADDER_SLOTS);
+            } compiled_ladders SEC(".maps");"#,
+            r#"struct {
+                __uint(type, BPF_MAP_TYPE_ARRAY);
+                __type(key, u32);
+                __type(value, u32);
+                __uint(max_entries, 1);
+            } active_ladder SEC(".maps");"#,
+            r#"struct {
+                __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+                __type(key, u32);
+                __type(value, u32);
+                __uint(max_entries, SNAKE_LADDER_SLOTS);
+            } ladder_readers SEC(".maps");"#,
+            r#"struct {
+                __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+                __type(key, u32);
+                __type(value, u64);
+                __uint(max_entries, SNAKE_LADDER_SLOTS * SNAKE_NR_STATS);
+            } stats SEC(".maps");"#,
+            r#"struct {
+                __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+                __type(key, u32);
+                __type(value, u64);
+                __uint(max_entries, SNAKE_LADDER_SLOTS * SNAKE_MAX_QUEUE_CELLS *
+                                            SNAKE_NR_CELL_STATS);
+            } cell_stats SEC(".maps");"#,
+            r#"struct {
+                __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+                __type(key, u32);
+                __type(value, struct snake_callback_timing);
+                __uint(max_entries, SNAKE_LADDER_SLOTS * SNAKE_NR_CALLBACKS);
+            } callback_timing SEC(".maps");"#,
+            r#"struct {
+                __uint(type, BPF_MAP_TYPE_ARRAY);
+                __type(key, u32);
+                __type(value, struct snake_fine_timing_config);
+                __uint(max_entries, 1);
+            } fine_timing_config SEC(".maps");"#,
+            r#"struct {
+                __uint(type, BPF_MAP_TYPE_RINGBUF);
+                __uint(max_entries, 1024 * 1024);
+            } fine_timing_events SEC(".maps");"#,
+            r#"struct {
+                __uint(type, BPF_MAP_TYPE_RINGBUF);
+                __uint(max_entries, 1024 * 1024);
+            } rung_timing_events SEC(".maps");"#,
+            r#"struct {
+                __uint(type, BPF_MAP_TYPE_RINGBUF);
+                __uint(max_entries, 1024 * 1024);
+            } queue_timing_events SEC(".maps");"#,
+            r#"struct {
+                __uint(type, BPF_MAP_TYPE_TASK_STORAGE);
+                __uint(map_flags, BPF_F_NO_PREALLOC);
+                __type(key, int);
+                __type(value, struct snake_task_runtime);
+            } task_runtimes SEC(".maps");"#,
+            r#"struct {
+                __uint(type, BPF_MAP_TYPE_TASK_STORAGE);
+                __uint(map_flags, BPF_F_NO_PREALLOC);
+                __type(key, int);
+                __type(value, struct snake_task_cell);
+            } task_cells SEC(".maps");"#,
+            r#"struct {
+                __uint(type, BPF_MAP_TYPE_ARRAY);
+                __type(key, u32);
+                __type(value, struct snake_queue_header);
+                __uint(max_entries, 1);
+            } queue_header SEC(".maps");"#,
+            r#"struct {
+                __uint(type, BPF_MAP_TYPE_ARRAY);
+                __type(key, u32);
+                __type(value, u32);
+                __uint(max_entries, SNAKE_MAX_CPUS);
+            } queue_cell_lookup SEC(".maps");"#,
+            r#"struct {
+                __uint(type, BPF_MAP_TYPE_ARRAY);
+                __type(key, u32);
+                __type(value, struct snake_queue_cell);
+                __uint(max_entries, SNAKE_MAX_QUEUE_CELLS);
+            } queue_cells SEC(".maps");"#,
+            r#"struct {
+                __uint(type, BPF_MAP_TYPE_ARRAY);
+                __type(key, u32);
+                __type(value, struct snake_normal_queue);
+                __uint(max_entries, SNAKE_MAX_NORMAL_QUEUES);
+            } normal_queues SEC(".maps");"#,
+            r#"struct {
+                __uint(type, BPF_MAP_TYPE_ARRAY);
+                __type(key, u32);
+                __type(value, struct snake_cpu_queue);
+                __uint(max_entries, SNAKE_MAX_CPUS);
+            } cpu_queues SEC(".maps");"#,
+            r#"struct {
+                __uint(type, BPF_MAP_TYPE_ARRAY);
+                __type(key, u32);
+                __type(value, struct snake_queue_cell_masks);
+                __uint(max_entries, SNAKE_MAX_QUEUE_CELLS);
+            } queue_cell_masks SEC(".maps");"#,
+            r#"struct {
+                __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+                __type(key, u32);
+                __type(value, struct snake_queue_cpu_state);
+                __uint(max_entries, 1);
+            } queue_cpu_states SEC(".maps");"#,
+            r#"struct {
+                __uint(type, BPF_MAP_TYPE_ARRAY);
+                __type(key, u32);
+                __type(value, struct snake_mask_data);
+                __uint(max_entries, SNAKE_LADDER_SLOTS * SNAKE_MAX_MASK_TABLES * SNAKE_MAX_CPUS);
+            } mask_data SEC(".maps");"#,
+            r#"struct {
+                __uint(type, BPF_MAP_TYPE_ARRAY);
+                __type(key, u32);
+                __type(value, struct snake_mask_slot);
+                __uint(max_entries, SNAKE_LADDER_SLOTS * SNAKE_MAX_MASK_TABLES * SNAKE_MAX_CPUS);
+            } mask_slots SEC(".maps");"#,
+            r#"struct {
+                __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+                __type(key, u32);
+                __type(value, struct snake_mask_scratch);
+                __uint(max_entries, 1);
+            } mask_scratch SEC(".maps");"#,
+            r#"struct {
+                __uint(type, BPF_MAP_TYPE_ARRAY);
+                __type(key, u32);
+                __type(value, struct snake_vtime_domain);
+                __uint(max_entries, 1);
+            } vtime_domain SEC(".maps");"#,
+            r#"struct {
+                __uint(type, BPF_MAP_TYPE_ARRAY);
+                __type(key, u32);
+                __type(value, struct snake_eevdf_domain);
+                __uint(max_entries, 1);
+            } eevdf_domain SEC(".maps");"#,
+            r#"struct {
+                __uint(type, BPF_MAP_TYPE_ARRAY);
+                __type(key, u32);
+                __type(value, struct snake_vtime_domain);
+                __uint(max_entries, SNAKE_MAX_QUEUE_CELLS);
+            } cell_vtime_domains SEC(".maps");"#,
+        ];
         const EXPECTED_MAPS: &[&str] = &[
             ".data.uei_dump",
             "active_ladder",
@@ -2684,44 +2831,86 @@ scope = "task_allowed"
 
         assert_eq!(maps, EXPECTED_MAPS);
         assert_eq!(programs, EXPECTED_PROGRAMS);
+
+        let bpf_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bpf");
+        let combined = bpf_sources(&bpf_dir)
+            .into_iter()
+            .map(|(_, source)| source)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let normalized = combined.split_whitespace().collect::<String>();
+        for definition in EXPECTED_MAP_DEFINITIONS {
+            let definition = definition.split_whitespace().collect::<String>();
+            assert!(
+                normalized.contains(&definition),
+                "BPF map definition changed: {definition}"
+            );
+        }
+
+        let main = fs::read_to_string(bpf_dir.join("main.bpf.c"))
+            .expect("main BPF translation unit should be readable");
+        let ops = main
+            .split_once("SCX_OPS_DEFINE(")
+            .and_then(|(_, rest)| rest.split_once(");"))
+            .map(|(ops, _)| ops.split_whitespace().collect::<String>())
+            .expect("snake_ops definition should exist");
+        assert_eq!(
+            ops,
+            concat!(
+                "snake_ops,",
+                ".select_cpu=(void*)snake_select_cpu,",
+                ".init_task=(void*)snake_init_task,",
+                ".enqueue=(void*)snake_enqueue,",
+                ".dispatch=(void*)snake_dispatch,",
+                ".runnable=(void*)snake_runnable,",
+                ".running=(void*)snake_running,",
+                ".stopping=(void*)snake_stopping,",
+                ".quiescent=(void*)snake_quiescent,",
+                ".set_weight=(void*)snake_set_weight,",
+                ".init=(void*)snake_init,",
+                ".exit=(void*)snake_exit,",
+                ".timeout_ms=5000,",
+                ".name=\"snake\""
+            )
+        );
     }
 
     #[test]
-    fn task_runtime_flat_field_inventory_is_stable() {
-        const EXPECTED_FIELDS: &[&str] = &[
-            "queue_cpumask",
-            "started_exec_runtime",
-            "service_budget",
-            "vruntime",
-            "affinity_vruntime",
-            "deadline",
-            "request_remaining_ns",
-            "queue_timing_session_id",
-            "queue_timing_dsq_id",
-            "queue_timing_enqueued_at_ns",
-            "sleep_lag",
-            "active_weight",
-            "pending_weight",
-            "cell_index",
-            "affinity_cell_index",
-            "run_cell_index",
-            "run_owner_cell_index",
-            "selected_cpu",
-            "direct_cell_index",
-            "queue_timing_cell_index",
-            "queue_timing_depth_after_insert",
-            "queue_timing_queue_class",
-            "runtime_valid",
-            "initialized",
-            "runnable_accounted",
-            "has_sleep_lag",
-            "run_direct",
-            "cell_initialized",
-            "affinity_initialized",
-            "selected_cpu_valid",
-            "queue_class",
-            "run_queue_class",
-            "direct_cell_valid",
+    fn task_runtime_flat_layout_is_stable() {
+        const EXPECTED_DECLARATIONS: &[&str] = &[
+            "struct bpf_cpumask __kptr *queue_cpumask",
+            "u64 started_exec_runtime",
+            "u64 service_budget",
+            "u64 vruntime",
+            "u64 affinity_vruntime",
+            "u64 deadline",
+            "u64 request_remaining_ns",
+            "u64 queue_timing_session_id",
+            "u64 queue_timing_dsq_id",
+            "u64 queue_timing_enqueued_at_ns",
+            "s64 sleep_lag",
+            "u32 active_weight",
+            "u32 pending_weight",
+            "u32 cell_index",
+            "u32 affinity_cell_index",
+            "u32 run_cell_index",
+            "u32 run_owner_cell_index",
+            "u32 selected_cpu",
+            "u32 direct_cell_index",
+            "u32 queue_timing_cell_index",
+            "u32 queue_timing_depth_after_insert",
+            "u32 queue_timing_queue_class",
+            "u8 runtime_valid",
+            "u8 initialized",
+            "u8 runnable_accounted",
+            "u8 has_sleep_lag",
+            "u8 run_direct",
+            "u8 cell_initialized",
+            "u8 affinity_initialized",
+            "u8 selected_cpu_valid",
+            "u8 queue_class",
+            "u8 run_queue_class",
+            "u8 direct_cell_valid",
         ];
 
         let bpf_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bpf");
@@ -2735,18 +2924,15 @@ scope = "task_allowed"
             .and_then(|(_, rest)| rest.split_once("};"))
             .map(|(body, _)| body)
             .expect("snake_task_runtime should remain defined in BPF source");
-        let fields = body
+        let declarations = body
             .lines()
             .filter_map(|line| {
                 let declaration = line.trim().strip_suffix(';')?;
-                declaration
-                    .split_whitespace()
-                    .last()
-                    .map(|field| field.trim_start_matches('*'))
+                Some(declaration.split_whitespace().collect::<Vec<_>>().join(" "))
             })
             .collect::<Vec<_>>();
 
-        assert_eq!(fields, EXPECTED_FIELDS);
+        assert_eq!(declarations, EXPECTED_DECLARATIONS);
 
         type TaskRuntime = bpf_skel::types::snake_task_runtime;
         assert_eq!(size_of::<TaskRuntime>(), 144);
@@ -4122,15 +4308,130 @@ scope = "task_allowed"
 
     #[test]
     fn encodes_complete_compiled_ladder() {
+        fn assert_field_type<T, F>(_field: fn(&T) -> &F) {}
+
         let policy = policy::compile_policy(policy_source()).expect("policy should compile");
         let encoded = encode_ladder(&policy, 42).expect("ladder should encode");
 
         assert_eq!(bpf_intf::SNAKE_ABI_VERSION, 20);
         assert_eq!(size_of::<bpf_intf::snake_callback_timing>(), 520);
+        assert_eq!(offset_of!(bpf_intf::snake_callback_timing, total_ns), 0);
+        assert_eq!(offset_of!(bpf_intf::snake_callback_timing, buckets), 8);
+        assert_field_type::<bpf_intf::snake_callback_timing, u64>(|value| &value.total_ns);
+        assert_field_type::<
+            bpf_intf::snake_callback_timing,
+            [u64; bpf_intf::SNAKE_CALLBACK_TIMING_BUCKETS as usize],
+        >(|value| &value.buckets);
+        assert_eq!(size_of::<bpf_intf::snake_rung_timing_event>(), 24);
+        assert_eq!(offset_of!(bpf_intf::snake_rung_timing_event, generation), 0);
+        assert_eq!(offset_of!(bpf_intf::snake_rung_timing_event, elapsed_ns), 8);
+        assert_eq!(offset_of!(bpf_intf::snake_rung_timing_event, ladder), 16);
+        assert_eq!(offset_of!(bpf_intf::snake_rung_timing_event, rung), 20);
+        assert_field_type::<bpf_intf::snake_rung_timing_event, u64>(|value| &value.generation);
+        assert_field_type::<bpf_intf::snake_rung_timing_event, u64>(|value| &value.elapsed_ns);
+        assert_field_type::<bpf_intf::snake_rung_timing_event, u32>(|value| &value.ladder);
+        assert_field_type::<bpf_intf::snake_rung_timing_event, u32>(|value| &value.rung);
         assert_eq!(size_of::<bpf_intf::snake_fine_timing_config>(), 32);
+        assert_eq!(
+            offset_of!(bpf_intf::snake_fine_timing_config, session_ids),
+            0
+        );
+        assert_eq!(
+            offset_of!(bpf_intf::snake_fine_timing_config, enabled_mask),
+            24
+        );
+        assert_eq!(offset_of!(bpf_intf::snake_fine_timing_config, reserved), 28);
+        assert_field_type::<
+            bpf_intf::snake_fine_timing_config,
+            [u64; bpf_intf::snake_fine_timing_callback_SNAKE_NR_FINE_TIMING_CALLBACKS as usize],
+        >(|value| &value.session_ids);
+        assert_field_type::<bpf_intf::snake_fine_timing_config, u32>(|value| &value.enabled_mask);
+        assert_field_type::<bpf_intf::snake_fine_timing_config, u32>(|value| &value.reserved);
         assert_eq!(size_of::<bpf_intf::snake_fine_timing_event>(), 48);
+        assert_eq!(offset_of!(bpf_intf::snake_fine_timing_event, session_id), 0);
+        assert_eq!(offset_of!(bpf_intf::snake_fine_timing_event, elapsed_ns), 8);
+        assert_eq!(
+            offset_of!(bpf_intf::snake_fine_timing_event, source_dsq_id),
+            16
+        );
+        assert_eq!(
+            offset_of!(bpf_intf::snake_fine_timing_event, target_dsq_id),
+            24
+        );
+        assert_eq!(offset_of!(bpf_intf::snake_fine_timing_event, stage), 32);
+        assert_eq!(offset_of!(bpf_intf::snake_fine_timing_event, operation), 36);
+        assert_eq!(offset_of!(bpf_intf::snake_fine_timing_event, outcome), 40);
+        assert_eq!(
+            offset_of!(bpf_intf::snake_fine_timing_event, queue_class),
+            44
+        );
+        assert_field_type::<bpf_intf::snake_fine_timing_event, u64>(|value| &value.session_id);
+        assert_field_type::<bpf_intf::snake_fine_timing_event, u64>(|value| &value.elapsed_ns);
+        assert_field_type::<bpf_intf::snake_fine_timing_event, u64>(|value| &value.source_dsq_id);
+        assert_field_type::<bpf_intf::snake_fine_timing_event, u64>(|value| &value.target_dsq_id);
+        assert_field_type::<bpf_intf::snake_fine_timing_event, u32>(|value| &value.stage);
+        assert_field_type::<bpf_intf::snake_fine_timing_event, u32>(|value| &value.operation);
+        assert_field_type::<bpf_intf::snake_fine_timing_event, u32>(|value| &value.outcome);
+        assert_field_type::<bpf_intf::snake_fine_timing_event, u32>(|value| &value.queue_class);
         assert_eq!(size_of::<bpf_intf::snake_queue_timing_counters>(), 24);
+        assert_eq!(
+            offset_of!(bpf_intf::snake_queue_timing_counters, started_samples),
+            0
+        );
+        assert_eq!(
+            offset_of!(bpf_intf::snake_queue_timing_counters, completed_samples),
+            8
+        );
+        assert_eq!(
+            offset_of!(bpf_intf::snake_queue_timing_counters, dropped_samples),
+            16
+        );
+        assert_field_type::<bpf_intf::snake_queue_timing_counters, u64>(|value| {
+            &value.started_samples
+        });
+        assert_field_type::<bpf_intf::snake_queue_timing_counters, u64>(|value| {
+            &value.completed_samples
+        });
+        assert_field_type::<bpf_intf::snake_queue_timing_counters, u64>(|value| {
+            &value.dropped_samples
+        });
         assert_eq!(size_of::<bpf_intf::snake_queue_timing_event>(), 40);
+        assert_eq!(
+            offset_of!(bpf_intf::snake_queue_timing_event, session_id),
+            0
+        );
+        assert_eq!(offset_of!(bpf_intf::snake_queue_timing_event, dsq_id), 8);
+        assert_eq!(
+            offset_of!(bpf_intf::snake_queue_timing_event, residence_ns),
+            16
+        );
+        assert_eq!(
+            offset_of!(bpf_intf::snake_queue_timing_event, cell_index),
+            24
+        );
+        assert_eq!(
+            offset_of!(bpf_intf::snake_queue_timing_event, queue_class),
+            28
+        );
+        assert_eq!(
+            offset_of!(bpf_intf::snake_queue_timing_event, depth_after_insert),
+            32
+        );
+        assert_eq!(
+            offset_of!(bpf_intf::snake_queue_timing_event, depth_after_dispatch),
+            36
+        );
+        assert_field_type::<bpf_intf::snake_queue_timing_event, u64>(|value| &value.session_id);
+        assert_field_type::<bpf_intf::snake_queue_timing_event, u64>(|value| &value.dsq_id);
+        assert_field_type::<bpf_intf::snake_queue_timing_event, u64>(|value| &value.residence_ns);
+        assert_field_type::<bpf_intf::snake_queue_timing_event, u32>(|value| &value.cell_index);
+        assert_field_type::<bpf_intf::snake_queue_timing_event, u32>(|value| &value.queue_class);
+        assert_field_type::<bpf_intf::snake_queue_timing_event, u32>(|value| {
+            &value.depth_after_insert
+        });
+        assert_field_type::<bpf_intf::snake_queue_timing_event, u32>(|value| {
+            &value.depth_after_dispatch
+        });
         assert_eq!(size_of::<bpf_intf::snake_compiled_ladder>(), 352);
         assert_eq!(offset_of!(bpf_intf::snake_compiled_ladder, generation), 0);
         assert_eq!(

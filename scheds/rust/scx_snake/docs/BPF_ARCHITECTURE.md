@@ -33,13 +33,13 @@ data flow, [`QUEUE_POLICY.md`](QUEUE_POLICY.md) for queue semantics, and
 | --- | --- | --- |
 | Callback entry | `main.bpf.c`, `main.h` | sched_ext hooks, callback lifetime, final error reporting, and fallback completion. |
 | Common BPF mechanism | `bpf_common.h`, `policy_bank.h` | maps shared by all modes, active policy acquisition, reader lifetime, and publication slots. |
-| ABI | `intf.h` | userspace-visible constants, map records, events, statistics, and task-state layout. |
+| ABI | `intf.h` | userspace-visible constants, map records, events, and statistics. |
 | Placement policy | `ladder.h`, `cpu_pick.h` | placement rung validation and execution, bounded ladder walks, and CPU selection primitives. |
 | Mask runtime | `mask_table.h` | hot-path lookup and selection from materialized generic CPU masks. |
 | Mask initialization | `mask_table_init.h` | attachment and policy-update materialization and cleanup. |
 | DSQ identity | `dsq_id.h` | typed construction and classification of scheduler DSQ IDs. |
 | DSQ operations | `dsq.h` | insert, ordered insert, move, peek, queue depth, and operation timing. |
-| Task state | `task_state.h` | the single task-storage adapter and runtime-state lifetime. |
+| Task state | `task_state.h` | the single task-storage adapter, generated BTF runtime layout, and runtime-state lifetime. |
 | Fairness facade | `fairness.h`, `fairness_common.h` | mode selection, shared task/weight helpers, and the callback-facing fairness API. |
 | Fairness policies | `fairness_fifo.h`, `fairness_vtime.h`, `fairness_eevdf.h` | policy-specific runnable ordering and accounting. |
 | Queue state | `queue_state.h`, `queue.h` | queue maps, immutable routing lookup, queue masks, and allowed-CPU selection. |
