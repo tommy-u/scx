@@ -6,7 +6,7 @@
 use std::path::PathBuf;
 
 use scx_snake_inspector::collector::{
-    decode_counter_entry, decode_cpu_runtime_stats, decode_inspection_stats, find_symbol_address,
+    decode_counter_entry, decode_inspection_stats, decode_top_stats, find_symbol_address,
     CollectorConfig,
 };
 use scx_snake_inspector::model::CpuPair;
@@ -63,21 +63,86 @@ fn kallsyms_lookup_matches_the_exact_nonzero_symbol() {
 }
 
 #[test]
-fn snake_stats_decode_per_cpu_runtime_and_ignore_other_metrics() {
+fn snake_top_stats_decode_cpu_and_optional_cell_metrics_together() {
     let payload = serde_json::json!({
         "policy_generation": 4,
         "select_calls": 99,
         "cpus": {
             "0": {"cpu": 0, "runtime_ns": 1250},
             "7": {"cpu": 7, "runtime_ns": 8750}
+        },
+        "cells": {
+            "3": {
+                "id": 3,
+                "index": 1,
+                "runtime_ns": 1000,
+                "primary_runtime_ns": 700,
+                "borrowed_runtime_ns": 300,
+                "lent_runtime_ns": 200,
+                "normal_enqueues": 9,
+                "affinity_enqueues": 2,
+                "normal_dispatches": 8,
+                "affinity_dispatches": 1,
+                "clock_transitions": 4
+            }
         }
     });
 
+    let decoded = decode_top_stats(payload).unwrap();
+    assert_eq!(decoded.policy_generation, 4);
     assert_eq!(
-        decode_cpu_runtime_stats(payload).unwrap(),
+        decoded.cpus,
         std::collections::BTreeMap::from([(0, 1250), (7, 8750)])
     );
-    assert!(decode_cpu_runtime_stats(serde_json::json!({"select_calls": 4})).is_err());
+    let cells = decoded.cells.unwrap();
+    assert_eq!(cells[&3].id, 3);
+    assert_eq!(cells[&3].runtime_ns, 1000);
+
+    let absent = decode_top_stats(serde_json::json!({
+        "policy_generation": 4,
+        "cpus": {"0": {"cpu": 0, "runtime_ns": 1}}
+    }))
+    .unwrap();
+    assert!(absent.cells.is_none());
+    let empty = decode_top_stats(serde_json::json!({
+        "policy_generation": 4,
+        "cpus": {"0": {"cpu": 0, "runtime_ns": 1}},
+        "cells": {}
+    }))
+    .unwrap();
+    assert_eq!(empty.cells, Some(std::collections::BTreeMap::new()));
+}
+
+#[test]
+fn snake_top_stats_reject_mismatched_map_keys() {
+    assert!(decode_top_stats(serde_json::json!({
+        "policy_generation": 4,
+        "cpus": {"0": {"cpu": 1, "runtime_ns": 1}}
+    }))
+    .is_err());
+    assert!(decode_top_stats(serde_json::json!({
+        "policy_generation": 4,
+        "cpus": {"0": {"cpu": 0, "runtime_ns": 1}},
+        "cells": {"3": {
+            "id": 4,
+            "index": 0,
+            "runtime_ns": 0,
+            "primary_runtime_ns": 0,
+            "borrowed_runtime_ns": 0,
+            "lent_runtime_ns": 0,
+            "normal_enqueues": 0,
+            "affinity_enqueues": 0,
+            "normal_dispatches": 0,
+            "affinity_dispatches": 0,
+            "clock_transitions": 0
+        }}
+    }))
+    .is_err());
+    assert!(decode_top_stats(serde_json::json!({
+        "policy_generation": 4,
+        "cpus": {}
+    }))
+    .is_err());
 }
 
 #[test]

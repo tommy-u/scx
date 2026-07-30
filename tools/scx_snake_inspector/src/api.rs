@@ -22,7 +22,7 @@ use tokio_stream::StreamExt;
 
 use crate::collector::{
     CallbackTimingRateResponse, CollectorCommand, FineTimingCallback, FineTimingControlResponse,
-    StatsResetResponse,
+    QueueTimingControlResponse, StatsResetResponse,
 };
 use crate::dashboard::{Dashboard, RuntimeContextView};
 use crate::launcher::{LaunchFairness, LaunchOptions, LaunchRequest, SnakeLauncher};
@@ -90,6 +90,10 @@ pub fn router(context: ApiContext) -> Router {
             get(callback_timing).post(set_callback_timing_sample_rate),
         )
         .route("/api/fine-timing", get(fine_timing).post(set_fine_timing))
+        .route(
+            "/api/queue-timing",
+            get(queue_timing).post(set_queue_timing),
+        )
         .route("/api/policies", get(policies))
         .route("/api/policies/activate", post(activate_policy))
         .route("/api/scheduler/control", get(scheduler_control))
@@ -297,6 +301,42 @@ async fn set_fine_timing(
     Ok(Json(response))
 }
 
+async fn queue_timing(
+    State(context): State<ApiContext>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, ApiError> {
+    require_session_token(&headers, &context.token)?;
+    Ok(Json(context.dashboard.queue_timing()))
+}
+
+#[derive(Deserialize)]
+struct QueueTimingRequest {
+    enabled: bool,
+}
+
+async fn set_queue_timing(
+    State(context): State<ApiContext>,
+    headers: HeaderMap,
+    Json(request): Json<QueueTimingRequest>,
+) -> Result<Json<QueueTimingControlResponse>, ApiError> {
+    require_session_token(&headers, &context.token)?;
+    let (response_tx, response_rx) = std::sync::mpsc::sync_channel(1);
+    context
+        .commands
+        .send(CollectorCommand::SetQueueTiming {
+            enabled: request.enabled,
+            response: response_tx,
+        })
+        .map_err(|_| ApiError::unavailable("collector is not running"))?;
+    let response =
+        tokio::task::spawn_blocking(move || response_rx.recv_timeout(Duration::from_secs(5)))
+            .await
+            .map_err(|_| ApiError::unavailable("queue timing worker failed"))?
+            .map_err(|_| ApiError::unavailable("queue timing update timed out"))?
+            .map_err(ApiError::bad_request)?;
+    Ok(Json(response))
+}
+
 async fn policies(State(context): State<ApiContext>) -> impl IntoResponse {
     Json(context.dashboard.policy_catalog())
 }
@@ -345,6 +385,7 @@ struct SchedulerSettingControl {
     name: &'static str,
     value: serde_json::Value,
     effective: serde_json::Value,
+    default_value: serde_json::Value,
     launch_override: serde_json::Value,
     runtime_observed: bool,
     change_mode: &'static str,
@@ -627,6 +668,8 @@ fn scheduler_control_response(context: &ApiContext) -> Result<SchedulerControl, 
             name: "fairness",
             value: effective_fairness_value.clone(),
             effective: effective_fairness_value,
+            default_value: serde_json::to_value(LaunchFairness::Fifo)
+                .map_err(|error| ApiError::unavailable(error.to_string()))?,
             launch_override: fairness_override_value,
             runtime_observed: observed_fairness.is_some(),
             change_mode: "reload",
@@ -635,6 +678,7 @@ fn scheduler_control_response(context: &ApiContext) -> Result<SchedulerControl, 
             name: "callback_timing_sample_rate",
             value: effective_sample_rate_value.clone(),
             effective: effective_sample_rate_value,
+            default_value: serde_json::Value::from(64),
             launch_override: sample_rate_override_value,
             runtime_observed: observed_sample_rate.is_some(),
             change_mode: "dynamic",
@@ -643,6 +687,7 @@ fn scheduler_control_response(context: &ApiContext) -> Result<SchedulerControl, 
             name: "exit_dump_len",
             value: effective_exit_dump_value.clone(),
             effective: effective_exit_dump_value,
+            default_value: serde_json::Value::from(0),
             launch_override: exit_dump_override_value,
             runtime_observed: false,
             change_mode: "reload",
@@ -651,6 +696,7 @@ fn scheduler_control_response(context: &ApiContext) -> Result<SchedulerControl, 
             name: "verbose",
             value: effective_verbose_value.clone(),
             effective: effective_verbose_value,
+            default_value: serde_json::Value::Bool(false),
             launch_override: verbose_override_value,
             runtime_observed: false,
             change_mode: "reload",
@@ -659,6 +705,7 @@ fn scheduler_control_response(context: &ApiContext) -> Result<SchedulerControl, 
             name: "stats_reset",
             value: serde_json::Value::String("On demand".into()),
             effective: serde_json::Value::String("On demand".into()),
+            default_value: serde_json::Value::Null,
             launch_override: serde_json::Value::Null,
             runtime_observed: false,
             change_mode: "dynamic",

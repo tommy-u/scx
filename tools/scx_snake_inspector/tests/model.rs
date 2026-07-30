@@ -7,7 +7,8 @@ use std::collections::BTreeMap;
 
 use scx_snake_inspector::model::{
     summarize_callback_timing, CallbackTimingCounters, CallbackTimingHistory,
-    CallbackTimingSnapshot, CpuPair, CpuUsageHistory, RollingHistory,
+    CallbackTimingSnapshot, CellMetricCounters, CellMetricHistory, CpuPair, CpuUsageHistory,
+    RollingHistory,
 };
 
 fn counters(entries: &[(CpuPair, u64)]) -> BTreeMap<CpuPair, u64> {
@@ -181,4 +182,69 @@ fn cpu_usage_reset_discards_runtime_from_the_previous_scheduler_epoch() {
     let view = history.view(550, 1_000).unwrap();
     assert_eq!(view.runtime_ns, BTreeMap::from([(0, 75_000_000)]));
     assert_eq!(view.observed_ms, 250);
+}
+
+fn cell_metrics(id: u32, runtime_ns: u64, normal_dispatches: u64) -> CellMetricCounters {
+    CellMetricCounters {
+        id,
+        index: id + 10,
+        runtime_ns,
+        primary_runtime_ns: runtime_ns / 2,
+        borrowed_runtime_ns: runtime_ns / 4,
+        lent_runtime_ns: runtime_ns / 8,
+        normal_enqueues: normal_dispatches + 2,
+        affinity_enqueues: 1,
+        normal_dispatches,
+        affinity_dispatches: 2,
+        clock_transitions: 3,
+    }
+}
+
+#[test]
+fn cell_metric_history_sums_top_deltas_inside_the_selected_window() {
+    let mut history = CellMetricHistory::new(5_000);
+    history.ingest(0, 4, 7, &BTreeMap::from([(2, cell_metrics(2, 0, 0))]));
+    history.ingest(
+        250,
+        4,
+        7,
+        &BTreeMap::from([(2, cell_metrics(2, 100_000_000, 4))]),
+    );
+    history.ingest(
+        500,
+        4,
+        7,
+        &BTreeMap::from([(2, cell_metrics(2, 50_000_000, 6))]),
+    );
+
+    let full = history.view(500, 500).unwrap().unwrap();
+    assert_eq!(full.scheduler_attach_seq, 4);
+    assert_eq!(full.policy_generation, 7);
+    assert_eq!(full.observed_ms, 500);
+    assert_eq!(full.cells[&2].runtime_ns, 150_000_000);
+    assert_eq!(full.cells[&2].normal_dispatches, 10);
+
+    let recent = history.view(600, 300).unwrap().unwrap();
+    assert_eq!(recent.observed_ms, 300);
+    assert_eq!(recent.cells[&2].runtime_ns, 50_000_000);
+    assert_eq!(recent.cells[&2].normal_dispatches, 6);
+}
+
+#[test]
+fn cell_metric_history_rebases_on_attachment_or_policy_generation_change() {
+    let mut history = CellMetricHistory::new(5_000);
+    history.ingest(0, 4, 7, &BTreeMap::from([(2, cell_metrics(2, 0, 0))]));
+    history.ingest(250, 4, 7, &BTreeMap::from([(2, cell_metrics(2, 100, 4))]));
+
+    history.ingest(500, 4, 8, &BTreeMap::from([(2, cell_metrics(2, 900, 40))]));
+    let generation = history.view(500, 1_000).unwrap().unwrap();
+    assert_eq!(generation.policy_generation, 8);
+    assert_eq!(generation.observed_ms, 0);
+    assert_eq!(generation.cells[&2].runtime_ns, 0);
+
+    history.ingest(750, 5, 8, &BTreeMap::from([(2, cell_metrics(2, 700, 30))]));
+    let attachment = history.view(750, 1_000).unwrap().unwrap();
+    assert_eq!(attachment.scheduler_attach_seq, 5);
+    assert_eq!(attachment.observed_ms, 0);
+    assert_eq!(attachment.cells[&2].runtime_ns, 0);
 }

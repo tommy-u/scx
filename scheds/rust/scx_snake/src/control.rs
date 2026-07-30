@@ -8,6 +8,7 @@ use scx_stats::StatsClient;
 
 use crate::fine_timing::{FineTimingCallback, FineTimingControlResponse};
 use crate::inspection::InspectionView;
+use crate::queue_timing::QueueTimingControlResponse;
 use crate::runtime_policy::{PolicyUpdateResponse, PolicyValidationResponse};
 use crate::stats::Metrics;
 use crate::task_cells::{ThreadCellAssignment, ThreadCellResponse};
@@ -16,6 +17,7 @@ use crate::task_cells::{ThreadCellAssignment, ThreadCellResponse};
 pub struct CallbackTimingRateResponse {
     pub sample_rate: u32,
     pub fine_timing_stopped: bool,
+    pub queue_timing_stopped: bool,
 }
 
 #[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
@@ -24,6 +26,7 @@ pub struct StatsResetResponse {
     pub active_slot: u32,
     pub reset_at_ms: u64,
     pub fine_timing_stopped: bool,
+    pub queue_timing_stopped: bool,
 }
 
 const UPDATE_TIMEOUT_MS: u64 = 15_000;
@@ -47,6 +50,9 @@ pub enum SchedulerRequest {
         callback: FineTimingCallback,
         enabled: bool,
     },
+    SetQueueTiming {
+        enabled: bool,
+    },
     SetCallbackTimingSampleRate {
         sample_rate: u32,
     },
@@ -62,6 +68,7 @@ pub enum SchedulerResponse {
     ReplacePolicy(std::result::Result<PolicyUpdateResponse, String>),
     ThreadCell(std::result::Result<ThreadCellResponse, String>),
     FineTiming(std::result::Result<FineTimingControlResponse, String>),
+    QueueTiming(std::result::Result<QueueTimingControlResponse, String>),
     CallbackTimingSampleRate(std::result::Result<CallbackTimingRateResponse, String>),
     StatsReset(std::result::Result<StatsResetResponse, String>),
 }
@@ -96,6 +103,20 @@ pub fn request_fine_timing(
         vec![
             ("target".into(), "fine_timing_set".into()),
             ("callback".into(), callback.as_str().into()),
+            ("enabled".into(), enabled.to_string()),
+        ],
+    )
+}
+
+#[cfg(test)]
+pub fn request_queue_timing(
+    client: &mut StatsClient,
+    enabled: bool,
+) -> Result<QueueTimingControlResponse> {
+    client.request(
+        "stats",
+        vec![
+            ("target".into(), "queue_timing_set".into()),
             ("enabled".into(), enabled.to_string()),
         ],
     )
@@ -302,6 +323,47 @@ scope = "task_allowed"
     }
 
     #[test]
+    fn queue_timing_control_round_trips_enabled_state() {
+        use crate::queue_timing::QueueTimingControlResponse;
+
+        let path = socket_path("queue-timing");
+        let server = StatsServer::new(stats::server_data())
+            .set_path(&path)
+            .launch()
+            .expect("test server should launch");
+        let (responses, requests) = server.channels();
+        let worker = thread::spawn(move || {
+            let SchedulerRequest::SetQueueTiming { enabled } =
+                requests.recv().expect("request should arrive")
+            else {
+                panic!("expected a queue timing request");
+            };
+            assert!(enabled);
+            responses
+                .send(SchedulerResponse::QueueTiming(Ok(
+                    QueueTimingControlResponse {
+                        enabled,
+                        session_id: Some(17),
+                    },
+                )))
+                .expect("response should send");
+        });
+
+        let mut client = StatsClient::new()
+            .set_path(&path)
+            .connect(Some(1_000))
+            .expect("client should connect");
+        let response = request_queue_timing(&mut client, true)
+            .expect("queue timing update should be acknowledged");
+
+        assert!(response.enabled);
+        assert_eq!(response.session_id, Some(17));
+        worker.join().expect("worker should finish");
+        drop(server);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
     fn callback_timing_rate_control_round_trips_runtime_rate() {
         let path = socket_path("callback-rate");
         let server = StatsServer::new(stats::server_data())
@@ -321,6 +383,7 @@ scope = "task_allowed"
                     CallbackTimingRateResponse {
                         sample_rate,
                         fine_timing_stopped: true,
+                        queue_timing_stopped: true,
                     },
                 )))
                 .expect("response should send");
@@ -335,6 +398,7 @@ scope = "task_allowed"
 
         assert_eq!(response.sample_rate, 128);
         assert!(response.fine_timing_stopped);
+        assert!(response.queue_timing_stopped);
         worker.join().expect("worker should finish");
         drop(server);
         let _ = fs::remove_file(path);
@@ -359,6 +423,7 @@ scope = "task_allowed"
                     active_slot: 1,
                     reset_at_ms: 4_200,
                     fine_timing_stopped: true,
+                    queue_timing_stopped: true,
                 })))
                 .expect("response should send");
         });
@@ -376,6 +441,7 @@ scope = "task_allowed"
                 active_slot: 1,
                 reset_at_ms: 4_200,
                 fine_timing_stopped: true,
+                queue_timing_stopped: true,
             }
         );
         worker.join().expect("worker should finish");
@@ -448,6 +514,7 @@ scope = "task_allowed"
                         active_slot: 1,
                         callback_timing_sample_rate: 64,
                         fine_timing: crate::inspection::FineTimingInspectionView::default(),
+                        queue_timing: None,
                         fairness: crate::inspection::FairnessInspectionView {
                             mode_name: "fifo".into(),
                             clock_model: "no virtual-time clock".into(),

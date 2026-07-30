@@ -14,9 +14,11 @@ use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use scx_snake_inspector::api::{router, ApiContext, CSRF_HEADER};
 use scx_snake_inspector::collector::CollectorCommand;
-use scx_snake_inspector::dashboard::{Dashboard, FineTimingStatus};
+use scx_snake_inspector::dashboard::{
+    CellStatsStatus, Dashboard, FineTimingStatus, QueueTimingStatus,
+};
 use scx_snake_inspector::launcher::SnakeLauncher;
-use scx_snake_inspector::model::CpuPair;
+use scx_snake_inspector::model::{CellMetricCounters, CpuPair};
 use scx_snake_inspector::policies::{InvalidPolicy, PolicyCatalog, PolicyChoice};
 use scx_snake_inspector::scope::TaskScope;
 use scx_snake_inspector::topology::{CpuInfo, TopologyView};
@@ -154,6 +156,63 @@ fn fine_timing_snapshot() -> Value {
     snapshot
 }
 
+fn queue_topology_snapshot(generation: u64) -> Value {
+    let mut snapshot = callback_timing_snapshot(generation, 0, 0);
+    snapshot["queue_topology"] = json!({
+        "cells": [{
+            "external_id": 3,
+            "index": 1,
+            "primary_cpus": [0, 1]
+        }]
+    });
+    snapshot
+}
+
+fn queue_timing_snapshot() -> Value {
+    let mut snapshot = queue_topology_snapshot(7);
+    let mut residence = vec![0_u64; 64];
+    residence[5] = 100;
+    let mut depth = vec![0_u64; 256];
+    depth[3] = 50;
+    depth[9] = 50;
+    snapshot["queue_timing"] = json!({
+        "sample_rate": 64,
+        "state": "collecting",
+        "session_id": 11,
+        "policy_generation": 7,
+        "started_at_ms": 1000,
+        "stopped_at_ms": null,
+        "started_samples": 120,
+        "completed_samples": 100,
+        "dropped_samples": 2,
+        "dsqs": [{
+            "dsq_id": 8192,
+            "cell_index": 1,
+            "queue_class": "normal",
+            "residence": {"total_ns": 6300, "buckets": residence},
+            "depth": {"samples": 100, "latest": 4, "max": 9, "buckets": depth}
+        }]
+    });
+    snapshot
+}
+
+fn cell_metrics(runtime_ns: u64) -> CellMetricCounters {
+    let active = runtime_ns > 0;
+    CellMetricCounters {
+        id: 3,
+        index: 1,
+        runtime_ns,
+        primary_runtime_ns: runtime_ns * 3 / 4,
+        borrowed_runtime_ns: runtime_ns / 4,
+        lent_runtime_ns: runtime_ns / 4,
+        normal_enqueues: if active { 80 } else { 0 },
+        affinity_enqueues: if active { 20 } else { 0 },
+        normal_dispatches: if active { 50 } else { 0 },
+        affinity_dispatches: if active { 50 } else { 0 },
+        clock_transitions: if active { 10 } else { 0 },
+    }
+}
+
 #[test]
 fn runtime_context_tracks_scheduler_attachment_and_policy_generation() {
     let dashboard = dashboard();
@@ -188,16 +247,27 @@ fn dashboard_stats_reset_rebases_all_histories_without_changing_scope() {
     dashboard.set_scope(TaskScope::Tgids(vec![42]));
     dashboard.ingest(0, &BTreeMap::new());
     dashboard.ingest(500, &BTreeMap::from([(pair, 9)]));
-    dashboard.reset_cpu_usage(0);
-    dashboard.ingest_cpu_usage(500, &BTreeMap::from([(0, 250_000_000)]));
     dashboard.set_scheduler("snake", true, 4);
 
     let mut inspection = fine_timing_snapshot();
+    inspection["queue_topology"] = queue_topology_snapshot(7)["queue_topology"].clone();
     let mut buckets = vec![0_u64; 64];
     buckets[5] = 100;
     inspection["slots"][0]["metrics"]["callback_timing"]["dispatch"] =
         json!({"total_ns": 6300, "buckets": buckets});
     dashboard.set_inspection_at(500, Some(inspection), None);
+    dashboard.ingest_top_metrics(
+        0,
+        7,
+        &BTreeMap::from([(0, 0)]),
+        Some(&BTreeMap::from([(3, cell_metrics(0))])),
+    );
+    dashboard.ingest_top_metrics(
+        500,
+        7,
+        &BTreeMap::from([(0, 250_000_000)]),
+        Some(&BTreeMap::from([(3, cell_metrics(250_000_000))])),
+    );
     assert_eq!(
         dashboard
             .callback_timing_lifetime()
@@ -218,12 +288,111 @@ fn dashboard_stats_reset_rebases_all_histories_without_changing_scope() {
     assert_eq!(snapshot.observed_ms, 0);
     assert!(snapshot.cpu_usage.is_empty());
     assert_eq!(snapshot.cpu_usage_observed_ms, 0);
+    assert_eq!(snapshot.cell_stats.source_policy_generation, None);
+    assert!(snapshot.cell_stats.cells.is_empty());
     assert!(dashboard.callback_timing_lifetime().callbacks.is_empty());
     assert_eq!(
         dashboard.fine_timing().status,
         FineTimingStatus::Unavailable
     );
     assert!(dashboard.inspection().snapshot.is_none());
+}
+
+#[test]
+fn cell_stats_derive_window_metrics_from_top_deltas_and_queue_topology() {
+    let dashboard = dashboard();
+    dashboard.set_scheduler("snake", true, 4);
+    dashboard.set_inspection_at(0, Some(queue_topology_snapshot(7)), None);
+    dashboard.ingest_top_metrics(
+        0,
+        7,
+        &BTreeMap::from([(0, 0), (1, 0)]),
+        Some(&BTreeMap::from([(3, cell_metrics(0))])),
+    );
+    let empty = serde_json::to_value(dashboard.snapshot(1_000).unwrap()).unwrap();
+    let empty = &empty["cell_stats"]["cells"][0];
+    for field in [
+        "service_cores",
+        "service_share_pct",
+        "primary_pct",
+        "borrowed_pct",
+        "owned_utilization_pct",
+        "enqueue_rate_per_second",
+        "dispatch_rate_per_second",
+        "affinity_enqueue_share_pct",
+        "affinity_dispatch_share_pct",
+        "transition_rate_per_second",
+        "transitions_per_1k_dispatches",
+    ] {
+        assert_eq!(empty[field], Value::Null, "{field}");
+    }
+    dashboard.ingest_top_metrics(
+        1_000,
+        7,
+        &BTreeMap::from([(0, 500_000_000), (1, 500_000_000)]),
+        Some(&BTreeMap::from([(3, cell_metrics(1_000_000_000))])),
+    );
+
+    let snapshot = serde_json::to_value(dashboard.snapshot(1_000).unwrap()).unwrap();
+    let stats = &snapshot["cell_stats"];
+    let cell = &stats["cells"][0];
+    assert_eq!(stats["status"], "ready");
+    assert_eq!(stats["scope"], "all_snake_tasks");
+    assert_eq!(stats["source_policy_generation"], 7);
+    assert_eq!(stats["window_ms"], 1_000);
+    assert_eq!(stats["observed_ms"], 1_000);
+    assert_eq!(cell["id"], 3);
+    assert_eq!(cell["index"], 1);
+    assert_eq!(cell["primary_cpu_count"], 2);
+    assert_eq!(cell["runtime_ns"], 1_000_000_000_u64);
+    assert_eq!(cell["service_cores"], 1.0);
+    assert_eq!(cell["service_share_pct"], 100.0);
+    assert_eq!(cell["primary_pct"], 75.0);
+    assert_eq!(cell["borrowed_pct"], 25.0);
+    assert_eq!(cell["owned_utilization_pct"], 50.0);
+    assert_eq!(cell["enqueue_rate_per_second"], 100.0);
+    assert_eq!(cell["dispatch_rate_per_second"], 100.0);
+    assert_eq!(cell["affinity_enqueue_share_pct"], 20.0);
+    assert_eq!(cell["affinity_dispatch_share_pct"], 50.0);
+    assert_eq!(cell["transition_rate_per_second"], 10.0);
+    assert_eq!(cell["transitions_per_1k_dispatches"], 100.0);
+}
+
+#[test]
+fn cell_stats_distinguish_policy_mode_support_and_generation_sync() {
+    let dashboard = dashboard();
+    dashboard.set_scheduler("snake", true, 4);
+    let mut placement = callback_timing_snapshot(7, 0, 0);
+    placement["queue_topology"] = Value::Null;
+    dashboard.set_inspection_at(0, Some(placement), None);
+    dashboard.ingest_top_metrics(0, 7, &BTreeMap::from([(0, 0)]), None);
+    assert_eq!(
+        dashboard.snapshot(1_000).unwrap().cell_stats.status,
+        CellStatsStatus::NotApplicable
+    );
+    dashboard.set_cpu_usage_error(Some("top stream unavailable".into()));
+    assert_eq!(
+        dashboard.snapshot(1_000).unwrap().cell_stats.status,
+        CellStatsStatus::NotApplicable
+    );
+    dashboard.set_cpu_usage_error(None);
+
+    dashboard.set_inspection_at(0, Some(queue_topology_snapshot(7)), None);
+    assert_eq!(
+        dashboard.snapshot(1_000).unwrap().cell_stats.status,
+        CellStatsStatus::Unsupported
+    );
+
+    dashboard.ingest_top_metrics(
+        250,
+        8,
+        &BTreeMap::from([(0, 0)]),
+        Some(&BTreeMap::from([(3, cell_metrics(0))])),
+    );
+    assert_eq!(
+        dashboard.snapshot(1_000).unwrap().cell_stats.status,
+        CellStatsStatus::Synchronizing
+    );
 }
 
 #[tokio::test]
@@ -257,6 +426,7 @@ async fn stats_reset_requires_token_and_sends_collector_command() {
                 active_slot: 1,
                 reset_at_ms: 123_456,
                 fine_timing_stopped: true,
+                queue_timing_stopped: true,
             }))
             .unwrap();
     });
@@ -279,6 +449,7 @@ async fn stats_reset_requires_token_and_sends_collector_command() {
     assert_eq!(response["active_slot"], 1);
     assert_eq!(response["reset_at_ms"], 123_456);
     assert_eq!(response["fine_timing_stopped"], true);
+    assert_eq!(response["queue_timing_stopped"], true);
     responder.join().unwrap();
 }
 
@@ -316,6 +487,10 @@ async fn scheduler_control_lists_policies_while_stopped_and_manages_an_owned_chi
     assert_eq!(body["policies"][0]["id"], "basic.toml");
     assert_eq!(body["policies"][0]["change_mode"], "reload");
     assert_eq!(body["settings"][0]["name"], "fairness");
+    assert_eq!(body["settings"][0]["default_value"], "fifo");
+    assert_eq!(body["settings"][1]["default_value"], 64);
+    assert_eq!(body["settings"][2]["default_value"], 0);
+    assert_eq!(body["settings"][3]["default_value"], false);
 
     let request_body = Body::from(
         r#"{"policy_id":"basic.toml","fairness":"vtime","callback_timing_sample_rate":128,"exit_dump_len":4096,"verbose":true}"#,
@@ -480,6 +655,7 @@ async fn scheduler_control_preserves_omitted_launch_flags() {
         .find(|setting| setting["name"] == "fairness")
         .unwrap();
     assert_eq!(fairness["effective"], "fifo");
+    assert_eq!(fairness["default_value"], "fifo");
     assert_eq!(fairness["launch_override"], Value::Null);
     assert_eq!(fairness["runtime_observed"], true);
     let sampling = settings
@@ -487,6 +663,7 @@ async fn scheduler_control_preserves_omitted_launch_flags() {
         .find(|setting| setting["name"] == "callback_timing_sample_rate")
         .unwrap();
     assert_eq!(sampling["effective"], 64);
+    assert_eq!(sampling["default_value"], 64);
     assert_eq!(sampling["launch_override"], Value::Null);
     assert_eq!(sampling["runtime_observed"], true);
 }
@@ -1151,6 +1328,7 @@ async fn callback_timing_rate_update_requires_token_and_uses_runtime_control() {
             .send(Ok(CallbackTimingRateResponse {
                 sample_rate,
                 fine_timing_stopped: true,
+                queue_timing_stopped: true,
             }))
             .unwrap();
     });
@@ -1172,6 +1350,7 @@ async fn callback_timing_rate_update_requires_token_and_uses_runtime_control() {
         serde_json::from_slice(&accepted.into_body().collect().await.unwrap().to_bytes()).unwrap();
     assert_eq!(response["sample_rate"], 128);
     assert_eq!(response["fine_timing_stopped"], true);
+    assert_eq!(response["queue_timing_stopped"], true);
     responder.join().unwrap();
 }
 
@@ -1262,6 +1441,168 @@ async fn fine_timing_endpoint_summarizes_stages_and_controls_callbacks_independe
     assert_eq!(body["enabled"], true);
     assert_eq!(body["session_id"], 11);
     responder.join().unwrap();
+}
+
+#[tokio::test]
+async fn queue_timing_endpoint_summarizes_capture_and_controls_it_with_a_token() {
+    use scx_snake_inspector::collector::QueueTimingControlResponse;
+
+    let dashboard = dashboard();
+    dashboard.set_scheduler("snake", true, 4);
+    dashboard.set_inspection_at(1_000, Some(queue_timing_snapshot()), None);
+    let (tx, rx) = mpsc::channel();
+    let root = tempfile::tempdir().unwrap();
+    let context = ApiContext::new(dashboard, tx, "secret", root.path().to_path_buf());
+
+    let unauthorized = router(context.clone())
+        .oneshot(
+            Request::builder()
+                .uri("/api/queue-timing")
+                .header("host", "127.0.0.1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+    let response = router(context.clone())
+        .oneshot(
+            Request::builder()
+                .uri("/api/queue-timing")
+                .header("host", "127.0.0.1")
+                .header(CSRF_HEADER, "secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    let dsq = &body["dsqs"][0];
+    assert_eq!(body["status"], "ready");
+    assert_eq!(body["sample_rate"], 64);
+    assert_eq!(body["state"], "collecting");
+    assert_eq!(body["session_id"], 11);
+    assert_eq!(body["started_samples"], 120);
+    assert_eq!(body["completed_samples"], 100);
+    assert_eq!(body["dropped_samples"], 2);
+    assert_eq!(dsq["dsq_id"], 8192);
+    assert_eq!(dsq["cell_index"], 1);
+    assert_eq!(dsq["queue_class"], "normal");
+    assert_eq!(dsq["residence"]["samples"], 100);
+    assert_eq!(dsq["residence"]["mean_ns"], 63);
+    assert_eq!(dsq["residence"]["p50_ns"], 63);
+    assert_eq!(dsq["residence"]["p95_ns"], 63);
+    assert_eq!(dsq["residence"]["p99_ns"], 63);
+    assert_eq!(dsq["depth"]["samples"], 100);
+    assert_eq!(dsq["depth"]["latest"], 4);
+    assert_eq!(dsq["depth"]["p95"], 9);
+    assert_eq!(dsq["depth"]["max"], 9);
+
+    let unauthorized = router(context.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/queue-timing")
+                .header("host", "127.0.0.1")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"enabled":true}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+    let responder = std::thread::spawn(move || {
+        let CollectorCommand::SetQueueTiming { enabled, response } = rx.recv().unwrap() else {
+            panic!("expected queue timing command");
+        };
+        assert!(enabled);
+        response
+            .send(Ok(QueueTimingControlResponse {
+                enabled,
+                session_id: Some(12),
+            }))
+            .unwrap();
+    });
+    let accepted = router(context)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/queue-timing")
+                .header("host", "127.0.0.1")
+                .header("content-type", "application/json")
+                .header(CSRF_HEADER, "secret")
+                .body(Body::from(r#"{"enabled":true}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(accepted.status(), StatusCode::OK);
+    let body: Value =
+        serde_json::from_slice(&accepted.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(body, json!({"enabled": true, "session_id": 12}));
+    responder.join().unwrap();
+}
+
+#[test]
+fn queue_timing_availability_and_validation_are_explicit() {
+    let dashboard = dashboard();
+    assert_eq!(
+        dashboard.queue_timing().status,
+        QueueTimingStatus::Unavailable
+    );
+
+    dashboard.set_scheduler("snake", true, 4);
+    let mut placement = callback_timing_snapshot(7, 0, 0);
+    placement["queue_topology"] = Value::Null;
+    dashboard.set_inspection(Some(placement), None);
+    assert_eq!(
+        dashboard.queue_timing().status,
+        QueueTimingStatus::NotApplicable
+    );
+
+    dashboard.set_inspection(Some(queue_topology_snapshot(7)), None);
+    assert_eq!(
+        dashboard.queue_timing().status,
+        QueueTimingStatus::Unsupported
+    );
+
+    let mut disabled = queue_timing_snapshot();
+    disabled["queue_timing"]["sample_rate"] = json!(0);
+    dashboard.set_inspection(Some(disabled), None);
+    assert_eq!(dashboard.queue_timing().status, QueueTimingStatus::Disabled);
+
+    let mut malformed = queue_timing_snapshot();
+    malformed["queue_timing"]["dsqs"][0]["queue_class"] = json!("global");
+    dashboard.set_inspection(Some(malformed), None);
+    let invalid = dashboard.queue_timing();
+    assert_eq!(invalid.status, QueueTimingStatus::Unavailable);
+    assert!(invalid.error.unwrap().contains("queue class"));
+
+    let mut malformed = queue_timing_snapshot();
+    malformed["queue_timing"]["dsqs"][0]["residence"]["buckets"] = json!(vec![0_u64; 63]);
+    dashboard.set_inspection(Some(malformed), None);
+    let invalid = dashboard.queue_timing();
+    assert_eq!(invalid.status, QueueTimingStatus::Unavailable);
+    assert!(invalid.error.unwrap().contains("64 buckets"));
+
+    let mut sparse = queue_timing_snapshot();
+    let mut residence = vec![0_u64; 64];
+    residence[3] = 19;
+    let mut depth = vec![0_u64; 256];
+    depth[2] = 19;
+    sparse["queue_timing"]["completed_samples"] = json!(19);
+    sparse["queue_timing"]["dsqs"][0]["residence"] = json!({"total_ns": 190, "buckets": residence});
+    sparse["queue_timing"]["dsqs"][0]["depth"] =
+        json!({"samples": 19, "latest": 2, "max": 2, "buckets": depth});
+    dashboard.set_inspection(Some(sparse), None);
+    let sparse = serde_json::to_value(dashboard.queue_timing()).unwrap();
+    assert_eq!(sparse["dsqs"][0]["residence"]["p95_ns"], Value::Null);
+    assert_eq!(sparse["dsqs"][0]["residence"]["p99_ns"], Value::Null);
+    assert_eq!(sparse["dsqs"][0]["depth"]["p95"], Value::Null);
 }
 
 #[test]
@@ -1560,13 +1901,20 @@ async fn root_page_embeds_session_configuration_and_local_assets() {
     for control in [
         "id=\"liveStatus\"",
         "id=\"primaryNav\"",
-        "href=\"#/activity\"",
-        "href=\"#/policy\"",
-        "href=\"#/cells\"",
+        "href=\"#/overview\"",
+        "href=\"#/observe/placement\"",
+        "href=\"#/observe/callbacks\"",
+        "href=\"#/configure\"",
+        "href=\"#/inspect/policy-slots\"",
+        "href=\"#/inspect/queue-topology\"",
+        "href=\"#/inspect/cells\"",
+        "id=\"overviewView\"",
         "id=\"activityView\"",
         "id=\"policyView\"",
+        "id=\"queueTopologyView\"",
         "id=\"policyLibrary\"",
         "id=\"policyDialog\"",
+        "id=\"feedbackDrawer\"",
         "id=\"cellsView\"",
         "id=\"workloadTargetKind\"",
         "id=\"workloadTargetValue\"",

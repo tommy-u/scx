@@ -12,6 +12,7 @@ use crate::policy::{
     QueueDispatchSource, QueueEnqueueTarget, QueueLayout, QueueMaskKind, QueuePolicy,
     RUNG_FLAG_INTERSECT_TASK_ALLOWED, RUNG_FLAG_PICK_IDLE_CORE, RUNG_FLAG_PICK_RANDOM,
 };
+use crate::queue_timing::QueueTimingInspectionView;
 use crate::queue_topology::QueueTopology;
 use crate::stats::{CallbackTimingMetrics, Metrics, RungMetrics};
 
@@ -154,6 +155,7 @@ pub struct InspectionView {
     pub active_slot: u32,
     pub callback_timing_sample_rate: u32,
     pub fine_timing: FineTimingInspectionView,
+    pub queue_timing: Option<QueueTimingInspectionView>,
     pub fairness: FairnessInspectionView,
     pub queue_topology: Option<QueueTopologyInspectionView>,
     pub slots: Vec<SlotInspectionView>,
@@ -375,6 +377,7 @@ impl Inspector {
             active_slot: self.active_slot,
             callback_timing_sample_rate: self.callback_timing_sample_rate,
             fine_timing: FineTimingInspectionView::default(),
+            queue_timing: None,
             fairness: self.fairness.clone(),
             queue_topology: self.queue_topology.clone(),
             slots,

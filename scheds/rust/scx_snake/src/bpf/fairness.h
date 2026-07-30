@@ -12,6 +12,9 @@ struct snake_task_runtime {
 	u64 affinity_vruntime;
 	u64 deadline;
 	u64 request_remaining_ns;
+	u64 queue_timing_session_id;
+	u64 queue_timing_dsq_id;
+	u64 queue_timing_enqueued_at_ns;
 	s64 sleep_lag;
 	u32 active_weight;
 	u32 pending_weight;
@@ -21,6 +24,9 @@ struct snake_task_runtime {
 	u32 run_owner_cell_index;
 	u32 selected_cpu;
 	u32 direct_cell_index;
+	u32 queue_timing_cell_index;
+	u32 queue_timing_depth_after_insert;
+	u32 queue_timing_queue_class;
 	u8  runtime_valid;
 	u8  initialized;
 	u8  runnable_accounted;

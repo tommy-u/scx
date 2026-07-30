@@ -25,7 +25,10 @@ use crate::policies::{
 use crate::scheduler::{GateChange, SchedulerGate};
 use crate::scope::TaskScope;
 use crate::workload::{resolve_workload_target, WorkloadCellResponse, WorkloadTarget};
-use crate::{bpf_intf, model::CpuPair};
+use crate::{
+    bpf_intf,
+    model::{CellMetricCounters, CpuPair},
+};
 
 const DEFAULT_OPS_PATH: &str = "/sys/kernel/sched_ext/root/ops";
 const DEFAULT_ENABLE_SEQ_PATH: &str = "/sys/kernel/sched_ext/enable_seq";
@@ -35,6 +38,23 @@ const MAX_PAIR_MAP_ENTRIES: usize = 1_048_576;
 const STATS_TIMEOUT_MS: u64 = 1_000;
 const INSPECTION_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const POLICY_SCAN_INTERVAL: Duration = Duration::from_secs(5);
+
+#[derive(Default)]
+struct TopStatsConnectionState {
+    initialized: bool,
+}
+
+impl TopStatsConnectionState {
+    fn observe_success(&mut self) -> bool {
+        let first_read = !self.initialized;
+        self.initialized = true;
+        first_read
+    }
+
+    fn disconnect(&mut self) {
+        self.initialized = false;
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CollectorConfig {
@@ -94,16 +114,25 @@ struct SnakeCpuMetrics {
 
 #[derive(Debug, Deserialize)]
 struct SnakeMetrics {
+    policy_generation: u64,
     #[serde(default)]
     cpus: BTreeMap<u32, SnakeCpuMetrics>,
+    cells: Option<BTreeMap<u32, CellMetricCounters>>,
 }
 
-pub fn decode_cpu_runtime_stats(value: serde_json::Value) -> anyhow::Result<BTreeMap<u32, u64>> {
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SnakeTopStats {
+    pub policy_generation: u64,
+    pub cpus: BTreeMap<u32, u64>,
+    pub cells: Option<BTreeMap<u32, CellMetricCounters>>,
+}
+
+pub fn decode_top_stats(value: serde_json::Value) -> anyhow::Result<SnakeTopStats> {
     let metrics: SnakeMetrics = serde_json::from_value(value)?;
     if metrics.cpus.is_empty() {
         anyhow::bail!("running Snake does not export per-CPU runtime");
     }
-    metrics
+    let cpus = metrics
         .cpus
         .into_iter()
         .map(|(cpu, metrics)| {
@@ -112,7 +141,19 @@ pub fn decode_cpu_runtime_stats(value: serde_json::Value) -> anyhow::Result<BTre
             }
             Ok((cpu, metrics.runtime_ns))
         })
-        .collect()
+        .collect::<anyhow::Result<_>>()?;
+    if let Some(cells) = &metrics.cells {
+        for (&id, cell) in cells {
+            if cell.id != id {
+                anyhow::bail!("Snake cell metric key {id} contains cell {}", cell.id);
+            }
+        }
+    }
+    Ok(SnakeTopStats {
+        policy_generation: metrics.policy_generation,
+        cpus,
+        cells: metrics.cells,
+    })
 }
 
 pub fn decode_inspection_stats(value: serde_json::Value) -> anyhow::Result<serde_json::Value> {
@@ -201,6 +242,14 @@ pub struct FineTimingControlResponse {
 pub struct CallbackTimingRateResponse {
     pub sample_rate: u32,
     pub fine_timing_stopped: bool,
+    #[serde(default)]
+    pub queue_timing_stopped: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct QueueTimingControlResponse {
+    pub enabled: bool,
+    pub session_id: Option<u64>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -209,6 +258,8 @@ pub struct StatsResetResponse {
     pub active_slot: u32,
     pub reset_at_ms: u64,
     pub fine_timing_stopped: bool,
+    #[serde(default)]
+    pub queue_timing_stopped: bool,
 }
 
 #[derive(Debug)]
@@ -228,6 +279,11 @@ pub enum CollectorCommand {
         sample_rate: u32,
         response:
             std::sync::mpsc::SyncSender<std::result::Result<CallbackTimingRateResponse, String>>,
+    },
+    SetQueueTiming {
+        enabled: bool,
+        response:
+            std::sync::mpsc::SyncSender<std::result::Result<QueueTimingControlResponse, String>>,
     },
     SetWorkloadCell {
         target: WorkloadTarget,
@@ -283,6 +339,10 @@ impl PartialEq for CollectorCommand {
                 Self::SetCallbackTimingSampleRate {
                     sample_rate: right, ..
                 },
+            ) => left == right,
+            (
+                Self::SetQueueTiming { enabled: left, .. },
+                Self::SetQueueTiming { enabled: right, .. },
             ) => left == right,
             (Self::ResetStats { .. }, Self::ResetStats { .. }) => true,
             (Self::Shutdown, Self::Shutdown) => true,
@@ -371,6 +431,7 @@ pub fn run_collector(
     let mut last_scheduler_name = String::new();
     let mut last_health = (0_u64, 0_u64);
     let mut stats_client = None;
+    let mut top_stats_connection = TopStatsConnectionState::default();
     let mut last_cpu_usage_error = None;
     let mut next_inspection_at = started;
     let mut next_policy_scan_at = started;
@@ -454,12 +515,20 @@ pub fn run_collector(
                 next_inspection_at = Instant::now();
                 continue;
             }
+            Ok(CollectorCommand::SetQueueTiming { enabled, response }) => {
+                let result = set_queue_timing(&mut stats_client, &options.stats_path, enabled)
+                    .map_err(|error| format!("{error:#}"));
+                let _ = response.send(result);
+                next_inspection_at = Instant::now();
+                continue;
+            }
             Ok(CollectorCommand::ResetStats { response }) => {
                 let result = reset_scheduler_stats(&mut stats_client, &options.stats_path)
                     .map_err(|error| format!("{error:#}"));
                 let result = match result {
                     Ok(reset) => {
                         stats_client = None;
+                        top_stats_connection.disconnect();
                         let now_ms = elapsed_ms(started);
                         match read_counts(&skel.maps.migration_counts) {
                             Ok(baseline) => {
@@ -513,6 +582,7 @@ pub fn run_collector(
                 let baseline = read_counts(&skel.maps.migration_counts)?;
                 dashboard.reset(now_ms, &baseline);
                 stats_client = None;
+                top_stats_connection.disconnect();
                 next_inspection_at = Instant::now();
                 next_policy_scan_at = Instant::now();
                 last_policy_files = None;
@@ -526,6 +596,7 @@ pub fn run_collector(
                 let baseline = read_counts(&skel.maps.migration_counts)?;
                 dashboard.reset(now_ms, &baseline);
                 stats_client = None;
+                top_stats_connection.disconnect();
                 last_policy_files = None;
                 dashboard.set_inspection(None, None);
                 dashboard.set_policy_catalog(None, None);
@@ -548,16 +619,22 @@ pub fn run_collector(
         if gate.is_active() {
             let counts = read_counts(&skel.maps.migration_counts)?;
             dashboard.ingest(now_ms, &counts);
-            match read_cpu_runtime(&mut stats_client, &options.stats_path) {
-                Ok((runtime_ns, connected)) => {
-                    if connected {
-                        dashboard.reset_cpu_usage(now_ms);
+            match read_top_stats(&mut stats_client, &options.stats_path) {
+                Ok(metrics) => {
+                    if top_stats_connection.observe_success() {
+                        dashboard.reset_top_metrics(now_ms);
                     }
-                    dashboard.ingest_cpu_usage(now_ms, &runtime_ns);
+                    dashboard.ingest_top_metrics(
+                        now_ms,
+                        metrics.policy_generation,
+                        &metrics.cpus,
+                        metrics.cells.as_ref(),
+                    );
                     set_cpu_usage_error(&dashboard, &mut last_cpu_usage_error, None);
                 }
                 Err(error) => {
                     stats_client = None;
+                    top_stats_connection.disconnect();
                     set_cpu_usage_error(
                         &dashboard,
                         &mut last_cpu_usage_error,
@@ -717,6 +794,31 @@ fn set_callback_timing_sample_rate(
         )
 }
 
+fn set_queue_timing(
+    client: &mut Option<StatsClient>,
+    stats_path: &Path,
+    enabled: bool,
+) -> Result<QueueTimingControlResponse> {
+    if client.is_none() {
+        *client = Some(
+            StatsClient::new()
+                .set_path(stats_path)
+                .connect(Some(STATS_TIMEOUT_MS))
+                .with_context(|| format!("connecting to {}", stats_path.display()))?,
+        );
+    }
+    client
+        .as_mut()
+        .context("Snake stats client is unavailable")?
+        .request(
+            "stats",
+            vec![
+                ("target".into(), "queue_timing_set".into()),
+                ("enabled".into(), enabled.to_string()),
+            ],
+        )
+}
+
 fn reset_scheduler_stats(
     client: &mut Option<StatsClient>,
     stats_path: &Path,
@@ -820,12 +922,8 @@ fn read_inspection(
     decode_inspection_stats(payload)
 }
 
-fn read_cpu_runtime(
-    client: &mut Option<StatsClient>,
-    stats_path: &Path,
-) -> Result<(BTreeMap<u32, u64>, bool)> {
-    let connected = client.is_none();
-    if connected {
+fn read_top_stats(client: &mut Option<StatsClient>, stats_path: &Path) -> Result<SnakeTopStats> {
+    if client.is_none() {
         *client = Some(
             StatsClient::new()
                 .set_path(stats_path)
@@ -837,7 +935,7 @@ fn read_cpu_runtime(
         .as_mut()
         .context("Snake stats client is unavailable")?
         .request::<serde_json::Value>("stats", Vec::new())?;
-    Ok((decode_cpu_runtime_stats(payload)?, connected))
+    decode_top_stats(payload)
 }
 
 fn set_cpu_usage_error(
@@ -920,4 +1018,20 @@ fn elapsed_ms(started: Instant) -> u64 {
 
 fn next_generation(current: u32) -> u32 {
     current.wrapping_add(1).max(1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TopStatsConnectionState;
+
+    #[test]
+    fn top_stats_connection_state_marks_the_first_read_after_every_disconnect() {
+        let mut state = TopStatsConnectionState::default();
+
+        assert!(state.observe_success());
+        assert!(!state.observe_success());
+        state.disconnect();
+        assert!(state.observe_success());
+        assert!(!state.observe_success());
+    }
 }

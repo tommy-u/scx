@@ -45,6 +45,75 @@ pub struct CpuUsageWindow {
     pub observed_ms: u64,
 }
 
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct CellMetricCounters {
+    pub id: u32,
+    pub index: u32,
+    pub runtime_ns: u64,
+    pub primary_runtime_ns: u64,
+    pub borrowed_runtime_ns: u64,
+    pub lent_runtime_ns: u64,
+    pub normal_enqueues: u64,
+    pub affinity_enqueues: u64,
+    pub normal_dispatches: u64,
+    pub affinity_dispatches: u64,
+    pub clock_transitions: u64,
+}
+
+impl CellMetricCounters {
+    fn zero_like(&self) -> Self {
+        Self {
+            id: self.id,
+            index: self.index,
+            ..Self::default()
+        }
+    }
+
+    fn add_assign(&mut self, other: &Self) {
+        self.runtime_ns = self.runtime_ns.saturating_add(other.runtime_ns);
+        self.primary_runtime_ns = self
+            .primary_runtime_ns
+            .saturating_add(other.primary_runtime_ns);
+        self.borrowed_runtime_ns = self
+            .borrowed_runtime_ns
+            .saturating_add(other.borrowed_runtime_ns);
+        self.lent_runtime_ns = self.lent_runtime_ns.saturating_add(other.lent_runtime_ns);
+        self.normal_enqueues = self.normal_enqueues.saturating_add(other.normal_enqueues);
+        self.affinity_enqueues = self
+            .affinity_enqueues
+            .saturating_add(other.affinity_enqueues);
+        self.normal_dispatches = self
+            .normal_dispatches
+            .saturating_add(other.normal_dispatches);
+        self.affinity_dispatches = self
+            .affinity_dispatches
+            .saturating_add(other.affinity_dispatches);
+        self.clock_transitions = self
+            .clock_transitions
+            .saturating_add(other.clock_transitions);
+    }
+
+    fn is_empty(&self) -> bool {
+        self.runtime_ns == 0
+            && self.primary_runtime_ns == 0
+            && self.borrowed_runtime_ns == 0
+            && self.lent_runtime_ns == 0
+            && self.normal_enqueues == 0
+            && self.affinity_enqueues == 0
+            && self.normal_dispatches == 0
+            && self.affinity_dispatches == 0
+            && self.clock_transitions == 0
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CellMetricWindow {
+    pub scheduler_attach_seq: u64,
+    pub policy_generation: u64,
+    pub observed_ms: u64,
+    pub cells: BTreeMap<u32, CellMetricCounters>,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WindowError {
     Empty,
@@ -78,6 +147,136 @@ struct DeltaBin {
 struct CpuUsageBin {
     at_ms: u64,
     runtime_ns: BTreeMap<u32, u64>,
+}
+
+#[derive(Debug)]
+struct CellMetricBin {
+    at_ms: u64,
+    cells: BTreeMap<u32, CellMetricCounters>,
+}
+
+#[derive(Debug)]
+pub struct CellMetricHistory {
+    max_window_ms: u64,
+    started_at_ms: Option<u64>,
+    scheduler_attach_seq: Option<u64>,
+    policy_generation: Option<u64>,
+    latest_cells: BTreeMap<u32, CellMetricCounters>,
+    bins: VecDeque<CellMetricBin>,
+}
+
+impl CellMetricHistory {
+    pub fn new(max_window_ms: u64) -> Self {
+        assert!(max_window_ms > 0, "maximum window must be non-zero");
+        Self {
+            max_window_ms,
+            started_at_ms: None,
+            scheduler_attach_seq: None,
+            policy_generation: None,
+            latest_cells: BTreeMap::new(),
+            bins: VecDeque::new(),
+        }
+    }
+
+    pub fn ingest(
+        &mut self,
+        at_ms: u64,
+        scheduler_attach_seq: u64,
+        policy_generation: u64,
+        cells: &BTreeMap<u32, CellMetricCounters>,
+    ) {
+        let initialized = self.scheduler_attach_seq.is_some();
+        if !initialized
+            || self.scheduler_attach_seq != Some(scheduler_attach_seq)
+            || self.policy_generation != Some(policy_generation)
+        {
+            self.reset_epoch(at_ms, scheduler_attach_seq, policy_generation, cells);
+            if initialized {
+                return;
+            }
+        }
+
+        self.latest_cells = cells
+            .iter()
+            .map(|(&id, counters)| (id, counters.zero_like()))
+            .collect();
+        let deltas = cells
+            .iter()
+            .filter(|(_, counters)| !counters.is_empty())
+            .map(|(&id, counters)| (id, counters.clone()))
+            .collect::<BTreeMap<_, _>>();
+        if !deltas.is_empty() {
+            self.bins.push_back(CellMetricBin {
+                at_ms,
+                cells: deltas,
+            });
+        }
+        self.expire(at_ms.saturating_sub(self.max_window_ms));
+    }
+
+    pub fn clear(&mut self) {
+        self.started_at_ms = None;
+        self.scheduler_attach_seq = None;
+        self.policy_generation = None;
+        self.latest_cells.clear();
+        self.bins.clear();
+    }
+
+    pub fn view(
+        &self,
+        now_ms: u64,
+        window_ms: u64,
+    ) -> Result<Option<CellMetricWindow>, WindowError> {
+        validate_window(window_ms, self.max_window_ms)?;
+        let (Some(scheduler_attach_seq), Some(policy_generation)) =
+            (self.scheduler_attach_seq, self.policy_generation)
+        else {
+            return Ok(None);
+        };
+        let cutoff_ms = now_ms.saturating_sub(window_ms);
+        let mut cells = self.latest_cells.clone();
+        for bin in self.bins.iter().filter(|bin| bin.at_ms > cutoff_ms) {
+            for (&id, delta) in &bin.cells {
+                cells
+                    .entry(id)
+                    .or_insert_with(|| delta.zero_like())
+                    .add_assign(delta);
+            }
+        }
+        let observed_ms = self
+            .started_at_ms
+            .map(|started| now_ms.saturating_sub(started).min(window_ms))
+            .unwrap_or(0);
+        Ok(Some(CellMetricWindow {
+            scheduler_attach_seq,
+            policy_generation,
+            observed_ms,
+            cells,
+        }))
+    }
+
+    fn reset_epoch(
+        &mut self,
+        at_ms: u64,
+        scheduler_attach_seq: u64,
+        policy_generation: u64,
+        cells: &BTreeMap<u32, CellMetricCounters>,
+    ) {
+        self.started_at_ms = Some(at_ms);
+        self.scheduler_attach_seq = Some(scheduler_attach_seq);
+        self.policy_generation = Some(policy_generation);
+        self.latest_cells = cells
+            .iter()
+            .map(|(&id, counters)| (id, counters.zero_like()))
+            .collect();
+        self.bins.clear();
+    }
+
+    fn expire(&mut self, cutoff_ms: u64) {
+        while self.bins.front().is_some_and(|bin| bin.at_ms <= cutoff_ms) {
+            self.bins.pop_front();
+        }
+    }
 }
 
 #[derive(Debug)]

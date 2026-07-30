@@ -268,8 +268,8 @@ Callback execution-time sampling defaults to one in every 64 invocations for
 or a power of two through 4096. Unsampled calls perform only the sampling
 decision; sampled calls update a per-CPU base-2 nanosecond histogram without
 atomic contention. The inspector can change the rate while Snake is running;
-changing it stops active fine-grained captures so each capture has one sampling
-rate.
+changing it stops active fine-grained and queue-timing captures so each capture
+has one sampling rate.
 
 The inspector can independently enable fine-grained timing for `select_cpu`,
 queue-mode `enqueue`, and queue-mode `dispatch`. Fine timing reuses the same
@@ -280,10 +280,26 @@ ladder acquisition, the policy walk, its queue/direct/fallback outcome, and
 final accounting. Enqueue retains the total runnable-preparation measurement
 and breaks out task storage, cell-clock, and credit-clamp work. Dispatch groups
 remote normal-queue scans by queue fanout without adding work inside the scan
-loop, and measures the kernel move-to-local helper separately from accounting.
+loop, measures affinity DSQ insertion separately from the full affinity path,
+and measures the kernel move-to-local helper both in aggregate and by
+normal/affinity success/miss outcome using the same elapsed duration.
 Disabling a capture freezes it as historical. Starting a new capture resets
 only that callback's histograms, and activating another policy automatically
 stops active captures before the generation changes.
+
+Queue-mode policies also support one independent, on-demand queue-timing
+capture. It reuses the callback `1/N` sample decision without requiring enqueue
+or dispatch fine timing. After a sampled successful normal or affinity DSQ
+insertion, Snake records the post-insert depth and measures residence until the
+task reaches `running`, where it records post-dispatch depth. Residence uses 64
+base-2 nanosecond buckets. Depth uses 256 linear buckets, with bucket 255
+covering every depth at or above 255; exact latest and maximum depths are kept
+separately. The inspection payload reports started, successfully emitted, and
+ring-buffer-dropped samples. Explicitly stopping the capture freezes it as
+historical. Rate changes, policy activation, and scheduler shutdown stop an
+active capture; resetting statistics clears its history. Queue timing is
+rejected when callback sampling is disabled or the scheduler has no queue
+topology.
 
 Run a cell queue policy only with VTIME:
 
@@ -399,8 +415,8 @@ p95 requires at least 20 samples and p99 at least 100. The same target publishes
 the current or historical fine-grained capture for each supported callback.
 The inspector's **Reset all stats** action switches to a cleared ladder stats
 bank without changing the policy generation or reloading Snake. It also clears
-fine-grained capture history while leaving DSQs, clocks, membership, and task
-cell assignments intact.
+fine-grained and queue-timing capture history while leaving DSQs, clocks,
+membership, and task cell assignments intact.
 
 Use `--stats-format json` for NDJSON, `--help-stats` for counter definitions, or
 monitor an already running scheduler without a policy:

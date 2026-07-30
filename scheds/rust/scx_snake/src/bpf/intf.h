@@ -8,7 +8,7 @@ typedef unsigned int	   u32;
 typedef unsigned long long u64;
 #endif
 
-#define SNAKE_ABI_VERSION 19
+#define SNAKE_ABI_VERSION 20
 #define SNAKE_MAX_RUNGS 8
 #define SNAKE_MAX_QUEUE_RUNGS 8
 #define SNAKE_LADDER_SLOTS 2
@@ -23,6 +23,8 @@ typedef unsigned long long u64;
 #define SNAKE_QUEUE_LAYOUT_CELL_LLC 2U
 #define SNAKE_AFFINITY_DSQ_BASE 0x10000000ULL
 #define SNAKE_NORMAL_DSQ_BASE 0x20000000ULL
+#define SNAKE_QUEUE_CLASS_NORMAL 0U
+#define SNAKE_QUEUE_CLASS_AFFINITY 1U
 #define SNAKE_QUEUE_LLC_NONE 0xffffffffU
 #define SNAKE_RUNG_F_INTERSECT_TASK_ALLOWED (1U << 0)
 #define SNAKE_RUNG_F_PICK_IDLE_CORE (1U << 1)
@@ -94,6 +96,7 @@ enum snake_fine_timing_stage {
 	SNAKE_FINE_TIMING_ENQUEUE_PICK_TARGET,
 	SNAKE_FINE_TIMING_ENQUEUE_NORMAL_DSQ_INSERT,
 	SNAKE_FINE_TIMING_ENQUEUE_NORMAL_ACCOUNT_KICK,
+	SNAKE_FINE_TIMING_ENQUEUE_AFFINITY_DSQ_INSERT,
 	SNAKE_FINE_TIMING_ENQUEUE_AFFINITY_PATH,
 	SNAKE_FINE_TIMING_ENQUEUE_FINISH,
 	SNAKE_FINE_TIMING_DISPATCH_ACQUIRE_LADDER,
@@ -109,6 +112,10 @@ enum snake_fine_timing_stage {
 	SNAKE_FINE_TIMING_DISPATCH_ARBITRATE,
 	SNAKE_FINE_TIMING_DISPATCH_KEEP_RUNNING,
 	SNAKE_FINE_TIMING_DISPATCH_MOVE_TO_LOCAL,
+	SNAKE_FINE_TIMING_DISPATCH_MOVE_NORMAL_SUCCESS,
+	SNAKE_FINE_TIMING_DISPATCH_MOVE_NORMAL_MISS,
+	SNAKE_FINE_TIMING_DISPATCH_MOVE_AFFINITY_SUCCESS,
+	SNAKE_FINE_TIMING_DISPATCH_MOVE_AFFINITY_MISS,
 	SNAKE_FINE_TIMING_DISPATCH_REPLENISH,
 	SNAKE_FINE_TIMING_DISPATCH_FINISH,
 	SNAKE_NR_FINE_TIMING_STAGES,
@@ -125,6 +132,22 @@ struct snake_fine_timing_event {
 	u64 elapsed_ns;
 	u32 stage;
 	u32 reserved;
+};
+
+struct snake_queue_timing_counters {
+	u64 started_samples;
+	u64 completed_samples;
+	u64 dropped_samples;
+};
+
+struct snake_queue_timing_event {
+	u64 session_id;
+	u64 dsq_id;
+	u64 residence_ns;
+	u32 cell_index;
+	u32 queue_class;
+	u32 depth_after_insert;
+	u32 depth_after_dispatch;
 };
 
 /* Stable operation codes shared by the userspace compiler and BPF. */

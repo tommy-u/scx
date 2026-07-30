@@ -665,6 +665,25 @@ pub fn server_data() -> StatsServerData<SchedulerRequest, SchedulerResponse> {
             Ok(read)
         });
 
+    let set_queue_timing: Box<dyn StatsOpener<SchedulerRequest, SchedulerResponse>> =
+        Box::new(move |_| {
+            let read: Box<dyn StatsReader<SchedulerRequest, SchedulerResponse>> =
+                Box::new(move |args, (req_ch, res_ch)| {
+                    let enabled = parse_arg::<bool>(args, "enabled", "queue_timing_set")?;
+                    req_ch.send(SchedulerRequest::SetQueueTiming { enabled })?;
+                    match res_ch.recv()? {
+                        SchedulerResponse::QueueTiming(Ok(response)) => {
+                            Ok(serde_json::to_value(response)?)
+                        }
+                        SchedulerResponse::QueueTiming(Err(error)) => bail!(error),
+                        response => {
+                            bail!("unexpected response to queue timing request: {response:?}")
+                        }
+                    }
+                });
+            Ok(read)
+        });
+
     let reset_stats: Box<dyn StatsOpener<SchedulerRequest, SchedulerResponse>> =
         Box::new(move |_| {
             let read: Box<dyn StatsReader<SchedulerRequest, SchedulerResponse>> =
@@ -721,6 +740,13 @@ pub fn server_data() -> StatsServerData<SchedulerRequest, SchedulerResponse> {
             "fine_timing_set",
             StatsOps {
                 open: set_fine_timing,
+                close: None,
+            },
+        )
+        .add_ops(
+            "queue_timing_set",
+            StatsOps {
+                open: set_queue_timing,
                 close: None,
             },
         )
@@ -842,6 +868,7 @@ mod tests {
             active_slot: 0,
             reset_at_ms: 8_765,
             fine_timing_stopped: false,
+            queue_timing_stopped: true,
         };
 
         let value = receive_stats_reset_response(SchedulerResponse::StatsReset(Ok(response)))
@@ -854,6 +881,7 @@ mod tests {
                 "active_slot": 0,
                 "reset_at_ms": 8_765,
                 "fine_timing_stopped": false,
+                "queue_timing_stopped": true,
             })
         );
     }

@@ -100,7 +100,7 @@ pub struct FineTimingStage {
     pub name: &'static str,
 }
 
-const ENQUEUE_STAGES: [FineTimingStage; 13] = [
+const ENQUEUE_STAGES: [FineTimingStage; 14] = [
     FineTimingStage {
         id: bpf_intf::snake_fine_timing_stage_SNAKE_FINE_TIMING_ENQUEUE_ACQUIRE_LADDER,
         name: "acquire_ladder",
@@ -146,6 +146,10 @@ const ENQUEUE_STAGES: [FineTimingStage; 13] = [
         name: "normal_account_kick",
     },
     FineTimingStage {
+        id: bpf_intf::snake_fine_timing_stage_SNAKE_FINE_TIMING_ENQUEUE_AFFINITY_DSQ_INSERT,
+        name: "affinity_dsq_insert",
+    },
+    FineTimingStage {
         id: bpf_intf::snake_fine_timing_stage_SNAKE_FINE_TIMING_ENQUEUE_AFFINITY_PATH,
         name: "affinity_path",
     },
@@ -155,7 +159,7 @@ const ENQUEUE_STAGES: [FineTimingStage; 13] = [
     },
 ];
 
-const DISPATCH_STAGES: [FineTimingStage; 15] = [
+const DISPATCH_STAGES: [FineTimingStage; 19] = [
     FineTimingStage {
         id: bpf_intf::snake_fine_timing_stage_SNAKE_FINE_TIMING_DISPATCH_ACQUIRE_LADDER,
         name: "acquire_ladder",
@@ -207,6 +211,22 @@ const DISPATCH_STAGES: [FineTimingStage; 15] = [
     FineTimingStage {
         id: bpf_intf::snake_fine_timing_stage_SNAKE_FINE_TIMING_DISPATCH_MOVE_TO_LOCAL,
         name: "move_to_local_helper",
+    },
+    FineTimingStage {
+        id: bpf_intf::snake_fine_timing_stage_SNAKE_FINE_TIMING_DISPATCH_MOVE_NORMAL_SUCCESS,
+        name: "move_to_local_normal_success",
+    },
+    FineTimingStage {
+        id: bpf_intf::snake_fine_timing_stage_SNAKE_FINE_TIMING_DISPATCH_MOVE_NORMAL_MISS,
+        name: "move_to_local_normal_miss",
+    },
+    FineTimingStage {
+        id: bpf_intf::snake_fine_timing_stage_SNAKE_FINE_TIMING_DISPATCH_MOVE_AFFINITY_SUCCESS,
+        name: "move_to_local_affinity_success",
+    },
+    FineTimingStage {
+        id: bpf_intf::snake_fine_timing_stage_SNAKE_FINE_TIMING_DISPATCH_MOVE_AFFINITY_MISS,
+        name: "move_to_local_affinity_miss",
     },
     FineTimingStage {
         id: bpf_intf::snake_fine_timing_stage_SNAKE_FINE_TIMING_DISPATCH_REPLENISH,
