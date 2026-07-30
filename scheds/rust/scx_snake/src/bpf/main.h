@@ -136,6 +136,12 @@ struct {
 	__uint(max_entries, 1024 * 1024);
 } fine_timing_events SEC(".maps");
 
+/* Sampled rung durations are histogrammed in userspace. */
+struct {
+	__uint(type, BPF_MAP_TYPE_RINGBUF);
+	__uint(max_entries, 1024 * 1024);
+} rung_timing_events SEC(".maps");
+
 /* Queue residence events are independent from fine timing stage events. */
 struct {
 	__uint(type, BPF_MAP_TYPE_RINGBUF);
@@ -233,6 +239,27 @@ static __always_inline u64 callback_timing_start(void)
 	if (rate > 1 && (bpf_get_prandom_u32() & (rate - 1)))
 		return 0;
 	return bpf_ktime_get_ns();
+}
+
+static __always_inline u64 rung_timing_start(u64 callback_started_at)
+{
+	return callback_started_at ? bpf_ktime_get_ns() : 0;
+}
+
+static __noinline void
+rung_timing_finish(const struct snake_ladder_ctx *ctx, u32 ladder, u32 rung,
+		   u64 started_at)
+{
+	struct snake_rung_timing_event event = {};
+
+	if (!started_at || ctx->slot >= SNAKE_LADDER_SLOTS ||
+	    ladder >= SNAKE_NR_RUNG_LADDERS || rung >= SNAKE_MAX_RUNGS)
+		return;
+	event.generation = ctx->ladder->generation;
+	event.elapsed_ns = bpf_ktime_get_ns() - started_at;
+	event.ladder = ladder;
+	event.rung = rung;
+	bpf_ringbuf_output(&rung_timing_events, &event, sizeof(event), 0);
 }
 
 static __always_inline void

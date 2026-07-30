@@ -47,7 +47,9 @@ use scx_utils::{
     scx_ops_attach, scx_ops_load, scx_ops_open, try_set_rlimit_infinity, uei_exited, uei_report,
     UserExitInfo,
 };
-use stats::{CallbackTimingMetrics, CellMetrics, CpuMetrics, Metrics, RungMetrics};
+use stats::{
+    CallbackTimingMetrics, CellMetrics, CpuMetrics, Metrics, RungMetrics, RungTimingMetrics,
+};
 use task_cells::{ThreadCellAssignment, ThreadCellResponse};
 
 const SCHEDULER_NAME: &str = "scx_snake";
@@ -414,6 +416,69 @@ fn relay_fine_timing(data: &[u8], accumulator: &Mutex<FineTimingAccumulator>) ->
     let stage = u32::from_ne_bytes(data[16..20].try_into().unwrap());
     if let Ok(mut accumulator) = accumulator.lock() {
         accumulator.record(session_id, stage, elapsed_ns);
+    }
+    0
+}
+
+#[derive(Debug, Default)]
+struct RungTimingAccumulator {
+    metrics: BTreeMap<(u64, u32, u32), RungTimingMetrics>,
+}
+
+impl RungTimingAccumulator {
+    fn record(&mut self, generation: u64, ladder: u32, rung: u32, elapsed_ns: u64) {
+        if ladder >= bpf_intf::snake_rung_ladder_SNAKE_NR_RUNG_LADDERS
+            || rung >= bpf_intf::SNAKE_MAX_RUNGS
+        {
+            return;
+        }
+        let metrics = self
+            .metrics
+            .entry((generation, ladder, rung))
+            .or_insert_with(|| RungTimingMetrics {
+                total_ns: 0,
+                buckets: vec![0; bpf_intf::SNAKE_CALLBACK_TIMING_BUCKETS as usize],
+            });
+        let bucket = if elapsed_ns > 1 {
+            (u64::BITS - 1 - elapsed_ns.leading_zeros()) as usize
+        } else {
+            0
+        }
+        .min(metrics.buckets.len() - 1);
+        metrics.total_ns = metrics.total_ns.saturating_add(elapsed_ns);
+        metrics.buckets[bucket] = metrics.buckets[bucket].saturating_add(1);
+    }
+
+    fn generation(&self, generation: u64) -> Result<BTreeMap<String, RungTimingMetrics>> {
+        let mut result = BTreeMap::new();
+        for ladder in 0..bpf_intf::snake_rung_ladder_SNAKE_NR_RUNG_LADDERS {
+            for rung in 0..bpf_intf::SNAKE_MAX_RUNGS {
+                result.insert(
+                    rung_timing_key(ladder, rung)?,
+                    self.metrics
+                        .get(&(generation, ladder, rung))
+                        .cloned()
+                        .unwrap_or_else(|| RungTimingMetrics {
+                            total_ns: 0,
+                            buckets: vec![0; bpf_intf::SNAKE_CALLBACK_TIMING_BUCKETS as usize],
+                        }),
+                );
+            }
+        }
+        Ok(result)
+    }
+}
+
+fn relay_rung_timing(data: &[u8], accumulator: &Mutex<RungTimingAccumulator>) -> i32 {
+    if data.len() != size_of::<bpf_intf::snake_rung_timing_event>() {
+        return 0;
+    }
+    let generation = u64::from_ne_bytes(data[0..8].try_into().unwrap());
+    let elapsed_ns = u64::from_ne_bytes(data[8..16].try_into().unwrap());
+    let ladder = u32::from_ne_bytes(data[16..20].try_into().unwrap());
+    let rung = u32::from_ne_bytes(data[20..24].try_into().unwrap());
+    if let Ok(mut accumulator) = accumulator.lock() {
+        accumulator.record(generation, ladder, rung, elapsed_ns);
     }
     0
 }
@@ -1024,6 +1089,7 @@ fn aggregate_raw_stats(
         cpus,
         cells: BTreeMap::new(),
         rungs,
+        rung_timing: BTreeMap::new(),
         callback_timing: BTreeMap::new(),
     })
 }
@@ -1087,6 +1153,16 @@ fn aggregate_raw_callback_timing(
             Ok(((*name).to_owned(), metrics))
         })
         .collect()
+}
+
+fn rung_timing_key(ladder: u32, rung: u32) -> Result<String> {
+    let ladder = match ladder {
+        bpf_intf::snake_rung_ladder_SNAKE_RUNG_LADDER_IDLE => "idle",
+        bpf_intf::snake_rung_ladder_SNAKE_RUNG_LADDER_ENQUEUE => "enqueue",
+        bpf_intf::snake_rung_ladder_SNAKE_RUNG_LADDER_DISPATCH => "dispatch",
+        _ => bail!("unknown rung ladder {ladder}"),
+    };
+    Ok(format!("{ladder}:{rung}"))
 }
 
 fn aggregate_raw_cell_stats(
@@ -1206,6 +1282,7 @@ struct Scheduler<'object, 'policy> {
     struct_ops: Option<libbpf_rs::Link>,
     timing_ring: libbpf_rs::RingBuffer<'static>,
     fine_timing_accumulator: Arc<Mutex<FineTimingAccumulator>>,
+    rung_timing_accumulator: Arc<Mutex<RungTimingAccumulator>>,
     queue_timing_accumulator: Arc<Mutex<queue_timing::QueueTimingAccumulator>>,
     stats_server: StatsServer<SchedulerRequest, SchedulerResponse>,
     inspector: Inspector,
@@ -1309,6 +1386,8 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
         .with_callback_timing_sample_rate(opts.callback_timing_sample_rate);
         let fine_timing_accumulator = Arc::new(Mutex::new(FineTimingAccumulator::default()));
         let relay_accumulator = Arc::clone(&fine_timing_accumulator);
+        let rung_timing_accumulator = Arc::new(Mutex::new(RungTimingAccumulator::default()));
+        let rung_relay_accumulator = Arc::clone(&rung_timing_accumulator);
         let queue_timing_accumulator =
             Arc::new(Mutex::new(queue_timing::QueueTimingAccumulator::default()));
         let queue_relay_accumulator = Arc::clone(&queue_timing_accumulator);
@@ -1318,6 +1397,11 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
                 relay_fine_timing(data, &relay_accumulator)
             })
             .context("registering fine timing ring buffer")?;
+        ring_builder
+            .add(&skel.maps.rung_timing_events, move |data| {
+                relay_rung_timing(data, &rung_relay_accumulator)
+            })
+            .context("registering rung timing ring buffer")?;
         ring_builder
             .add(&skel.maps.queue_timing_events, move |data| {
                 relay_queue_timing(data, &queue_relay_accumulator)
@@ -1332,6 +1416,7 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
             struct_ops,
             timing_ring,
             fine_timing_accumulator,
+            rung_timing_accumulator,
             queue_timing_accumulator,
             stats_server,
             inspector,
@@ -1347,6 +1432,7 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
     }
 
     fn metrics(&self) -> Result<Metrics> {
+        self.drain_timing_events()?;
         let mut metrics = aggregate_raw_stats(
             &read_raw_stats(&self.skel, self.runtime.active_slot)?,
             &self.runtime.compiled,
@@ -1363,6 +1449,11 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
             &self.skel,
             self.runtime.active_slot,
         )?)?;
+        metrics.rung_timing = self
+            .rung_timing_accumulator
+            .lock()
+            .map_err(|_| anyhow!("rung timing accumulator lock poisoned"))?
+            .generation(self.runtime.generation)?;
         Ok(metrics)
     }
 
@@ -1420,6 +1511,12 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
                     metrics.callback_timing = aggregate_raw_callback_timing(
                         &read_raw_callback_timing(&self.skel, previous_slot)?,
                     )?;
+                    self.drain_timing_events()?;
+                    metrics.rung_timing = self
+                        .rung_timing_accumulator
+                        .lock()
+                        .map_err(|_| anyhow!("rung timing accumulator lock poisoned"))?
+                        .generation(previous_generation)?;
                     Ok(metrics)
                 }) {
                 Ok(metrics) => metrics,
@@ -2289,6 +2386,33 @@ scope = "task_allowed"
         assert!(timing.contains_key("running"));
         assert!(timing.contains_key("stopping"));
         assert!(timing.contains_key("quiescent"));
+    }
+
+    #[test]
+    fn rung_timing_accumulator_separates_generations_ladders_and_indices() {
+        let mut accumulator = RungTimingAccumulator::default();
+        accumulator.record(7, bpf_intf::snake_rung_ladder_SNAKE_RUNG_LADDER_IDLE, 0, 8);
+        accumulator.record(
+            7,
+            bpf_intf::snake_rung_ladder_SNAKE_RUNG_LADDER_IDLE,
+            0,
+            512,
+        );
+        accumulator.record(
+            7,
+            bpf_intf::snake_rung_ladder_SNAKE_RUNG_LADDER_DISPATCH,
+            1,
+            40,
+        );
+        accumulator.record(8, bpf_intf::snake_rung_ladder_SNAKE_RUNG_LADDER_IDLE, 0, 16);
+
+        let timing = accumulator.generation(7).expect("timing should aggregate");
+        assert_eq!(timing["idle:0"].total_ns, 520);
+        assert_eq!(timing["idle:0"].buckets[3], 1);
+        assert_eq!(timing["idle:0"].buckets[9], 1);
+        assert_eq!(timing["dispatch:1"].total_ns, 40);
+        assert_eq!(timing["dispatch:1"].buckets[5], 1);
+        assert_eq!(accumulator.generation(8).unwrap()["idle:0"].total_ns, 16);
     }
 
     #[test]

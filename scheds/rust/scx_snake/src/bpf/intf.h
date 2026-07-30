@@ -70,6 +70,20 @@ struct snake_callback_timing {
 	u64 buckets[SNAKE_CALLBACK_TIMING_BUCKETS];
 };
 
+enum snake_rung_ladder {
+	SNAKE_RUNG_LADDER_IDLE = 0,
+	SNAKE_RUNG_LADDER_ENQUEUE,
+	SNAKE_RUNG_LADDER_DISPATCH,
+	SNAKE_NR_RUNG_LADDERS,
+};
+
+struct snake_rung_timing_event {
+	u64 generation;
+	u64 elapsed_ns;
+	u32 ladder;
+	u32 rung;
+};
+
 enum snake_fine_timing_callback {
 	SNAKE_FINE_TIMING_CALLBACK_SELECT_CPU = 0,
 	SNAKE_FINE_TIMING_CALLBACK_ENQUEUE,

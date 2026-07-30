@@ -32,9 +32,11 @@ import {
   formatFeedbackTranscript,
   ladderPercentages,
   launchDiff,
+  nextPolicyCandidate,
   parseFeedbackEntries,
   policyCandidateActionDisabled,
   policyCategoryGroups,
+  policyInlineActionModel,
   policyLibraryModels,
   policySlotComparison,
   queueLadderSections,
@@ -57,6 +59,7 @@ import {
   updateFeedbackEntries,
   rungLadderPercentages,
   rungPercentages,
+  rungTimingSummary,
   selectionRungHitFlow,
   workloadAssignmentRequest,
 } from "/assets/inspection.js";
@@ -219,6 +222,7 @@ const state = {
   callbackTiming: null,
   callbackTimingError: null,
   callbackTimingLoading: false,
+  callbackTimingRequestId: 0,
   callbackRatePending: false,
   callbackRateDirty: false,
   cellOrderMode: "llc",
@@ -538,6 +542,11 @@ function bindControls() {
     }
   });
   elements.policyChoices.addEventListener("click", (event) => {
+    const liveApply = event.target.closest("[data-policy-live-apply]");
+    if (liveApply && !liveApply.disabled) {
+      openPolicyDialog(liveApply.dataset.policyLiveApply);
+      return;
+    }
     const fairnessControl = event.target.closest("[data-policy-fairness]");
     if (fairnessControl && !fairnessControl.dataset.policyId) {
       state.selectedPolicyFairness = fairnessControl.dataset.policyFairness;
@@ -548,14 +557,17 @@ function bindControls() {
     if (!control || control.disabled) {
       return;
     }
-    state.policyCandidate = {
+    const nextCandidate = {
       policyId: control.dataset.policyId,
       fairness: control.dataset.policyFairness,
       actionKind: control.dataset.policyAction,
     };
-    state.selectedLifecyclePolicyId = control.dataset.policyId;
-    state.selectedLifecycleFairness = control.dataset.policyFairness;
-    state.schedulerFormInitialized = true;
+    state.policyCandidate = nextPolicyCandidate(state.policyCandidate, nextCandidate);
+    if (nextCandidate.actionKind === "lifecycle") {
+      state.selectedLifecyclePolicyId = control.dataset.policyId;
+      state.selectedLifecycleFairness = control.dataset.policyFairness;
+      state.schedulerFormInitialized = true;
+    }
     renderPolicyLibrary();
     renderSchedulerControl();
   });
@@ -1384,7 +1396,7 @@ function renderOverview() {
         ["Policy", model.policy.policyId || "Unknown"],
         ["Fairness", model.policy.fairness ? model.policy.fairness.toUpperCase() : "Unknown"],
         ["Generation", model.policy.generation == null ? "Unavailable" : formatCount(model.policy.generation)],
-        ["Active slot", model.policy.activeSlot == null ? "Unavailable" : formatCount(model.policy.activeSlot)],
+        ["Active rung set", model.policy.activeSlot == null ? "Unavailable" : formatCount(model.policy.activeSlot)],
         ["Queue layout", model.policy.queueLayout || "None"],
         ["CPU routes", routeCoverage],
       ])
@@ -1433,7 +1445,7 @@ function renderDebugging() {
     ["Attachment", model.identity.attachSequence == null ? "Unavailable" : `#${formatCount(model.identity.attachSequence)}`],
     ["Policy", model.identity.policyId || "Unavailable"],
     ["Generation", model.identity.policyGeneration == null ? "Unavailable" : formatCount(model.identity.policyGeneration)],
-    ["Active slot", model.identity.activeSlot == null ? "Unavailable" : formatCount(model.identity.activeSlot)],
+    ["Active rung set", model.identity.activeSlot == null ? "Unavailable" : formatCount(model.identity.activeSlot)],
   ];
   elements.debuggingIdentity.innerHTML = identityFacts.map(([name, value]) => `
     <div><dt>${escapeHtml(name)}</dt><dd>${escapeHtml(value)}</dd></div>`).join("");
@@ -1450,7 +1462,7 @@ function renderDebugging() {
         <td><span class="change-mode ${setting.changeLabel === "Dynamic" ? "dynamic" : "reload"}">${escapeHtml(setting.changeLabel)}</span></td>
       </tr>`).join("");
   elements.debuggingPolicyContext.textContent = model.identity.policyId
-    ? `${model.identity.policyId} · generation ${model.identity.policyGeneration ?? "unknown"} · slot ${model.identity.activeSlot ?? "unknown"}`
+    ? `${model.identity.policyId} · generation ${model.identity.policyGeneration ?? "unknown"} · rung set ${model.identity.activeSlot ?? "unknown"}`
     : "Unavailable";
   elements.debuggingPolicySource.textContent = model.policySource || "Policy source unavailable.";
   if (document.activeElement !== elements.debuggingSnapshot) {
@@ -1460,10 +1472,11 @@ function renderDebugging() {
   decorateFeedbackTargets(elements.debuggingView);
 }
 
-async function loadCallbackTiming() {
-  if (state.callbackTimingLoading) {
+async function loadCallbackTiming({ force = false } = {}) {
+  if (state.callbackTimingLoading && !force) {
     return;
   }
+  const requestId = ++state.callbackTimingRequestId;
   state.callbackTimingLoading = true;
   const query = state.callbackRange === "lifetime"
     ? "scope=lifetime"
@@ -1474,13 +1487,22 @@ async function loadCallbackTiming() {
       const body = await response.json().catch(() => ({}));
       throw new Error(body.error || `Callback timing request failed (${response.status})`);
     }
-    state.callbackTiming = await response.json();
+    const timing = await response.json();
+    if (requestId !== state.callbackTimingRequestId) {
+      return;
+    }
+    state.callbackTiming = timing;
     state.callbackTimingError = null;
     state.lastCallbackTimingAt = Date.now();
   } catch (error) {
+    if (requestId !== state.callbackTimingRequestId) {
+      return;
+    }
     state.callbackTimingError = error.message;
   } finally {
-    state.callbackTimingLoading = false;
+    if (requestId === state.callbackTimingRequestId) {
+      state.callbackTimingLoading = false;
+    }
   }
   renderRuntimeContext();
   if (state.route === "observe/callbacks") {
@@ -1742,6 +1764,7 @@ async function loadSchedulerControl() {
     state.schedulerControlLoading = false;
   }
   renderRuntimeContext();
+  renderStatsResetControl();
   if (state.route === "configure") {
     renderSchedulerControl();
     renderPolicyLibrary();
@@ -1793,7 +1816,7 @@ function renderSchedulerControl() {
   elements.startScheduler.disabled = model.startDisabled;
   elements.restartScheduler.disabled = model.restartDisabled;
   elements.stopScheduler.disabled = model.stopDisabled;
-  elements.resetAllStats.disabled = statsResetDisabled(control, state.statsResetPending);
+  renderStatsResetControl();
 
   elements.schedulerControlState.className = `scheduler-state ${model.stateName}`;
   elements.schedulerControlState.textContent = model.stateLabel;
@@ -1801,16 +1824,22 @@ function renderSchedulerControl() {
   const message = schedulerControlMessage(control, state.schedulerControlError);
   if (message) {
     showElementNotice(elements.schedulerControlNotice, message);
+  } else if (state.policyCandidate?.actionKind === "activate") {
+    const policy = control?.policies?.find(
+      (candidate) => candidate.id === state.policyCandidate.policyId,
+    );
+    showElementNotice(
+      elements.schedulerControlNotice,
+      `${policy?.name || state.policyCandidate.policyId} is selected for live activation. Review the inline action, then choose Apply live.`,
+      "info",
+    );
   } else if (state.policyCandidate && state.selectedLifecyclePolicyId) {
     const policy = control?.policies?.find(
       (candidate) => candidate.id === state.selectedLifecyclePolicyId,
     );
-    const live = state.policyCandidate.actionKind === "activate";
     showElementNotice(
       elements.schedulerControlNotice,
-      live
-        ? `${policy?.name || state.selectedLifecyclePolicyId} is selected for live activation. Review the impact, then choose Apply live.`
-        : `${policy?.name || state.selectedLifecyclePolicyId} with ${state.selectedLifecycleFairness?.toUpperCase() || "the current fairness mode"} is selected. Review the command, then ${control?.active ? "restart" : "start"} Snake.`,
+      `${policy?.name || state.selectedLifecyclePolicyId} with ${state.selectedLifecycleFairness?.toUpperCase() || "the current fairness mode"} is selected. Review the command, then ${control?.active ? "restart" : "start"} Snake.`,
       "info",
     );
   } else {
@@ -1820,6 +1849,13 @@ function renderSchedulerControl() {
   elements.schedulerCurrentCommand.textContent = schedulerCurrentCommand(control);
   renderSchedulerCommandPreview();
   renderSchedulerSettings(control);
+}
+
+function renderStatsResetControl() {
+  elements.resetAllStats.disabled = statsResetDisabled(
+    state.schedulerControl,
+    state.statsResetPending,
+  );
 }
 
 function syncSchedulerFairnessOptions(control) {
@@ -1994,11 +2030,14 @@ async function schedulerMutation(path, payload) {
 }
 
 async function resetAllStats() {
-  if (state.statsResetPending || !window.confirm("Reset all inspector and Snake statistics?")) {
+  if (
+    state.statsResetPending
+    || !window.confirm("Reset all Snake and inspector statistics? This clears placement, cell, callback, and queue histories and stops active captures.")
+  ) {
     return;
   }
   state.statsResetPending = true;
-  renderSchedulerControl();
+  renderStatsResetControl();
   showElementNotice(elements.statsResetNotice, "Resetting statistics…", "info");
   try {
     const response = await fetch("/api/stats/reset", {
@@ -2015,12 +2054,18 @@ async function resetAllStats() {
     ].join("");
     showElementNotice(
       elements.statsResetNotice,
-      `Reset generation ${numberFormat.format(payload.generation)}, slot ${numberFormat.format(payload.active_slot)} at ${formatTimestamp(payload.reset_at_ms)}.${captureMessage}`,
+      `Reset generation ${numberFormat.format(payload.generation)}, rung set ${numberFormat.format(payload.active_slot)} at ${formatTimestamp(payload.reset_at_ms)}.${captureMessage} Coarse callback sampling remains active, so new samples may appear immediately.`,
       "success",
     );
+    state.callbackTimingRequestId += 1;
+    state.callbackTimingLoading = false;
+    state.callbackTiming = null;
+    state.callbackTimingError = null;
+    state.lastCallbackTimingAt = 0;
+    renderCallbackTiming();
     await Promise.all([
       loadInspection(),
-      loadCallbackTiming(),
+      loadCallbackTiming({ force: true }),
       loadFineTiming(),
       loadQueueTiming(),
     ]);
@@ -2028,7 +2073,7 @@ async function resetAllStats() {
     showElementNotice(elements.statsResetNotice, error.message);
   } finally {
     state.statsResetPending = false;
-    renderSchedulerControl();
+    renderStatsResetControl();
   }
 }
 
@@ -2231,7 +2276,7 @@ function renderPolicySlotComparison(slots) {
     <section class="policy-slot-diff">
       <header>
         <div><h3>Policy structure comparison</h3><p>${formatCount(changed)} of ${formatCount(comparison.rows.length)} fields changed</p></div>
-        <span>Metrics are excluded because the two slots cover different time periods.</span>
+        <span>Metrics are excluded because the two rung sets cover different time periods.</span>
       </header>
       <div class="policy-slot-diff-table-wrap">
         <table>
@@ -2409,17 +2454,17 @@ function renderSlot(slot) {
     ? "Active policy"
     : slot.state === "inactive"
       ? "Previous policy"
-      : `Slot ${slot.slot}`;
+      : `Rung set ${slot.slot}`;
   if (!slot.policy) {
     return `
-      <section class="slot-panel empty-slot" aria-label="Ladder slot ${slot.slot}, empty"
-        data-feedback-key="Policy:Slot-${slot.slot}">
+      <section class="slot-panel empty-slot" aria-label="Ladder rung set ${slot.slot}, empty"
+        data-feedback-key="Policy:Rung-set-${slot.slot}">
         <header class="slot-heading">
           <h3>${roleHeading}</h3>
-          <p>Slot ${slot.slot}</p>
+          <p>Rung set ${slot.slot}</p>
           <span class="slot-state empty">${stateLabel}</span>
         </header>
-        <p>No ladder is installed in this slot.</p>
+        <p>No ladder is installed in this rung set.</p>
       </section>`;
   }
   const metrics = slot.metrics || {};
@@ -2443,12 +2488,12 @@ function renderSlot(slot) {
         </li>`).join("")
     : "<li>None</li>";
   return `
-    <section class="slot-panel" aria-label="Ladder slot ${slot.slot}, ${stateLabel}"
-      data-feedback-key="Policy:Slot-${slot.slot}">
+    <section class="slot-panel" aria-label="Ladder rung set ${slot.slot}, ${stateLabel}"
+      data-feedback-key="Policy:Rung-set-${slot.slot}">
       <header class="slot-heading">
         <div>
           <h3>${roleHeading}</h3>
-          <p>Slot ${slot.slot} · Generation ${numberFormat.format(slot.generation)} · ${metricKind}</p>
+          <p>Rung set ${slot.slot} · Generation ${numberFormat.format(slot.generation)} · ${metricKind}</p>
         </div>
         <span class="slot-state ${escapeHtml(slot.state)}">${stateLabel}</span>
       </header>
@@ -2519,6 +2564,7 @@ function renderQueueLadder(section) {
             <h4>${escapeHtml(rung.operation)}</h4>
             <p>${escapeHtml(rung.role)}</p>
           </div>
+          ${renderRungTiming(rung.timing)}
         </header>
         <div class="rung-flow">
           <span class="hit-flow">${escapeHtml(rung.flow.hit)}</span>
@@ -2607,16 +2653,25 @@ function renderPolicyLibrary() {
       : group.policies.map((policy) => {
         const selected = state.policyCandidate?.policyId === policy.id
           && state.policyCandidate?.fairness === selectedFairness;
+        const inlineAction = policyInlineActionModel(
+          policy,
+          state.policyCandidate,
+          state.policyActivationPending,
+        );
+        const inlineActionId = `policy-live-action-${policy.id}-${selectedFairness}`;
+        const appliesLiveClass = policy.changeMode === "dynamic" && !policy.active
+          ? " applies-live"
+          : "";
         const changeStatus = policy.reasons.length > 0
           ? `<details class="policy-reason-details" data-render-key="policy-choice:${escapeHtml(selectedFairness)}:${escapeHtml(policy.id)}:reasons">
-              <summary class="change-mode ${policy.changeMode}" data-render-key="policy-choice:${escapeHtml(selectedFairness)}:${escapeHtml(policy.id)}:reasons:summary">${escapeHtml(policy.changeLabel)}</summary>
+              <summary class="change-mode ${policy.changeMode}${appliesLiveClass}" data-render-key="policy-choice:${escapeHtml(selectedFairness)}:${escapeHtml(policy.id)}:reasons:summary">${escapeHtml(policy.changeLabel)}</summary>
               <ul class="policy-reason-list">
                 ${policy.reasons.map((reason) => `<li><strong>${escapeHtml(reason.label)}</strong><span>${escapeHtml(reason.detail)}</span></li>`).join("")}
               </ul>
             </details>`
-          : `<span class="change-mode ${policy.changeMode}">${escapeHtml(policy.changeLabel)}</span>`;
+          : `<span class="change-mode ${policy.changeMode}${appliesLiveClass}">${escapeHtml(policy.changeLabel)}</span>`;
         return `
-      <article class="policy-choice${policy.active ? " active" : ""}${selected ? " selected" : ""}${policy.changeMode === "invalid" ? " invalid" : ""}">
+      <article class="policy-choice${policy.active ? " active" : ""}${selected ? " selected" : ""}${inlineAction.expanded ? " has-inline-action" : ""}${policy.changeMode === "invalid" ? " invalid" : ""}">
         <div class="policy-choice-copy">
           <h4>${escapeHtml(policy.name)}</h4>
           <p><code>${escapeHtml(policy.id)}</code>${policy.summary ? ` · ${escapeHtml(policy.summary)}` : ""}</p>
@@ -2628,10 +2683,21 @@ function renderPolicyLibrary() {
             data-policy-id="${escapeHtml(policy.id)}"
             data-policy-fairness="${escapeHtml(selectedFairness)}"
             data-render-key="policy-choice:${escapeHtml(selectedFairness)}:${escapeHtml(policy.id)}:select"
-            data-policy-action="${escapeHtml(policy.actionKind)}" aria-pressed="${selected}">
-            ${selected ? "Selected" : "Review"}
+            data-policy-action="${escapeHtml(policy.actionKind)}" aria-pressed="${selected}"
+            aria-expanded="${inlineAction.expanded}"${inlineAction.expanded ? ` aria-controls="${escapeHtml(inlineActionId)}"` : ""}>
+            ${inlineAction.expanded ? "Close" : selected ? "Selected" : "Review"}
           </button>
         </div>
+        ${inlineAction.expanded ? `
+          <section class="policy-live-action-panel" id="${escapeHtml(inlineActionId)}" aria-label="Apply ${escapeHtml(policy.name)} live">
+            <div>
+              <strong>Apply without restarting Snake</strong>
+              <span>Install this policy as the next generation while the scheduler keeps running.</span>
+            </div>
+            <button class="apply-button" type="button"
+              data-policy-live-apply="${escapeHtml(policy.id)}"
+              ${inlineAction.disabled ? "disabled" : ""}>${escapeHtml(inlineAction.label)}</button>
+          </section>` : ""}
       </article>`;
       }).join("");
     return `
@@ -2677,6 +2743,7 @@ function renderPolicyContextBar(fairnessModels, activeFairness) {
     elements.policyCandidateImpact.textContent = "—";
     elements.policyCandidateAction.textContent = "Select a policy";
     elements.policyCandidateAction.disabled = true;
+    elements.policyCandidateAction.classList.remove("hidden");
     return;
   }
   elements.policyCandidateContext.textContent = `${candidate.name} · ${candidate.selectedFairness.toUpperCase()}`;
@@ -2685,6 +2752,7 @@ function renderPolicyContextBar(fairnessModels, activeFairness) {
     ? `${candidate.changeLabel}: ${reasonLabels.join(", ")}`
     : candidate.changeLabel;
   state.policyCandidate.actionKind = candidate.actionKind;
+  elements.policyCandidateAction.classList.toggle("hidden", candidate.actionKind === "activate");
   elements.policyCandidateAction.textContent = candidate.actionLabel;
   elements.policyCandidateAction.disabled = policyCandidateActionDisabled(
     candidate,
@@ -2805,6 +2873,7 @@ function renderRung(rung, index, count, ladderMetrics, queues) {
             <div><dt>Misses</dt><dd>${formatCount(metrics.misses)}<small>${formatPercentage(percentages.miss)} of rung attempts</small><small>${formatPercentage(ladderRates.miss)} of ladder calls</small></dd></div>
             <div><dt>Errors</dt><dd>${formatCount(metrics.errors)}</dd></div>
           </dl>
+          ${renderRungTiming(rung.timing)}
         </header>
         <div class="rung-fields">
           ${fieldButton("Opcode", rung.opcode)}
@@ -2818,6 +2887,17 @@ function renderRung(rung, index, count, ladderMetrics, queues) {
         </div>
       </div>
     </article>`;
+}
+
+function renderRungTiming(rawTiming) {
+  const timing = rungTimingSummary(rawTiming);
+  const value = timing.p95Ns == null
+    ? "—"
+    : formatCallbackDuration(timing.p95Ns);
+  return `
+    <dl class="rung-timing">
+      <div><dt>Sampled p95</dt><dd>${escapeHtml(value)}<small>${formatCount(timing.samples)} samples</small></dd></div>
+    </dl>`;
 }
 
 function fieldButton(name, reference) {

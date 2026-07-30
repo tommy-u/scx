@@ -14,7 +14,7 @@ use crate::policy::{
 };
 use crate::queue_timing::QueueTimingInspectionView;
 use crate::queue_topology::QueueTopology;
-use crate::stats::{CallbackTimingMetrics, Metrics, RungMetrics};
+use crate::stats::{CallbackTimingMetrics, Metrics, RungMetrics, RungTimingMetrics};
 
 #[derive(Clone, Debug)]
 pub struct SlotPolicy {
@@ -83,6 +83,7 @@ pub struct RungInspectionView {
     pub flags: FieldReferenceView,
     pub data: FieldReferenceView,
     pub metrics: Option<RungMetrics>,
+    pub timing: Option<RungTimingMetrics>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -106,6 +107,7 @@ pub struct PolicyInspectionView {
 pub struct QueueRungInspectionView {
     pub index: u32,
     pub operation: String,
+    pub timing: Option<RungTimingMetrics>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -468,6 +470,11 @@ fn slot_view(
         .map(|metrics| &metrics.rungs)
         .cloned()
         .unwrap_or_default();
+    let rung_timing = metrics
+        .as_ref()
+        .map(|metrics| &metrics.rung_timing)
+        .cloned()
+        .unwrap_or_default();
     let rungs = policy
         .compiled
         .rungs
@@ -479,6 +486,7 @@ fn slot_view(
                 index,
                 rung,
                 rung_metrics.get(&(index as u32)),
+                rung_timing.get(&format!("idle:{index}")),
             )
         })
         .collect();
@@ -508,14 +516,21 @@ fn slot_view(
             source: policy.source.clone(),
             fallback: fallback_reference(policy.compiled.fallback),
             rungs,
-            queues: policy.compiled.queues.as_ref().map(queue_policy_view),
+            queues: policy
+                .compiled
+                .queues
+                .as_ref()
+                .map(|queues| queue_policy_view(queues, &rung_timing)),
             mask_tables,
         }),
         metrics,
     }
 }
 
-fn queue_policy_view(queues: &QueuePolicy) -> QueuePolicyInspectionView {
+fn queue_policy_view(
+    queues: &QueuePolicy,
+    timing: &BTreeMap<String, RungTimingMetrics>,
+) -> QueuePolicyInspectionView {
     QueuePolicyInspectionView {
         layout: match queues.layout {
             QueueLayout::Cell => "cell",
@@ -533,6 +548,7 @@ fn queue_policy_view(queues: &QueuePolicy) -> QueuePolicyInspectionView {
                     QueueEnqueueTarget::Affinity => "affinity",
                 }
                 .into(),
+                timing: timing.get(&format!("enqueue:{index}")).cloned(),
             })
             .collect(),
         dispatch: queues
@@ -547,6 +563,7 @@ fn queue_policy_view(queues: &QueuePolicy) -> QueuePolicyInspectionView {
                     QueueDispatchSource::MinVtime => "min_vtime(cell,affinity)",
                 }
                 .into(),
+                timing: timing.get(&format!("dispatch:{index}")).cloned(),
             })
             .collect(),
     }
@@ -557,6 +574,7 @@ fn rung_view(
     index: usize,
     rung: &CompiledRung,
     metrics: Option<&RungMetrics>,
+    timing: Option<&RungTimingMetrics>,
 ) -> RungInspectionView {
     RungInspectionView {
         index: index as u32,
@@ -567,6 +585,7 @@ fn rung_view(
         flags: flags_reference(policy, rung),
         data: data_reference(policy, rung),
         metrics: metrics.cloned(),
+        timing: timing.cloned(),
     }
 }
 

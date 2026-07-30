@@ -48,7 +48,7 @@
           </div>
           <div class="navigation-group">
             <span class="navigation-group-label">Inspect</span>
-            <a href="#/inspect/policy-slots" data-route="inspect/policy-slots">Policy slots</a>
+            <a href="#/inspect/policy-slots" data-route="inspect/policy-slots">Policy rungs</a>
             <a href="#/inspect/queue-topology" data-route="inspect/queue-topology">Queue topology</a>
             <a href="#/inspect/cells" data-route="inspect/cells">Cells &amp; tasks</a>
           </div>
@@ -94,7 +94,7 @@
           <section class="overview-section" aria-labelledby="overviewPolicyTitle" data-feedback-key="Overview:Policy">
             <div class="overview-section-heading">
               <h3 id="overviewPolicyTitle">Policy and queues</h3>
-              <a href="#/inspect/policy-slots">Open policy slots</a>
+              <a href="#/inspect/policy-slots">Open policy rungs</a>
             </div>
             <div class="overview-diagnostic" id="overviewPolicy">Waiting for policy inspection</div>
           </section>
@@ -208,7 +208,9 @@
             <select id="callbackSampleRateControl" aria-label="Callback timing sample rate"></select>
           </label>
           <button class="apply-button" id="applyCallbackSampleRate" type="button">Apply rate</button>
+          <button class="secondary-button callback-reset-button" id="resetAllStats" type="button" disabled>Reset all statistics</button>
           <p class="control-message hidden" id="callbackRateNotice" role="status"></p>
+          <p class="control-message hidden" id="statsResetNotice" role="status"></p>
         </section>
         <section class="callback-summary-band" aria-label="Callback timing summary" data-feedback-key="Callbacks:Timing-summary">
           <dl>
@@ -249,7 +251,7 @@
       <section class="view-panel hidden" id="policyView" data-view="inspect/policy-slots" aria-labelledby="policyTitle">
         <header class="view-heading">
           <div>
-            <h2 id="policyTitle">Policy slots</h2>
+            <h2 id="policyTitle">Policy rungs</h2>
             <p>Current execution state compared with the last policy retained for safe replacement</p>
           </div>
           <span class="view-freshness" id="policyFreshness">Waiting for Snake</span>
@@ -433,9 +435,7 @@
                 <button class="apply-button" id="startScheduler" type="button">Start Snake</button>
                 <button class="apply-button" id="restartScheduler" type="button" disabled>Restart Snake</button>
                 <button class="secondary-button" id="stopScheduler" type="button" disabled>Stop Snake</button>
-                <button class="secondary-button" id="resetAllStats" type="button" disabled>Reset all stats</button>
               </div>
-              <p class="control-message hidden" id="statsResetNotice" role="status"></p>
             </section>
           </div>
             </section>
@@ -532,7 +532,7 @@
           </div>
           <div class="navigation-group">
             <span class="navigation-group-label">Inspect</span>
-            <a href="#/inspect/policy-slots" data-route="inspect/policy-slots">Policy slots</a>
+            <a href="#/inspect/policy-slots" data-route="inspect/policy-slots">Policy rungs</a>
             <a href="#/inspect/queue-topology" data-route="inspect/queue-topology">Queue topology</a>
             <a href="#/inspect/cells" data-route="inspect/cells">Cells &amp; tasks</a>
           </div>
@@ -570,8 +570,8 @@
     <dialog class="policy-dialog" id="policyDialog" aria-labelledby="policyDialogTitle">
       <form method="dialog">
         <header>
-          <span>Activate policy</span>
-          <h2 id="policyDialogTitle">Confirm policy change</h2>
+          <span>Apply live</span>
+          <h2 id="policyDialogTitle">Confirm live policy change</h2>
         </header>
         <div class="policy-dialog-body">
           <strong id="policyDialogName"></strong>
@@ -581,7 +581,7 @@
         </div>
         <footer>
           <button class="secondary-button" value="cancel">Cancel</button>
-          <button class="apply-button" id="confirmPolicyActivation" type="button">Activate policy</button>
+          <button class="apply-button" id="confirmPolicyActivation" type="button">Apply live</button>
         </footer>
       </form>
     </dialog>

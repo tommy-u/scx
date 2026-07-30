@@ -25,6 +25,38 @@ pub struct CallbackTimingMetrics {
     pub buckets: Vec<u64>,
 }
 
+#[stat_doc]
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize, Stats)]
+pub struct RungTimingMetrics {
+    #[stat(desc = "Total sampled rung execution time", _om_skip)]
+    pub total_ns: u64,
+    #[stat(desc = "Base-2 nanosecond rung execution-time buckets", _om_skip)]
+    pub buckets: Vec<u64>,
+}
+
+impl RungTimingMetrics {
+    fn delta(&self, previous: Option<&Self>) -> Self {
+        Self {
+            total_ns: self
+                .total_ns
+                .saturating_sub(previous.map_or(0, |metrics| metrics.total_ns)),
+            buckets: self
+                .buckets
+                .iter()
+                .enumerate()
+                .map(|(index, count)| {
+                    count.saturating_sub(
+                        previous
+                            .and_then(|metrics| metrics.buckets.get(index))
+                            .copied()
+                            .unwrap_or_default(),
+                    )
+                })
+                .collect(),
+        }
+    }
+}
+
 impl CallbackTimingMetrics {
     fn delta(&self, previous: Option<&Self>) -> Self {
         Self {
@@ -263,6 +295,11 @@ pub struct Metrics {
     pub cells: BTreeMap<u32, CellMetrics>,
     #[stat(desc = "Per-rung policy evaluation metrics")]
     pub rungs: BTreeMap<u32, RungMetrics>,
+    #[stat(
+        desc = "Sampled execution-time histograms for every policy rung",
+        _om_skip
+    )]
+    pub rung_timing: BTreeMap<String, RungTimingMetrics>,
     #[stat(desc = "Sampled callback execution-time histograms", _om_skip)]
     pub callback_timing: BTreeMap<String, CallbackTimingMetrics>,
 }
@@ -391,6 +428,11 @@ impl Metrics {
                 .rungs
                 .iter()
                 .map(|(index, rung)| (*index, rung.delta(previous.rungs.get(index))))
+                .collect(),
+            rung_timing: self
+                .rung_timing
+                .iter()
+                .map(|(key, timing)| (key.clone(), timing.delta(previous.rung_timing.get(key))))
                 .collect(),
             callback_timing: self
                 .callback_timing
@@ -700,6 +742,7 @@ pub fn server_data() -> StatsServerData<SchedulerRequest, SchedulerResponse> {
         .add_meta(CpuMetrics::meta())
         .add_meta(CellMetrics::meta())
         .add_meta(RungMetrics::meta())
+        .add_meta(RungTimingMetrics::meta())
         .add_ops("top", StatsOps { open, close: None })
         .add_ops(
             "inspect",

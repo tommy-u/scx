@@ -17,8 +17,10 @@ import {
   fineTimingCaptureModels,
   formatCallbackDuration,
   ladderPercentages,
+  nextPolicyCandidate,
   policyLibraryModels,
   policyCandidateActionDisabled,
+  policyInlineActionModel,
   queueTopologyModel,
   queueLadderSections,
   queueRungFlow,
@@ -31,6 +33,7 @@ import {
   statsResetDisabled,
   rungLadderPercentages,
   rungPercentages,
+  rungTimingSummary,
   selectionRungHitFlow,
   workloadAssignmentRequest,
 } from "../../src/web/inspection.js";
@@ -100,7 +103,7 @@ test("runtime context model distinguishes scheduler attachment from policy gener
     {
       synchronizing: false,
       statusLabel: "Snake active · Attach #24",
-      detailLabel: "cell-min-vtime.toml · VTIME · policy gen 2 · slot 1 · sampling 1/64",
+      detailLabel: "cell-min-vtime.toml · VTIME · policy gen 2 · rung set 1 · sampling 1/64",
     },
   );
 
@@ -177,8 +180,8 @@ test("feedback entries keep first-entry order and one draft per element", () => 
   );
   entries = inspectionState.updateFeedbackEntries(
     entries,
-    "Policy:Slot-0",
-    "Make the active slot easier to scan.",
+    "Policy:Rung-set-0",
+    "Make the active rung set easier to scan.",
   );
   entries = inspectionState.updateFeedbackEntries(
     entries,
@@ -191,7 +194,7 @@ test("feedback entries keep first-entry order and one draft per element", () => 
       key: "Callbacks:Fine-grained-timing:Select-CPU",
       text: "Show both active and historical stages.",
     },
-    { key: "Policy:Slot-0", text: "Make the active slot easier to scan." },
+    { key: "Policy:Rung-set-0", text: "Make the active rung set easier to scan." },
   ]);
 });
 
@@ -223,10 +226,10 @@ test("feedback transcript preserves multiline text and separates elements", () =
         key: "Callbacks:Fine-grained-timing:Select-CPU",
         text: "First thought\nSecond thought",
       },
-      { key: "Policy:Slot-0", text: "Another request" },
+      { key: "Policy:Rung-set-0", text: "Another request" },
     ]),
     "[Callbacks:Fine-grained-timing:Select-CPU] First thought\nSecond thought\n\n"
-      + "[Policy:Slot-0] Another request",
+      + "[Policy:Rung-set-0] Another request",
   );
 });
 
@@ -527,8 +530,6 @@ test("configure workspace exposes policy selection, launch controls, and setting
     'id="startScheduler"',
     'id="restartScheduler"',
     'id="stopScheduler"',
-    'id="resetAllStats"',
-    'id="statsResetNotice"',
     'id="schedulerSettingsRows"',
   ]) {
     assert.match(page, new RegExp(control), `missing ${control}`);
@@ -542,6 +543,25 @@ test("configure workspace exposes policy selection, launch controls, and setting
   assert.match(page, /Launch override/);
 });
 
+test("global statistics reset is exposed by callback performance, not Configure", () => {
+  const page = readFileSync(
+    new URL("../../src/web/index.html", import.meta.url),
+    "utf8",
+  );
+  const callbacks = page.slice(
+    page.indexOf('id="callbacksView"'),
+    page.indexOf('id="policyView"'),
+  );
+  const configure = page.slice(
+    page.indexOf('id="controlView"'),
+    page.indexOf('id="debuggingView"'),
+  );
+
+  assert.match(callbacks, /id="resetAllStats"[^>]*>Reset all statistics<\/button>/);
+  assert.match(callbacks, /id="statsResetNotice"/);
+  assert.doesNotMatch(configure, /id="resetAllStats"|id="statsResetNotice"/);
+});
+
 test("control client uses the scheduler lifecycle endpoints", () => {
   const script = readFileSync(
     new URL("../../src/web/app.js", import.meta.url),
@@ -552,7 +572,24 @@ test("control client uses the scheduler lifecycle endpoints", () => {
   assert.match(script, /schedulerMutation\("\/api\/scheduler\/restart"/);
   assert.match(script, /schedulerMutation\("\/api\/scheduler\/stop"/);
   assert.match(script, /fetch\("\/api\/stats\/reset"/);
-  assert.match(script, /confirm\("Reset all inspector and Snake statistics\?"\)/);
+  assert.match(
+    script,
+    /confirm\("Reset all Snake and inspector statistics\? This clears placement, cell, callback, and queue histories and stops active captures\."\)/,
+  );
+});
+
+test("callback reset supersedes an in-flight pre-reset timing request", () => {
+  const script = readFileSync(
+    new URL("../../src/web/app.js", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(script, /callbackTimingRequestId:\s*0/);
+  assert.match(script, /async function loadCallbackTiming\(\{ force = false \} = \{\}\)/);
+  assert.match(script, /const requestId = \+\+state\.callbackTimingRequestId/);
+  assert.match(script, /requestId !== state\.callbackTimingRequestId/);
+  assert.match(script, /state\.callbackTimingRequestId \+= 1/);
+  assert.match(script, /loadCallbackTiming\(\{ force: true \}\)/);
 });
 
 test("the global runtime banner names attachment and policy generations unambiguously", () => {
@@ -728,6 +765,58 @@ test("lifecycle candidate actions honor scheduler controllability and pending st
   }, { active: false, managed: false }), true);
 });
 
+test("only the selected live-applicable policy exposes its inline action", () => {
+  const current = {
+    policyId: "random.toml",
+    fairness: "fifo",
+    actionKind: "activate",
+  };
+  const live = {
+    id: "random.toml",
+    selectedFairness: "fifo",
+    actionKind: "activate",
+    actionLabel: "Apply live",
+    disabled: false,
+  };
+
+  assert.deepEqual(policyInlineActionModel(live, current), {
+    expanded: true,
+    label: "Apply live",
+    disabled: false,
+  });
+  assert.equal(policyInlineActionModel({ ...live, id: "basic.toml" }, current).expanded, false);
+  assert.equal(policyInlineActionModel({ ...live, actionKind: "lifecycle" }, current).expanded, false);
+
+  const replacement = {
+    policyId: "basic.toml",
+    fairness: "fifo",
+    actionKind: "activate",
+  };
+  assert.deepEqual(nextPolicyCandidate(current, replacement), replacement);
+  assert.equal(nextPolicyCandidate(current, { ...current }), null);
+});
+
+test("live policy selection renders one inline Apply live panel", () => {
+  const script = readFileSync(
+    new URL("../../src/web/app.js", import.meta.url),
+    "utf8",
+  );
+  const stylesheet = readFileSync(
+    new URL("../../src/web/style.css", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(script, /class="policy-live-action-panel"/);
+  assert.match(script, /data-policy-live-apply/);
+  assert.match(script, /openPolicyDialog\(liveApply\.dataset\.policyLiveApply\)/);
+  assert.match(
+    script,
+    /if \(nextCandidate\.actionKind === "lifecycle"\) \{[\s\S]*?state\.selectedLifecyclePolicyId = control\.dataset\.policyId/,
+  );
+  assert.match(script, /candidate\.id === state\.policyCandidate\.policyId/);
+  assert.match(stylesheet, /\.policy-live-action-panel\s*\{/);
+});
+
 test("policy library resolves at most one active policy when sources are duplicated", () => {
   const catalog = {
     policies: [
@@ -868,7 +957,7 @@ test("Policy exposes a tuning context strip and accessible change reasons", () =
   assert.doesNotMatch(script, /policy\.hoverDetail \? `title=/);
 });
 
-test("policy slot comparison distinguishes active and previous structural state", () => {
+test("policy rung comparison distinguishes active and previous structural state", () => {
   assert.equal(typeof inspectionState.policySlotComparison, "function");
   if (typeof inspectionState.policySlotComparison !== "function") {
     return;
@@ -902,8 +991,8 @@ test("policy slot comparison distinguishes active and previous structural state"
     },
   ]);
 
-  assert.equal(comparison.activeLabel, "Active · slot 1");
-  assert.equal(comparison.previousLabel, "Previous · slot 0");
+  assert.equal(comparison.activeLabel, "Active · rung set 1");
+  assert.equal(comparison.previousLabel, "Previous · rung set 0");
   assert.deepEqual(
     comparison.rows.filter((row) => row.changed).map((row) => row.name),
     ["Generation", "Idle rungs", "Fallback", "Mask tables", "Queue layout", "Enqueue ladder", "Dispatch ladder"],
@@ -928,6 +1017,31 @@ test("policy library renders fairness parents and stacks status over actions", (
   assert.match(stylesheet, /\.policy-fairness-options\s*\{/);
   assert.match(stylesheet, /\.policy-fairness-option\.active\s*\{/);
   assert.match(stylesheet, /\.policy-choice-actions\s*\{/);
+});
+
+test("policy library reserves green cards for active policies and blue for Applies live", () => {
+  const script = readFileSync(
+    new URL("../../src/web/app.js", import.meta.url),
+    "utf8",
+  );
+  const stylesheet = readFileSync(
+    new URL("../../src/web/style.css", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(
+    script,
+    /policy\.changeMode === "dynamic"\s*&& !policy\.active\s*\? " applies-live"/,
+  );
+  assert.match(
+    stylesheet,
+    /\.policy-choice\.active\s*\{[^}]*background:\s*#e4f5ef;/s,
+  );
+  assert.match(stylesheet, /\.policy-choice\.active\.selected\s*\{/);
+  assert.match(
+    stylesheet,
+    /\.change-mode\.applies-live\s*\{[^}]*background:\s*#e0eff8;[^}]*border-color:\s*#6b9dbc;/s,
+  );
 });
 
 test("control layout has bounded launch fields and a responsive narrow mode", () => {
@@ -1139,6 +1253,34 @@ test("rung ladder percentages use all select calls as the denominator", () => {
   );
 });
 
+test("rung timing reports sampled p95 only after twenty samples", () => {
+  const buckets = Array(64).fill(0);
+  buckets[4] = 19;
+  buckets[7] = 1;
+  assert.deepEqual(rungTimingSummary({ total_ns: 500, buckets }), {
+    samples: 20,
+    meanNs: 25,
+    p95Ns: 31,
+  });
+
+  buckets[4] = 18;
+  assert.deepEqual(rungTimingSummary({ total_ns: 475, buckets }), {
+    samples: 19,
+    meanNs: 25,
+    p95Ns: null,
+  });
+});
+
+test("policy rung rows render sampled p95 and sample count for every ladder", () => {
+  const script = readFileSync(
+    new URL("../../src/web/app.js", import.meta.url),
+    "utf8",
+  );
+  assert.match(script, /<dt>Sampled p95<\/dt>/);
+  assert.match(script, /timing\.samples/);
+  assert.match(script, /queue.*timing|timing.*queue/is);
+});
+
 test("rung metric columns have stable equal-width geometry", () => {
   const stylesheet = readFileSync(
     new URL("../../src/web/style.css", import.meta.url),
@@ -1348,7 +1490,7 @@ test("keyed render state restores disclosure, scrolling, and focus only for matc
 
 test("keyed render state restores textarea selection after polling replacement", () => {
   const oldTextarea = {
-    dataset: { renderKey: "feedback:Policy:Slot-0:textarea" },
+    dataset: { renderKey: "feedback:Policy:Rung-set-0:textarea" },
     scrollTop: 18,
     scrollLeft: 0,
     selectionStart: 6,
@@ -1357,7 +1499,7 @@ test("keyed render state restores textarea selection after polling replacement",
   };
   const snapshot = inspectionState.captureKeyedRenderState([oldTextarea], oldTextarea);
   const newTextarea = {
-    dataset: { renderKey: "feedback:Policy:Slot-0:textarea" },
+    dataset: { renderKey: "feedback:Policy:Rung-set-0:textarea" },
     scrollTop: 0,
     scrollLeft: 0,
     selectionStart: 0,
@@ -1493,7 +1635,7 @@ test("every planned feedback target has a stable semantic key", () => {
     "Callbacks:Callback-percentiles",
     "Callbacks:Fine-grained-timing:",
     "Policy:Policy-library",
-    "Policy:Slot-",
+    "Policy:Rung-set-",
     "Policy:Resolved-queue-topology",
     "Cells:Workload-assignment",
     "Cells:Cell-browser",

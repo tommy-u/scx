@@ -104,7 +104,8 @@ s32 BPF_STRUCT_OPS(snake_select_cpu, struct task_struct *p, s32 prev_cpu,
 
 	fine_stage_started_at = fine_timing_select_start(callback_started_at);
 	cpu = walk_policy_ladder(&ladder_ctx, p, prev_cpu, wake_flags,
-				 &dispatch_flags, &queue_cell_index);
+				 &dispatch_flags, &queue_cell_index,
+				 callback_started_at);
 	fine_timing_finish_select(SNAKE_FINE_TIMING_SELECT_POLICY_LADDER,
 				  fine_stage_started_at);
 	if (cpu >= 0) {
@@ -242,7 +243,7 @@ void BPF_STRUCT_OPS(snake_enqueue, struct task_struct *p, u64 enq_flags)
 	stat_inc(&ladder_ctx, SNAKE_STAT_ENQUEUES);
 	if (queue_topology_enabled()) {
 		ret = queue_ladder_enqueue(&ladder_ctx, p, enq_flags,
-					   &fine_timing);
+					   &fine_timing, callback_started_at);
 		stage_started_at = fine_timing_start(&fine_timing);
 		if (ret)
 			scx_bpf_error("snake queue enqueue failed for pid %d", p->pid);
@@ -253,7 +254,8 @@ void BPF_STRUCT_OPS(snake_enqueue, struct task_struct *p, u64 enq_flags)
 		return;
 	}
 	slice = fairness_dispatch_slice(&ladder_ctx, p, true);
-	cell_enqueued = try_enqueue_task_cell(&ladder_ctx, p, enq_flags, slice);
+	cell_enqueued = try_enqueue_task_cell(&ladder_ctx, p, enq_flags, slice,
+				      callback_started_at);
 	if (cell_enqueued)
 		goto out;
 	ret = fairness_enqueue(&ladder_ctx, p, enq_flags);
@@ -288,7 +290,8 @@ void BPF_STRUCT_OPS(snake_dispatch, s32 cpu, struct task_struct *prev)
 			   SNAKE_FINE_TIMING_DISPATCH_ACQUIRE_LADDER,
 			   stage_started_at);
 	if (queue_topology_enabled()) {
-		ret = queue_ladder_dispatch(&ladder_ctx, cpu, prev, &fine_timing);
+		ret = queue_ladder_dispatch(&ladder_ctx, cpu, prev, &fine_timing,
+					    callback_started_at);
 		stage_started_at = fine_timing_start(&fine_timing);
 		if (ret)
 			scx_bpf_error("snake queue dispatch failed on CPU %d", cpu);

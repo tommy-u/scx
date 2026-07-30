@@ -149,7 +149,7 @@ test("overview model summarizes existing runtime payloads without new thresholds
     runtime: {
       synchronizing: false,
       statusLabel: "Snake active · Attach #7",
-      detailLabel: "cell-min-vtime.toml · VTIME · policy gen 12 · slot 1 · sampling 1/64",
+      detailLabel: "cell-min-vtime.toml · VTIME · policy gen 12 · rung set 1 · sampling 1/64",
     },
     warnings: [
       "2 pair-map failures · 0 task-state failures",

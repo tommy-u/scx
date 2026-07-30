@@ -579,6 +579,10 @@ button:focus-visible {
   min-height: 58px;
 }
 
+.callback-reset-button {
+  margin-left: auto;
+}
+
 .callback-control-band .notice {
   flex: 1 1 100%;
   border-bottom: 0;
@@ -1360,8 +1364,13 @@ button:focus-visible {
 }
 
 .policy-choice.active {
+  background: #e4f5ef;
   border-color: #80bba8;
   box-shadow: inset 3px 0 0 var(--active);
+}
+
+.policy-choice.active p {
+  color: #287362;
 }
 
 .policy-choice.selected {
@@ -1369,8 +1378,51 @@ button:focus-visible {
   box-shadow: inset 3px 0 0 var(--accent);
 }
 
+.policy-choice.active.selected {
+  background: #e4f5ef;
+  border-color: #80bba8;
+  box-shadow: inset 3px 0 0 var(--active);
+}
+
 .policy-choice.invalid {
   background: var(--surface-muted);
+}
+
+.policy-choice.has-inline-action {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.policy-live-action-panel {
+  min-width: 0;
+  padding: 10px 0 1px;
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  border-top: 1px solid var(--border);
+}
+
+.policy-live-action-panel strong,
+.policy-live-action-panel span {
+  display: block;
+}
+
+.policy-live-action-panel strong {
+  font-size: 0.7rem;
+}
+
+.policy-live-action-panel span {
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 0.62rem;
+  line-height: 1.35;
+}
+
+.policy-live-action-panel .apply-button {
+  flex: 0 0 auto;
+  white-space: nowrap;
 }
 
 .policy-choice-copy {
@@ -1567,6 +1619,7 @@ button:focus-visible {
 
 .slot-summary,
 .rung-metrics,
+.rung-timing,
 .cell-facts,
 .task-mapping dl {
   margin: 0;
@@ -1583,6 +1636,7 @@ button:focus-visible {
 
 .slot-summary dt,
 .rung-metrics dt,
+.rung-timing dt,
 .cell-facts dt,
 .task-mapping dt {
   color: var(--muted);
@@ -1592,6 +1646,7 @@ button:focus-visible {
 
 .slot-summary dd,
 .rung-metrics dd,
+.rung-timing dd,
 .cell-facts dd,
 .task-mapping dd {
   margin: 2px 0 0;
@@ -1754,6 +1809,26 @@ button:focus-visible {
 }
 
 .rung-metrics dd small {
+  display: block;
+  margin-top: 1px;
+  color: var(--muted);
+  font-size: 0.58rem;
+  font-weight: 650;
+}
+
+.rung-timing {
+  min-width: 92px;
+  margin: 0;
+  padding-left: 10px;
+  flex: 0 0 92px;
+  border-left: 1px solid var(--border);
+}
+
+.rung-timing dd {
+  font-size: 0.72rem;
+}
+
+.rung-timing dd small {
   display: block;
   margin-top: 1px;
   color: var(--muted);
@@ -2667,6 +2742,12 @@ button:focus-visible {
   color: #075e4c;
   background: #e4f5ef;
   border-color: #80bba8;
+}
+
+.change-mode.applies-live {
+  color: #0c4f7d;
+  background: #e0eff8;
+  border-color: #6b9dbc;
 }
 
 .change-mode.reload {

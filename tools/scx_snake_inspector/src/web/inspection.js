@@ -415,7 +415,7 @@ export function runtimeContextModel({ snapshot, inspection, control } = {}) {
         context.policy_generation == null
           ? null
           : `policy gen ${context.policy_generation}`,
-        context.active_slot == null ? null : `slot ${context.active_slot}`,
+        context.active_slot == null ? null : `rung set ${context.active_slot}`,
         context.callback_sample_rate == null
           ? null
           : context.callback_sample_rate === 0
@@ -922,7 +922,7 @@ export function policyCategoryGroups(policies) {
 export function policySlotComparison(slots) {
   const active = (slots || []).find((slot) => slot.state === "active") || null;
   const previous = (slots || []).find((slot) => slot.state === "inactive") || null;
-  const label = (role, slot) => slot ? `${role} · slot ${slot.slot}` : `${role} unavailable`;
+  const label = (role, slot) => slot ? `${role} · rung set ${slot.slot}` : `${role} unavailable`;
   if (!active?.policy || !previous?.policy) {
     return {
       activeLabel: label("Active", active),
@@ -1021,6 +1021,34 @@ export function rungLadderPercentages(metrics, ladderMetrics) {
   return {
     hit: Math.max(0, Number(metrics?.hits) || 0) * 100 / selectCalls,
     miss: Math.max(0, Number(metrics?.misses) || 0) * 100 / selectCalls,
+  };
+}
+
+export function rungTimingSummary(timing) {
+  const buckets = Array.isArray(timing?.buckets) ? timing.buckets : [];
+  const samples = buckets.reduce(
+    (total, count) => total + Math.max(0, Number(count) || 0),
+    0,
+  );
+  const totalNs = Math.max(0, Number(timing?.total_ns) || 0);
+  let p95Ns = null;
+  if (samples >= 20) {
+    const rank = Math.ceil(samples * 0.95);
+    let cumulative = 0;
+    for (let bucket = 0; bucket < buckets.length; bucket += 1) {
+      cumulative += Math.max(0, Number(buckets[bucket]) || 0);
+      if (cumulative >= rank) {
+        p95Ns = bucket >= 52
+          ? Number.MAX_SAFE_INTEGER
+          : (2 ** (bucket + 1)) - 1;
+        break;
+      }
+    }
+  }
+  return {
+    samples,
+    meanNs: samples > 0 ? Math.floor(totalNs / samples) : null,
+    p95Ns,
   };
 }
 
@@ -1463,6 +1491,26 @@ export function policyCandidateActionDisabled(candidate, control, pending = fals
   }
   const model = schedulerControlModel(control, pending, true);
   return control?.active ? model.restartDisabled : model.startDisabled;
+}
+
+export function policyInlineActionModel(policy, candidate, pending = false) {
+  const expanded = policy?.actionKind === "activate"
+    && candidate?.actionKind === "activate"
+    && candidate.policyId === policy.id
+    && candidate.fairness === policy.selectedFairness;
+  return {
+    expanded,
+    label: policy?.actionLabel || "Apply live",
+    disabled: Boolean(pending) || Boolean(policy?.disabled),
+  };
+}
+
+export function nextPolicyCandidate(current, next) {
+  const sameLiveCandidate = next?.actionKind === "activate"
+    && current?.actionKind === "activate"
+    && current.policyId === next.policyId
+    && current.fairness === next.fairness;
+  return sameLiveCandidate ? null : next;
 }
 
 function isPowerOfTwo(value) {
