@@ -61,10 +61,11 @@ assignments.
 
 The Queue topology view shows fairness and clock mode, synthetic cell 0, dense
 cell indices, allocated primary and borrowable masks, cell/LLC normal DSQ
-shards, and every CPU's owner, normal DSQ, and affinity DSQ. Its Observed DSQs
-table groups sampled insert success/error and removal success/miss latency by
-DSQ. Successful moves are attributed to both queues, so FIFO mode shows the
-shared source and each observed per-CPU local destination.
+shards, and every CPU's owner, normal DSQ, and affinity DSQ. Its DSQ activity
+table joins sampled insert success/error and removal success/miss latency with
+queue residence and depth capture by DSQ. Successful moves are attributed to
+both queues, so FIFO mode shows the shared source and each observed per-CPU
+local destination.
 
 An aligned strip above the matrix shows per-CPU utilization reported by
 Snake's stats socket. The strip always covers all Snake tasks; TGID and cgroup

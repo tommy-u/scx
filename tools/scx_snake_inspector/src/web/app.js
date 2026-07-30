@@ -24,6 +24,7 @@ import {
   cellStatsModel,
   compactCpuList,
   decorateCells,
+  dsqActivityModels,
   fieldReferenceGroups,
   fineTimingCaptureModels,
   fineTimingDsqModels,
@@ -2718,10 +2719,10 @@ function renderResolvedQueueTopology() {
     : timing.state === "historical" && !timing.topologyCompatible
       ? `<p class="notice queue-capture-notice">Historical capture policy generation ${formatNullableCount(timing.capture?.policy_generation)} does not match the current queue topology; DSQ measurements are not joined.</p>`
       : "";
-  const observedDsqOperations = renderObservedDsqOperations(
+  const dsqActivity = renderDsqActivity(dsqActivityModels(
     fineTimingDsqModels(state.fineTiming),
-  );
-  const capturedDsqResidence = renderCapturedDsqResidence(timing.dsqs);
+    timing.dsqs,
+  ));
   if (!model.layout) {
     replaceKeyedHtml(elements.queueTopology, `
       <header class="queue-topology-heading">
@@ -2730,8 +2731,7 @@ function renderResolvedQueueTopology() {
       </header>
       ${summary}
       ${captureNotice}
-      ${observedDsqOperations}
-      ${capturedDsqResidence}
+      ${dsqActivity}
       <p class="queue-topology-empty">No resolved cell queue topology is installed.</p>`);
     return;
   }
@@ -2770,8 +2770,7 @@ function renderResolvedQueueTopology() {
     ${summary}
     ${captureNotice}
     ${routeWarning}
-    ${observedDsqOperations}
-    ${capturedDsqResidence}
+    ${dsqActivity}
     <section class="queue-topology-table-section">
       <h4>Cell allocation</h4>
       <div class="queue-topology-table-wrap" data-render-key="queue:${generation}:cell-allocation:scroll">
@@ -2798,51 +2797,35 @@ function renderResolvedQueueTopology() {
     </details>`);
 }
 
-function renderCapturedDsqResidence(dsqs) {
+function renderDsqActivity(dsqs) {
   const rows = dsqs.map((dsq) => `
     <tr>
       <th scope="row"><code>${escapeHtml(dsq.label)}</code></th>
       <td>${escapeHtml(dsq.kind)}</td>
-      <td>${escapeHtml(dsq.queueClass)}</td>
-      ${renderQueueTimingCells(dsq)}
+      <td>${dsq.queueClass === "unknown" ? "—" : escapeHtml(dsq.queueClass)}</td>
+      ${renderDsqOperationTimingCells(dsq.insertSuccess, dsq.hasOperations)}
+      <td>${dsq.hasOperations ? formatCount(dsq.insertError.samples) : "—"}</td>
+      ${renderDsqOperationTimingCells(dsq.moveSuccess, dsq.hasOperations)}
+      ${renderDsqOperationTimingCells(dsq.moveMiss, dsq.hasOperations)}
+      ${renderQueueTimingCells(dsq, dsq.hasQueueTiming)}
     </tr>`).join("");
-  const body = rows || '<tr><td colspan="11" class="callback-empty">No sampled queue residence.</td></tr>';
+  const body = rows || '<tr><td colspan="21" class="callback-empty">No sampled DSQ activity.</td></tr>';
   return `
-    <details class="queue-topology-details" open data-render-key="queue:captured-dsq-residence">
-      <summary data-render-key="queue:captured-dsq-residence:summary">Queue capture DSQs (${formatCount(dsqs.length)})</summary>
-      <div class="queue-topology-table-wrap" data-render-key="queue:captured-dsq-residence:scroll">
-        <table class="queue-timing-table" data-sort-key="queue:captured-dsq-residence"><thead>
-          <tr><th rowspan="2" data-sort-column="0" data-sort-type="bigint">DSQ</th><th rowspan="2" data-sort-column="1" data-sort-type="text">Kind</th><th rowspan="2" data-sort-column="2" data-sort-type="text">Class</th><th colspan="5">Residence</th><th colspan="3">Operation-sampled depth</th></tr>
-          <tr><th data-sort-column="3" data-sort-type="number">Samples</th><th data-sort-column="4" data-sort-type="duration">Mean</th><th data-sort-column="5" data-sort-type="duration">p50</th><th aria-label="Residence p95" data-sort-column="6" data-sort-type="duration">p95</th><th aria-label="Residence p99" data-sort-column="7" data-sort-type="duration">p99</th><th data-sort-column="8" data-sort-type="number">Latest</th><th aria-label="Operation-sampled depth p95" data-sort-column="9" data-sort-type="number">p95</th><th data-sort-column="10" data-sort-type="number">Max</th></tr>
+    <details class="queue-topology-details" open data-render-key="queue:dsq-activity">
+      <summary data-render-key="queue:dsq-activity:summary">DSQ activity (${formatCount(dsqs.length)})</summary>
+      <div class="queue-topology-table-wrap" data-render-key="queue:dsq-activity:scroll">
+        <table class="queue-timing-table" data-sort-key="queue:dsq-activity"><thead>
+          <tr><th rowspan="2" data-sort-column="0" data-sort-type="bigint">DSQ</th><th rowspan="2" data-sort-column="1" data-sort-type="text">Kind</th><th rowspan="2" data-sort-column="2" data-sort-type="text">Class</th><th colspan="3">Insert success</th><th rowspan="2" data-sort-column="6" data-sort-type="number">Insert errors</th><th colspan="3">Remove success</th><th colspan="3">Remove miss</th><th colspan="5">Residence</th><th colspan="3">Operation-sampled depth</th></tr>
+          <tr><th data-sort-column="3" data-sort-type="number">Samples</th><th data-sort-column="4" data-sort-type="duration">Mean</th><th data-sort-column="5" data-sort-type="duration">p99</th><th data-sort-column="7" data-sort-type="number">Samples</th><th data-sort-column="8" data-sort-type="duration">Mean</th><th data-sort-column="9" data-sort-type="duration">p99</th><th data-sort-column="10" data-sort-type="number">Samples</th><th data-sort-column="11" data-sort-type="duration">Mean</th><th data-sort-column="12" data-sort-type="duration">p99</th><th data-sort-column="13" data-sort-type="number">Samples</th><th data-sort-column="14" data-sort-type="duration">Mean</th><th data-sort-column="15" data-sort-type="duration">p50</th><th aria-label="Residence p95" data-sort-column="16" data-sort-type="duration">p95</th><th aria-label="Residence p99" data-sort-column="17" data-sort-type="duration">p99</th><th data-sort-column="18" data-sort-type="number">Latest</th><th aria-label="Operation-sampled depth p95" data-sort-column="19" data-sort-type="number">p95</th><th data-sort-column="20" data-sort-type="number">Max</th></tr>
         </thead><tbody>${body}</tbody></table>
       </div>
     </details>`;
 }
 
-function renderObservedDsqOperations(dsqs) {
-  const rows = dsqs.map((dsq) => `
-    <tr>
-      <th scope="row"><code>${escapeHtml(dsq.label)}</code></th>
-      <td>${escapeHtml(dsq.kind)}</td>
-      ${renderDsqOperationTimingCells(dsq.insertSuccess)}
-      <td>${formatCount(dsq.insertError.samples)}</td>
-      ${renderDsqOperationTimingCells(dsq.moveSuccess)}
-      ${renderDsqOperationTimingCells(dsq.moveMiss)}
-    </tr>`).join("");
-  const body = rows || '<tr><td colspan="12" class="callback-empty">No sampled DSQ operations.</td></tr>';
-  return `
-    <details class="queue-topology-details" open data-render-key="queue:observed-dsq-operations">
-      <summary data-render-key="queue:observed-dsq-operations:summary">Observed DSQs (${formatCount(dsqs.length)})</summary>
-      <div class="queue-topology-table-wrap" data-render-key="queue:observed-dsq-operations:scroll">
-        <table class="queue-timing-table" data-sort-key="queue:observed-dsq-operations"><thead>
-          <tr><th rowspan="2" data-sort-column="0" data-sort-type="bigint">DSQ</th><th rowspan="2" data-sort-column="1" data-sort-type="text">Kind</th><th colspan="3">Insert success</th><th rowspan="2" data-sort-column="5" data-sort-type="number">Insert errors</th><th colspan="3">Remove success</th><th colspan="3">Remove miss</th></tr>
-          <tr><th data-sort-column="2" data-sort-type="number">Samples</th><th data-sort-column="3" data-sort-type="duration">Mean</th><th data-sort-column="4" data-sort-type="duration">p99</th><th data-sort-column="6" data-sort-type="number">Samples</th><th data-sort-column="7" data-sort-type="duration">Mean</th><th data-sort-column="8" data-sort-type="duration">p99</th><th data-sort-column="9" data-sort-type="number">Samples</th><th data-sort-column="10" data-sort-type="duration">Mean</th><th data-sort-column="11" data-sort-type="duration">p99</th></tr>
-        </thead><tbody>${body}</tbody></table>
-      </div>
-    </details>`;
-}
-
-function renderDsqOperationTimingCells(timing) {
+function renderDsqOperationTimingCells(timing, available = true) {
+  if (!available) {
+    return "<td>—</td><td>—</td><td>—</td>";
+  }
   return `
     <td>${formatCount(timing.samples)}</td>
     <td class="${callbackDurationClass(timing.meanNs)}">${escapeHtml(formatCallbackDuration(timing.meanNs))}</td>
@@ -2879,7 +2862,10 @@ function renderQueueCaptureHeader(timing) {
     </div>`;
 }
 
-function renderQueueTimingCells(timing) {
+function renderQueueTimingCells(timing, available = true) {
+  if (!available) {
+    return "<td>—</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td><td>—</td>";
+  }
   return `
     <td>${formatCount(timing.residence.samples)}</td>
     <td>${escapeHtml(formatCallbackDuration(timing.residence.meanNs))}</td>

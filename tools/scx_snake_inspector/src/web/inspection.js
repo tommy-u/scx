@@ -1317,6 +1317,74 @@ export function fineTimingDsqModels(payload) {
   });
 }
 
+export function dsqActivityModels(operationDsqs, queueTimingDsqs) {
+  const rows = new Map();
+  const emptyOperations = () => ({
+    insertSuccess: emptyDsqOperationTiming(),
+    insertError: emptyDsqOperationTiming(),
+    moveSuccess: emptyDsqOperationTiming(),
+    moveMiss: emptyDsqOperationTiming(),
+  });
+  const emptyQueue = () => {
+    const timing = emptyQueueTiming();
+    return { residence: timing.residence, depth: timing.depth };
+  };
+  const createRow = (dsqId) => ({
+    dsqId,
+    label: formatDsqId(dsqId),
+    kind: dsqKind(dsqId),
+    queueClass: "unknown",
+    hasOperations: false,
+    hasQueueTiming: false,
+    ...emptyOperations(),
+    ...emptyQueue(),
+  });
+
+  for (const timing of queueTimingDsqs || []) {
+    const key = timing?.dsqKey ?? canonicalDsqKey(timing?.dsqId);
+    if (key === null) {
+      continue;
+    }
+    rows.set(key, {
+      ...createRow(key),
+      label: timing.label || formatDsqId(key),
+      kind: timing.kind || dsqKind(key),
+      queueClass: timing.queueClass || "unknown",
+      hasQueueTiming: true,
+      residence: timing.residence,
+      depth: timing.depth,
+    });
+  }
+
+  for (const operation of operationDsqs || []) {
+    const key = canonicalDsqKey(operation?.dsqId);
+    if (key === null) {
+      continue;
+    }
+    const row = rows.get(key) || createRow(key);
+    rows.set(key, {
+      ...row,
+      label: operation.label || row.label,
+      kind: operation.kind || row.kind,
+      hasOperations: true,
+      insertSuccess: operation.insertSuccess,
+      insertError: operation.insertError,
+      moveSuccess: operation.moveSuccess,
+      moveMiss: operation.moveMiss,
+    });
+  }
+
+  return [...rows.values()].sort((left, right) => {
+    try {
+      const leftId = BigInt(left.dsqId);
+      const rightId = BigInt(right.dsqId);
+      return leftId < rightId ? -1 : leftId > rightId ? 1 : 0;
+    } catch {
+      return String(left.dsqId).localeCompare(String(right.dsqId));
+    }
+  });
+}
+
 function restartReasonLabel(reason) {
   const text = String(reason || "").trim();
   const lower = text.toLowerCase();

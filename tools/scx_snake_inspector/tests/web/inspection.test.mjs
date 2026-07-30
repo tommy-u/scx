@@ -13,6 +13,7 @@ import {
   callbackSampleRateOptions,
   compactCpuList,
   decorateCells,
+  dsqActivityModels,
   fieldReferenceGroups,
   fineTimingCaptureModels,
   fineTimingDsqModels,
@@ -1450,6 +1451,102 @@ test("fine timing DSQ operations exclude historical policy generations", () => {
   });
 
   assert.deepEqual(dsqs, []);
+});
+
+test("DSQ activity joins operation and queue capture metrics by DSQ ID", () => {
+  const operations = fineTimingDsqModels({
+    context: { policy_generation: 9 },
+    captures: [{
+      callback: "enqueue",
+      policy_generation: 9,
+      dsq_operations: [{
+        dsq_id: 536_870_912,
+        operation: "insert",
+        outcome: "success",
+        samples: 12,
+        mean_ns: 800,
+        p99_ns: 2_047,
+      }],
+    }],
+  });
+  const capture = inspectionState.queueTimingModel({
+    status: "ready",
+    sample_rate: 64,
+    state: "historical",
+    session_id: 4,
+    policy_generation: 9,
+    dsqs: [{
+      dsq_id: 536_870_912,
+      queue_class: "normal",
+      residence: {
+        samples: 120,
+        mean_ns: 12_000,
+        p50_ns: 8_191,
+        p95_ns: 32_767,
+        p99_ns: 65_535,
+      },
+      depth: { samples: 120, latest: 2, p95: 6, max: 7 },
+    }],
+  }, { context: { policy_generation: 9 } });
+
+  const activity = dsqActivityModels(operations, capture.dsqs);
+
+  assert.equal(activity.length, 1);
+  assert.equal(activity[0].dsqId, "536870912");
+  assert.equal(activity[0].label, "0x20000000");
+  assert.equal(activity[0].kind, "Normal");
+  assert.equal(activity[0].queueClass, "normal");
+  assert.equal(activity[0].hasOperations, true);
+  assert.equal(activity[0].hasQueueTiming, true);
+  assert.equal(activity[0].insertSuccess.samples, 12);
+  assert.equal(activity[0].residence.samples, 120);
+  assert.equal(activity[0].depth.max, 7);
+});
+
+test("DSQ activity retains rows seen by only one sampler", () => {
+  const operations = fineTimingDsqModels({
+    captures: [{
+      callback: "dispatch",
+      dsq_operations: [{
+        dsq_id: 805_306_368,
+        operation: "remove",
+        outcome: "miss",
+        samples: 8,
+        mean_ns: 300,
+        p99_ns: 511,
+      }],
+    }],
+  });
+  const capture = inspectionState.queueTimingModel({
+    status: "ready",
+    sample_rate: 64,
+    state: "historical",
+    dsqs: [{
+      dsq_id: 536_870_912,
+      queue_class: "normal",
+      residence: { samples: 20, mean_ns: 1_000, p95_ns: 2_047 },
+      depth: { samples: 20, latest: 0, p95: 1, max: 2 },
+    }],
+  });
+
+  const activity = dsqActivityModels(operations, capture.dsqs);
+
+  assert.deepEqual(activity.map((row) => row.dsqId), ["536870912", "805306368"]);
+  assert.equal(activity[0].hasOperations, false);
+  assert.equal(activity[0].hasQueueTiming, true);
+  assert.equal(activity[1].hasOperations, true);
+  assert.equal(activity[1].hasQueueTiming, false);
+});
+
+test("queue topology renders one unified DSQ activity table", () => {
+  const script = readFileSync(
+    new URL("../../src/web/app.js", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(script, /DSQ activity/);
+  assert.doesNotMatch(script, /Observed DSQs/);
+  assert.doesNotMatch(script, /Queue capture DSQs/);
 });
 
 test("callback page contains the fine timing panel host", () => {
