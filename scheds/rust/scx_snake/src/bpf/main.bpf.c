@@ -398,6 +398,7 @@ void BPF_STRUCT_OPS(snake_quiescent, struct task_struct *p, u64 deq_flags)
 		return;
 	}
 	stat_inc(&ladder_ctx, SNAKE_STAT_QUIESCENT);
+	queue_timing_cancel(&ladder_ctx, p);
 	if (queue_topology_enabled()) {
 		queue_fairness_cancel_direct(&ladder_ctx, p);
 		release_timed_callback(&ladder_ctx, SNAKE_CALLBACK_QUIESCENT, callback_started_at);

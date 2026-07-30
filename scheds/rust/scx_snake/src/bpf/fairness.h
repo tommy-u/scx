@@ -346,6 +346,15 @@ queue_timing_record_insert(struct snake_ladder_ctx *ctx, struct task_struct *p,
 		queue_timing_record_sample(ctx, p, dsq, cell_index, session_id);
 }
 
+static __always_inline void
+queue_timing_cancel(struct snake_ladder_ctx *ctx, struct task_struct *p)
+{
+	struct snake_task_runtime *runtime = fairness_task(ctx, p, false);
+
+	if (runtime)
+		runtime->queue_timing_session_id = 0;
+}
+
 static __noinline void
 queue_timing_complete(struct snake_task_runtime *runtime)
 {

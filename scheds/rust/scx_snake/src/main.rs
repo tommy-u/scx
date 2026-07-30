@@ -2859,6 +2859,21 @@ scope = "task_allowed"
         );
     }
 
+    #[test]
+    fn quiescence_cancels_an_unfinished_queue_timing_sample() {
+        let main = fs::read_to_string(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bpf/main.bpf.c"),
+        )
+        .unwrap();
+        let quiescent = main
+            .split_once("void BPF_STRUCT_OPS(snake_quiescent")
+            .and_then(|(_, rest)| rest.split_once("void BPF_STRUCT_OPS(snake_set_weight"))
+            .map(|(body, _)| body)
+            .expect("snake_quiescent should precede snake_set_weight");
+
+        assert!(quiescent.contains("queue_timing_cancel(&ladder_ctx, p);"));
+    }
+
     fn set_stat(raw: &mut [Vec<Vec<u8>>], index: u32, cpu_values: &[u64]) {
         raw[index as usize] = cpu_values
             .iter()
