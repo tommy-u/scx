@@ -124,9 +124,6 @@ prepare_mask_tables(u32 slot, const struct snake_compiled_ladder *ladder)
 
 	bpf_for(table_id, 0, SNAKE_MAX_MASK_TABLES)
 	{
-		if (table_id >= ladder->nr_mask_tables)
-			break;
-
 		bpf_for(cpu, 0, SNAKE_MAX_CPUS)
 		{
 			struct bpf_cpumask     *mask, *stale;
@@ -139,7 +136,7 @@ prepare_mask_tables(u32 slot, const struct snake_compiled_ladder *ladder)
 			mask_slot = bpf_map_lookup_elem(&mask_slots, &index);
 			if (!data || !mask_slot)
 				return -EINVAL;
-			if (data->valid != 1) {
+			if (table_id >= ladder->nr_mask_tables || data->valid != 1) {
 				stale = bpf_kptr_xchg(&mask_slot->mask, NULL);
 				if (stale)
 					bpf_cpumask_release(stale);

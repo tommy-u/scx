@@ -10,6 +10,7 @@ policy=${2:-${repo}/scheds/rust/scx_snake/examples/kernel-default-sim.toml}
 tmpdir=$(mktemp -d)
 snake_log=${tmpdir}/snake.log
 update_log=${tmpdir}/update.log
+reduced_policy=${tmpdir}/reduced.toml
 snake_pid=
 stress_pid=
 dmesg_lines=0
@@ -79,6 +80,17 @@ fork_workers=$((cpus / 4))
 ((fork_workers < 1)) && fork_workers=1
 dmesg_lines=$(dmesg | wc -l)
 
+printf '%s\n' \
+    'fallback = "previous_cpu"' \
+    '' \
+    '[[rung]]' \
+    'operation = "claim_idle"' \
+    'scope = "previous_cpu"' \
+    '' \
+    '[[rung]]' \
+    'operation = "pick_idle"' \
+    'scope = "task_allowed"' >"${reduced_policy}"
+
 "${snake_bin}" --policy "${policy}" --fairness vtime \
     >"${snake_log}" 2>&1 &
 snake_pid=$!
@@ -102,8 +114,13 @@ timeout --signal=TERM --kill-after=3s 45s \
 stress_pid=$!
 
 for generation in $(seq 2 21); do
+    if ((generation % 2 == 0)); then
+        candidate=${reduced_policy}
+    else
+        candidate=${policy}
+    fi
     timeout --signal=TERM --kill-after=2s 8s \
-        "${snake_bin}" --update-policy "${policy}" \
+        "${snake_bin}" --update-policy "${candidate}" \
         >"${update_log}" 2>&1 ||
         fail "policy update for generation ${generation} failed or timed out"
     grep -q "activated policy generation ${generation}" "${update_log}" ||

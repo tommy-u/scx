@@ -897,16 +897,12 @@ fn install_mask_tables(
     Ok(())
 }
 
-fn clear_mask_table_data(skel: &mut BpfSkel<'_>, slot: u32, table_count: usize) -> Result<()> {
-    if table_count > bpf_intf::SNAKE_MAX_MASK_TABLES as usize {
-        bail!("mask table count {table_count} exceeds the BPF table capacity");
-    }
-
+fn clear_mask_table_data(skel: &mut BpfSkel<'_>, slot: u32) -> Result<()> {
     let empty = bpf_intf::snake_mask_data {
         valid: 0,
         bits: [0; bpf_intf::SNAKE_MASK_BYTES as usize],
     };
-    for table_id in 0..table_count as u32 {
+    for table_id in 0..bpf_intf::SNAKE_MAX_MASK_TABLES {
         for cpu in 0..bpf_intf::SNAKE_MAX_CPUS {
             let key = runtime_policy::mask_data_index(slot, table_id, cpu)?;
             skel.maps
@@ -1031,7 +1027,7 @@ impl runtime_policy::PolicyBackend for BpfPolicyBackend<'_, '_> {
     }
 
     fn write_mask_tables(&mut self, slot: u32, tables: &[ResolvedMaskTable]) -> Result<()> {
-        clear_mask_table_data(self.skel, slot, tables.len())?;
+        clear_mask_table_data(self.skel, slot)?;
         install_mask_tables(self.skel, slot, tables)
     }
 
@@ -1056,7 +1052,7 @@ fn install_ladder_slot(
     tables: &[ResolvedMaskTable],
 ) -> Result<()> {
     write_ladder_slot(skel, slot, generation, policy)?;
-    clear_mask_table_data(skel, slot, tables.len())?;
+    clear_mask_table_data(skel, slot)?;
     install_mask_tables(skel, slot, tables)?;
     prepare_ladder_slot(skel, slot)
 }
@@ -2872,6 +2868,26 @@ scope = "task_allowed"
             .expect("snake_quiescent should precede snake_set_weight");
 
         assert!(quiescent.contains("queue_timing_cancel(&ladder_ctx, p);"));
+    }
+
+    #[test]
+    fn mask_preparation_releases_removed_table_slots() {
+        let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let mask_table = fs::read_to_string(manifest.join("src/bpf/mask_table.h")).unwrap();
+        let prepare = mask_table
+            .split_once("prepare_mask_tables(")
+            .and_then(|(_, rest)| rest.split_once("mask_table_has_key("))
+            .map(|(body, _)| body)
+            .expect("prepare_mask_tables should precede mask_table_has_key");
+        assert!(prepare.contains("table_id >= ladder->nr_mask_tables || data->valid != 1"));
+
+        let rust = fs::read_to_string(manifest.join("src/main.rs")).unwrap();
+        let clear = rust
+            .split_once("fn clear_mask_table_data(")
+            .and_then(|(_, rest)| rest.split_once("fn set_active_ladder("))
+            .map(|(body, _)| body)
+            .expect("clear_mask_table_data should precede set_active_ladder");
+        assert!(clear.contains("for table_id in 0..bpf_intf::SNAKE_MAX_MASK_TABLES"));
     }
 
     fn set_stat(raw: &mut [Vec<Vec<u8>>], index: u32, cpu_values: &[u64]) {
