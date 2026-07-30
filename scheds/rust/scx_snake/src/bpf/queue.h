@@ -140,47 +140,29 @@ queue_mask_contains(const struct snake_mask_data *mask, u32 cpu)
 }
 
 static __always_inline bool
-queue_primary_subset(const struct snake_queue_cell *cell,
+queue_primary_subset(const struct cpumask *primary,
 		     const struct task_struct *p)
 {
-	u32 cpu;
-
-	if (!cell || !cell->primary.valid)
-		return false;
-	bpf_for(cpu, 0, SNAKE_MAX_CPUS)
-	{
-		if (cpu >= nr_cpu_ids)
-			break;
-		if (queue_mask_contains(&cell->primary, cpu) &&
-		    !bpf_cpumask_test_cpu(cpu, p->cpus_ptr))
-			return false;
-	}
-	return true;
+	return primary && bpf_cpumask_subset(primary, p->cpus_ptr);
 }
 
 static __always_inline s32
-queue_pick_primary_cpu(const struct snake_queue_cell *cell,
-		       const struct task_struct *p, s32 preferred)
+queue_pick_primary_cpu(const struct cpumask *primary,
+		       struct bpf_cpumask *scratch, const struct task_struct *p,
+		       s32 preferred)
 {
-	u32 offset, start;
+	u32 cpu;
 
+	if (!primary || !scratch)
+		return -EINVAL;
 	if (preferred >= 0 && preferred < nr_cpu_ids &&
-	    queue_mask_contains(&cell->primary, preferred) &&
+	    bpf_cpumask_test_cpu(preferred, primary) &&
 	    bpf_cpumask_test_cpu(preferred, p->cpus_ptr))
 		return preferred;
-	start = bpf_get_prandom_u32() % nr_cpu_ids;
-	bpf_for(offset, 0, SNAKE_MAX_CPUS)
-	{
-		u32 cpu;
-
-		if (offset >= nr_cpu_ids)
-			break;
-		cpu = (start + offset) % nr_cpu_ids;
-		if (queue_mask_contains(&cell->primary, cpu) &&
-		    bpf_cpumask_test_cpu(cpu, p->cpus_ptr))
-			return cpu;
-	}
-	return -ENOENT;
+	if (!bpf_cpumask_and(scratch, primary, p->cpus_ptr))
+		return -ENOENT;
+	cpu = bpf_cpumask_any_distribute((const struct cpumask *)scratch);
+	return cpu < nr_cpu_ids ? cpu : -ENOENT;
 }
 
 static __always_inline s32

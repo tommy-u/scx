@@ -401,6 +401,7 @@ queue_fairness_enqueue_cell(struct snake_ladder_ctx *ctx, struct task_struct *p,
 {
 	struct snake_queue_cell    *cell;
 	struct snake_cpu_queue     *cpuq = NULL;
+	const struct cpumask       *primary;
 	s32			    target_cpu = selected_cpu;
 	s32			    ret = 0;
 	u64			    flags = enq_flags & ~SCX_ENQ_PREEMPT;
@@ -409,9 +410,10 @@ queue_fairness_enqueue_cell(struct snake_ladder_ctx *ctx, struct task_struct *p,
 
 	stage_started_at = fine_timing_start(fine);
 	cell = queue_cell(runtime->cell_index);
-	if (!cell)
+	primary = queue_cell_mask(runtime->cell_index, SNAKE_QUEUE_MASK_PRIMARY);
+	if (!cell || !primary)
 		ret = -EINVAL;
-	else if (!queue_primary_subset(cell, p))
+	else if (!queue_primary_subset(primary, p))
 		ret = -ENOENT;
 	fine_timing_finish(fine, SNAKE_FINE_TIMING_ENQUEUE_CELL_VALIDATE,
 			   stage_started_at);
@@ -420,19 +422,18 @@ queue_fairness_enqueue_cell(struct snake_ladder_ctx *ctx, struct task_struct *p,
 
 	stage_started_at = fine_timing_start(fine);
 	cpuq = target_cpu >= 0 ? queue_cpu(target_cpu) : NULL;
-	if (!cpuq || cpuq->owner_cell_index != runtime->cell_index) {
-		target_cpu = queue_pick_primary_cpu(cell, p, -1);
-		if (target_cpu >= 0)
-			cpuq = queue_cpu(target_cpu);
-	}
+	if (!cpuq || cpuq->owner_cell_index != runtime->cell_index)
+		target_cpu = queue_pick_primary_cpu(
+			primary, runtime->queue_cpumask, p, -1);
 	if (target_cpu < 0)
 		ret = target_cpu;
-	else if (!cpuq || cpuq->owner_cell_index != runtime->cell_index)
-		ret = -EINVAL;
 	fine_timing_finish(fine, SNAKE_FINE_TIMING_ENQUEUE_PICK_TARGET,
 			   stage_started_at);
 	if (ret)
 		return ret;
+	cpuq = queue_cpu(target_cpu);
+	if (!cpuq || cpuq->owner_cell_index != runtime->cell_index)
+		return -EINVAL;
 
 	runtime->queue_class = SNAKE_QUEUE_CLASS_NORMAL;
 	runtime->run_direct = 0;

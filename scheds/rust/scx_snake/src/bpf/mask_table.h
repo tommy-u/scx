@@ -8,6 +8,10 @@ struct snake_mask_slot {
 	struct bpf_cpumask __kptr *mask;
 };
 
+struct snake_mask_scratch {
+	struct bpf_cpumask __kptr *mask;
+};
+
 struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
 	__type(key, u32);
@@ -21,6 +25,47 @@ struct {
 	__type(value, struct snake_mask_slot);
 	__uint(max_entries, SNAKE_LADDER_SLOTS *SNAKE_MAX_MASK_TABLES *SNAKE_MAX_CPUS);
 } mask_slots		   SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__type(key, u32);
+	__type(value, struct snake_mask_scratch);
+	__uint(max_entries, 1);
+} mask_scratch SEC(".maps");
+
+static __always_inline int init_mask_table_scratch(void)
+{
+	u32 zero = 0, cpu;
+
+	bpf_for(cpu, 0, SNAKE_MAX_CPUS)
+	{
+		struct snake_mask_scratch *scratch;
+		struct bpf_cpumask	  *mask, *stale;
+
+		if (cpu >= nr_cpu_ids)
+			break;
+		scratch = bpf_map_lookup_percpu_elem(&mask_scratch, &zero, cpu);
+		if (!scratch)
+			return -EINVAL;
+		mask = bpf_cpumask_create();
+		if (!mask)
+			return -ENOMEM;
+		stale = bpf_kptr_xchg(&scratch->mask, mask);
+		if (stale)
+			bpf_cpumask_release(stale);
+	}
+
+	return 0;
+}
+
+static __always_inline struct bpf_cpumask *mask_table_scratch(void)
+{
+	struct snake_mask_scratch *scratch;
+	u32			   zero = 0;
+
+	scratch = bpf_map_lookup_elem(&mask_scratch, &zero);
+	return scratch ? scratch->mask : NULL;
+}
 
 static __always_inline u32 mask_table_index(u32 slot, u32 table_id, u32 key)
 {
@@ -188,11 +233,13 @@ mask_table_intersects(const struct snake_ladder_ctx *ctx, u32 table_id, s32 key,
 static __always_inline s32
 pick_idle_from_mask_table(const struct snake_ladder_ctx *ctx,
 			  const struct task_struct *p, u32 table_id, s32 key,
-			  const struct cpumask *eligible)
+			  bool whole_core)
 {
+	struct bpf_cpumask     *scratch;
 	struct bpf_cpumask     *table_mask;
 	struct snake_mask_slot *slot;
-	u32			index, offset, start;
+	u32			index;
+	s32			cpu;
 
 	if (table_id >= ctx->ladder->nr_mask_tables || key < 0 ||
 	    key >= SNAKE_MAX_CPUS)
@@ -207,27 +254,16 @@ pick_idle_from_mask_table(const struct snake_ladder_ctx *ctx,
 	if (!table_mask)
 		return -EINVAL;
 
-	/* CPU-keyed tables rotate from the CPU; sparse cell IDs start at CPU zero. */
-	start = key < nr_cpu_ids ? key : 0;
-	bpf_for(offset, 0, SNAKE_MAX_CPUS)
-	{
-		u32 cpu;
+	scratch = mask_table_scratch();
+	if (!scratch)
+		return -EINVAL;
+	if (!bpf_cpumask_and(scratch, (const struct cpumask *)table_mask,
+			     p->cpus_ptr))
+		return -ENOENT;
 
-		if (offset >= nr_cpu_ids)
-			break;
-		cpu = start + offset;
-		if (cpu >= nr_cpu_ids)
-			cpu -= nr_cpu_ids;
-		if (!bpf_cpumask_test_cpu(cpu,
-					  (const struct cpumask *)table_mask) ||
-		    !bpf_cpumask_test_cpu(cpu, p->cpus_ptr) ||
-		    !bpf_cpumask_test_cpu(cpu, eligible))
-			continue;
-		if (scx_bpf_test_and_clear_cpu_idle(cpu))
-			return cpu;
-	}
-
-	return -ENOENT;
+	cpu = scx_bpf_pick_idle_cpu((const struct cpumask *)scratch,
+				     whole_core ? SCX_PICK_IDLE_CORE : 0);
+	return cpu < 0 ? -ENOENT : cpu;
 }
 
 /* Uniformly choose and claim an allowed idle CPU from a CPU-keyed table mask. */
@@ -281,23 +317,6 @@ pick_random_idle_from_mask_table(const struct snake_ladder_ctx *ctx,
 	claimed = scx_bpf_test_and_clear_cpu_idle(selected);
 	scx_bpf_put_idle_cpumask(idle);
 	return claimed ? selected : -ENOENT;
-}
-
-/* Pick from a table only when every SMT sibling of the CPU is idle. */
-static __always_inline s32 pick_idle_core_from_mask_table(
-	const struct snake_ladder_ctx *ctx, const struct task_struct *p, u32 table_id,
-	s32 key)
-{
-	const struct cpumask *idle_smt;
-	s32		      cpu;
-
-	idle_smt = scx_bpf_get_idle_smtmask();
-	if (!idle_smt)
-		return -EINVAL;
-
-	cpu = pick_idle_from_mask_table(ctx, p, table_id, key, idle_smt);
-	scx_bpf_put_idle_cpumask(idle_smt);
-	return cpu;
 }
 
 #endif /* __SCX_SNAKE_MASK_TABLE_H */

@@ -445,6 +445,11 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(snake_init)
 	int			 ret;
 
 	nr_cpu_ids = scx_bpf_nr_cpu_ids();
+	ret = init_mask_table_scratch();
+	if (ret) {
+		scx_bpf_error("snake mask-table scratch initialization failed: %d", ret);
+		return ret;
+	}
 	ret = validate_queue_topology();
 	if (ret) {
 		scx_bpf_error("snake queue topology validation failed: %d", ret);

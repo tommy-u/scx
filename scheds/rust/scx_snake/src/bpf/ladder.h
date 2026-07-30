@@ -211,13 +211,9 @@ static __noinline s32 execute_rung(const struct snake_ladder_ctx *ctx,
 						    READ_ONCE(cell->cell_id));
 			if (exists <= 0)
 				return exists < 0 ? exists : -ENOENT;
-			if (rung->flags & SNAKE_RUNG_F_PICK_IDLE_CORE)
-				cpu = pick_idle_core_from_mask_table(
-					ctx, p, rung->data, READ_ONCE(cell->cell_id));
-			else
-				cpu = pick_idle_from_mask_table(
-					ctx, p, rung->data, READ_ONCE(cell->cell_id),
-					p->cpus_ptr);
+			cpu = pick_idle_from_mask_table(
+				ctx, p, rung->data, READ_ONCE(cell->cell_id),
+				rung->flags & SNAKE_RUNG_F_PICK_IDLE_CORE);
 			if (cpu >= 0) {
 				if (READ_ONCE(cell->needs_rehome))
 					stat_inc(ctx, SNAKE_STAT_CELL_REHOMES);
@@ -225,11 +221,8 @@ static __noinline s32 execute_rung(const struct snake_ladder_ctx *ctx,
 			}
 			return cpu;
 		}
-		if (rung->flags & SNAKE_RUNG_F_PICK_IDLE_CORE)
-			return pick_idle_core_from_mask_table(ctx, p, rung->data,
-							      prev_cpu);
 		return pick_idle_from_mask_table(ctx, p, rung->data, prev_cpu,
-						 p->cpus_ptr);
+						 rung->flags & SNAKE_RUNG_F_PICK_IDLE_CORE);
 	case SNAKE_OP_PICK_IDLE_QUEUE_MASK: {
 		s32 cpu;
 
