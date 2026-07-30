@@ -21,28 +21,35 @@ import {
   captureKeyedRenderState,
   cellQueueFacts,
   cellCpuOrder,
+  cellStatsModel,
   compactCpuList,
   decorateCells,
   fieldReferenceGroups,
   fineTimingCaptureModels,
   freshnessModel,
   formatCallbackDuration,
+  formatCellMetric,
   formatFeedbackTranscript,
   ladderPercentages,
   launchDiff,
   parseFeedbackEntries,
+  policyCandidateActionDisabled,
   policyCategoryGroups,
   policyLibraryModels,
   policySlotComparison,
   queueLadderSections,
+  queueTimingModel,
   queueTopologyModel,
-  routeFromHash,
+  mergeQueueTimingTopology,
+  overviewModel,
+  parseInspectorRoute,
   runtimeContextModel,
   restoreKeyedRenderState,
   schedulerCommandPreview,
   schedulerControlModel,
   schedulerControlMessage,
   schedulerCurrentCommand,
+  schedulerDebugModel,
   schedulerLaunchRequest,
   schedulerSettingModels,
   statsResetDisabled,
@@ -97,13 +104,18 @@ const elements = {
   fineTimingPanels: document.querySelector("#fineTimingPanels"),
   feedbackNotice: document.querySelector("#feedbackNotice"),
   feedbackTranscript: document.querySelector("#feedbackTranscript"),
-  feedbackView: document.querySelector("#feedbackView"),
+  feedbackDrawer: document.querySelector("#feedbackDrawer"),
+  feedbackCount: document.querySelector("#feedbackCount"),
+  closeFeedback: document.querySelector("#closeFeedback"),
   copyFeedback: document.querySelector("#copyFeedback"),
   clearFeedback: document.querySelector("#clearFeedback"),
+  copyDebuggingSnapshot: document.querySelector("#copyDebuggingSnapshot"),
   cgroupField: document.querySelector("#cgroupField"),
   cgroupInput: document.querySelector("#cgroupInput"),
   cellsFreshness: document.querySelector("#cellsFreshness"),
   cellsNotice: document.querySelector("#cellsNotice"),
+  cellStatsNotice: document.querySelector("#cellStatsNotice"),
+  cellWindowSelect: document.querySelector("#cellWindowSelect"),
   cellsView: document.querySelector("#cellsView"),
   cellDetail: document.querySelector("#cellDetail"),
   cellBarTooltip: document.querySelector("#cellBarTooltip"),
@@ -124,6 +136,16 @@ const elements = {
   migrationRate: document.querySelector("#migrationRate"),
   migrationPairInspection: document.querySelector("#migrationPairInspection"),
   notice: document.querySelector("#notice"),
+  debuggingCommand: document.querySelector("#debuggingCommand"),
+  debuggingCopyNotice: document.querySelector("#debuggingCopyNotice"),
+  debuggingFreshness: document.querySelector("#debuggingFreshness"),
+  debuggingIdentity: document.querySelector("#debuggingIdentity"),
+  debuggingNotice: document.querySelector("#debuggingNotice"),
+  debuggingPolicyContext: document.querySelector("#debuggingPolicyContext"),
+  debuggingPolicySource: document.querySelector("#debuggingPolicySource"),
+  debuggingSettingsRows: document.querySelector("#debuggingSettingsRows"),
+  debuggingSnapshot: document.querySelector("#debuggingSnapshot"),
+  debuggingView: document.querySelector("#debuggingView"),
   policyFreshness: document.querySelector("#policyFreshness"),
   policyActivationNotice: document.querySelector("#policyActivationNotice"),
   policyActiveContext: document.querySelector("#policyActiveContext"),
@@ -140,7 +162,10 @@ const elements = {
   invalidPolicies: document.querySelector("#invalidPolicies"),
   policyNotice: document.querySelector("#policyNotice"),
   policyView: document.querySelector("#policyView"),
+  queueFreshness: document.querySelector("#queueFreshness"),
+  queueNotice: document.querySelector("#queueNotice"),
   queueTopology: document.querySelector("#queueTopology"),
+  queueTopologyView: document.querySelector("#queueTopologyView"),
   primaryNav: document.querySelector("#primaryNav"),
   referencePopover: document.querySelector("#referencePopover"),
   resetAllStats: document.querySelector("#resetAllStats"),
@@ -158,7 +183,6 @@ const elements = {
   schedulerExitDumpLen: document.querySelector("#schedulerExitDumpLen"),
   schedulerFairness: document.querySelector("#schedulerFairness"),
   schedulerFairnessEnabled: document.querySelector("#schedulerFairnessEnabled"),
-  schedulerPolicy: document.querySelector("#schedulerPolicy"),
   schedulerSampleRate: document.querySelector("#schedulerSampleRate"),
   schedulerSampleRateEnabled: document.querySelector("#schedulerSampleRateEnabled"),
   schedulerSettingsRows: document.querySelector("#schedulerSettingsRows"),
@@ -171,12 +195,24 @@ const elements = {
   tooltip: document.querySelector("#heatmapTooltip"),
   totalMigrations: document.querySelector("#totalMigrations"),
   activityView: document.querySelector("#activityView"),
+  overviewView: document.querySelector("#overviewView"),
+  overviewRuntime: document.querySelector("#overviewRuntime"),
+  overviewWarnings: document.querySelector("#overviewWarnings"),
+  overviewActivity: document.querySelector("#overviewActivity"),
+  overviewCallbacks: document.querySelector("#overviewCallbacks"),
+  overviewPolicy: document.querySelector("#overviewPolicy"),
+  overviewCells: document.querySelector("#overviewCells"),
+  navigationDrawer: document.querySelector("#navigationDrawer"),
+  openNavigation: document.querySelector("#openNavigation"),
+  closeNavigation: document.querySelector("#closeNavigation"),
   slotComparison: document.querySelector("#slotComparison"),
   viewport: document.querySelector("#heatmapViewport"),
   windowCoverage: document.querySelector("#windowCoverage"),
   windowSelect: document.querySelector("#windowSelect"),
   zoom: document.querySelector("#zoomControl"),
 };
+
+const initialRoute = parseInspectorRoute(window.location.hash);
 
 const state = {
   callbackRange: String(initialWindowMs),
@@ -214,6 +250,10 @@ const state = {
   policyActivationPending: false,
   policyCandidate: null,
   selectedPolicy: null,
+  queueTiming: null,
+  queueTimingError: null,
+  queueTimingLoading: false,
+  queueTimingPending: false,
   schedulerControl: null,
   schedulerControlError: null,
   schedulerControlLoading: false,
@@ -226,7 +266,7 @@ const state = {
   referenceId: 0,
   pinnedMigrationPair: null,
   references: new Map(),
-  route: routeFromHash(window.location.hash),
+  route: initialRoute.route,
   scale: "log",
   selectedCellId: null,
   workloadAssignmentPending: false,
@@ -261,11 +301,13 @@ async function start() {
   renderRoute();
   renderHeatmap();
   await loadInspection();
+  await loadQueueTiming();
   await loadCallbackTiming();
   await loadFineTiming();
   await loadPolicyCatalog();
   await loadSchedulerControl();
   window.setInterval(loadInspection, 1_000);
+  window.setInterval(loadQueueTiming, 1_000);
   window.setInterval(loadCallbackTiming, 1_000);
   window.setInterval(loadFineTiming, 1_000);
   window.setInterval(loadPolicyCatalog, 5_000);
@@ -279,13 +321,22 @@ function configureWindowSelector() {
     presets.push(initialWindowMs);
     presets.sort((left, right) => left - right);
   }
-  for (const value of presets) {
-    const option = document.createElement("option");
-    option.value = String(value);
-    option.textContent = formatDuration(value);
-    option.selected = value === initialWindowMs;
-    elements.windowSelect.append(option);
+  for (const select of [elements.windowSelect, elements.cellWindowSelect]) {
+    for (const value of presets) {
+      const option = document.createElement("option");
+      option.value = String(value);
+      option.textContent = formatDuration(value);
+      option.selected = value === initialWindowMs;
+      select.append(option);
+    }
   }
+}
+
+function setWindow(value) {
+  state.windowMs = Number(value);
+  elements.windowSelect.value = String(state.windowMs);
+  elements.cellWindowSelect.value = String(state.windowMs);
+  connectEvents();
 }
 
 function configureCallbackRangeSelector() {
@@ -331,8 +382,10 @@ function configureSchedulerSampleRateSelector() {
 
 function bindControls() {
   elements.windowSelect.addEventListener("change", () => {
-    state.windowMs = Number(elements.windowSelect.value);
-    connectEvents();
+    setWindow(elements.windowSelect.value);
+  });
+  elements.cellWindowSelect.addEventListener("change", () => {
+    setWindow(elements.cellWindowSelect.value);
   });
   elements.callbackRangeSelect.addEventListener("change", () => {
     state.callbackRange = elements.callbackRangeSelect.value;
@@ -346,6 +399,12 @@ function bindControls() {
     const control = event.target.closest("[data-fine-timing-callback]");
     if (control) {
       setFineTiming(control.dataset.fineTimingCallback, control.checked);
+    }
+  });
+  elements.queueTopology.addEventListener("change", (event) => {
+    const control = event.target.closest("[data-queue-capture]");
+    if (control) {
+      setQueueTiming(control.checked);
     }
   });
   document.querySelectorAll('input[name="cpuOrder"]').forEach((control) => {
@@ -375,7 +434,7 @@ function bindControls() {
       renderHeatmap();
     }
   });
-  window.addEventListener("hashchange", renderRoute);
+  window.addEventListener("hashchange", () => renderRoute({ focusHeading: true }));
   elements.cellList.addEventListener("click", (event) => {
     const control = event.target.closest("[data-cell-id]");
     if (!control) {
@@ -397,7 +456,6 @@ function bindControls() {
   elements.assignWorkloadCell.addEventListener("click", () => setWorkloadCell(false));
   elements.clearWorkloadCell.addEventListener("click", () => setWorkloadCell(true));
   for (const control of [
-    elements.schedulerPolicy,
     elements.schedulerFairnessEnabled,
     elements.schedulerFairness,
     elements.schedulerSampleRateEnabled,
@@ -408,11 +466,9 @@ function bindControls() {
   ]) {
     control.addEventListener("change", () => {
       if (
-        control === elements.schedulerPolicy
-        || control === elements.schedulerFairnessEnabled
+        control === elements.schedulerFairnessEnabled
         || control === elements.schedulerFairness
       ) {
-        state.selectedLifecyclePolicyId = null;
         state.selectedLifecycleFairness = null;
       }
       state.schedulerFormInitialized = true;
@@ -426,6 +482,35 @@ function bindControls() {
   elements.resetAllStats.addEventListener("click", resetAllStats);
   elements.copyFeedback.addEventListener("click", copyFeedback);
   elements.clearFeedback.addEventListener("click", clearFeedback);
+  elements.copyDebuggingSnapshot.addEventListener("click", copyDebuggingSnapshot);
+  elements.closeFeedback.addEventListener("click", closeFeedbackDrawer);
+  document.querySelectorAll("[data-open-feedback]").forEach((control) => {
+    control.addEventListener("click", openFeedbackDrawer);
+    control.setAttribute("aria-expanded", "false");
+  });
+  elements.openNavigation.addEventListener("click", () => {
+    if (!elements.navigationDrawer.open) {
+      elements.navigationDrawer.showModal();
+      elements.openNavigation.setAttribute("aria-expanded", "true");
+    }
+  });
+  elements.closeNavigation.addEventListener("click", () => elements.navigationDrawer.close());
+  elements.navigationDrawer.addEventListener("close", () => {
+    elements.openNavigation.setAttribute("aria-expanded", "false");
+  });
+  elements.feedbackDrawer.addEventListener("close", () => {
+    document.querySelectorAll("[data-open-feedback]").forEach((control) => {
+      control.setAttribute("aria-expanded", "false");
+    });
+    if (String(window.location.hash).replace(/^#\/?/, "") === "feedback") {
+      window.history.replaceState(null, "", "#/overview");
+    }
+  });
+  elements.navigationDrawer.addEventListener("click", (event) => {
+    if (event.target.closest("[data-route]")) {
+      elements.navigationDrawer.close();
+    }
+  });
   document.addEventListener("click", (event) => {
     const toggle = event.target.closest("[data-feedback-toggle]");
     if (toggle) {
@@ -468,8 +553,11 @@ function bindControls() {
       fairness: control.dataset.policyFairness,
       actionKind: control.dataset.policyAction,
     };
+    state.selectedLifecyclePolicyId = control.dataset.policyId;
+    state.selectedLifecycleFairness = control.dataset.policyFairness;
+    state.schedulerFormInitialized = true;
     renderPolicyLibrary();
-    runPolicyCandidate();
+    renderSchedulerControl();
   });
   elements.policyCandidateAction.addEventListener("click", runPolicyCandidate);
   elements.confirmPolicyActivation.addEventListener("click", activateSelectedPolicy);
@@ -545,10 +633,45 @@ function updateFeedback(key, text) {
 
 function renderFeedback() {
   const transcript = formatFeedbackTranscript(state.feedbackEntries);
+  const draftCount = state.feedbackEntries.filter((entry) => entry.text.trim()).length;
   elements.feedbackTranscript.value = transcript;
   elements.copyFeedback.disabled = !transcript;
   elements.clearFeedback.disabled = !transcript && state.expandedFeedbackKeys.size === 0;
+  elements.feedbackCount.textContent = numberFormat.format(draftCount);
+  elements.feedbackCount.classList.toggle("hidden", draftCount === 0);
+  elements.feedbackCount.classList.toggle("has-feedback", draftCount > 0);
+  elements.feedbackCount.setAttribute(
+    "aria-label",
+    `${numberFormat.format(draftCount)} feedback ${draftCount === 1 ? "draft" : "drafts"}`,
+  );
+  document.querySelectorAll("[data-feedback-count]").forEach((count) => {
+    count.textContent = numberFormat.format(draftCount);
+    count.classList.toggle("hidden", draftCount === 0);
+    count.classList.toggle("has-feedback", draftCount > 0);
+  });
+  document.querySelectorAll("[data-open-feedback]").forEach((control) => {
+    control.setAttribute(
+      "aria-label",
+      draftCount === 0
+        ? "Open feedback"
+        : `Open feedback, ${numberFormat.format(draftCount)} ${draftCount === 1 ? "draft" : "drafts"}`,
+    );
+  });
   decorateFeedbackTargets(document);
+}
+
+function openFeedbackDrawer() {
+  renderFeedback();
+  if (!elements.feedbackDrawer.open) {
+    elements.feedbackDrawer.showModal();
+  }
+  document.querySelectorAll("[data-open-feedback]").forEach((control) => {
+    control.setAttribute("aria-expanded", "true");
+  });
+}
+
+function closeFeedbackDrawer() {
+  elements.feedbackDrawer.close();
 }
 
 function toggleFeedbackComposer(key) {
@@ -593,7 +716,7 @@ function decorateFeedbackTarget(target) {
   target.classList.add("feedback-target");
   const heading = [...target.children].find((child) => child.matches("[data-feedback-anchor]"))
     || [...target.children].find((child) => child.matches(
-      "header, .matrix-heading, .fine-timing-panel-heading, .cell-detail-heading",
+      "header, .overview-section-heading, .matrix-heading, .fine-timing-panel-heading, .cell-detail-heading",
     ));
   let button = [...target.querySelectorAll("[data-feedback-toggle]")]
     .find((candidate) => candidate.dataset.feedbackToggle === key);
@@ -658,35 +781,50 @@ function feedbackComposerId(key) {
 }
 
 async function copyFeedback() {
-  const transcript = elements.feedbackTranscript.value;
-  if (!transcript) {
-    return;
+  const copied = await copyTextarea(elements.feedbackTranscript);
+  if (copied) {
+    showElementNotice(elements.feedbackNotice, "Feedback copied.", "success");
+  } else {
+    showElementNotice(elements.feedbackNotice, "Copy failed. The feedback text is selected.");
+  }
+}
+
+async function copyDebuggingSnapshot() {
+  const copied = await copyTextarea(elements.debuggingSnapshot);
+  if (copied) {
+    showElementNotice(elements.debuggingCopyNotice, "Scheduler snapshot copied.", "success");
+  } else {
+    showElementNotice(
+      elements.debuggingCopyNotice,
+      "Copy failed. The scheduler snapshot is selected.",
+    );
+  }
+}
+
+async function copyTextarea(textarea) {
+  const text = textarea.value;
+  if (!text) {
+    return false;
   }
   let copied = false;
   try {
     if (navigator.clipboard && navigator.clipboard.writeText) {
-      await navigator.clipboard.writeText(transcript);
+      await navigator.clipboard.writeText(text);
       copied = true;
     }
   } catch {
     copied = false;
   }
   if (!copied) {
-    elements.feedbackTranscript.focus();
-    elements.feedbackTranscript.select();
+    textarea.focus();
+    textarea.select();
     try {
       copied = document.execCommand("copy");
     } catch {
       copied = false;
     }
   }
-  if (copied) {
-    showElementNotice(elements.feedbackNotice, "Feedback copied.", "success");
-  } else {
-    elements.feedbackTranscript.focus();
-    elements.feedbackTranscript.select();
-    showElementNotice(elements.feedbackNotice, "Copy failed. The feedback text is selected.");
-  }
+  return copied;
 }
 
 function clearFeedback() {
@@ -801,6 +939,13 @@ function renderSnapshot() {
   }
   renderRuntimeContext();
   renderHeatmap();
+  if (state.route === "inspect/cells") {
+    renderCells();
+  } else if (state.route === "overview") {
+    renderOverview();
+  } else if (state.route === "debugging") {
+    renderDebugging();
+  }
 }
 
 function renderHeatmap() {
@@ -1126,20 +1271,23 @@ function hideTooltip() {
   elements.tooltip.classList.add("hidden");
 }
 
-function renderRoute() {
-  state.route = routeFromHash(window.location.hash);
+function renderRoute({ focusHeading = false } = {}) {
+  const parsed = parseInspectorRoute(window.location.hash);
+  state.route = parsed.route;
   hideCellBarTooltip();
   for (const view of [
+    elements.overviewView,
     elements.activityView,
     elements.callbacksView,
     elements.policyView,
+    elements.queueTopologyView,
     elements.cellsView,
     elements.schedulerControlView,
-    elements.feedbackView,
+    elements.debuggingView,
   ]) {
     view.classList.toggle("hidden", view.dataset.view !== state.route);
   }
-  elements.primaryNav.querySelectorAll("[data-route]").forEach((link) => {
+  document.querySelectorAll("[data-route]").forEach((link) => {
     if (link.dataset.route === state.route) {
       link.setAttribute("aria-current", "page");
     } else {
@@ -1147,15 +1295,169 @@ function renderRoute() {
     }
   });
   hideReferencePopover(true);
-  if (state.route === "activity") {
+  if (state.route === "overview") {
+    renderOverview();
+  } else if (state.route === "observe/placement") {
     window.requestAnimationFrame(renderHeatmap);
-  } else if (state.route === "control") {
+  } else if (state.route === "configure") {
+    renderPolicyLibrary();
     renderSchedulerControl();
-  } else if (state.route === "feedback") {
-    renderFeedback();
+  } else if (state.route === "debugging") {
+    renderDebugging();
   } else {
     renderInspectionViews();
   }
+  if (parsed.feedbackOpen) {
+    openFeedbackDrawer();
+  }
+  if (focusHeading) {
+    window.scrollTo(0, 0);
+    window.requestAnimationFrame(() => {
+      const heading = document.querySelector(`[data-view="${state.route}"]:not(.hidden) h2`);
+      if (heading) {
+        heading.tabIndex = -1;
+        heading.focus({ preventScroll: true });
+      }
+    });
+  }
+}
+
+function renderOverview() {
+  const model = overviewModel({
+    snapshot: state.snapshot,
+    callbackTiming: state.callbackTiming,
+    inspection: state.inspection
+      ? { ...state.inspection, context: state.inspectionContext }
+      : null,
+    control: state.schedulerControl,
+    topology: state.topology,
+    errors: [
+      state.snapshotError,
+      state.callbackTimingError,
+      state.inspectionError,
+      state.policyCatalogError,
+      state.schedulerControlError,
+    ],
+  });
+  elements.overviewRuntime.innerHTML = `
+    <strong>${escapeHtml(model.runtime.statusLabel)}</strong>
+    <span>${escapeHtml(model.runtime.detailLabel)}</span>`;
+  elements.overviewWarnings.classList.toggle("hidden", model.warnings.length === 0);
+  const warningSignature = JSON.stringify(model.warnings);
+  if (elements.overviewWarnings.dataset.warningSignature !== warningSignature) {
+    elements.overviewWarnings.dataset.warningSignature = warningSignature;
+    elements.overviewWarnings.innerHTML = model.warnings.length === 0
+      ? ""
+      : `<strong>Reported warnings</strong><ul>${model.warnings.map((warning) => `<li>${escapeHtml(warning)}</li>`).join("")}</ul>`;
+  }
+
+  const busiestRoute = model.activity.busiestRoute
+    ? `CPU ${formatCount(model.activity.busiestRoute.from)} → CPU ${formatCount(model.activity.busiestRoute.to)} · ${formatCount(model.activity.busiestRoute.count)}`
+    : "No migrations in the current window";
+  elements.overviewActivity.innerHTML = model.activity.available
+    ? overviewFacts([
+        ["Migrations", formatCount(model.activity.total)],
+        ["Rate", `${formatRate(model.activity.ratePerSecond)}/s`],
+        ["Active routes", formatCount(model.activity.activePairs)],
+        ["Busiest route", busiestRoute],
+        ["Coverage", `${formatDuration(model.activity.observedMs)} / ${formatDuration(model.activity.windowMs)}`],
+      ])
+    : '<span class="overview-empty">Waiting for migration data</span>';
+
+  const slowestCallback = model.callbacks.slowest
+    ? `${model.callbacks.slowest.callback} · p99 ${formatCallbackDuration(model.callbacks.slowest.p99Ns)}`
+    : "No callback samples";
+  elements.overviewCallbacks.innerHTML = model.callbacks.available
+    ? overviewFacts([
+        ["Sampling", model.callbacks.sampleRate > 0 ? `1 / ${formatCount(model.callbacks.sampleRate)}` : "Off"],
+        ["Generation", model.callbacks.generation == null ? "Unavailable" : formatCount(model.callbacks.generation)],
+        ["Samples", formatCount(model.callbacks.sampleCount)],
+        ["Slowest p99", slowestCallback],
+      ])
+    : '<span class="overview-empty">Waiting for callback timing data</span>';
+
+  const routeCoverage = model.policy.expectedCpuCount > 0
+    ? `${formatCount(model.policy.cpuRouteCount)} / ${formatCount(model.policy.expectedCpuCount)}${model.policy.routesComplete ? "" : " · incomplete"}`
+    : "Not applicable";
+  elements.overviewPolicy.innerHTML = model.policy.available
+    ? overviewFacts([
+        ["Policy", model.policy.policyId || "Unknown"],
+        ["Fairness", model.policy.fairness ? model.policy.fairness.toUpperCase() : "Unknown"],
+        ["Generation", model.policy.generation == null ? "Unavailable" : formatCount(model.policy.generation)],
+        ["Active slot", model.policy.activeSlot == null ? "Unavailable" : formatCount(model.policy.activeSlot)],
+        ["Queue layout", model.policy.queueLayout || "None"],
+        ["CPU routes", routeCoverage],
+      ])
+    : '<span class="overview-empty">Waiting for policy inspection</span>';
+
+  elements.overviewCells.innerHTML = model.cells.available
+    ? overviewFacts([
+        ["Configured cells", formatCount(model.cells.cellCount)],
+        ["Mapped tasks", formatCount(model.cells.taskCount)],
+      ])
+    : '<span class="overview-empty">Waiting for cell inspection</span>';
+}
+
+function overviewFacts(facts) {
+  return `<dl>${facts.map(([name, value]) => `
+    <div><dt>${escapeHtml(name)}</dt><dd>${escapeHtml(value)}</dd></div>`).join("")}</dl>`;
+}
+
+function renderDebugging() {
+  const inspection = state.inspection
+    ? { ...state.inspection, context: state.inspectionContext }
+    : null;
+  const model = schedulerDebugModel({
+    control: state.schedulerControl,
+    inspection,
+  });
+  renderFreshness(
+    elements.debuggingFreshness,
+    Boolean(state.schedulerControl || inspection),
+    state.schedulerControlError || state.inspectionError,
+    Math.max(state.lastSchedulerControlAt, state.lastInspectionAt),
+    2_000,
+  );
+  const message = state.schedulerControlError
+    || state.inspectionError
+    || (!model.available ? "Snake is not running; no active scheduler configuration is available." : null);
+  if (message) {
+    showElementNotice(elements.debuggingNotice, message, model.available ? "warning" : "info");
+  } else {
+    hideElementNotice(elements.debuggingNotice);
+  }
+  const identityFacts = [
+    ["Scheduler", model.identity.schedulerName || "Unavailable"],
+    ["PID", model.identity.pid == null ? "Unavailable" : formatCount(model.identity.pid)],
+    ["Ownership", model.identity.ownership],
+    ["Attachment", model.identity.attachSequence == null ? "Unavailable" : `#${formatCount(model.identity.attachSequence)}`],
+    ["Policy", model.identity.policyId || "Unavailable"],
+    ["Generation", model.identity.policyGeneration == null ? "Unavailable" : formatCount(model.identity.policyGeneration)],
+    ["Active slot", model.identity.activeSlot == null ? "Unavailable" : formatCount(model.identity.activeSlot)],
+  ];
+  elements.debuggingIdentity.innerHTML = identityFacts.map(([name, value]) => `
+    <div><dt>${escapeHtml(name)}</dt><dd>${escapeHtml(value)}</dd></div>`).join("");
+  elements.debuggingCommand.textContent = model.command;
+  elements.debuggingSettingsRows.innerHTML = model.nonDefaultSettings.length === 0
+    ? '<tr><td class="debugging-empty" colspan="6">No non-default settings are active.</td></tr>'
+    : model.nonDefaultSettings.map((setting) => `
+      <tr>
+        <th scope="row">${escapeHtml(setting.name)}</th>
+        <td><code>${escapeHtml(setting.defaultValue)}</code></td>
+        <td><code>${escapeHtml(setting.effectiveValue)}</code></td>
+        <td><code>${escapeHtml(setting.launchOverride || "Omitted")}</code></td>
+        <td>${escapeHtml(setting.source)}</td>
+        <td><span class="change-mode ${setting.changeLabel === "Dynamic" ? "dynamic" : "reload"}">${escapeHtml(setting.changeLabel)}</span></td>
+      </tr>`).join("");
+  elements.debuggingPolicyContext.textContent = model.identity.policyId
+    ? `${model.identity.policyId} · generation ${model.identity.policyGeneration ?? "unknown"} · slot ${model.identity.activeSlot ?? "unknown"}`
+    : "Unavailable";
+  elements.debuggingPolicySource.textContent = model.policySource || "Policy source unavailable.";
+  if (document.activeElement !== elements.debuggingSnapshot) {
+    elements.debuggingSnapshot.value = model.snapshotText;
+  }
+  elements.copyDebuggingSnapshot.disabled = !model.snapshotText;
+  decorateFeedbackTargets(elements.debuggingView);
 }
 
 async function loadCallbackTiming() {
@@ -1181,8 +1483,12 @@ async function loadCallbackTiming() {
     state.callbackTimingLoading = false;
   }
   renderRuntimeContext();
-  if (state.route === "callbacks") {
+  if (state.route === "observe/callbacks") {
     renderCallbackTiming();
+  } else if (state.route === "overview") {
+    renderOverview();
+  } else if (state.route === "debugging") {
+    renderDebugging();
   }
 }
 
@@ -1206,7 +1512,7 @@ async function loadFineTiming() {
     state.fineTimingLoading = false;
   }
   renderRuntimeContext();
-  if (state.route === "callbacks") {
+  if (state.route === "observe/callbacks") {
     renderFineTiming();
   }
 }
@@ -1272,20 +1578,96 @@ async function setCallbackSampleRate() {
       throw new Error(payload.error || `Sampling update failed (${response.status})`);
     }
     state.callbackRateDirty = false;
-    const suffix = payload.fine_timing_stopped
-      ? " Active fine-grained captures were preserved as Historical."
-      : "";
+    const suffix = [
+      payload.fine_timing_stopped
+        ? " Active fine-grained captures were preserved as Historical."
+        : "",
+      payload.queue_timing_stopped
+        ? " Active queue capture was preserved as Historical."
+        : "",
+    ].join("");
     showElementNotice(
       elements.callbackRateNotice,
       `Callback sampling updated to ${sampleRate === 0 ? "Disabled" : `1 / ${numberFormat.format(sampleRate)}`}.${suffix}`,
       "success",
     );
-    await Promise.all([loadCallbackTiming(), loadFineTiming(), loadInspection()]);
+    await Promise.all([
+      loadCallbackTiming(),
+      loadFineTiming(),
+      loadInspection(),
+      loadQueueTiming(),
+    ]);
   } catch (error) {
     showElementNotice(elements.callbackRateNotice, error.message);
   } finally {
     state.callbackRatePending = false;
     elements.applyCallbackSampleRate.disabled = false;
+  }
+}
+
+async function loadQueueTiming() {
+  if (state.queueTimingLoading) {
+    return;
+  }
+  state.queueTimingLoading = true;
+  try {
+    const response = await fetch("/api/queue-timing", {
+      cache: "no-store",
+      headers: { "x-snake-token": token },
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(payload.error || `Queue timing request failed (${response.status})`);
+    }
+    state.queueTiming = payload;
+    state.queueTimingError = null;
+  } catch (error) {
+    state.queueTimingError = error.message;
+  } finally {
+    state.queueTimingLoading = false;
+  }
+  if (state.route === "inspect/queue-topology") {
+    renderInspectionViews();
+  } else if (state.route === "overview") {
+    renderOverview();
+  } else if (state.route === "debugging") {
+    renderDebugging();
+  }
+}
+
+async function setQueueTiming(enabled) {
+  if (state.queueTimingPending) {
+    return;
+  }
+  const model = queueTimingModel(state.queueTiming, {
+    context: state.inspectionContext,
+  });
+  if (model.controlDisabled) {
+    renderQueueTopologyView();
+    return;
+  }
+  state.queueTimingPending = true;
+  state.queueTimingError = null;
+  renderQueueTopologyView();
+  try {
+    const response = await fetch("/api/queue-timing", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-snake-token": token,
+      },
+      body: JSON.stringify({ enabled }),
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(payload.error || `Queue capture update failed (${response.status})`);
+    }
+    await loadQueueTiming();
+  } catch (error) {
+    state.queueTimingError = error.message;
+  } finally {
+    state.queueTimingPending = false;
+    renderQueueTopologyView();
   }
 }
 
@@ -1333,8 +1715,10 @@ async function loadPolicyCatalog() {
   } finally {
     state.policyCatalogLoading = false;
   }
-  if (state.route === "policy") {
+  if (state.route === "configure") {
     renderPolicyLibrary();
+  } else if (state.route === "overview") {
+    renderOverview();
   }
 }
 
@@ -1358,26 +1742,30 @@ async function loadSchedulerControl() {
     state.schedulerControlLoading = false;
   }
   renderRuntimeContext();
-  if (state.route === "control") {
+  if (state.route === "configure") {
     renderSchedulerControl();
-  } else if (state.route === "policy") {
     renderPolicyLibrary();
+  } else if (state.route === "overview") {
+    renderOverview();
+  } else if (state.route === "debugging") {
+    renderDebugging();
   }
 }
 
 function renderSchedulerControl() {
   const control = state.schedulerControl;
-  syncSchedulerPolicyOptions(control?.policies || []);
   if (control && !state.schedulerFormInitialized) {
     hydrateSchedulerLaunchForm(control);
     state.schedulerFormInitialized = true;
   }
   if (
     state.selectedLifecyclePolicyId
-    && [...elements.schedulerPolicy.options]
-      .some((option) => option.value === state.selectedLifecyclePolicyId && !option.disabled)
+    && Array.isArray(control?.policies)
+    && !control?.policies?.some(
+      (policy) => policy.id === state.selectedLifecyclePolicyId && policy.change_mode !== "invalid",
+    )
   ) {
-    elements.schedulerPolicy.value = state.selectedLifecyclePolicyId;
+    state.selectedLifecyclePolicyId = null;
   }
   if (
     state.selectedLifecycleFairness
@@ -1389,15 +1777,12 @@ function renderSchedulerControl() {
   }
   syncSchedulerFairnessOptions(control);
 
-  const active = Boolean(control?.active);
-  const managed = Boolean(control?.managed);
   const model = schedulerControlModel(
     control,
     state.schedulerControlPending,
-    Boolean(elements.schedulerPolicy.value),
+    Boolean(state.selectedLifecyclePolicyId),
   );
   const locked = model.configLocked;
-  elements.schedulerPolicy.disabled = locked || elements.schedulerPolicy.options.length === 0;
   elements.schedulerFairnessEnabled.disabled = locked;
   elements.schedulerSampleRateEnabled.disabled = locked;
   elements.schedulerExitDumpEnabled.disabled = locked;
@@ -1416,13 +1801,16 @@ function renderSchedulerControl() {
   const message = schedulerControlMessage(control, state.schedulerControlError);
   if (message) {
     showElementNotice(elements.schedulerControlNotice, message);
-  } else if (state.selectedLifecyclePolicyId) {
+  } else if (state.policyCandidate && state.selectedLifecyclePolicyId) {
     const policy = control?.policies?.find(
       (candidate) => candidate.id === state.selectedLifecyclePolicyId,
     );
+    const live = state.policyCandidate.actionKind === "activate";
     showElementNotice(
       elements.schedulerControlNotice,
-      `${policy?.name || state.selectedLifecyclePolicyId} with ${state.selectedLifecycleFairness?.toUpperCase() || "the current fairness mode"} is selected. Review the command, then ${control?.active ? "restart" : "start"} Snake.`,
+      live
+        ? `${policy?.name || state.selectedLifecyclePolicyId} is selected for live activation. Review the impact, then choose Apply live.`
+        : `${policy?.name || state.selectedLifecyclePolicyId} with ${state.selectedLifecycleFairness?.toUpperCase() || "the current fairness mode"} is selected. Review the command, then ${control?.active ? "restart" : "start"} Snake.`,
       "info",
     );
   } else {
@@ -1434,33 +1822,9 @@ function renderSchedulerControl() {
   renderSchedulerSettings(control);
 }
 
-function syncSchedulerPolicyOptions(policies) {
-  const signature = policies
-    .map((policy) => `${policy.id}:${policy.name}:${policy.change_mode}:${policy.supported_fairness?.join(",") || ""}`)
-    .join("|");
-  if (elements.schedulerPolicy.dataset.signature === signature) {
-    return;
-  }
-  const selected = elements.schedulerPolicy.value;
-  elements.schedulerPolicy.innerHTML = policies.length === 0
-    ? '<option value="">No policies available</option>'
-    : policies.map((policy) => {
-      const mode = policy.change_mode === "dynamic"
-        ? "Dynamic"
-        : policy.change_mode === "reload"
-          ? "Reload required"
-          : "Invalid";
-      return `<option value="${escapeHtml(policy.id)}" ${policy.change_mode === "invalid" ? "disabled" : ""}>${escapeHtml(policy.name || policy.id)} (${mode})</option>`;
-    }).join("");
-  if ([...elements.schedulerPolicy.options].some((option) => option.value === selected)) {
-    elements.schedulerPolicy.value = selected;
-  }
-  elements.schedulerPolicy.dataset.signature = signature;
-}
-
 function syncSchedulerFairnessOptions(control) {
   const policy = control?.policies?.find(
-    (candidate) => candidate.id === elements.schedulerPolicy.value,
+    (candidate) => candidate.id === state.selectedLifecyclePolicyId,
   );
   const supported = policy?.supported_fairness?.length
     ? policy.supported_fairness
@@ -1479,12 +1843,12 @@ function syncSchedulerFairnessOptions(control) {
 function hydrateSchedulerLaunchForm(control) {
   const launch = control.launch || {};
   const policyId = control.policy_id || launch.policy_id;
-  if (
-    policyId
-    && [...elements.schedulerPolicy.options].some((option) => option.value === policyId)
-  ) {
-    elements.schedulerPolicy.value = policyId;
-  }
+  const validPolicies = (control.policies || []).filter(
+    (policy) => policy.change_mode !== "invalid",
+  );
+  state.selectedLifecyclePolicyId = validPolicies.some((policy) => policy.id === policyId)
+    ? policyId
+    : validPolicies[0]?.id || null;
   const hasFairness = launch.fairness != null;
   elements.schedulerFairnessEnabled.checked = hasFairness;
   if (hasFairness && ["fifo", "vtime", "eevdf"].includes(launch.fairness)) {
@@ -1505,7 +1869,7 @@ function hydrateSchedulerLaunchForm(control) {
 
 function schedulerLaunchFormValues() {
   return {
-    policy_id: elements.schedulerPolicy.value,
+    policy_id: state.selectedLifecyclePolicyId || "",
     fairness_enabled: elements.schedulerFairnessEnabled.checked,
     fairness: elements.schedulerFairness.value,
     callback_timing_sample_rate_enabled: elements.schedulerSampleRateEnabled.checked,
@@ -1645,15 +2009,21 @@ async function resetAllStats() {
     if (!response.ok) {
       throw new Error(payload.error || `Stats reset failed (${response.status})`);
     }
-    const captureMessage = payload.fine_timing_stopped
-      ? " Fine-grained captures were stopped."
-      : "";
+    const captureMessage = [
+      payload.fine_timing_stopped ? " Fine-grained captures were stopped." : "",
+      payload.queue_timing_stopped ? " Queue capture was stopped." : "",
+    ].join("");
     showElementNotice(
       elements.statsResetNotice,
       `Reset generation ${numberFormat.format(payload.generation)}, slot ${numberFormat.format(payload.active_slot)} at ${formatTimestamp(payload.reset_at_ms)}.${captureMessage}`,
       "success",
     );
-    await Promise.all([loadInspection(), loadCallbackTiming(), loadFineTiming()]);
+    await Promise.all([
+      loadInspection(),
+      loadCallbackTiming(),
+      loadFineTiming(),
+      loadQueueTiming(),
+    ]);
   } catch (error) {
     showElementNotice(elements.statsResetNotice, error.message);
   } finally {
@@ -1663,15 +2033,21 @@ async function resetAllStats() {
 }
 
 function renderInspectionViews() {
-  if (state.route === "policy") {
+  if (state.route === "inspect/policy-slots") {
     if (!elements.referencePopover.classList.contains("hidden")) {
       return;
     }
-    renderPolicy();
-  } else if (state.route === "cells") {
+    renderPolicySlots();
+  } else if (state.route === "inspect/queue-topology") {
+    renderQueueTopologyView();
+  } else if (state.route === "inspect/cells") {
     renderCells();
-  } else if (state.route === "callbacks") {
+  } else if (state.route === "observe/callbacks") {
     renderCallbackTiming();
+  } else if (state.route === "overview") {
+    renderOverview();
+  } else if (state.route === "debugging") {
+    renderDebugging();
   }
 }
 
@@ -1818,21 +2194,27 @@ function fineTimingDurationCell(value) {
   return `<td class="${callbackDurationClass(value)}">${escapeHtml(formatCallbackDuration(value))}</td>`;
 }
 
-function renderPolicy() {
+function renderPolicySlots() {
   renderInspectionStatus(elements.policyNotice, elements.policyFreshness);
-  renderPolicyLibrary();
   state.references.clear();
   state.referenceId = 0;
   if (!state.inspection) {
     elements.slotComparison.replaceChildren();
-    elements.queueTopology.replaceChildren();
-    elements.queueTopology.classList.add("hidden");
     return;
   }
   replaceKeyedHtml(
     elements.slotComparison,
     `${renderPolicySlotComparison(state.inspection.slots)}${state.inspection.slots.map(renderSlot).join("")}`,
   );
+}
+
+function renderQueueTopologyView() {
+  renderInspectionStatus(elements.queueNotice, elements.queueFreshness);
+  if (!state.inspection) {
+    elements.queueTopology.replaceChildren();
+    elements.queueTopology.classList.add("hidden");
+    return;
+  }
   renderResolvedQueueTopology();
 }
 
@@ -1866,10 +2248,20 @@ function renderPolicySlotComparison(slots) {
 }
 
 function renderResolvedQueueTopology() {
-  const model = queueTopologyModel(
-    state.inspection.fairness,
-    state.inspection.queue_topology,
-    state.topology?.numeric_order || [],
+  const timing = queueTimingModel(
+    state.queueTiming,
+    {
+      context: state.inspectionContext,
+      pending: state.queueTimingPending,
+    },
+  );
+  const model = mergeQueueTimingTopology(
+    queueTopologyModel(
+      state.inspection.fairness,
+      state.inspection.queue_topology,
+      state.topology?.numeric_order || [],
+    ),
+    timing,
   );
   const generation = state.inspection.slots
     .find((slot) => slot.state === "active")
@@ -1886,12 +2278,21 @@ function renderResolvedQueueTopology() {
   const routeWarning = model.routesComplete
     ? ""
     : `<p class="notice">Routing data is incomplete: loaded ${formatCount(model.cpuRoutes.length)} of ${formatCount(model.expectedCpuCount)} online CPUs.</p>`;
+  const captureHeader = renderQueueCaptureHeader(timing);
+  const captureError = state.queueTimingError || timing.error;
+  const captureNotice = captureError
+    ? `<p class="notice queue-capture-notice">${escapeHtml(captureError)}</p>`
+    : timing.state === "historical" && !timing.topologyCompatible
+      ? `<p class="notice queue-capture-notice">Historical capture policy generation ${formatNullableCount(timing.capture?.policy_generation)} does not match the current queue topology; DSQ measurements are not joined.</p>`
+      : "";
   if (!model.layout) {
     replaceKeyedHtml(elements.queueTopology, `
       <header class="queue-topology-heading">
         <div><h3>Scheduler execution model</h3><p>Fairness and attachment-time queue topology</p></div>
+        ${captureHeader}
       </header>
       ${summary}
+      ${captureNotice}
       <p class="queue-topology-empty">No resolved cell queue topology is installed.</p>`);
     return;
   }
@@ -1911,6 +2312,7 @@ function renderResolvedQueueTopology() {
       <td>${queue.llc_id == null ? "All" : formatCount(queue.llc_id)}</td>
       <td><code>cell:${formatCount(queue.clock_index)}</code></td>
       <td class="cpu-mask">${escapeHtml(compactCpuList(queue.consumer_cpus))}</td>
+      ${renderQueueTimingCells(queue.timing)}
     </tr>`).join("");
   const routes = model.cpuRoutes.map((route) => `
     <tr>
@@ -1919,12 +2321,15 @@ function renderResolvedQueueTopology() {
       <td>${formatCount(route.llc_id)}</td>
       <td><code>${escapeHtml(route.normalDsq)}</code></td>
       <td><code>${escapeHtml(route.affinityDsq)}</code></td>
+      ${renderQueueTimingCells(route.affinityTiming)}
     </tr>`).join("");
   replaceKeyedHtml(elements.queueTopology, `
     <header class="queue-topology-heading">
       <div><h3>Resolved queue topology</h3><p>Attachment-time CPU ownership, DSQs, and clock domains</p></div>
+      ${captureHeader}
     </header>
     ${summary}
+    ${captureNotice}
     ${routeWarning}
     <section class="queue-topology-table-section">
       <h4>Cell allocation</h4>
@@ -1935,15 +2340,63 @@ function renderResolvedQueueTopology() {
     <details class="queue-topology-details" data-render-key="queue:${generation}:normal-dsqs">
       <summary data-render-key="queue:${generation}:normal-dsqs:summary">Normal DSQs (${formatCount(model.normalQueues.length)})</summary>
       <div class="queue-topology-table-wrap" data-render-key="queue:${generation}:normal-dsqs:scroll">
-        <table><thead><tr><th>DSQ</th><th>Cell</th><th>LLC</th><th>Clock</th><th>Consumer CPUs</th></tr></thead><tbody>${queues}</tbody></table>
+        <table class="queue-timing-table"><thead>
+          <tr><th rowspan="2">DSQ</th><th rowspan="2">Cell</th><th rowspan="2">LLC</th><th rowspan="2">Clock</th><th rowspan="2">Consumer CPUs</th><th colspan="5">Residence</th><th colspan="3">Operation-sampled depth</th></tr>
+          <tr><th>Samples</th><th>Mean</th><th>p50</th><th aria-label="Residence p95">p95</th><th aria-label="Residence p99">p99</th><th>Latest</th><th aria-label="Operation-sampled depth p95">p95</th><th>Max</th></tr>
+        </thead><tbody>${queues}</tbody></table>
       </div>
     </details>
     <details class="queue-topology-details" data-render-key="queue:${generation}:cpu-routes">
       <summary data-render-key="queue:${generation}:cpu-routes:summary">Per-CPU routing (${formatCount(model.cpuRoutes.length)} of ${formatCount(model.expectedCpuCount)} online CPUs)</summary>
       <div class="queue-topology-table-wrap queue-route-table-wrap" data-render-key="queue:${generation}:cpu-routes:scroll">
-        <table><thead><tr><th>CPU</th><th>Owner</th><th>LLC</th><th>Normal DSQ</th><th>Affinity DSQ</th></tr></thead><tbody>${routes}</tbody></table>
+        <table class="queue-timing-table"><thead>
+          <tr><th rowspan="2">CPU</th><th rowspan="2">Owner</th><th rowspan="2">LLC</th><th rowspan="2">Normal DSQ</th><th rowspan="2">Affinity DSQ</th><th colspan="5">Affinity residence</th><th colspan="3">Operation-sampled depth</th></tr>
+          <tr><th>Samples</th><th>Mean</th><th>p50</th><th aria-label="Residence p95">p95</th><th aria-label="Residence p99">p99</th><th>Latest</th><th aria-label="Operation-sampled depth p95">p95</th><th>Max</th></tr>
+        </thead><tbody>${routes}</tbody></table>
       </div>
     </details>`);
+}
+
+function renderQueueCaptureHeader(timing) {
+  const showCaptureState = timing.status === "ready"
+    || (timing.status === "disabled" && timing.state === "historical");
+  const stateClass = showCaptureState ? timing.state : timing.status;
+  const statusLabel = showCaptureState ? timing.stateLabel : timing.statusLabel;
+  const capture = timing.capture;
+  const session = capture?.session_id == null
+    ? "No capture session"
+    : `Session ${formatCount(capture.session_id)} · policy generation ${formatCount(capture.policy_generation)} · started ${formatTimestamp(capture.started_at_ms)} · ${capture.stopped_at_ms ? `stopped ${formatTimestamp(capture.stopped_at_ms)}` : timing.state === "collecting" ? "collecting now" : "stop time unavailable"}`;
+  const reason = timing.controlDisabled
+    ? timing.status === "ready" && timing.sampleRate === 0
+      ? "Enable callback sampling to collect queue timing."
+      : timing.statusLabel
+    : "Sample queue residence and operation-point depth.";
+  return `
+    <div class="queue-capture-control">
+      <div class="queue-capture-state">
+        <span class="fine-timing-state ${escapeHtml(stateClass)}">${escapeHtml(statusLabel)}</span>
+        <span>${escapeHtml(timing.sampleRateLabel)}</span>
+      </div>
+      <label class="fine-timing-toggle" title="${escapeHtml(reason)}">
+        <input type="checkbox" data-queue-capture
+          ${timing.checked ? "checked" : ""}
+          ${timing.controlDisabled ? "disabled" : ""}>
+        <span>Queue capture</span>
+      </label>
+      <small>${escapeHtml(session)} · ${formatCount(timing.counts.started)} started · ${formatCount(timing.counts.completed)} completed · ${formatCount(timing.counts.dropped)} dropped</small>
+    </div>`;
+}
+
+function renderQueueTimingCells(timing) {
+  return `
+    <td>${formatCount(timing.residence.samples)}</td>
+    <td>${escapeHtml(formatCallbackDuration(timing.residence.meanNs))}</td>
+    <td>${escapeHtml(formatCallbackDuration(timing.residence.p50Ns))}</td>
+    <td>${escapeHtml(formatCallbackDuration(timing.residence.p95Ns))}</td>
+    <td>${escapeHtml(formatCallbackDuration(timing.residence.p99Ns))}</td>
+    <td>${formatNullableCount(timing.depth.latest)}</td>
+    <td>${formatNullableCount(timing.depth.p95)}</td>
+    <td>${formatNullableCount(timing.depth.max)}</td>`;
 }
 
 function renderSlot(slot) {
@@ -2142,7 +2595,8 @@ function renderPolicyLibrary() {
 
   const fairnessOptions = fairnessModels.map((option) => `
     <button class="policy-fairness-option${option.id === selectedFairness ? " selected" : ""}${option.active ? " active" : ""}" type="button"
-      role="tab" aria-selected="${option.id === selectedFairness}"
+      aria-pressed="${option.id === selectedFairness}"
+      data-render-key="policy-fairness:${escapeHtml(option.id)}"
       data-policy-fairness="${escapeHtml(option.id)}">
       <strong>${escapeHtml(option.label)}</strong>
       <span>${numberFormat.format(option.policies.length)} policies${option.active ? " · active" : ""}</span>
@@ -2151,6 +2605,8 @@ function renderPolicyLibrary() {
     const policyCards = group.policies.length === 0
       ? '<p class="empty-state">No policies in this group.</p>'
       : group.policies.map((policy) => {
+        const selected = state.policyCandidate?.policyId === policy.id
+          && state.policyCandidate?.fairness === selectedFairness;
         const changeStatus = policy.reasons.length > 0
           ? `<details class="policy-reason-details" data-render-key="policy-choice:${escapeHtml(selectedFairness)}:${escapeHtml(policy.id)}:reasons">
               <summary class="change-mode ${policy.changeMode}" data-render-key="policy-choice:${escapeHtml(selectedFairness)}:${escapeHtml(policy.id)}:reasons:summary">${escapeHtml(policy.changeLabel)}</summary>
@@ -2160,18 +2616,20 @@ function renderPolicyLibrary() {
             </details>`
           : `<span class="change-mode ${policy.changeMode}">${escapeHtml(policy.changeLabel)}</span>`;
         return `
-      <article class="policy-choice${policy.active ? " active" : ""}${policy.changeMode === "invalid" ? " invalid" : ""}">
+      <article class="policy-choice${policy.active ? " active" : ""}${selected ? " selected" : ""}${policy.changeMode === "invalid" ? " invalid" : ""}">
         <div class="policy-choice-copy">
           <h4>${escapeHtml(policy.name)}</h4>
           <p><code>${escapeHtml(policy.id)}</code>${policy.summary ? ` · ${escapeHtml(policy.summary)}` : ""}</p>
         </div>
         <div class="policy-choice-actions">
           ${changeStatus}
-          <button class="${policy.actionKind === "activate" || policy.actionKind === "lifecycle" ? "apply-button" : "secondary-button"}" type="button"
+          <span class="policy-action-intent">${escapeHtml(policy.actionLabel)}</span>
+          <button class="secondary-button policy-select-button" type="button"
             data-policy-id="${escapeHtml(policy.id)}"
             data-policy-fairness="${escapeHtml(selectedFairness)}"
-            data-policy-action="${escapeHtml(policy.actionKind)}" ${policy.disabled ? "disabled" : ""}>
-            ${escapeHtml(policy.actionLabel)}
+            data-render-key="policy-choice:${escapeHtml(selectedFairness)}:${escapeHtml(policy.id)}:select"
+            data-policy-action="${escapeHtml(policy.actionKind)}" aria-pressed="${selected}">
+            ${selected ? "Selected" : "Review"}
           </button>
         </div>
       </article>`;
@@ -2183,10 +2641,10 @@ function renderPolicyLibrary() {
       </section>`;
   }).join("");
   replaceKeyedHtml(elements.policyChoices, `
-    <div class="policy-fairness-options" role="tablist" aria-label="Fairness approach">
+    <div class="policy-fairness-options" role="group" aria-label="Fairness approach">
       ${fairnessOptions}
     </div>
-    <section class="policy-fairness-branch" role="tabpanel">
+    <section class="policy-fairness-branch">
       <header>
         <div>
           <h4>${escapeHtml(selectedModel.label)} policies</h4>
@@ -2228,16 +2686,31 @@ function renderPolicyContextBar(fairnessModels, activeFairness) {
     : candidate.changeLabel;
   state.policyCandidate.actionKind = candidate.actionKind;
   elements.policyCandidateAction.textContent = candidate.actionLabel;
-  elements.policyCandidateAction.disabled = candidate.disabled;
+  elements.policyCandidateAction.disabled = policyCandidateActionDisabled(
+    candidate,
+    state.schedulerControl,
+    state.schedulerControlPending,
+  );
 }
 
 function runPolicyCandidate() {
   const candidate = state.policyCandidate;
-  if (!candidate) {
+  if (policyCandidateActionDisabled(
+    candidate,
+    state.schedulerControl,
+    state.schedulerControlPending,
+  )) {
     return;
   }
   if (candidate.actionKind === "lifecycle") {
-    selectPolicyForLifecycle(candidate.policyId, candidate.fairness);
+    if (!selectPolicyForLifecycle(candidate.policyId, candidate.fairness)) {
+      return;
+    }
+    if (state.schedulerControl?.active) {
+      restartScheduler();
+    } else {
+      startScheduler();
+    }
   } else if (candidate.actionKind === "activate") {
     openPolicyDialog(candidate.policyId);
   }
@@ -2251,13 +2724,13 @@ function selectPolicyForLifecycle(policyId, fairnessMode) {
     || !POLICY_FAIRNESS_OPTIONS.some((option) => option.id === fairnessMode)
   ) {
     showElementNotice(elements.policyLibraryNotice, `Policy ${policyId} is not available for restart.`);
-    return;
+    return false;
   }
   state.selectedLifecyclePolicyId = policyId;
   state.selectedLifecycleFairness = fairnessMode;
-  state.schedulerFormInitialized = false;
-  window.location.hash = "#/control";
-  renderRoute();
+  state.schedulerFormInitialized = true;
+  renderSchedulerControl();
+  return true;
 }
 
 function openPolicyDialog(policyId) {
@@ -2411,14 +2884,14 @@ function hideReferencePopover(force) {
     return;
   }
   elements.referencePopover.classList.add("hidden");
-  if (state.route === "policy" && state.inspection) {
+  if (state.route === "inspect/policy-slots" && state.inspection) {
     window.requestAnimationFrame(() => {
       if (
-        state.route === "policy"
+        state.route === "inspect/policy-slots"
         && state.inspection
         && elements.referencePopover.classList.contains("hidden")
       ) {
-        renderPolicy();
+        renderPolicySlots();
       }
     });
   }
@@ -2440,6 +2913,10 @@ function replaceKeyedHtml(container, html) {
 function renderCells() {
   renderInspectionStatus(elements.cellsNotice, elements.cellsFreshness);
   renderWorkloadCellOptions();
+  const statsModel = cellStatsModel(state.snapshot?.cell_stats, {
+    policyGeneration: state.inspectionContext?.policy_generation,
+  });
+  renderCellStatsStatus(statsModel);
   if (!state.inspection || !state.topology) {
     elements.cellList.replaceChildren();
     elements.cellDetail.replaceChildren();
@@ -2455,7 +2932,13 @@ function renderCells() {
   for (const id of orphanIds) {
     definitions.push({ id, cpus: [], task_count: 0, undefined: true });
   }
+  const statsByCell = new Map(
+    statsModel.status === "ready"
+      ? statsModel.cells.map((cell) => [cell.id, cell])
+      : [],
+  );
   const cells = decorateCells(definitions, state.inspection.task_mappings)
+    .map((cell) => ({ ...cell, stats: statsByCell.get(cell.id) || null }))
     .sort((left, right) => left.id - right.id);
   if (cells.length === 0) {
     elements.cellList.innerHTML = '<p class="empty-state">The active policy defines no cells.</p>';
@@ -2478,8 +2961,28 @@ function renderCells() {
   );
   replaceKeyedHtml(
     elements.cellDetail,
-    renderCellDetail(selected, cellQueueFacts(topology, selected.id)),
+    renderCellDetail(selected, cellQueueFacts(topology, selected.id), statsModel),
   );
+}
+
+function renderCellStatsStatus(model) {
+  let message = model.error;
+  if (!message && model.status !== "ready") {
+    message = model.statusLabel;
+  } else if (!message && model.zeroActivity) {
+    message = "No cell activity was observed in the selected window.";
+  } else if (!message && model.cells.length === 0) {
+    message = "No cell statistics rows are available for the selected window.";
+  }
+  if (message) {
+    showElementNotice(
+      elements.cellStatsNotice,
+      message,
+      model.status === "unavailable" ? "warning" : "info",
+    );
+  } else {
+    hideElementNotice(elements.cellStatsNotice);
+  }
 }
 
 function renderWorkloadTargetField() {
@@ -2565,11 +3068,21 @@ async function setWorkloadCell(clear, tidOverride = null) {
 function renderCellRow(cell) {
   const selected = cell.id === state.selectedCellId;
   const definition = cell.undefined ? "Undefined by active policy" : `${cell.cpus.length} CPUs`;
+  const stats = cell.stats;
+  const affinity = stats
+    ? `${formatCellMetric(stats.affinityEnqueuePct, "percentage")} enq · ${formatCellMetric(stats.affinityDispatchPct, "percentage")} dispatch`
+    : "—";
   return `
     <button class="cell-row${selected ? " selected" : ""}" type="button"
       data-cell-id="${cell.id}" aria-pressed="${selected}">
       <span class="cell-identity"><strong>Cell ${cell.id}</strong><small>${definition}</small></span>
       ${renderCpuStrip(cell)}
+      <span class="cell-row-stats">
+        <span><small>Service</small><strong>${formatCellMetric(stats?.serviceCores, "cores")} cores · ${formatCellMetric(stats?.serviceSharePct, "percentage")}</strong></span>
+        <span><small>Borrowed</small><strong>${formatCellMetric(stats?.borrowedPct, "percentage")}</strong></span>
+        <span><small>Lent runtime</small><strong>${formatCellMetric(stats?.raw.lent_runtime_ns, "duration")}</strong></span>
+        <span><small>Affinity path</small><strong>${affinity}</strong></span>
+      </span>
     </button>`;
 }
 
@@ -2632,7 +3145,7 @@ function hideCellBarTooltip() {
   elements.cellBarTooltip.classList.add("hidden");
 }
 
-function renderCellDetail(cell, queueFacts) {
+function renderCellDetail(cell, queueFacts, statsModel) {
   const cpuList = cell.cpus.length > 0
     ? compactCpuList(cell.cpus)
     : "No active CPU definition";
@@ -2642,12 +3155,18 @@ function renderCellDetail(cell, queueFacts) {
   const tasks = cell.tasks.length > 0
     ? cell.tasks.map((task) => renderTaskMapping(task, cell.id)).join("")
     : '<p class="empty-state">No live task mappings for this cell.</p>';
+  const stats = cell.stats;
+  const coverage = statsModel.status !== "ready"
+    ? statsModel.statusLabel
+    : statsModel.observedMs == null || statsModel.windowMs == null
+    ? statsModel.statusLabel
+    : `${formatDuration(statsModel.observedMs)} observed of ${formatDuration(statsModel.windowMs)}`;
   return `
     <header class="cell-detail-heading">
-      <div><h3>Cell ${cell.id}</h3><p>${numberFormat.format(cell.tasks.length)} mapped tasks</p></div>
+      <div><h3>Cell ${cell.id}</h3><p>${numberFormat.format(cell.tasks.length)} mapped tasks · ${escapeHtml(coverage)}</p></div>
       ${cell.undefined ? '<span class="slot-state warning">Undefined</span>' : ""}
     </header>
-    <dl class="cell-facts">
+    <dl class="cell-facts cell-identity-facts">
       <div><dt>Policy CPUs</dt><dd>${escapeHtml(cpuList)}</dd></div>
       <div><dt>Overlapping cells</dt><dd>${escapeHtml(overlap)}</dd></div>
       <div><dt>Primary CPUs</dt><dd>${escapeHtml(queueFacts.configured ? compactCpuList(queueFacts.primaryCpus) : "Not configured")}</dd></div>
@@ -2656,7 +3175,71 @@ function renderCellDetail(cell, queueFacts) {
       <div><dt>Normal DSQs</dt><dd>${escapeHtml(queueFacts.configured ? queueFacts.normalDsqs.join(", ") || "None" : "Not configured")}</dd></div>
       <div><dt>CPU weight</dt><dd>${queueFacts.weight == null ? "—" : formatCount(queueFacts.weight)}</dd></div>
     </dl>
+    <section class="cell-stat-groups" aria-label="Cell window statistics">
+      <div class="cell-stat-group">
+        <h4>Service</h4>
+        <dl class="cell-facts">
+          <div><dt>Service cores</dt><dd>${formatCellMetric(stats?.serviceCores, "cores")}</dd></div>
+          <div><dt>Service share</dt><dd>${formatCellMetric(stats?.serviceSharePct, "percentage")}</dd></div>
+        </dl>
+      </div>
+      <div class="cell-stat-group">
+        <h4>Placement</h4>
+        <dl class="cell-facts">
+          <div><dt>Primary runtime</dt><dd>${formatCellMetric(stats?.primaryPct, "percentage")}</dd></div>
+          <div><dt>Owned utilization</dt><dd>${formatCellMetric(stats?.ownedUtilizationPct, "percentage")}</dd></div>
+        </dl>
+      </div>
+      <div class="cell-stat-group">
+        <h4>Capacity exchange</h4>
+        <dl class="cell-facts">
+          <div><dt>Borrowed share</dt><dd>${formatCellMetric(stats?.borrowedPct, "percentage")}</dd></div>
+          <div><dt>Lent runtime</dt><dd>${formatCellMetric(stats?.raw.lent_runtime_ns, "duration")}</dd></div>
+        </dl>
+      </div>
+      <div class="cell-stat-group wide">
+        <h4>Queue paths</h4>
+        <dl class="cell-facts">
+          <div><dt>Normal enqueue</dt><dd>${formatCellMetric(stats?.normalEnqueueRate, "rate")}</dd></div>
+          <div><dt>Affinity enqueue</dt><dd>${formatCellMetric(stats?.affinityEnqueueRate, "rate")} · ${formatCellMetric(stats?.affinityEnqueuePct, "percentage")}</dd></div>
+          <div><dt>Normal dispatch</dt><dd>${formatCellMetric(stats?.normalDispatchRate, "rate")}</dd></div>
+          <div><dt>Affinity dispatch</dt><dd>${formatCellMetric(stats?.affinityDispatchRate, "rate")} · ${formatCellMetric(stats?.affinityDispatchPct, "percentage")}</dd></div>
+        </dl>
+      </div>
+      <div class="cell-stat-group wide">
+        <h4>Clock transitions</h4>
+        <dl class="cell-facts">
+          <div><dt>Transition rate</dt><dd>${formatCellMetric(stats?.clockTransitionRate, "rate")}</dd></div>
+          <div><dt>Per 1k dispatches</dt><dd>${formatCellMetric(stats?.transitionsPer1kDispatches)}</dd></div>
+        </dl>
+      </div>
+    </section>
+    ${renderRawCellStats(stats, cell.id)}
     <div class="task-mappings">${tasks}</div>`;
+}
+
+function renderRawCellStats(stats, cellId) {
+  const rows = [
+    ["runtime_ns", "Runtime", "duration"],
+    ["primary_runtime_ns", "Primary runtime", "duration"],
+    ["borrowed_runtime_ns", "Borrowed runtime", "duration"],
+    ["lent_runtime_ns", "Lent runtime", "duration"],
+    ["normal_enqueues", "Normal enqueues", "number"],
+    ["affinity_enqueues", "Affinity enqueues", "number"],
+    ["normal_dispatches", "Normal dispatches", "number"],
+    ["affinity_dispatches", "Affinity dispatches", "number"],
+    ["clock_transitions", "Clock transitions", "number"],
+  ];
+  return `
+    <details class="cell-raw-stats" data-render-key="cell:${cellId}:raw-stats">
+      <summary data-render-key="cell:${cellId}:raw-stats:summary">Raw window counters</summary>
+      <div class="cell-raw-table-wrap">
+        <table><thead><tr><th>Counter</th><th>Value</th></tr></thead><tbody>
+          ${rows.map(([field, label, kind]) => `
+            <tr><th scope="row"><code>${field}</code><small>${label}</small></th><td>${formatCellMetric(stats?.raw[field], kind)}</td></tr>`).join("")}
+        </tbody></table>
+      </div>
+    </details>`;
 }
 
 function renderTaskMapping(task, cellId) {
@@ -2710,6 +3293,12 @@ function formatTimestamp(milliseconds) {
 
 function formatCount(value) {
   return numberFormat.format(Number(value || 0));
+}
+
+function formatNullableCount(value) {
+  return value == null || !Number.isFinite(Number(value))
+    ? "—"
+    : numberFormat.format(Number(value));
 }
 
 function formatPercentage(value) {

@@ -9,10 +9,16 @@
     <link rel="stylesheet" href="/assets/style.css">
   </head>
   <body data-initial-window-ms="__INITIAL_WINDOW_MS__" data-max-window-ms="__MAX_WINDOW_MS__">
+    <a class="skip-link" href="#app">Skip to inspector content</a>
     <header class="topbar">
-      <div class="product-title">
-        <h1>Snake inspector</h1>
-        <p>Scheduler activity and installed policy state</p>
+      <div class="topbar-product">
+        <button class="header-icon-button navigation-trigger" id="openNavigation" type="button" aria-label="Open workspace navigation" aria-controls="navigationDrawer">
+          <span aria-hidden="true">&#9776;</span>
+        </button>
+        <div class="product-title">
+          <h1>Snake inspector</h1>
+          <p>Scheduler activity and installed policy state</p>
+        </div>
       </div>
       <div class="runtime-summary">
         <div class="live-status waiting" id="liveStatus" role="status" aria-live="polite">
@@ -21,19 +27,94 @@
         </div>
         <span class="runtime-context-detail" id="runtimeContextDetail">Runtime context unavailable</span>
       </div>
+      <button class="header-icon-button mobile-feedback-trigger" type="button" data-open-feedback aria-label="Open feedback" aria-controls="feedbackDrawer">
+        <span aria-hidden="true">&#128066;</span>
+        <span class="feedback-count mobile-feedback-count hidden" data-feedback-count aria-hidden="true">0</span>
+      </button>
     </header>
 
-    <nav class="primary-nav" id="primaryNav" aria-label="Inspector views">
-      <a href="#/activity" data-route="activity" aria-current="page">Activity</a>
-      <a href="#/callbacks" data-route="callbacks">Callbacks</a>
-      <a href="#/policy" data-route="policy">Policy</a>
-      <a href="#/cells" data-route="cells">Cells</a>
-      <a href="#/control" data-route="control">Control</a>
-      <a href="#/feedback" data-route="feedback">Feedback</a>
-    </nav>
+    <div class="workspace-shell">
+      <aside class="workspace-sidebar" id="workspaceSidebar">
+        <nav class="workspace-navigation" id="primaryNav" aria-label="Inspector workspaces">
+          <a href="#/overview" data-route="overview" aria-current="page">Overview</a>
+          <div class="navigation-group">
+            <span class="navigation-group-label">Observe</span>
+            <a href="#/observe/placement" data-route="observe/placement">Placement</a>
+            <a href="#/observe/callbacks" data-route="observe/callbacks">Callback performance</a>
+          </div>
+          <div class="navigation-group">
+            <span class="navigation-group-label">Configure</span>
+            <a href="#/configure" data-route="configure">Scheduler &amp; policies</a>
+          </div>
+          <div class="navigation-group">
+            <span class="navigation-group-label">Inspect</span>
+            <a href="#/inspect/policy-slots" data-route="inspect/policy-slots">Policy slots</a>
+            <a href="#/inspect/queue-topology" data-route="inspect/queue-topology">Queue topology</a>
+            <a href="#/inspect/cells" data-route="inspect/cells">Cells &amp; tasks</a>
+          </div>
+          <a class="navigation-debugging" href="#/debugging" data-route="debugging">Debugging</a>
+        </nav>
+        <button class="workspace-feedback-button" id="openFeedback" type="button" data-open-feedback aria-controls="feedbackDrawer">
+          <span>Feedback</span>
+          <span class="feedback-count" id="feedbackCount" aria-label="0 feedback drafts">0</span>
+        </button>
+      </aside>
 
-    <main id="app" aria-label="Snake scheduler inspector">
-      <section class="view-panel" id="activityView" data-view="activity">
+      <main id="app" tabindex="-1" aria-label="Snake scheduler inspector">
+      <section class="view-panel" id="overviewView" data-view="overview" aria-labelledby="overviewTitle">
+        <header class="view-heading">
+          <div>
+            <h2 id="overviewTitle">Overview</h2>
+            <p>Current scheduler context and diagnostic coverage</p>
+          </div>
+        </header>
+        <div class="overview-summary">
+          <section class="overview-section" aria-labelledby="overviewRuntimeTitle" data-feedback-key="Overview:Runtime">
+            <div class="overview-section-heading">
+              <h3 id="overviewRuntimeTitle">Runtime</h3>
+              <a href="#/configure">Open configuration</a>
+            </div>
+            <div class="overview-diagnostic" id="overviewRuntime">Waiting for Snake</div>
+            <div class="overview-warnings" id="overviewWarnings" aria-live="polite"></div>
+          </section>
+          <section class="overview-section" aria-labelledby="overviewActivityTitle" data-feedback-key="Overview:Activity">
+            <div class="overview-section-heading">
+              <h3 id="overviewActivityTitle">Placement activity</h3>
+              <a href="#/observe/placement">Open placement</a>
+            </div>
+            <div class="overview-diagnostic" id="overviewActivity">Waiting for migration data</div>
+          </section>
+          <section class="overview-section" aria-labelledby="overviewCallbacksTitle" data-feedback-key="Overview:Callbacks">
+            <div class="overview-section-heading">
+              <h3 id="overviewCallbacksTitle">Callback performance</h3>
+              <a href="#/observe/callbacks">Open callback performance</a>
+            </div>
+            <div class="overview-diagnostic" id="overviewCallbacks">Waiting for callback samples</div>
+          </section>
+          <section class="overview-section" aria-labelledby="overviewPolicyTitle" data-feedback-key="Overview:Policy">
+            <div class="overview-section-heading">
+              <h3 id="overviewPolicyTitle">Policy and queues</h3>
+              <a href="#/inspect/policy-slots">Open policy slots</a>
+            </div>
+            <div class="overview-diagnostic" id="overviewPolicy">Waiting for policy inspection</div>
+          </section>
+          <section class="overview-section" aria-labelledby="overviewCellsTitle" data-feedback-key="Overview:Cells">
+            <div class="overview-section-heading">
+              <h3 id="overviewCellsTitle">Cells and tasks</h3>
+              <a href="#/inspect/cells">Open cells and tasks</a>
+            </div>
+            <div class="overview-diagnostic" id="overviewCells">Waiting for cell inspection</div>
+          </section>
+        </div>
+      </section>
+
+      <section class="view-panel hidden" id="activityView" data-view="observe/placement" aria-labelledby="placementTitle">
+        <header class="view-heading">
+          <div>
+            <h2 id="placementTitle">Placement</h2>
+            <p>CPU utilization and task migration paths across the topology</p>
+          </div>
+        </header>
         <section class="control-band" aria-label="Heatmap controls" data-feedback-key="Activity:Controls">
         <label class="control-field">
           <span>Window</span>
@@ -92,7 +173,7 @@
         <section class="matrix-section" aria-labelledby="matrixTitle" data-feedback-key="Activity:CPU-migration-matrix">
         <div class="matrix-heading">
           <div>
-            <h2 id="matrixTitle">CPU migration matrix</h2>
+            <h3 id="matrixTitle">CPU migration matrix</h3>
             <p id="matrixSubtitle">Source CPU by destination CPU</p>
           </div>
           <div class="legend" aria-label="Heat intensity legend">
@@ -109,7 +190,7 @@
         </section>
       </section>
 
-      <section class="view-panel hidden" id="callbacksView" data-view="callbacks" aria-labelledby="callbacksTitle">
+      <section class="view-panel hidden" id="callbacksView" data-view="observe/callbacks" aria-labelledby="callbacksTitle">
         <header class="view-heading">
           <div>
             <h2 id="callbacksTitle">Scheduler callback timing</h2>
@@ -165,58 +246,46 @@
         </section>
       </section>
 
-      <section class="view-panel hidden" id="policyView" data-view="policy" aria-labelledby="policyTitle">
+      <section class="view-panel hidden" id="policyView" data-view="inspect/policy-slots" aria-labelledby="policyTitle">
         <header class="view-heading">
           <div>
-            <h2 id="policyTitle">Active and previous policy</h2>
+            <h2 id="policyTitle">Policy slots</h2>
             <p>Current execution state compared with the last policy retained for safe replacement</p>
           </div>
           <span class="view-freshness" id="policyFreshness">Waiting for Snake</span>
         </header>
-        <section class="policy-context-bar" id="policyContextBar" aria-label="Policy change context">
-          <div>
-            <span>Active</span>
-            <strong id="policyActiveContext">Waiting for Snake</strong>
-          </div>
-          <div>
-            <span>Candidate</span>
-            <strong id="policyCandidateContext">None selected</strong>
-          </div>
-          <div>
-            <span>Impact</span>
-            <strong id="policyCandidateImpact">—</strong>
-          </div>
-          <button class="apply-button" id="policyCandidateAction" type="button" disabled>Select a policy</button>
-        </section>
-        <section class="policy-library" id="policyLibrary" aria-labelledby="policyLibraryTitle" data-feedback-key="Policy:Policy-library">
-          <header>
-            <div>
-              <h3 id="policyLibraryTitle">Policy library</h3>
-              <p>Validated TOML policies available to this inspector</p>
-            </div>
-            <span id="policyLibraryStatus">Loading policies</span>
-          </header>
-          <p class="notice hidden" id="policyLibraryNotice" role="status"></p>
-          <div class="policy-hierarchy" id="policyChoices"></div>
-          <details class="invalid-policy-list hidden" id="invalidPolicies">
-            <summary></summary>
-            <ul></ul>
-          </details>
-        </section>
         <p class="notice hidden" id="policyNotice" role="status"></p>
         <div class="slot-comparison" id="slotComparison"></div>
+      </section>
+
+      <section class="view-panel hidden" id="queueTopologyView" data-view="inspect/queue-topology" aria-labelledby="queueTopologyTitle">
+        <header class="view-heading">
+          <div>
+            <h2 id="queueTopologyTitle">Queue topology</h2>
+            <p>Resolved per-CPU routing and active queue configuration</p>
+          </div>
+          <span class="view-freshness" id="queueFreshness">Waiting for Snake</span>
+        </header>
+        <p class="notice hidden" id="queueNotice" role="status"></p>
         <section class="resolved-queue-topology hidden" id="queueTopology" aria-live="polite" data-feedback-key="Policy:Resolved-queue-topology"></section>
       </section>
 
-      <section class="view-panel hidden" id="cellsView" data-view="cells" aria-labelledby="cellsTitle">
+      <section class="view-panel hidden" id="cellsView" data-view="inspect/cells" aria-labelledby="cellsTitle">
         <header class="view-heading">
           <div>
             <h2 id="cellsTitle">Cells and task mappings</h2>
             <p>Active policy CPU membership with current task annotations</p>
           </div>
-          <span class="view-freshness" id="cellsFreshness">Waiting for Snake</span>
+          <div class="cell-heading-actions">
+            <label class="control-field compact-window-field">
+              <span>Window</span>
+              <select id="cellWindowSelect" aria-label="Cell statistics window"></select>
+            </label>
+            <span class="view-freshness" id="cellsFreshness">Waiting for Snake</span>
+          </div>
         </header>
         <p class="notice hidden" id="cellsNotice" role="status"></p>
+        <p class="notice hidden" id="cellStatsNotice" role="status"></p>
         <section class="control-band workload-control-band" aria-label="Workload cell assignment" data-feedback-key="Cells:Workload-assignment">
           <fieldset class="control-field segmented" id="workloadTargetKind">
             <legend>Target</legend>
@@ -253,28 +322,57 @@
         </div>
       </section>
 
-      <section class="view-panel hidden" id="controlView" data-view="control" aria-labelledby="controlTitle">
+      <section class="view-panel hidden" id="controlView" data-view="configure" aria-labelledby="controlTitle">
         <header class="view-heading">
           <div>
-            <h2 id="controlTitle">Scheduler control</h2>
-            <p>Managed Snake process and launch configuration</p>
+            <h2 id="controlTitle">Scheduler &amp; policies</h2>
+            <p>Select a policy candidate and review its launch impact before applying changes</p>
           </div>
           <span class="scheduler-state stopped" id="schedulerControlState">Stopped</span>
         </header>
-        <p class="notice hidden" id="schedulerControlNotice" role="status"></p>
+        <div class="configure-workspace">
+          <aside class="configure-master" aria-label="Policy selection">
+            <section class="policy-library" id="policyLibrary" aria-labelledby="policyLibraryTitle" data-feedback-key="Policy:Policy-library">
+              <header>
+                <div>
+                  <h3 id="policyLibraryTitle">Policy library</h3>
+                  <p>Validated TOML policies available to this inspector</p>
+                </div>
+                <span id="policyLibraryStatus">Loading policies</span>
+              </header>
+              <p class="notice hidden" id="policyLibraryNotice" role="status"></p>
+              <div class="policy-hierarchy" id="policyChoices"></div>
+              <details class="invalid-policy-list hidden" id="invalidPolicies">
+                <summary></summary>
+                <ul></ul>
+              </details>
+            </section>
+          </aside>
+          <div class="configure-detail">
+            <section class="policy-context-bar" id="policyContextBar" aria-label="Policy change context">
+              <div>
+                <span>Active</span>
+                <strong id="policyActiveContext">Waiting for Snake</strong>
+              </div>
+              <div>
+                <span>Candidate</span>
+                <strong id="policyCandidateContext">None selected</strong>
+              </div>
+              <div>
+                <span>Impact</span>
+                <strong id="policyCandidateImpact">—</strong>
+              </div>
+              <button class="apply-button" id="policyCandidateAction" type="button" disabled>Select a policy</button>
+            </section>
+            <p class="notice hidden" id="schedulerControlNotice" role="status"></p>
 
-        <section class="scheduler-launch-section" aria-labelledby="schedulerLaunchTitle">
+            <section class="scheduler-launch-section" aria-labelledby="schedulerLaunchTitle">
           <header class="section-heading">
             <h3 id="schedulerLaunchTitle">Launch and restart configuration</h3>
           </header>
           <div class="scheduler-launch-grid">
             <div class="scheduler-launch-fields" data-feedback-key="Control:Launch-configuration">
               <div class="scheduler-feedback-anchor" data-feedback-anchor></div>
-              <label class="control-field scheduler-policy-field">
-                <span>Policy</span>
-                <select id="schedulerPolicy" aria-label="Snake policy"></select>
-              </label>
-
               <fieldset class="scheduler-flag-list">
                 <legend>Launch argument overrides</legend>
                 <div class="scheduler-flag-row">
@@ -340,9 +438,9 @@
               <p class="control-message hidden" id="statsResetNotice" role="status"></p>
             </section>
           </div>
-        </section>
+            </section>
 
-        <section class="scheduler-settings-section" aria-labelledby="schedulerSettingsTitle" data-feedback-key="Control:Change-behavior">
+            <section class="scheduler-settings-section" aria-labelledby="schedulerSettingsTitle" data-feedback-key="Control:Change-behavior">
           <header class="section-heading" data-feedback-anchor>
             <h3 id="schedulerSettingsTitle">Change behavior</h3>
           </header>
@@ -352,15 +450,107 @@
               <tbody id="schedulerSettingsRows"></tbody>
             </table>
           </div>
-        </section>
+            </section>
+          </div>
+        </div>
       </section>
 
-      <section class="view-panel hidden" id="feedbackView" data-view="feedback" aria-labelledby="feedbackTitle">
+      <section class="view-panel hidden" id="debuggingView" data-view="debugging" aria-labelledby="debuggingTitle">
         <header class="view-heading">
+          <div>
+            <h2 id="debuggingTitle">Debugging</h2>
+            <p>Exact scheduler process, runtime configuration, and installed policy</p>
+          </div>
+          <span class="view-freshness" id="debuggingFreshness">Waiting for Snake</span>
+        </header>
+        <p class="notice hidden" id="debuggingNotice" role="status"></p>
+        <div class="debugging-workspace">
+          <section class="debugging-section" aria-labelledby="debuggingIdentityTitle" data-feedback-key="Debugging:Runtime-context">
+            <header class="section-heading">
+              <h3 id="debuggingIdentityTitle">Scheduler identity</h3>
+            </header>
+            <dl class="debugging-identity" id="debuggingIdentity"></dl>
+          </section>
+          <section class="debugging-section" aria-labelledby="debuggingCommandTitle" data-feedback-key="Debugging:Launch-command">
+            <header class="section-heading">
+              <h3 id="debuggingCommandTitle">Launch command</h3>
+            </header>
+            <pre class="debugging-code" id="debuggingCommand">Command line unavailable.</pre>
+          </section>
+          <section class="debugging-section" aria-labelledby="debuggingSettingsTitle" data-feedback-key="Debugging:Non-default-configuration">
+            <header class="section-heading">
+              <h3 id="debuggingSettingsTitle">Non-default configuration</h3>
+            </header>
+            <div class="debugging-table-wrap">
+              <table>
+                <thead><tr><th scope="col">Setting</th><th scope="col">Default</th><th scope="col">Effective</th><th scope="col">Launch override</th><th scope="col">Source</th><th scope="col">Application</th></tr></thead>
+                <tbody id="debuggingSettingsRows"></tbody>
+              </table>
+            </div>
+          </section>
+          <section class="debugging-section" aria-labelledby="debuggingPolicyTitle" data-feedback-key="Debugging:Active-policy">
+            <header class="section-heading debugging-policy-heading">
+              <div>
+                <h3 id="debuggingPolicyTitle">Installed policy</h3>
+                <p id="debuggingPolicyContext">Unavailable</p>
+              </div>
+            </header>
+            <pre class="debugging-code debugging-policy-source" id="debuggingPolicySource">Policy source unavailable.</pre>
+          </section>
+          <section class="debugging-section" aria-labelledby="debuggingSnapshotTitle" data-feedback-key="Debugging:Snapshot">
+            <header class="section-heading debugging-snapshot-heading">
+              <h3 id="debuggingSnapshotTitle">Copyable scheduler snapshot</h3>
+              <button class="apply-button" id="copyDebuggingSnapshot" type="button">Copy snapshot</button>
+            </header>
+            <textarea class="debugging-snapshot" id="debuggingSnapshot" aria-label="Copyable scheduler snapshot" readonly spellcheck="false"></textarea>
+            <p class="control-message hidden" id="debuggingCopyNotice" role="status" aria-live="polite"></p>
+          </section>
+        </div>
+      </section>
+
+      </main>
+    </div>
+
+    <dialog class="navigation-drawer" id="navigationDrawer" aria-labelledby="navigationDrawerTitle">
+      <div class="drawer-surface">
+        <header class="drawer-heading">
+          <h2 id="navigationDrawerTitle">Workspaces</h2>
+          <button class="drawer-close-button" id="closeNavigation" type="button" aria-label="Close workspace navigation">
+            <span aria-hidden="true">&#215;</span>
+          </button>
+        </header>
+        <nav class="workspace-navigation mobile-workspace-navigation" aria-label="Inspector workspaces">
+          <a href="#/overview" data-route="overview">Overview</a>
+          <div class="navigation-group">
+            <span class="navigation-group-label">Observe</span>
+            <a href="#/observe/placement" data-route="observe/placement">Placement</a>
+            <a href="#/observe/callbacks" data-route="observe/callbacks">Callback performance</a>
+          </div>
+          <div class="navigation-group">
+            <span class="navigation-group-label">Configure</span>
+            <a href="#/configure" data-route="configure">Scheduler &amp; policies</a>
+          </div>
+          <div class="navigation-group">
+            <span class="navigation-group-label">Inspect</span>
+            <a href="#/inspect/policy-slots" data-route="inspect/policy-slots">Policy slots</a>
+            <a href="#/inspect/queue-topology" data-route="inspect/queue-topology">Queue topology</a>
+            <a href="#/inspect/cells" data-route="inspect/cells">Cells &amp; tasks</a>
+          </div>
+          <a class="navigation-debugging" href="#/debugging" data-route="debugging">Debugging</a>
+        </nav>
+      </div>
+    </dialog>
+
+    <dialog class="feedback-drawer" id="feedbackDrawer" aria-labelledby="feedbackTitle">
+      <div class="drawer-surface">
+        <header class="drawer-heading">
           <div>
             <h2 id="feedbackTitle">Feedback</h2>
             <p>Collected UI change requests</p>
           </div>
+          <button class="drawer-close-button" id="closeFeedback" type="button" aria-label="Close feedback">
+            <span aria-hidden="true">&#215;</span>
+          </button>
         </header>
         <section class="feedback-workspace" aria-labelledby="feedbackTranscriptTitle">
           <header class="section-heading feedback-workspace-heading">
@@ -373,8 +563,8 @@
           <textarea id="feedbackTranscript" aria-label="Collected feedback" readonly spellcheck="false"></textarea>
           <p class="control-message hidden" id="feedbackNotice" role="status" aria-live="polite"></p>
         </section>
-      </section>
-    </main>
+      </div>
+    </dialog>
 
     <aside class="reference-popover hidden" id="referencePopover" role="dialog" aria-label="Field reference"></aside>
     <dialog class="policy-dialog" id="policyDialog" aria-labelledby="policyDialogTitle">

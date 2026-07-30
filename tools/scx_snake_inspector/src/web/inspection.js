@@ -3,7 +3,23 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 
-const ROUTES = new Set(["activity", "policy", "cells", "callbacks", "control", "feedback"]);
+const ROUTES = new Set([
+  "overview",
+  "observe/placement",
+  "observe/callbacks",
+  "configure",
+  "inspect/policy-slots",
+  "inspect/queue-topology",
+  "inspect/cells",
+  "debugging",
+]);
+const LEGACY_ROUTES = new Map([
+  ["activity", "observe/placement"],
+  ["callbacks", "observe/callbacks"],
+  ["control", "configure"],
+  ["policy", "inspect/policy-slots"],
+  ["cells", "inspect/cells"],
+]);
 const DEMO_POLICY_IDS = new Set([
   "llc-half-random.toml",
   "llc-random.toml",
@@ -14,9 +30,23 @@ const callbackDurationFormat = new Intl.NumberFormat("en-US", {
   maximumFractionDigits: 0,
 });
 
+export function parseInspectorRoute(hash) {
+  const requested = String(hash || "")
+    .replace(/^#\/?/, "")
+    .replace(/\?.*$/, "")
+    .replace(/\/+$/, "");
+  if (requested === "feedback") {
+    return { route: "overview", feedbackOpen: true };
+  }
+  const route = LEGACY_ROUTES.get(requested) || requested;
+  return {
+    route: ROUTES.has(route) ? route : "overview",
+    feedbackOpen: false,
+  };
+}
+
 export function routeFromHash(hash) {
-  const route = String(hash || "").replace(/^#\/?/, "");
-  return ROUTES.has(route) ? route : "activity";
+  return parseInspectorRoute(hash).route;
 }
 
 export function contextsMatch(left, right) {
@@ -29,6 +59,338 @@ export function contextsMatch(left, right) {
   return left.policy_generation == null
     || right.policy_generation == null
     || left.policy_generation === right.policy_generation;
+}
+
+const CELL_STATUSES = new Set([
+  "ready",
+  "not_applicable",
+  "unsupported",
+  "synchronizing",
+  "unavailable",
+]);
+const CELL_STATUS_LABELS = {
+  ready: "Ready",
+  not_applicable: "Not applicable to this policy",
+  unsupported: "Unsupported by this Snake version",
+  synchronizing: "Synchronizing policy statistics",
+  unavailable: "Cell statistics unavailable",
+};
+const CELL_COUNTER_FIELDS = [
+  "runtime_ns",
+  "primary_runtime_ns",
+  "borrowed_runtime_ns",
+  "lent_runtime_ns",
+  "normal_enqueues",
+  "affinity_enqueues",
+  "normal_dispatches",
+  "affinity_dispatches",
+  "clock_transitions",
+];
+const cellMetricNumberFormat = new Intl.NumberFormat("en-US", {
+  maximumFractionDigits: 1,
+});
+
+function finiteValue(...values) {
+  for (const value of values) {
+    if (value == null || value === "") {
+      continue;
+    }
+    const number = Number(value);
+    if (Number.isFinite(number)) {
+      return number;
+    }
+  }
+  return null;
+}
+
+function normalizedCell(cell, observedMs) {
+  const raw = Object.fromEntries(
+    CELL_COUNTER_FIELDS.map((field) => [field, Math.max(0, finiteValue(cell?.[field]) ?? 0)]),
+  );
+  const observedSeconds = Number(observedMs) > 0 ? Number(observedMs) / 1_000 : null;
+  const perSecond = (count) => observedSeconds === null
+    ? null
+    : Number((count / observedSeconds).toFixed(4));
+  return {
+    id: finiteValue(cell?.id, cell?.cell_id, cell?.external_id),
+    index: finiteValue(cell?.index, cell?.cell_index),
+    primaryCpuCount: finiteValue(cell?.primary_cpu_count),
+    raw,
+    serviceCores: finiteValue(cell?.service_cores),
+    serviceSharePct: finiteValue(cell?.service_share_pct),
+    primaryPct: finiteValue(cell?.primary_pct, cell?.primary_runtime_pct),
+    borrowedPct: finiteValue(cell?.borrowed_pct, cell?.borrowed_runtime_pct),
+    ownedUtilizationPct: finiteValue(cell?.owned_utilization_pct),
+    normalEnqueueRate: finiteValue(
+      cell?.normal_enqueues_per_second,
+      cell?.normal_enqueue_rate,
+      perSecond(raw.normal_enqueues),
+    ),
+    affinityEnqueueRate: finiteValue(
+      cell?.affinity_enqueues_per_second,
+      cell?.affinity_enqueue_rate,
+      perSecond(raw.affinity_enqueues),
+    ),
+    normalDispatchRate: finiteValue(
+      cell?.normal_dispatches_per_second,
+      cell?.normal_dispatch_rate,
+      perSecond(raw.normal_dispatches),
+    ),
+    affinityDispatchRate: finiteValue(
+      cell?.affinity_dispatches_per_second,
+      cell?.affinity_dispatch_rate,
+      perSecond(raw.affinity_dispatches),
+    ),
+    affinityEnqueuePct: finiteValue(
+      cell?.affinity_enqueue_share_pct,
+      cell?.affinity_enqueue_pct,
+    ),
+    affinityDispatchPct: finiteValue(
+      cell?.affinity_dispatch_share_pct,
+      cell?.affinity_dispatch_pct,
+    ),
+    clockTransitionRate: finiteValue(
+      cell?.transition_rate_per_second,
+      cell?.clock_transitions_per_second,
+      cell?.clock_transition_rate,
+    ),
+    transitionsPer1kDispatches: finiteValue(cell?.transitions_per_1k_dispatches),
+  };
+}
+
+export function cellStatsModel(payload, { policyGeneration = null } = {}) {
+  const requestedStatus = String(payload?.status || "unavailable").toLowerCase();
+  let status = CELL_STATUSES.has(requestedStatus) ? requestedStatus : "unavailable";
+  if (
+    status === "ready"
+    && policyGeneration != null
+    && (payload?.source_policy_generation ?? payload?.policy_generation) != null
+    && Number(policyGeneration)
+      !== Number(payload.source_policy_generation ?? payload.policy_generation)
+  ) {
+    status = "synchronizing";
+  }
+  const cells = (payload?.cells || [])
+    .map((cell) => normalizedCell(cell, payload?.observed_ms))
+    .filter((cell) => Number.isSafeInteger(cell.id) && cell.id >= 0)
+    .sort((left, right) => left.id - right.id);
+  const zeroActivity = status === "ready"
+    && cells.length > 0
+    && cells.every((cell) => CELL_COUNTER_FIELDS.every((field) => cell.raw[field] === 0));
+  return {
+    status,
+    statusLabel: CELL_STATUS_LABELS[status],
+    error: payload?.error || null,
+    scope: payload?.scope || null,
+    policyGeneration: finiteValue(
+      payload?.source_policy_generation,
+      payload?.policy_generation,
+    ),
+    windowMs: finiteValue(payload?.window_ms),
+    observedMs: finiteValue(payload?.observed_ms),
+    zeroActivity,
+    cells,
+  };
+}
+
+export function formatCellMetric(value, kind = "number") {
+  const number = finiteValue(value);
+  if (number === null) {
+    return "—";
+  }
+  if (kind === "percentage") {
+    return `${number.toFixed(1)}%`;
+  }
+  if (kind === "cores") {
+    return number.toFixed(2);
+  }
+  if (kind === "rate") {
+    return `${cellMetricNumberFormat.format(number)}/s`;
+  }
+  if (kind === "duration") {
+    if (number >= 1_000_000_000) {
+      return `${cellMetricNumberFormat.format(number / 1_000_000_000)} s`;
+    }
+    if (number >= 1_000_000) {
+      return `${cellMetricNumberFormat.format(number / 1_000_000)} ms`;
+    }
+    if (number >= 1_000) {
+      return `${cellMetricNumberFormat.format(number / 1_000)} µs`;
+    }
+    return `${cellMetricNumberFormat.format(number)} ns`;
+  }
+  return cellMetricNumberFormat.format(number);
+}
+
+const QUEUE_TIMING_STATUSES = new Set([
+  "ready",
+  "disabled",
+  "not_applicable",
+  "unsupported",
+  "synchronizing",
+  "unavailable",
+]);
+const QUEUE_TIMING_STATUS_LABELS = {
+  ready: "Available",
+  disabled: "Sampling disabled",
+  not_applicable: "Not applicable",
+  unsupported: "Unsupported",
+  synchronizing: "Synchronizing",
+  unavailable: "Unavailable",
+};
+
+function canonicalDsqKey(value) {
+  if (value == null || value === "") {
+    return null;
+  }
+  try {
+    return BigInt(String(value)).toString();
+  } catch {
+    return String(value).toLowerCase();
+  }
+}
+
+function normalizeQueueTimingDsq(dsq) {
+  const residence = dsq?.residence || {};
+  const depth = dsq?.depth || {};
+  const samples = Math.max(0, finiteValue(residence.samples, dsq?.samples) ?? 0);
+  const depthSamples = Math.max(0, finiteValue(depth.samples, samples) ?? 0);
+  return {
+    dsqId: dsq?.dsq_id ?? dsq?.id ?? null,
+    dsqKey: canonicalDsqKey(dsq?.dsq_id ?? dsq?.id),
+    queueClass: String(dsq?.queue_class || dsq?.kind || "unknown").toLowerCase(),
+    cpu: finiteValue(dsq?.cpu),
+    cellId: finiteValue(dsq?.cell_id, dsq?.cell_index),
+    cellIndex: finiteValue(dsq?.cell_index),
+    residence: {
+      samples,
+      totalNs: finiteValue(residence.total_ns),
+      meanNs: finiteValue(residence.mean_ns, dsq?.mean_ns),
+      p50Ns: finiteValue(residence.p50_ns, dsq?.p50_ns),
+      p95Ns: samples >= 20 ? finiteValue(residence.p95_ns, dsq?.p95_ns) : null,
+      p99Ns: samples >= 100 ? finiteValue(residence.p99_ns, dsq?.p99_ns) : null,
+    },
+    depth: {
+      samples: depthSamples,
+      latest: finiteValue(depth.latest, depth.latest_value, dsq?.depth_latest),
+      p95: depthSamples >= 20 ? finiteValue(depth.p95, dsq?.depth_p95) : null,
+      max: finiteValue(depth.max, dsq?.depth_max),
+    },
+  };
+}
+
+export function queueTimingModel(payload, { context = null, pending = false } = {}) {
+  let status = String(payload?.status || "unavailable").toLowerCase();
+  if (!QUEUE_TIMING_STATUSES.has(status)) {
+    status = "unavailable";
+  }
+  if (context && payload?.context && !contextsMatch(context, payload.context)) {
+    status = "synchronizing";
+  }
+  const sampleRate = Math.max(0, finiteValue(payload?.sample_rate) ?? 0);
+  const payloadCapture = payload?.capture || (
+    payload?.state != null
+    || payload?.session_id != null
+    || Array.isArray(payload?.dsqs)
+      ? payload
+      : null
+  );
+  let capture = status === "synchronizing" ? null : payloadCapture;
+  let state = ["collecting", "historical"].includes(capture?.state)
+    ? capture.state
+    : "inactive";
+  const captureGeneration = finiteValue(payloadCapture?.policy_generation);
+  const contextGeneration = finiteValue(context?.policy_generation);
+  const generationMismatch = captureGeneration !== null
+    && contextGeneration !== null
+    && captureGeneration !== contextGeneration;
+  if (state === "collecting" && generationMismatch) {
+    status = "synchronizing";
+    capture = null;
+    state = "inactive";
+  }
+  const stateLabel = state === "collecting"
+    ? "Collecting"
+    : state === "historical"
+      ? "Historical"
+      : "Inactive";
+  const topologyCompatible = status !== "synchronizing"
+    && !generationMismatch;
+  const counts = {
+    started: Math.max(0, finiteValue(capture?.started_count, capture?.started_samples) ?? 0),
+    completed: Math.max(
+      0,
+      finiteValue(capture?.completed_count, capture?.completed_samples) ?? 0,
+    ),
+    dropped: Math.max(
+      0,
+      finiteValue(
+        capture?.dropped_count,
+        capture?.dropped_samples,
+        capture?.dropped_events,
+      ) ?? 0,
+    ),
+  };
+  return {
+    sequence: finiteValue(payload?.sequence),
+    status,
+    statusLabel: QUEUE_TIMING_STATUS_LABELS[status],
+    error: payload?.error || null,
+    sampleRate,
+    sampleRateLabel: sampleRate === 0 ? "Sampling off" : `1 / ${sampleRate.toLocaleString()}`,
+    capture,
+    state,
+    stateLabel,
+    topologyCompatible,
+    checked: state === "collecting",
+    controlDisabled: Boolean(pending) || status !== "ready" || sampleRate === 0,
+    counts,
+    dsqs: (capture?.dsqs || []).map(normalizeQueueTimingDsq),
+  };
+}
+
+function emptyQueueTiming() {
+  return {
+    dsqId: null,
+    dsqKey: null,
+    queueClass: "unknown",
+    cpu: null,
+    cellId: null,
+    cellIndex: null,
+    residence: {
+      samples: 0,
+      totalNs: null,
+      meanNs: null,
+      p50Ns: null,
+      p95Ns: null,
+      p99Ns: null,
+    },
+    depth: { samples: 0, latest: null, p95: null, max: null },
+  };
+}
+
+export function mergeQueueTimingTopology(topologyModel, timingModel) {
+  const dsqs = timingModel?.topologyCompatible === false
+    ? []
+    : timingModel?.dsqs || [];
+  const findTiming = (dsqId, queueClass) => {
+    const key = canonicalDsqKey(dsqId);
+    return dsqs.find((timing) => (
+      timing.dsqKey === key
+      && (timing.queueClass === queueClass || timing.queueClass === "unknown")
+    )) || emptyQueueTiming();
+  };
+  return {
+    ...topologyModel,
+    normalQueues: (topologyModel?.normalQueues || []).map((queue) => ({
+      ...queue,
+      timing: findTiming(queue.dsq_id, "normal"),
+    })),
+    cpuRoutes: (topologyModel?.cpuRoutes || []).map((route) => ({
+      ...route,
+      affinityTiming: findTiming(route.affinity_dsq_id, "affinity"),
+    })),
+  };
 }
 
 export function runtimeContextModel({ snapshot, inspection, control } = {}) {
@@ -64,6 +426,102 @@ export function runtimeContextModel({ snapshot, inspection, control } = {}) {
     synchronizing,
     statusLabel: `${status} · Attach #${context.scheduler_attach_seq}`,
     detailLabel: detail,
+  };
+}
+
+export function overviewModel({
+  snapshot,
+  callbackTiming,
+  inspection,
+  control,
+  topology,
+  errors = [],
+} = {}) {
+  const context = inspection?.context || snapshot?.context || control?.context || null;
+  const activeSlot = (inspection?.slots || []).find((slot) => slot.state === "active") || null;
+  const routes = (snapshot?.cells || [])
+    .filter((route) => Number.isFinite(Number(route?.count)));
+  const busiestRoute = routes.reduce((busiest, route) => (
+    !busiest || Number(route.count) > Number(busiest.count) ? route : busiest
+  ), null);
+  const callbacks = callbackTiming?.callbacks || [];
+  const slowest = callbacks.reduce((candidate, callback) => {
+    const p99Ns = Number(callback?.p99_ns);
+    if (!Number.isFinite(p99Ns)) {
+      return candidate;
+    }
+    if (!candidate || p99Ns > candidate.p99Ns) {
+      return {
+        callback: String(callback.callback || "unknown"),
+        samples: Math.max(0, Number(callback.samples) || 0),
+        p99Ns,
+      };
+    }
+    return candidate;
+  }, null);
+  const queue = queueTopologyModel(
+    inspection?.fairness,
+    inspection?.queue_topology,
+    topology?.numeric_order || [],
+  );
+  const reportedWarnings = [
+    snapshot?.collector_error,
+    snapshot?.pair_map_failures || snapshot?.task_storage_failures
+      ? `${Number(snapshot?.pair_map_failures || 0)} pair-map failures · ${Number(snapshot?.task_storage_failures || 0)} task-state failures`
+      : null,
+    snapshot?.cpu_usage_error,
+    callbackTiming?.error,
+    inspection?.error,
+    ...errors,
+  ].filter((warning, index, all) => (
+    typeof warning === "string"
+    && warning.trim().length > 0
+    && all.indexOf(warning) === index
+  ));
+  return {
+    runtime: runtimeContextModel({ snapshot, inspection, control }),
+    warnings: reportedWarnings,
+    activity: {
+      available: Boolean(snapshot),
+      total: Math.max(0, Number(snapshot?.total) || 0),
+      ratePerSecond: Math.max(0, Number(snapshot?.rate_per_second) || 0),
+      activePairs: Math.max(0, Number(snapshot?.active_pairs) || 0),
+      observedMs: Math.max(0, Number(snapshot?.observed_ms) || 0),
+      windowMs: Math.max(0, Number(snapshot?.window_ms) || 0),
+      busiestRoute: busiestRoute
+        ? {
+            from: Number(busiestRoute.from),
+            to: Number(busiestRoute.to),
+            count: Number(busiestRoute.count),
+          }
+        : null,
+    },
+    callbacks: {
+      available: Boolean(callbackTiming),
+      sampleRate: Math.max(0, Number(callbackTiming?.sample_rate) || 0),
+      generation: callbackTiming?.generation ?? null,
+      sampleCount: callbacks.reduce(
+        (total, callback) => total + Math.max(0, Number(callback?.samples) || 0),
+        0,
+      ),
+      slowest,
+    },
+    policy: {
+      available: Boolean(inspection || control),
+      policyId: control?.policy_id || null,
+      fairness: context?.fairness || inspection?.fairness?.mode_name || null,
+      generation: context?.policy_generation ?? activeSlot?.generation ?? null,
+      activeSlot: context?.active_slot ?? activeSlot?.slot ?? null,
+      queueLayout: queue.layout,
+      cpuRouteCount: queue.cpuRoutes.length,
+      expectedCpuCount: queue.expectedCpuCount,
+      routesComplete: queue.routesComplete,
+    },
+    cells: {
+      available: Boolean(inspection),
+      cellCount: inspection?.cells?.length || 0,
+      taskCount: inspection?.task_mappings?.length || 0,
+    },
   };
 }
 
@@ -773,7 +1231,131 @@ export function schedulerCurrentCommand(control) {
   return control.current_command.map(shellWord).join(" ");
 }
 
-export function schedulerSettingModels(settings) {
+export function schedulerDebugModel({ control, inspection } = {}) {
+  const context = inspection?.context || control?.context || null;
+  const activeSlot = (inspection?.slots || []).find((slot) => (
+    slot.state === "active" || slot.slot === inspection?.active_slot
+  )) || null;
+  const settings = (control?.settings || [])
+    .filter((setting) => setting.name !== "stats_reset")
+    .map((setting) => {
+      const effective = setting.effective ?? setting.value ?? null;
+      const defaultValue = setting.default_value ?? null;
+      const launchOverride = setting.launch_override ?? null;
+      const changedAfterLaunch = setting.runtime_observed
+        && launchOverride != null
+        && !debugValuesEqual(effective, launchOverride);
+      return {
+        key: String(setting.name || "unknown"),
+        name: schedulerSettingName(setting.name),
+        default: defaultValue,
+        effective,
+        launchOverride,
+        defaultValue: defaultValue == null
+          ? "Unknown"
+          : formatSchedulerSettingValue(setting.name, defaultValue),
+        effectiveValue: effective == null
+          ? "Not observed"
+          : formatSchedulerSettingValue(setting.name, effective),
+        launchOverrideValue: launchOverride == null
+          ? null
+          : formatSchedulerSettingValue(setting.name, launchOverride),
+        source: setting.runtime_observed
+          ? changedAfterLaunch
+            ? "Observed from Snake; changed after launch"
+            : "Observed from Snake"
+          : launchOverride == null
+            ? "Snake default"
+            : "Launch command",
+        changeLabel: setting.change_mode === "dynamic" ? "Dynamic" : "Reload required",
+        nonDefault: effective != null
+          && defaultValue != null
+          && !debugValuesEqual(effective, defaultValue),
+      };
+    });
+  const preservedArgs = [...(control?.launch?.preserved_args || [])];
+  const nonDefaultSettings = settings
+    .filter((setting) => setting.nonDefault)
+    .map((setting) => ({
+      name: setting.name,
+      defaultValue: setting.defaultValue,
+      effectiveValue: setting.effectiveValue,
+      launchOverride: setting.launchOverrideValue,
+      source: setting.source,
+      changeLabel: setting.changeLabel,
+    }));
+  if (preservedArgs.length > 0) {
+    nonDefaultSettings.push({
+      name: "Additional arguments",
+      defaultValue: "None",
+      effectiveValue: preservedArgs.map(shellWord).join(" "),
+      launchOverride: preservedArgs.map(shellWord).join(" "),
+      source: "Launch command",
+      changeLabel: "Restart required",
+    });
+  }
+  const argv = Array.isArray(control?.current_command)
+    ? [...control.current_command]
+    : [];
+  const identity = {
+    schedulerName: control?.scheduler_name || null,
+    pid: control?.pid ?? null,
+    ownership: schedulerControlModel(control, false, Boolean(control?.policy_id)).stateLabel,
+    attachSequence: context?.scheduler_attach_seq ?? null,
+    policyId: control?.policy_id || null,
+    policyGeneration: context?.policy_generation ?? activeSlot?.generation ?? null,
+    activeSlot: context?.active_slot ?? activeSlot?.slot ?? null,
+  };
+  const policySource = activeSlot?.policy?.source || null;
+  const snapshot = {
+    schema: "scx_snake_debug_snapshot_v1",
+    scheduler: {
+      active: Boolean(control?.active),
+      name: identity.schedulerName,
+      pid: identity.pid,
+      ownership: identity.ownership,
+      argv,
+    },
+    runtime_context: context ? { ...context } : null,
+    configuration: {
+      settings: settings.map((setting) => ({
+        name: setting.key,
+        default: setting.default,
+        effective: setting.effective,
+        launch_override: setting.launchOverride,
+        source: setting.source,
+        application: setting.changeLabel,
+      })),
+      non_default: settings
+        .filter((setting) => setting.nonDefault)
+        .map((setting) => ({
+          name: setting.key,
+          default: setting.default,
+          effective: setting.effective,
+          launch_override: setting.launchOverride,
+          source: setting.source,
+        })),
+      preserved_args: preservedArgs,
+    },
+    active_policy: {
+      id: identity.policyId,
+      generation: identity.policyGeneration,
+      slot: identity.activeSlot,
+      source: policySource,
+    },
+  };
+  return {
+    available: Boolean(control?.active),
+    argv,
+    command: schedulerCurrentCommand(control),
+    identity,
+    nonDefaultSettings,
+    policySource,
+    snapshotText: JSON.stringify(snapshot, null, 2),
+  };
+}
+
+function schedulerSettingName(name) {
   const labels = {
     fairness: "Fairness",
     callback_timing_sample_rate: "Callback sample rate",
@@ -781,6 +1363,14 @@ export function schedulerSettingModels(settings) {
     verbose: "Verbose logging",
     stats_reset: "Stats reset",
   };
+  return labels[name] || String(name || "Unknown setting");
+}
+
+function debugValuesEqual(left, right) {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+export function schedulerSettingModels(settings) {
   return (settings || []).map((setting) => {
     const changeMode = setting.change_mode === "dynamic" ? "dynamic" : "reload";
     const effective = setting.effective ?? setting.value ?? null;
@@ -791,7 +1381,7 @@ export function schedulerSettingModels(settings) {
         ? "Omitted; Snake default applies"
         : formatSchedulerSettingValue(setting.name, launchOverride);
     return {
-      name: labels[setting.name] || String(setting.name || "Unknown setting"),
+      name: schedulerSettingName(setting.name),
       effectiveValue: effective == null
         ? "Not observed"
         : formatSchedulerSettingValue(setting.name, effective),
@@ -859,6 +1449,20 @@ export function schedulerControlModel(control, pending, hasPolicy) {
     stopDisabled: Boolean(pending) || !controllable,
     restartDisabled: Boolean(pending) || !active || !controllable || !hasPolicy,
   };
+}
+
+export function policyCandidateActionDisabled(candidate, control, pending = false) {
+  if (!candidate || candidate.disabled) {
+    return true;
+  }
+  if (candidate.actionKind !== "lifecycle") {
+    return false;
+  }
+  if (!control) {
+    return true;
+  }
+  const model = schedulerControlModel(control, pending, true);
+  return control?.active ? model.restartDisabled : model.startDisabled;
 }
 
 function isPowerOfTwo(value) {

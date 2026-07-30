@@ -18,6 +18,7 @@ import {
   formatCallbackDuration,
   ladderPercentages,
   policyLibraryModels,
+  policyCandidateActionDisabled,
   queueTopologyModel,
   queueLadderSections,
   queueRungFlow,
@@ -34,15 +35,15 @@ import {
   workloadAssignmentRequest,
 } from "../../src/web/inspection.js";
 
-test("inspection routes default to activity and accept every inspector view", () => {
-  assert.equal(routeFromHash(""), "activity");
-  assert.equal(routeFromHash("#/activity"), "activity");
-  assert.equal(routeFromHash("#/policy"), "policy");
-  assert.equal(routeFromHash("#/cells"), "cells");
-  assert.equal(routeFromHash("#/callbacks"), "callbacks");
-  assert.equal(routeFromHash("#/control"), "control");
-  assert.equal(routeFromHash("#/feedback"), "feedback");
-  assert.equal(routeFromHash("#/unknown"), "activity");
+test("inspection routes default to overview and preserve legacy view aliases", () => {
+  assert.equal(routeFromHash(""), "overview");
+  assert.equal(routeFromHash("#/activity"), "observe/placement");
+  assert.equal(routeFromHash("#/policy"), "inspect/policy-slots");
+  assert.equal(routeFromHash("#/cells"), "inspect/cells");
+  assert.equal(routeFromHash("#/callbacks"), "observe/callbacks");
+  assert.equal(routeFromHash("#/control"), "configure");
+  assert.equal(routeFromHash("#/feedback"), "overview");
+  assert.equal(routeFromHash("#/unknown"), "overview");
 });
 
 test("runtime contexts match only within the same scheduler attachment and policy generation", () => {
@@ -408,6 +409,18 @@ test("scheduler settings separate effective runtime values from launch overrides
   );
 });
 
+test("scheduler control settings expose authoritative Snake defaults", () => {
+  const source = readFileSync(
+    new URL("../../src/api.rs", import.meta.url),
+    "utf8",
+  );
+  assert.match(source, /default_value:\s*serde_json::Value/);
+  assert.match(source, /name:\s*"fairness"[\s\S]*?default_value:[\s\S]*?LaunchFairness::Fifo/);
+  assert.match(source, /name:\s*"callback_timing_sample_rate"[\s\S]*?default_value:[\s\S]*?64/);
+  assert.match(source, /name:\s*"exit_dump_len"[\s\S]*?default_value:[\s\S]*?0/);
+  assert.match(source, /name:\s*"verbose"[\s\S]*?default_value:[\s\S]*?false/);
+});
+
 test("stats reset is available for managed and external active Snake", () => {
   assert.equal(statsResetDisabled({ active: true, managed: true }, false), false);
   assert.equal(
@@ -494,15 +507,15 @@ test("scheduler control surfaces external ownership and managed launch exits", (
   );
 });
 
-test("control page exposes managed launch controls and settings table", () => {
+test("configure workspace exposes policy selection, launch controls, and settings", () => {
   const page = readFileSync(
     new URL("../../src/web/index.html", import.meta.url),
     "utf8",
   );
   for (const control of [
-    'href="#/control"',
+    'href="#/configure"',
     'id="controlView"',
-    'id="schedulerPolicy"',
+    'id="policyChoices"',
     'id="schedulerFairnessEnabled"',
     'id="schedulerFairness"',
     'id="schedulerSampleRateEnabled"',
@@ -520,6 +533,7 @@ test("control page exposes managed launch controls and settings table", () => {
   ]) {
     assert.match(page, new RegExp(control), `missing ${control}`);
   }
+  assert.doesNotMatch(page, /id="schedulerPolicy"/);
   assert.match(page, /value="eevdf"/i);
   assert.match(page, /Launch argument overrides/);
   assert.match(page, /Override fairness/);
@@ -684,6 +698,34 @@ test("policy library separates dynamic, restart-required, and invalid choices", 
     "dsq_topology",
     "task_membership",
   ]);
+});
+
+test("lifecycle candidate actions honor scheduler controllability and pending state", () => {
+  const lifecycle = { actionKind: "lifecycle", disabled: false };
+  assert.equal(policyCandidateActionDisabled(lifecycle, null), true);
+  assert.equal(policyCandidateActionDisabled(lifecycle, {
+    active: true,
+    managed: false,
+    controllable: false,
+  }), true);
+  assert.equal(policyCandidateActionDisabled(lifecycle, {
+    active: true,
+    managed: false,
+    controllable: true,
+  }), false);
+  assert.equal(policyCandidateActionDisabled(lifecycle, {
+    active: true,
+    managed: true,
+    controllable: true,
+  }, true), true);
+  assert.equal(policyCandidateActionDisabled({
+    actionKind: "activate",
+    disabled: false,
+  }, null, true), false);
+  assert.equal(policyCandidateActionDisabled({
+    actionKind: "lifecycle",
+    disabled: true,
+  }, { active: false, managed: false }), true);
 });
 
 test("policy library resolves at most one active policy when sources are duplicated", () => {
@@ -1413,16 +1455,15 @@ test("polling renderers use stable keys and avoid synchronous hidden-popover rer
   assert.match(script, /callbackRateDirty/);
 });
 
-test("feedback view exposes copy and global clear controls", () => {
+test("feedback drawer exposes copy and global clear controls", () => {
   const page = readFileSync(
     new URL("../../src/web/index.html", import.meta.url),
     "utf8",
   );
 
   for (const fragment of [
-    'href="#/feedback"',
-    'data-route="feedback"',
-    'id="feedbackView"',
+    'id="openFeedback"',
+    'id="feedbackDrawer"',
     'id="feedbackTranscript"',
     'id="copyFeedback"',
     'id="clearFeedback"',
@@ -1638,4 +1679,337 @@ test("Control feedback buttons use reserved right-aligned anchors", () => {
   assert.match(script, /matches\("\[data-feedback-anchor\]"\)/);
   assert.match(stylesheet, /\.feedback-heading\s*\{[^}]*justify-content:\s*space-between/s);
   assert.match(stylesheet, /\.scheduler-feedback-anchor\.feedback-heading\s*\{[^}]*justify-content:\s*flex-end/s);
+});
+
+const readyCellStatsFixture = {
+  status: "ready",
+  error: null,
+  scope: "all_snake_tasks",
+  source_policy_generation: 12,
+  window_ms: 30_000,
+  observed_ms: 29_500,
+  cells: [
+    {
+      id: 0,
+      index: 0,
+      primary_cpu_count: 1,
+      runtime_ns: 44_250_000_000,
+      primary_runtime_ns: 29_500_000_000,
+      borrowed_runtime_ns: 14_750_000_000,
+      lent_runtime_ns: 7_375_000_000,
+      normal_enqueues: 900,
+      affinity_enqueues: 100,
+      normal_dispatches: 720,
+      affinity_dispatches: 80,
+      clock_transitions: 16,
+      service_cores: 1.5,
+      service_share_pct: 60,
+      primary_pct: 66.6667,
+      borrowed_pct: 33.3333,
+      owned_utilization_pct: 62.5,
+      enqueue_rate_per_second: 33.8983,
+      dispatch_rate_per_second: 27.1186,
+      affinity_enqueue_share_pct: 10,
+      affinity_dispatch_share_pct: 10,
+      transition_rate_per_second: 0.5424,
+      transitions_per_1k_dispatches: 20,
+    },
+    {
+      id: 7,
+      index: 1,
+      primary_cpu_count: 2,
+      runtime_ns: 29_500_000_000,
+      primary_runtime_ns: 29_500_000_000,
+      borrowed_runtime_ns: 0,
+      lent_runtime_ns: 14_750_000_000,
+      normal_enqueues: 0,
+      affinity_enqueues: 0,
+      normal_dispatches: 0,
+      affinity_dispatches: 0,
+      clock_transitions: 0,
+      service_cores: 1,
+      service_share_pct: 40,
+      primary_pct: 100,
+      borrowed_pct: 0,
+      owned_utilization_pct: 50,
+      enqueue_rate_per_second: 0,
+      dispatch_rate_per_second: 0,
+      affinity_enqueue_share_pct: null,
+      affinity_dispatch_share_pct: null,
+      transition_rate_per_second: 0,
+      transitions_per_1k_dispatches: null,
+    },
+  ],
+};
+
+const collectingQueueTimingFixture = {
+  sequence: 18,
+  context: {
+    scheduler_attach_seq: 4,
+    scheduler_active: true,
+    policy_generation: 12,
+    active_slot: 0,
+    fairness: "vtime",
+    callback_sample_rate: 64,
+  },
+  status: "ready",
+  error: null,
+  sample_rate: 64,
+  state: "collecting",
+  session_id: 9,
+  policy_generation: 12,
+  started_at_ms: 1_700_000_000_000,
+  stopped_at_ms: null,
+  started_samples: 140,
+  completed_samples: 120,
+  dropped_samples: 2,
+  dsqs: [
+      {
+        dsq_id: 536_870_912,
+        queue_class: "normal",
+        cpu: null,
+        cell_index: 0,
+        residence: {
+          samples: 120,
+          total_ns: 1_020_000,
+          mean_ns: 8_500,
+          p50_ns: 4_096,
+          p95_ns: 16_384,
+          p99_ns: 32_768,
+        },
+        depth: { samples: 120, latest: 2, p95: 6, max: 11 },
+      },
+      {
+        dsq_id: 268_435_456,
+        queue_class: "affinity",
+        cpu: 0,
+        cell_index: 0,
+        residence: {
+          samples: 19,
+          total_ns: 34_200,
+          mean_ns: 1_800,
+          p50_ns: 1_024,
+          p95_ns: 4_096,
+          p99_ns: 8_192,
+        },
+        depth: { samples: 19, latest: 0, p95: 2, max: 3 },
+      },
+  ],
+};
+
+test("cell statistics preserve cell zero, nullable ratios, and all raw counters", () => {
+  assert.equal(typeof inspectionState.cellStatsModel, "function");
+  const model = inspectionState.cellStatsModel(readyCellStatsFixture);
+
+  assert.equal(model.status, "ready");
+  assert.equal(model.policyGeneration, 12);
+  assert.equal(model.scope, "all_snake_tasks");
+  assert.equal(model.windowMs, 30_000);
+  assert.equal(model.observedMs, 29_500);
+  assert.equal(model.zeroActivity, false);
+  assert.equal(model.cells[0].id, 0);
+  assert.equal(model.cells[0].index, 0);
+  assert.equal(model.cells[0].primaryCpuCount, 1);
+  assert.equal(model.cells[0].raw.clock_transitions, 16);
+  assert.equal(model.cells[0].serviceCores, 1.5);
+  assert.equal(model.cells[0].normalEnqueueRate, 30.5085);
+  assert.equal(model.cells[1].affinityEnqueuePct, null);
+  assert.equal(model.cells[1].transitionsPer1kDispatches, null);
+});
+
+test("cell statistics distinguish explicit availability and zero-activity states", () => {
+  assert.equal(typeof inspectionState.cellStatsModel, "function");
+  for (const status of [
+    "not_applicable",
+    "unsupported",
+    "synchronizing",
+    "unavailable",
+  ]) {
+    const model = inspectionState.cellStatsModel({
+      ...readyCellStatsFixture,
+      status,
+      error: null,
+      source_policy_generation: null,
+      observed_ms: 0,
+      cells: [],
+    });
+    assert.equal(model.status, status);
+    assert.notEqual(model.statusLabel, "");
+  }
+
+  const zero = inspectionState.cellStatsModel({
+    ...readyCellStatsFixture,
+    observed_ms: 30_000,
+    cells: readyCellStatsFixture.cells.map((cell) => ({
+      ...cell,
+      runtime_ns: 0,
+      primary_runtime_ns: 0,
+      borrowed_runtime_ns: 0,
+      lent_runtime_ns: 0,
+      normal_enqueues: 0,
+      affinity_enqueues: 0,
+      normal_dispatches: 0,
+      affinity_dispatches: 0,
+      clock_transitions: 0,
+    })),
+  });
+  assert.equal(zero.status, "ready");
+  assert.equal(zero.zeroActivity, true);
+});
+
+test("cell statistic formatting never turns an undefined ratio into zero", () => {
+  assert.equal(typeof inspectionState.formatCellMetric, "function");
+  assert.equal(inspectionState.formatCellMetric(null, "percentage"), "—");
+  assert.equal(inspectionState.formatCellMetric(Number.NaN, "cores"), "—");
+  assert.equal(inspectionState.formatCellMetric(0, "percentage"), "0.0%");
+  assert.equal(inspectionState.formatCellMetric(1.5, "cores"), "1.50");
+  assert.equal(inspectionState.formatCellMetric(30.5085, "rate"), "30.5/s");
+});
+
+test("queue timing model gates controls and low-sample percentiles", () => {
+  assert.equal(typeof inspectionState.queueTimingModel, "function");
+  const model = inspectionState.queueTimingModel(collectingQueueTimingFixture, {
+    context: collectingQueueTimingFixture.context,
+    pending: false,
+  });
+
+  assert.equal(model.status, "ready");
+  assert.equal(model.sequence, 18);
+  assert.equal(model.controlDisabled, false);
+  assert.equal(model.checked, true);
+  assert.equal(model.stateLabel, "Collecting");
+  assert.equal(model.sampleRateLabel, "1 / 64");
+  assert.deepEqual(model.counts, { started: 140, completed: 120, dropped: 2 });
+  assert.equal(model.dsqs[0].residence.p99Ns, 32_768);
+  assert.equal(model.dsqs[1].residence.p95Ns, null);
+  assert.equal(model.dsqs[1].residence.p99Ns, null);
+  assert.equal(model.dsqs[1].depth.p95, null);
+
+  for (const status of ["unsupported", "not_applicable", "synchronizing", "unavailable"]) {
+    const unavailable = inspectionState.queueTimingModel({
+      ...collectingQueueTimingFixture,
+      status,
+      state: null,
+      session_id: null,
+      dsqs: [],
+    });
+    assert.equal(unavailable.controlDisabled, true);
+    assert.notEqual(unavailable.statusLabel, "");
+  }
+  assert.equal(
+    inspectionState.queueTimingModel({
+      ...collectingQueueTimingFixture,
+      sample_rate: 0,
+      state: null,
+      session_id: null,
+      dsqs: [],
+    }).controlDisabled,
+    true,
+  );
+  const synchronizing = inspectionState.queueTimingModel(collectingQueueTimingFixture, {
+    context: { ...collectingQueueTimingFixture.context, policy_generation: 13 },
+  });
+  assert.equal(synchronizing.status, "synchronizing");
+  assert.equal(synchronizing.checked, false);
+  assert.deepEqual(synchronizing.dsqs, []);
+  assert.deepEqual(synchronizing.counts, { started: 0, completed: 0, dropped: 0 });
+});
+
+test("queue timing joins normal DSQs and per-CPU affinity routes by DSQ identity", () => {
+  assert.equal(typeof inspectionState.mergeQueueTimingTopology, "function");
+  const topology = queueTopologyModel(
+    { mode_name: "vtime", clock_model: "one clock per cell" },
+    {
+      layout: "cell",
+      affinity_queue_count: 1,
+      cells: [{
+        external_id: 0,
+        index: 0,
+        synthetic: true,
+        cpu_weight: 1,
+        clock_index: 0,
+        primary_cpus: [0],
+        borrowable_cpus: [],
+      }],
+      normal_queues: [{
+        index: 0,
+        dsq_id: 536_870_912,
+        cell_id: 0,
+        cell_index: 0,
+        clock_index: 0,
+        llc_id: null,
+        consumer_cpus: [0],
+      }],
+      cpu_routes: [{
+        cpu: 0,
+        owner_cell_id: 0,
+        owner_cell_index: 0,
+        llc_id: 0,
+        normal_queue_index: 0,
+        normal_dsq_id: 536_870_912,
+        affinity_dsq_id: 268_435_456,
+      }],
+    },
+    [0],
+  );
+  const timing = inspectionState.queueTimingModel(collectingQueueTimingFixture);
+  const merged = inspectionState.mergeQueueTimingTopology(topology, timing);
+
+  assert.equal(timing.topologyCompatible, true);
+  assert.equal(merged.normalQueues[0].timing.residence.samples, 120);
+  assert.equal(merged.cpuRoutes[0].affinityTiming.residence.samples, 19);
+  assert.equal(merged.cpuRoutes[0].affinityTiming.depth.latest, 0);
+
+  const historical = inspectionState.queueTimingModel({
+    ...collectingQueueTimingFixture,
+    state: "historical",
+    policy_generation: 11,
+    stopped_at_ms: 1_700_000_030_000,
+  }, { context: collectingQueueTimingFixture.context });
+  const currentTopology = inspectionState.mergeQueueTimingTopology(topology, historical);
+  assert.equal(historical.state, "historical");
+  assert.equal(historical.topologyCompatible, false);
+  assert.equal(currentTopology.normalQueues[0].timing.residence.samples, 0);
+
+  const staleCollecting = inspectionState.queueTimingModel({
+    ...collectingQueueTimingFixture,
+    policy_generation: 11,
+  }, { context: collectingQueueTimingFixture.context });
+  assert.equal(staleCollecting.status, "synchronizing");
+  assert.equal(staleCollecting.controlDisabled, true);
+  assert.deepEqual(staleCollecting.dsqs, []);
+});
+
+test("Cells and Policy expose the shared window and on-demand queue capture controls", () => {
+  const page = readFileSync(
+    new URL("../../src/web/index.html", import.meta.url),
+    "utf8",
+  );
+  const script = readFileSync(
+    new URL("../../src/web/app.js", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(page, /id="cellWindowSelect"/);
+  assert.match(page, /aria-label="Cell statistics window"/);
+  assert.match(script, /fetch\("\/api\/queue-timing"/);
+  assert.match(script, /JSON\.stringify\(\{ enabled \}\)/);
+  assert.match(script, /Queue capture/);
+  assert.match(script, /Raw window counters/);
+  assert.match(script, /Operation-sampled depth/);
+  assert.match(script, /Residence p95/);
+  assert.match(script, /queue_timing_stopped/);
+  assert.doesNotMatch(page, /data-route="queues"/);
+});
+
+test("queue timing polling authenticates its GET request", () => {
+  const script = readFileSync(
+    new URL("../../src/web/app.js", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(
+    script,
+    /fetch\("\/api\/queue-timing",\s*\{[^}]*headers:\s*\{\s*"x-snake-token":\s*token\s*\}[^}]*\}\)/s,
+  );
 });
