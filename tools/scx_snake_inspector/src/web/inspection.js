@@ -22,11 +22,9 @@ const LEGACY_ROUTES = new Map([
   ["policy", "inspect/policy-slots"],
   ["cells", "inspect/cells"],
 ]);
-const DEMO_POLICY_IDS = new Set([
-  "llc-half-random.toml",
-  "llc-random.toml",
-  "llc-whole-core-random.toml",
-  "random-idle.toml",
+const PRODUCTION_POLICY_IDS = new Set([
+  "kernel-default-sim.toml",
+  "kernel-default.toml",
 ]);
 const callbackDurationFormat = new Intl.NumberFormat("en-US", {
   maximumFractionDigits: 0,
@@ -1360,11 +1358,21 @@ export function policyCategoryGroups(policies) {
   const groups = [
     { id: "production", label: "Production", policies: [] },
     { id: "demo", label: "Demo", policies: [] },
+    { id: "components", label: "Components", policies: [] },
   ];
   for (const policy of policies || []) {
-    groups[DEMO_POLICY_IDS.has(policy.id) ? 1 : 0].policies.push(policy);
+    const id = String(policy?.id || "").toLowerCase();
+    const category = PRODUCTION_POLICY_IDS.has(id)
+      ? "production"
+      : id.includes("random")
+        ? "demo"
+        : "components";
+    groups.find((group) => group.id === category).policies.push(policy);
   }
-  return groups;
+  return groups.map((group) => ({
+    ...group,
+    defaultOpen: group.id === "production" || group.policies.some((policy) => policy.active),
+  }));
 }
 
 export function policySlotComparison(slots) {

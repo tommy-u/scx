@@ -1961,22 +1961,91 @@ test("feedback client mirrors inline edits and can copy or clear the whole batch
   assert.match(script, /confirm\("Clear all collected feedback\?"\)/);
 });
 
-test("policy choices are separated into production and demo groups", () => {
+test("policy choices are separated into production, demo, and component groups", () => {
   assert.equal(typeof inspectionState.policyCategoryGroups, "function");
   const groups = inspectionState.policyCategoryGroups([
-    { id: "llc-random.toml" },
+    { id: "basic.toml", active: true },
+    { id: "cell-borrowing.toml" },
+    { id: "cell-llc-queues.toml" },
     { id: "cell-min-vtime.toml" },
+    { id: "cell-queues.toml" },
+    { id: "kernel-default-sim.toml" },
+    { id: "kernel-default.toml" },
+    { id: "llc-half-random.toml" },
+    { id: "llc-half.toml" },
+    { id: "llc-random.toml" },
+    { id: "llc-whole-core-random.toml" },
+    { id: "llc-whole-core.toml" },
+    { id: "llc.toml" },
+    { id: "previous-only.toml" },
     { id: "random-idle.toml" },
-    { id: "future-policy.toml" },
   ]);
 
   assert.deepEqual(
-    groups.map((group) => [group.id, group.policies.map((policy) => policy.id)]),
+    groups.map((group) => [
+      group.id,
+      group.defaultOpen,
+      group.policies.map((policy) => policy.id),
+    ]),
     [
-      ["production", ["cell-min-vtime.toml", "future-policy.toml"]],
-      ["demo", ["llc-random.toml", "random-idle.toml"]],
+      ["production", true, ["kernel-default-sim.toml", "kernel-default.toml"]],
+      ["demo", false, [
+        "llc-half-random.toml",
+        "llc-random.toml",
+        "llc-whole-core-random.toml",
+        "random-idle.toml",
+      ]],
+      ["components", true, [
+        "basic.toml",
+        "cell-borrowing.toml",
+        "cell-llc-queues.toml",
+        "cell-min-vtime.toml",
+        "cell-queues.toml",
+        "llc-half.toml",
+        "llc-whole-core.toml",
+        "llc.toml",
+        "previous-only.toml",
+      ]],
     ],
   );
+});
+
+test("random names are demos and unknown non-random policies are components", () => {
+  const groups = inspectionState.policyCategoryGroups([
+    { id: "kernel-default-random.toml" },
+    { id: "new-random-experiment.toml", active: true },
+    { id: "new-placement.toml" },
+  ]);
+
+  assert.deepEqual(
+    groups.map((group) => [
+      group.id,
+      group.defaultOpen,
+      group.policies.map((policy) => policy.id),
+    ]),
+    [
+      ["production", true, []],
+      ["demo", true, ["kernel-default-random.toml", "new-random-experiment.toml"]],
+      ["components", false, ["new-placement.toml"]],
+    ],
+  );
+});
+
+test("policy category sections use native disclosures with stable render keys", () => {
+  const script = readFileSync(
+    new URL("../../src/web/app.js", import.meta.url),
+    "utf8",
+  );
+  const stylesheet = readFileSync(
+    new URL("../../src/web/style.css", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(script, /<details class="policy-category-section"/);
+  assert.match(script, /group\.defaultOpen \? " open" : ""/);
+  assert.match(script, /data-render-key="policy-category:/);
+  assert.match(script, /<summary[^>]*><h5>/);
+  assert.match(stylesheet, /\.policy-category-section\s*>\s*summary\s*\{/);
 });
 
 test("resolved routing retains and sorts every online CPU route", () => {

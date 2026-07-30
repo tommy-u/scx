@@ -1367,21 +1367,21 @@ button:focus-visible {
   margin-top: 12px;
 }
 
-.policy-category-section > header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
+.policy-category-section > summary {
+  cursor: pointer;
 }
 
 .policy-category-section h5 {
+  display: inline;
   margin: 0;
+  margin-left: 4px;
   font-size: 0.7rem;
   font-weight: 750;
   text-transform: uppercase;
 }
 
-.policy-category-section > header span {
+.policy-category-section > summary span {
+  float: right;
   color: var(--muted);
   font-size: 0.65rem;
   font-variant-numeric: tabular-nums;

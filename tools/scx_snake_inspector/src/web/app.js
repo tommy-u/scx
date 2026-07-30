@@ -2933,6 +2933,7 @@ function renderPolicyLibrary() {
       <span>${numberFormat.format(option.policies.length)} policies${option.active ? " · active" : ""}</span>
     </button>`).join("");
   const policySections = policyCategoryGroups(policies).map((group) => {
+    const activePolicyId = group.policies.find((policy) => policy.active)?.id || "inactive";
     const policyCards = group.policies.length === 0
       ? '<p class="empty-state">No policies in this group.</p>'
       : group.policies.map((policy) => {
@@ -3001,10 +3002,12 @@ function renderPolicyLibrary() {
       </article>`;
       }).join("");
     return `
-      <section class="policy-category-section" data-policy-category="${group.id}">
-        <header><h5>${escapeHtml(group.label)}</h5><span>${formatCount(group.policies.length)}</span></header>
+      <details class="policy-category-section"${group.defaultOpen ? " open" : ""}
+        data-policy-category="${group.id}"
+        data-render-key="policy-category:${escapeHtml(group.id)}:${escapeHtml(activePolicyId)}">
+        <summary data-render-key="policy-category:${escapeHtml(group.id)}:${escapeHtml(activePolicyId)}:summary"><h5>${escapeHtml(group.label)}</h5><span>${formatCount(group.policies.length)}</span></summary>
         <div class="policy-choice-list">${policyCards}</div>
-      </section>`;
+      </details>`;
   }).join("");
   replaceKeyedHtml(elements.policyChoices, `
     <div class="policy-fairness-options" role="group" aria-label="Fairness approach">
