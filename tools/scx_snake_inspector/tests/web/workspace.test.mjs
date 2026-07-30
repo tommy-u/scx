@@ -20,6 +20,10 @@ const script = readFileSync(
   new URL("../../src/web/app.js", import.meta.url),
   "utf8",
 );
+const styles = readFileSync(
+  new URL("../../src/web/style.css", import.meta.url),
+  "utf8",
+);
 const reviewIndex = readFileSync(
   new URL("../../../../docs/snake-review/README.md", import.meta.url),
   "utf8",
@@ -765,4 +769,31 @@ test("policy list clicks select a candidate without immediately mutating Snake",
   assert.match(policyClickHandler, /state\.selectedLifecycleFairness\s*=/);
   assert.doesNotMatch(policyClickHandler, /runPolicyCandidate\(\);/);
   assert.doesNotMatch(script, /policyCandidateAction/);
+});
+
+test("every inspector table opts into one accessible sorting contract", () => {
+  const sources = `${page}\n${script}`;
+  const tables = sources.match(/<table\b[^>]*>/g) || [];
+  const sortableTables = tables.filter((table) => /\bdata-sort-key=/.test(table));
+
+  assert.ok(tables.length >= 10, "expected the inspector's data-table surfaces");
+  assert.equal(sortableTables.length, tables.length, "every table template must have a stable sort key");
+  for (const key of [
+    "callbacks:timing",
+    "configure:settings",
+    "roadmap:mitosis-capabilities",
+    "debugging:settings",
+    "callbacks:fine:",
+    "policy:slot-comparison",
+    "queue:cell-allocation",
+    "queue:normal-dsqs",
+    "queue:cpu-routes",
+    "cell:",
+  ]) {
+    assert.match(sources, new RegExp(`data-sort-key="[^"]*${key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`), key);
+  }
+  assert.match(script, /data-table-sort/);
+  assert.match(script, /aria-sort/);
+  assert.match(script, /enhanceSortableTables\(container\)/);
+  assert.match(styles, /\.table-sort-button/);
 });

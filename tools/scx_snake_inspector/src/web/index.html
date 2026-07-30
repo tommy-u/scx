@@ -281,15 +281,15 @@
         <section class="callback-table-section" aria-label="Callback timing percentiles" data-feedback-key="Callbacks:Callback-percentiles">
           <p class="callback-threshold-legend" id="callbackThresholdLegend"><span aria-hidden="true"></span>Values above 1,000 ns are highlighted for scanning; this is not a latency SLO.</p>
           <div class="callback-table-wrap">
-            <table>
+            <table data-sort-key="callbacks:timing">
               <thead>
                 <tr>
-                  <th scope="col">Callback</th>
-                  <th scope="col">Samples</th>
-                  <th scope="col">Mean (ns)</th>
-                  <th scope="col">p50 approx. (ns)</th>
-                  <th scope="col">p95 approx. (ns)</th>
-                  <th scope="col">p99 approx. (ns)</th>
+                  <th scope="col" data-sort-column="0" data-sort-type="text">Callback</th>
+                  <th scope="col" data-sort-column="1" data-sort-type="number">Samples</th>
+                  <th scope="col" data-sort-column="2" data-sort-type="duration">Mean (ns)</th>
+                  <th scope="col" data-sort-column="3" data-sort-type="duration">p50 approx. (ns)</th>
+                  <th scope="col" data-sort-column="4" data-sort-type="duration">p95 approx. (ns)</th>
+                  <th scope="col" data-sort-column="5" data-sort-type="duration">p99 approx. (ns)</th>
                 </tr>
               </thead>
               <tbody id="callbackTimingRows"></tbody>
@@ -481,8 +481,8 @@
             <h3 id="schedulerSettingsTitle">Change behavior</h3>
           </header>
           <div class="scheduler-settings-table-wrap">
-            <table>
-              <thead><tr><th scope="col">Setting</th><th scope="col">Effective now</th><th scope="col">Launch override</th><th scope="col">Application</th></tr></thead>
+            <table data-sort-key="configure:settings">
+              <thead><tr><th scope="col" data-sort-column="0" data-sort-type="text">Setting</th><th scope="col" data-sort-column="1" data-sort-type="text">Effective now</th><th scope="col" data-sort-column="2" data-sort-type="text">Launch override</th><th scope="col" data-sort-column="3" data-sort-type="text">Application</th></tr></thead>
               <tbody id="schedulerSettingsRows"></tbody>
             </table>
           </div>
@@ -817,9 +817,9 @@
                 <g class="project-parity-score project-parity-overall" data-score-key="mitosis-overall" data-score-value="55"><text x="1000" y="300" text-anchor="middle">Overall behavior</text><text x="1000" y="344" text-anchor="middle">55% ±5</text></g>
               </svg>
             </div>
-            <table class="project-diagram-equivalent project-capability-table" data-diagram-equivalent="mitosis-capability-coverage">
+            <table class="project-diagram-equivalent project-capability-table" data-diagram-equivalent="mitosis-capability-coverage" data-sort-key="roadmap:mitosis-capabilities">
               <caption>Parity summary: static data plane 73%; dynamic control 33%; operations 67%; overall behavior 55% ±5.</caption>
-              <thead><tr><th scope="col">Area</th><th scope="col">Status</th><th scope="col">Where to inspect</th></tr></thead>
+              <thead><tr><th scope="col" data-sort-column="0" data-sort-type="text">Area</th><th scope="col" data-sort-column="1" data-sort-type="text">Status</th><th scope="col" data-sort-column="2" data-sort-type="text">Where to inspect</th></tr></thead>
               <tbody>
                 <tr><th scope="row">Lifecycle, identity, and cpusets</th><td>Partial</td><td><a href="#/inspect/cells">Cells &amp; tasks</a></td></tr>
                 <tr><th scope="row">Demand controller</th><td>Missing</td><td><a href="#/overview">Current counters</a></td></tr>
@@ -893,8 +893,8 @@
               <h3 id="debuggingSettingsTitle">Non-default configuration</h3>
             </header>
             <div class="debugging-table-wrap">
-              <table>
-                <thead><tr><th scope="col">Setting</th><th scope="col">Default</th><th scope="col">Effective</th><th scope="col">Launch override</th><th scope="col">Source</th><th scope="col">Application</th></tr></thead>
+              <table data-sort-key="debugging:settings">
+                <thead><tr><th scope="col" data-sort-column="0" data-sort-type="text">Setting</th><th scope="col" data-sort-column="1" data-sort-type="text">Default</th><th scope="col" data-sort-column="2" data-sort-type="text">Effective</th><th scope="col" data-sort-column="3" data-sort-type="text">Launch override</th><th scope="col" data-sort-column="4" data-sort-type="text">Source</th><th scope="col" data-sort-column="5" data-sort-type="text">Application</th></tr></thead>
                 <tbody id="debuggingSettingsRows"></tbody>
               </table>
             </div>

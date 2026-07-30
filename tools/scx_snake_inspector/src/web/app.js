@@ -57,7 +57,9 @@ import {
   schedulerUptimeLabel,
   schedulerSettingModels,
   statsResetDisabled,
+  stableSortTableRows,
   syncCallbackSampleRateControl,
+  nextTableSortState,
   updateFeedbackEntries,
   rungLadderPercentages,
   rungPercentages,
@@ -88,6 +90,7 @@ const POLICY_FAIRNESS_OPTIONS = [
 const token = document.querySelector('meta[name="snake-session-token"]').content;
 const initialWindowMs = Number(document.body.dataset.initialWindowMs);
 const maxWindowMs = Number(document.body.dataset.maxWindowMs);
+const tableSortStates = new Map();
 
 const elements = {
   activePairs: document.querySelector("#activePairs"),
@@ -302,6 +305,7 @@ configureWindowSelector();
 configureCallbackRangeSelector();
 configureCallbackSampleRateSelector();
 bindControls();
+enhanceSortableTables(document);
 decorateFeedbackTargets(document);
 renderFeedback();
 renderWorkloadTargetField();
@@ -541,6 +545,7 @@ function bindControls() {
       toggleFeedbackComposer(toggle.dataset.feedbackToggle);
     }
   });
+  document.addEventListener("click", handleTableSortClick);
   document.addEventListener("input", (event) => {
     const input = event.target.closest("[data-feedback-input]");
     if (input) {
@@ -1664,7 +1669,7 @@ function renderDebugging() {
   elements.debuggingIdentity.innerHTML = identityFacts.map(([name, value]) => `
     <div><dt>${escapeHtml(name)}</dt><dd>${escapeHtml(value)}</dd></div>`).join("");
   elements.debuggingCommand.textContent = model.command;
-  elements.debuggingSettingsRows.innerHTML = model.nonDefaultSettings.length === 0
+  replaceSortableTableBody(elements.debuggingSettingsRows, model.nonDefaultSettings.length === 0
     ? '<tr><td class="debugging-empty" colspan="6">No non-default settings are active.</td></tr>'
     : model.nonDefaultSettings.map((setting) => `
       <tr>
@@ -1674,7 +1679,7 @@ function renderDebugging() {
         <td><code>${escapeHtml(setting.launchOverride || "Omitted")}</code></td>
         <td>${escapeHtml(setting.source)}</td>
         <td><span class="change-mode ${setting.changeLabel === "Dynamic" ? "dynamic" : "reload"}">${escapeHtml(setting.changeLabel)}</span></td>
-      </tr>`).join("");
+      </tr>`).join(""));
   elements.debuggingPolicyContext.textContent = model.identity.policyId
     ? `${model.identity.policyId} · generation ${model.identity.policyGeneration ?? "unknown"} · rung set ${model.identity.activeSlot ?? "unknown"}`
     : "Unavailable";
@@ -2157,7 +2162,7 @@ function formatLaunchDiffValue(value) {
 
 function renderSchedulerSettings(control) {
   const settings = schedulerSettingModels(control?.settings || []);
-  elements.schedulerSettingsRows.innerHTML = settings.length === 0
+  replaceSortableTableBody(elements.schedulerSettingsRows, settings.length === 0
     ? '<tr><td class="scheduler-settings-empty" colspan="4">No scheduler settings reported.</td></tr>'
     : settings.map((setting) => `
       <tr>
@@ -2165,7 +2170,7 @@ function renderSchedulerSettings(control) {
         <td><code>${escapeHtml(setting.effectiveValue)}</code><small>${setting.runtimeObserved ? "Observed from Snake" : "Derived from launch state"}</small></td>
         <td class="${setting.differs ? "setting-differs" : ""}"><code>${escapeHtml(setting.overrideValue)}</code></td>
         <td><span class="change-mode ${setting.changeMode}">${setting.changeLabel}</span></td>
-      </tr>`).join("");
+      </tr>`).join(""));
 }
 
 async function startScheduler() {
@@ -2352,7 +2357,7 @@ function renderCallbackTiming() {
   }
 
   const rows = timing?.callbacks || [];
-  elements.callbackTimingRows.innerHTML = rows.length === 0
+  replaceSortableTableBody(elements.callbackTimingRows, rows.length === 0
     ? '<tr><td class="callback-empty" colspan="6">No callback timing rows available.</td></tr>'
     : rows.map((row) => `
       <tr>
@@ -2362,7 +2367,7 @@ function renderCallbackTiming() {
         <td class="${callbackDurationClass(row.p50_ns)}">${escapeHtml(formatCallbackDuration(row.p50_ns))}</td>
         <td class="${callbackDurationClass(row.p95_ns)}">${escapeHtml(formatCallbackDuration(row.p95_ns))}</td>
         <td class="${callbackDurationClass(row.p99_ns)}">${escapeHtml(formatCallbackDuration(row.p99_ns))}</td>
-      </tr>`).join("");
+      </tr>`).join(""));
   renderFineTiming();
 }
 
@@ -2428,8 +2433,8 @@ function renderFineTiming() {
             </div>
           </header>
           <div class="fine-timing-table-wrap">
-            <table>
-              <thead><tr><th>Stage</th><th>Samples</th><th>Mean (ns)</th><th>p50 approx. (ns)</th><th>p95 approx. (ns)</th><th>p99 approx. (ns)</th></tr></thead>
+            <table data-sort-key="callbacks:fine:${escapeHtml(capture.callback)}">
+              <thead><tr><th data-sort-column="0" data-sort-type="text">Stage</th><th data-sort-column="1" data-sort-type="number">Samples</th><th data-sort-column="2" data-sort-type="duration">Mean (ns)</th><th data-sort-column="3" data-sort-type="duration">p50 approx. (ns)</th><th data-sort-column="4" data-sort-type="duration">p95 approx. (ns)</th><th data-sort-column="5" data-sort-type="duration">p99 approx. (ns)</th></tr></thead>
               <tbody>${stages}</tbody>
             </table>
           </div>
@@ -2482,8 +2487,8 @@ function renderPolicySlotComparison(slots) {
         <span>Metrics are excluded because the two rung sets cover different time periods.</span>
       </header>
       <div class="policy-slot-diff-table-wrap">
-        <table>
-          <thead><tr><th scope="col">Structure</th><th scope="col">${escapeHtml(comparison.activeLabel)}</th><th scope="col">${escapeHtml(comparison.previousLabel)}</th></tr></thead>
+        <table data-sort-key="policy:slot-comparison">
+          <thead><tr><th scope="col" data-sort-column="0" data-sort-type="text">Structure</th><th scope="col" data-sort-column="1" data-sort-type="text">${escapeHtml(comparison.activeLabel)}</th><th scope="col" data-sort-column="2" data-sort-type="text">${escapeHtml(comparison.previousLabel)}</th></tr></thead>
           <tbody>${comparison.rows.map((row) => `
             <tr class="${row.changed ? "changed" : "unchanged"}">
               <th scope="row">${escapeHtml(row.name)}${row.changed ? '<span class="visually-hidden"> changed</span>' : ""}</th>
@@ -2587,24 +2592,24 @@ function renderResolvedQueueTopology() {
     <section class="queue-topology-table-section">
       <h4>Cell allocation</h4>
       <div class="queue-topology-table-wrap" data-render-key="queue:${generation}:cell-allocation:scroll">
-        <table><thead><tr><th>Cell</th><th>Dense</th><th>Weight</th><th>Clock</th><th>Primary CPUs</th><th>Borrowable CPUs</th></tr></thead><tbody>${cells}</tbody></table>
+        <table data-sort-key="queue:cell-allocation"><thead><tr><th data-sort-column="0" data-sort-type="text">Cell</th><th data-sort-column="1" data-sort-type="number">Dense</th><th data-sort-column="2" data-sort-type="number">Weight</th><th data-sort-column="3" data-sort-type="text">Clock</th><th data-sort-column="4" data-sort-type="text">Primary CPUs</th><th data-sort-column="5" data-sort-type="text">Borrowable CPUs</th></tr></thead><tbody>${cells}</tbody></table>
       </div>
     </section>
     <details class="queue-topology-details" data-render-key="queue:${generation}:normal-dsqs">
       <summary data-render-key="queue:${generation}:normal-dsqs:summary">Normal DSQs (${formatCount(model.normalQueues.length)})</summary>
       <div class="queue-topology-table-wrap" data-render-key="queue:${generation}:normal-dsqs:scroll">
-        <table class="queue-timing-table"><thead>
-          <tr><th rowspan="2">DSQ</th><th rowspan="2">Cell</th><th rowspan="2">LLC</th><th rowspan="2">Clock</th><th rowspan="2">Consumer CPUs</th><th colspan="5">Residence</th><th colspan="3">Operation-sampled depth</th></tr>
-          <tr><th>Samples</th><th>Mean</th><th>p50</th><th aria-label="Residence p95">p95</th><th aria-label="Residence p99">p99</th><th>Latest</th><th aria-label="Operation-sampled depth p95">p95</th><th>Max</th></tr>
+        <table class="queue-timing-table" data-sort-key="queue:normal-dsqs"><thead>
+          <tr><th rowspan="2" data-sort-column="0" data-sort-type="bigint">DSQ</th><th rowspan="2" data-sort-column="1" data-sort-type="text">Cell</th><th rowspan="2" data-sort-column="2" data-sort-type="number">LLC</th><th rowspan="2" data-sort-column="3" data-sort-type="text">Clock</th><th rowspan="2" data-sort-column="4" data-sort-type="text">Consumer CPUs</th><th colspan="5">Residence</th><th colspan="3">Operation-sampled depth</th></tr>
+          <tr><th data-sort-column="5" data-sort-type="number">Samples</th><th data-sort-column="6" data-sort-type="duration">Mean</th><th data-sort-column="7" data-sort-type="duration">p50</th><th aria-label="Residence p95" data-sort-column="8" data-sort-type="duration">p95</th><th aria-label="Residence p99" data-sort-column="9" data-sort-type="duration">p99</th><th data-sort-column="10" data-sort-type="number">Latest</th><th aria-label="Operation-sampled depth p95" data-sort-column="11" data-sort-type="number">p95</th><th data-sort-column="12" data-sort-type="number">Max</th></tr>
         </thead><tbody>${queues}</tbody></table>
       </div>
     </details>
     <details class="queue-topology-details" data-render-key="queue:${generation}:cpu-routes">
       <summary data-render-key="queue:${generation}:cpu-routes:summary">Per-CPU routing (${formatCount(model.cpuRoutes.length)} of ${formatCount(model.expectedCpuCount)} online CPUs)</summary>
       <div class="queue-topology-table-wrap queue-route-table-wrap" data-render-key="queue:${generation}:cpu-routes:scroll">
-        <table class="queue-timing-table"><thead>
-          <tr><th rowspan="2">CPU</th><th rowspan="2">Owner</th><th rowspan="2">LLC</th><th rowspan="2">Normal DSQ</th><th rowspan="2">Affinity DSQ</th><th colspan="5">Affinity residence</th><th colspan="3">Operation-sampled depth</th></tr>
-          <tr><th>Samples</th><th>Mean</th><th>p50</th><th aria-label="Residence p95">p95</th><th aria-label="Residence p99">p99</th><th>Latest</th><th aria-label="Operation-sampled depth p95">p95</th><th>Max</th></tr>
+        <table class="queue-timing-table" data-sort-key="queue:cpu-routes"><thead>
+          <tr><th rowspan="2" data-sort-column="0" data-sort-type="number">CPU</th><th rowspan="2" data-sort-column="1" data-sort-type="text">Owner</th><th rowspan="2" data-sort-column="2" data-sort-type="number">LLC</th><th rowspan="2" data-sort-column="3" data-sort-type="bigint">Normal DSQ</th><th rowspan="2" data-sort-column="4" data-sort-type="bigint">Affinity DSQ</th><th colspan="5">Affinity residence</th><th colspan="3">Operation-sampled depth</th></tr>
+          <tr><th data-sort-column="5" data-sort-type="number">Samples</th><th data-sort-column="6" data-sort-type="duration">Mean</th><th data-sort-column="7" data-sort-type="duration">p50</th><th aria-label="Residence p95" data-sort-column="8" data-sort-type="duration">p95</th><th aria-label="Residence p99" data-sort-column="9" data-sort-type="duration">p99</th><th data-sort-column="10" data-sort-type="number">Latest</th><th aria-label="Operation-sampled depth p95" data-sort-column="11" data-sort-type="number">p95</th><th data-sort-column="12" data-sort-type="number">Max</th></tr>
         </thead><tbody>${routes}</tbody></table>
       </div>
     </details>`);
@@ -2625,9 +2630,9 @@ function renderObservedDsqOperations(dsqs) {
     <details class="queue-topology-details" open data-render-key="queue:observed-dsq-operations">
       <summary data-render-key="queue:observed-dsq-operations:summary">Observed DSQs (${formatCount(dsqs.length)})</summary>
       <div class="queue-topology-table-wrap" data-render-key="queue:observed-dsq-operations:scroll">
-        <table class="queue-timing-table"><thead>
-          <tr><th rowspan="2">DSQ</th><th rowspan="2">Kind</th><th colspan="3">Insert success</th><th rowspan="2">Insert errors</th><th colspan="3">Remove success</th><th colspan="3">Remove miss</th></tr>
-          <tr><th>Samples</th><th>Mean</th><th>p99</th><th>Samples</th><th>Mean</th><th>p99</th><th>Samples</th><th>Mean</th><th>p99</th></tr>
+        <table class="queue-timing-table" data-sort-key="queue:observed-dsq-operations"><thead>
+          <tr><th rowspan="2" data-sort-column="0" data-sort-type="bigint">DSQ</th><th rowspan="2" data-sort-column="1" data-sort-type="text">Kind</th><th colspan="3">Insert success</th><th rowspan="2" data-sort-column="5" data-sort-type="number">Insert errors</th><th colspan="3">Remove success</th><th colspan="3">Remove miss</th></tr>
+          <tr><th data-sort-column="2" data-sort-type="number">Samples</th><th data-sort-column="3" data-sort-type="duration">Mean</th><th data-sort-column="4" data-sort-type="duration">p99</th><th data-sort-column="6" data-sort-type="number">Samples</th><th data-sort-column="7" data-sort-type="duration">Mean</th><th data-sort-column="8" data-sort-type="duration">p99</th><th data-sort-column="9" data-sort-type="number">Samples</th><th data-sort-column="10" data-sort-type="duration">Mean</th><th data-sort-column="11" data-sort-type="duration">p99</th></tr>
         </thead><tbody>${body}</tbody></table>
       </div>
     </details>`;
@@ -3165,6 +3170,141 @@ function hideReferencePopover(force) {
   }
 }
 
+function handleTableSortClick(event) {
+  const button = event.target.closest("[data-table-sort]");
+  if (!button) {
+    return;
+  }
+  const table = button.closest("table[data-sort-key]");
+  const header = button.closest("th[data-sort-column]");
+  if (!table || !header) {
+    return;
+  }
+  event.preventDefault();
+  const key = table.dataset.sortKey;
+  const next = nextTableSortState(
+    tableSortStates.get(key),
+    Number(header.dataset.sortColumn),
+  );
+  tableSortStates.set(key, next);
+  applyTableSort(table, next);
+}
+
+function enhanceSortableTables(root) {
+  const tables = [
+    ...(root.matches?.("table[data-sort-key]") ? [root] : []),
+    ...root.querySelectorAll("table[data-sort-key]"),
+  ];
+  for (const table of tables) {
+    enhanceSortableTable(table);
+  }
+}
+
+function enhanceSortableTable(table) {
+  const key = table.dataset.sortKey;
+  for (const header of table.querySelectorAll("thead th[data-sort-column]")) {
+    header.setAttribute("scope", "col");
+    let button = header.querySelector(":scope > [data-table-sort]");
+    if (!button) {
+      const label = header.getAttribute("aria-label") || header.textContent.trim();
+      header.dataset.sortLabel = label;
+      button = document.createElement("button");
+      button.type = "button";
+      button.className = "table-sort-button";
+      button.dataset.tableSort = header.dataset.sortColumn;
+      button.dataset.renderKey = `table-sort:${key}:${header.dataset.sortColumn}`;
+      const visibleLabel = document.createElement("span");
+      visibleLabel.className = "table-sort-label";
+      while (header.firstChild) {
+        visibleLabel.append(header.firstChild);
+      }
+      const indicator = document.createElement("span");
+      indicator.className = "table-sort-indicator";
+      indicator.dataset.tableSortIndicator = "";
+      indicator.setAttribute("aria-hidden", "true");
+      button.append(visibleLabel, indicator);
+      header.append(button);
+    }
+  }
+  applyTableSort(table, tableSortStates.get(key));
+}
+
+function applyTableSort(table, sortState) {
+  for (const header of table.querySelectorAll("thead th[data-sort-column]")) {
+    const column = Number(header.dataset.sortColumn);
+    const active = sortState?.column === column;
+    const direction = active ? sortState.direction : null;
+    if (direction) {
+      header.setAttribute("aria-sort", direction);
+    } else {
+      header.removeAttribute("aria-sort");
+    }
+    const button = header.querySelector(":scope > [data-table-sort]");
+    if (!button) {
+      continue;
+    }
+    const label = header.dataset.sortLabel || header.textContent.trim();
+    const nextDirection = direction === "ascending" ? "descending" : "ascending";
+    const status = direction
+      ? `Sorted ${direction}. Activate to sort ${nextDirection}.`
+      : "Not sorted. Activate to sort ascending.";
+    button.setAttribute("aria-label", `${label}. ${status}`);
+    button.title = direction
+      ? `Sort ${label} ${nextDirection}`
+      : `Sort ${label} ascending`;
+    const indicator = button.querySelector("[data-table-sort-indicator]");
+    if (indicator) {
+      indicator.textContent = direction === "ascending"
+        ? "\u2191"
+        : direction === "descending"
+          ? "\u2193"
+          : "\u2195";
+    }
+  }
+  if (!sortState) {
+    return;
+  }
+  const header = table.querySelector(
+    `thead th[data-sort-column="${sortState.column}"]`,
+  );
+  const type = header?.dataset.sortType || "auto";
+  for (const body of table.tBodies) {
+    const sortableRows = [];
+    const fixedRows = [];
+    for (const [index, row] of [...body.rows].entries()) {
+      const cell = row.cells[sortState.column];
+      if (!cell || (row.cells.length === 1 && row.cells[0].colSpan > 1)) {
+        fixedRows.push(row);
+        continue;
+      }
+      if (!row.dataset.sortSourceOrder) {
+        row.dataset.sortSourceOrder = String(index);
+      }
+      sortableRows.push({
+        row,
+        sourceOrder: Number(row.dataset.sortSourceOrder),
+        value: cell.dataset.sortValue ?? cell.textContent,
+      });
+    }
+    const fragment = document.createDocumentFragment();
+    for (const entry of stableSortTableRows(sortableRows, {
+      type,
+      direction: sortState.direction,
+    })) {
+      fragment.append(entry.row);
+    }
+    for (const row of fixedRows) {
+      fragment.append(row);
+    }
+    body.append(fragment);
+  }
+}
+
+function replaceSortableTableBody(body, html) {
+  body.innerHTML = html;
+  enhanceSortableTable(body.closest("table[data-sort-key]"));
+}
+
 function replaceKeyedHtml(container, html) {
   const snapshot = captureKeyedRenderState(
     container.querySelectorAll("[data-render-key]"),
@@ -3172,6 +3312,7 @@ function replaceKeyedHtml(container, html) {
   );
   container.innerHTML = html;
   decorateFeedbackTargets(container);
+  enhanceSortableTables(container);
   restoreKeyedRenderState(
     container.querySelectorAll("[data-render-key]"),
     snapshot,
@@ -3502,7 +3643,7 @@ function renderRawCellStats(stats, cellId) {
     <details class="cell-raw-stats" data-render-key="cell:${cellId}:raw-stats">
       <summary data-render-key="cell:${cellId}:raw-stats:summary">Raw window counters</summary>
       <div class="cell-raw-table-wrap">
-        <table><thead><tr><th>Counter</th><th>Value</th></tr></thead><tbody>
+        <table data-sort-key="cell:${cellId}:raw-stats"><thead><tr><th data-sort-column="0" data-sort-type="text">Counter</th><th data-sort-column="1" data-sort-type="auto">Value</th></tr></thead><tbody>
           ${rows.map(([field, label, kind]) => `
             <tr><th scope="row"><code>${field}</code><small>${label}</small></th><td>${formatCellMetric(stats?.raw[field], kind)}</td></tr>`).join("")}
         </tbody></table>

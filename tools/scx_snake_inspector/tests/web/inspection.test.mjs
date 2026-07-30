@@ -87,6 +87,80 @@ test("inspection routes default to overview and preserve legacy view aliases", (
   assert.equal(routeFromHash("#/unknown"), "overview");
 });
 
+test("table sort values handle natural text, formatted numbers, units, and missing data", () => {
+  assert.equal(typeof inspectionState.tableSortValue, "function");
+  assert.equal(typeof inspectionState.compareTableSortValues, "function");
+  if (
+    typeof inspectionState.tableSortValue !== "function"
+    || typeof inspectionState.compareTableSortValues !== "function"
+  ) {
+    return;
+  }
+
+  assert.equal(inspectionState.tableSortValue("1,234/s", "number"), 1_234);
+  assert.equal(inspectionState.tableSortValue("12.5%", "percentage"), 12.5);
+  assert.equal(inspectionState.tableSortValue("1.5 ms", "duration"), 1_500_000);
+  assert.equal(inspectionState.tableSortValue("900 µs", "duration"), 900_000);
+  assert.equal(inspectionState.tableSortValue("0x10000000000000000", "bigint"), 0x10000000000000000n);
+  assert.equal(inspectionState.tableSortValue("—", "number"), null);
+
+  assert.equal(
+    inspectionState.compareTableSortValues("CPU 2", "CPU 10", { type: "text" }),
+    -1,
+  );
+  assert.equal(
+    inspectionState.compareTableSortValues("900 µs", "1.5 ms", { type: "duration" }),
+    -1,
+  );
+  assert.equal(
+    inspectionState.compareTableSortValues("—", "10", {
+      type: "number",
+      direction: "ascending",
+    }),
+    1,
+  );
+  assert.equal(
+    inspectionState.compareTableSortValues("—", "10", {
+      type: "number",
+      direction: "descending",
+    }),
+    1,
+  );
+});
+
+test("table sorting toggles direction and keeps equal rows stable with missing rows last", () => {
+  assert.equal(typeof inspectionState.nextTableSortState, "function");
+  assert.equal(typeof inspectionState.stableSortTableRows, "function");
+  if (
+    typeof inspectionState.nextTableSortState !== "function"
+    || typeof inspectionState.stableSortTableRows !== "function"
+  ) {
+    return;
+  }
+
+  const ascending = inspectionState.nextTableSortState(null, 2);
+  assert.deepEqual(ascending, { column: 2, direction: "ascending" });
+  assert.deepEqual(
+    inspectionState.nextTableSortState(ascending, 2),
+    { column: 2, direction: "descending" },
+  );
+  assert.deepEqual(
+    inspectionState.nextTableSortState({ column: 2, direction: "descending" }, 1),
+    { column: 1, direction: "ascending" },
+  );
+
+  const rows = inspectionState.stableSortTableRows([
+    { id: "first-ten", value: "10", sourceOrder: 0 },
+    { id: "missing", value: "—", sourceOrder: 1 },
+    { id: "second-ten", value: "10", sourceOrder: 2 },
+    { id: "two", value: "2", sourceOrder: 3 },
+  ], { type: "number", direction: "descending" });
+  assert.deepEqual(
+    rows.map((row) => row.id),
+    ["first-ten", "second-ten", "two", "missing"],
+  );
+});
+
 test("runtime contexts match only within the same scheduler attachment and policy generation", () => {
   assert.equal(typeof inspectionState.contextsMatch, "function");
   if (typeof inspectionState.contextsMatch !== "function") {

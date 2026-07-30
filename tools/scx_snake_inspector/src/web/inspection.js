@@ -31,6 +31,152 @@ const DEMO_POLICY_IDS = new Set([
 const callbackDurationFormat = new Intl.NumberFormat("en-US", {
   maximumFractionDigits: 0,
 });
+const tableSortCollator = new Intl.Collator(undefined, {
+  numeric: true,
+  sensitivity: "base",
+});
+const TABLE_SORT_MISSING_VALUES = new Set([
+  "",
+  "-",
+  "—",
+  "n/a",
+  "not available",
+  "unavailable",
+]);
+const TABLE_SORT_DURATION_FACTORS = {
+  ns: 1,
+  us: 1_000,
+  "µs": 1_000,
+  "μs": 1_000,
+  ms: 1_000_000,
+  s: 1_000_000_000,
+};
+
+function tableSortText(value) {
+  return String(value ?? "").replace(/\s+/g, " ").trim();
+}
+
+function tableSortNumber(value) {
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : null;
+  }
+  const normalized = tableSortText(value).replaceAll(",", "");
+  const match = normalized.match(
+    /^([+-]?(?:\d+(?:\.\d*)?|\.\d+))(?:\s*(?:%|\/s|cores?))?$/i,
+  );
+  if (!match) {
+    return null;
+  }
+  const number = Number(match[1]);
+  return Number.isFinite(number) ? number : null;
+}
+
+function tableSortDuration(value) {
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : null;
+  }
+  const normalized = tableSortText(value).replaceAll(",", "").toLowerCase();
+  const match = normalized.match(
+    /^([+-]?(?:\d+(?:\.\d*)?|\.\d+))\s*(ns|us|µs|μs|ms|s)$/,
+  );
+  if (!match) {
+    return null;
+  }
+  const number = Number(match[1]) * TABLE_SORT_DURATION_FACTORS[match[2]];
+  return Number.isFinite(number) ? number : null;
+}
+
+export function tableSortValue(value, type = "auto") {
+  const text = tableSortText(value);
+  if (TABLE_SORT_MISSING_VALUES.has(text.toLowerCase())) {
+    return null;
+  }
+  if (type === "text") {
+    return text;
+  }
+  if (type === "duration") {
+    return tableSortDuration(value);
+  }
+  if (type === "percentage" || type === "number") {
+    return tableSortNumber(value);
+  }
+  if (type === "bigint") {
+    const normalized = text.replaceAll(",", "");
+    if (!/^[+-]?(?:0x[0-9a-f]+|\d+)$/i.test(normalized)) {
+      return null;
+    }
+    try {
+      return BigInt(normalized);
+    } catch {
+      return null;
+    }
+  }
+  const duration = tableSortDuration(value);
+  if (duration !== null) {
+    return duration;
+  }
+  if (/^[+-]?(?:0x[0-9a-f]+)$/i.test(text)) {
+    try {
+      return BigInt(text);
+    } catch {
+      return text;
+    }
+  }
+  const number = tableSortNumber(value);
+  return number === null ? text : number;
+}
+
+export function compareTableSortValues(
+  leftValue,
+  rightValue,
+  { type = "auto", direction = "ascending" } = {},
+) {
+  const left = tableSortValue(leftValue, type);
+  const right = tableSortValue(rightValue, type);
+  if (left === null || right === null) {
+    if (left === right) {
+      return 0;
+    }
+    return left === null ? 1 : -1;
+  }
+  let comparison;
+  if (typeof left === "string" || typeof right === "string") {
+    comparison = tableSortCollator.compare(String(left), String(right));
+  } else {
+    comparison = left < right ? -1 : left > right ? 1 : 0;
+  }
+  return direction === "descending" ? -comparison : comparison;
+}
+
+export function nextTableSortState(current, column) {
+  const nextColumn = Number(column);
+  return {
+    column: nextColumn,
+    direction: current?.column === nextColumn && current.direction === "ascending"
+      ? "descending"
+      : "ascending",
+  };
+}
+
+export function stableSortTableRows(
+  rows,
+  { type = "auto", direction = "ascending" } = {},
+) {
+  return rows
+    .map((row, index) => ({
+      row,
+      index,
+      sourceOrder: Number.isFinite(Number(row.sourceOrder))
+        ? Number(row.sourceOrder)
+        : index,
+    }))
+    .sort((left, right) => (
+      compareTableSortValues(left.row.value, right.row.value, { type, direction })
+      || left.sourceOrder - right.sourceOrder
+      || left.index - right.index
+    ))
+    .map(({ row }) => row);
+}
 
 export function parseInspectorRoute(hash) {
   const requested = String(hash || "")
