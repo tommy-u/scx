@@ -423,27 +423,10 @@ void BPF_STRUCT_OPS(snake_set_weight, struct task_struct *p, u32 weight)
 s32 BPF_STRUCT_OPS(snake_init_task, struct task_struct *p,
 		   struct scx_init_task_args *args)
 {
-	struct snake_task_runtime *runtime;
-	struct bpf_cpumask	 *mask, *stale;
-
 	(void)args;
 	if (!queue_topology_enabled())
 		return 0;
-	runtime = bpf_task_storage_get(&task_runtimes, p, NULL,
-				       BPF_LOCAL_STORAGE_GET_F_CREATE);
-	if (!runtime)
-		return -ENOMEM;
-	if (runtime->queue_cpumask)
-		return 0;
-	mask = bpf_cpumask_create();
-	if (!mask)
-		return -ENOMEM;
-	stale = bpf_kptr_xchg(&runtime->queue_cpumask, mask);
-	if (stale) {
-		bpf_cpumask_release(stale);
-		return -EINVAL;
-	}
-	return 0;
+	return task_state_init_queue_mask(p);
 }
 
 /* Validate the published ladder before the scheduler can attach. */

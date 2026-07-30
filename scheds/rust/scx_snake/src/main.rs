@@ -2780,6 +2780,52 @@ scope = "task_allowed"
     }
 
     #[test]
+    fn bpf_task_storage_access_is_centralized() {
+        let bpf_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bpf");
+        let sources = bpf_sources(&bpf_dir);
+        let owners = sources
+            .iter()
+            .filter(|(_, source)| source.contains("bpf_task_storage_get("))
+            .collect::<Vec<_>>();
+
+        assert_eq!(owners.len(), 1, "task storage must have one raw owner");
+        assert_eq!(owners[0].0.file_name().unwrap(), "task_state.h");
+        let owner = &owners[0].1;
+        assert_eq!(owner.matches("bpf_task_storage_get(").count(), 3);
+        assert_eq!(owner.matches("BPF_MAP_TYPE_TASK_STORAGE").count(), 2);
+        assert!(owner.contains("BPF_LOCAL_STORAGE_GET_F_CREATE"));
+        assert!(owner.contains("} task_runtimes SEC(\".maps\");"));
+        assert!(owner.contains("} task_cells SEC(\".maps\");"));
+        for wrapper in [
+            "task_state_lookup(",
+            "task_state_get_or_create(",
+            "task_annotation(",
+            "task_state_init_queue_mask(",
+            "task_route_record_selected_cpu(",
+            "task_route_take_selected_cpu(",
+            "task_route_clear_selected_cpu(",
+        ] {
+            assert!(
+                owner.contains(wrapper),
+                "task state owner is missing {wrapper}"
+            );
+        }
+
+        for (path, source) in &sources {
+            if path.file_name().unwrap() == "task_state.h" {
+                continue;
+            }
+            assert!(
+                !source.contains("task_runtimes") && !source.contains("task_cells"),
+                "{} bypasses task-state ownership",
+                path.display()
+            );
+            assert!(!source.contains("BPF_MAP_TYPE_TASK_STORAGE"));
+            assert!(!source.contains("BPF_LOCAL_STORAGE_GET_F_CREATE"));
+        }
+    }
+
+    #[test]
     fn fairness_callback_facade_surface_is_stable() {
         const ENTRYPOINTS: &[&str] = &[
             "fairness_init(",

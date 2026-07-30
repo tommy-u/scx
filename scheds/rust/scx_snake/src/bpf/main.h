@@ -3,26 +3,13 @@
 #define __SCX_SNAKE_MAIN_H
 
 #include "bpf_common.h"
+#include "task_state.h"
 #include "policy_bank.h"
 #include "stats.h"
 #include "timing.h"
 
 extern u64				  queue_timing_session_id;
 extern struct snake_queue_timing_counters queue_timing_counters;
-
-/* Userspace stores the resolved assignment and its independent policy layers. */
-struct {
-	__uint(type, BPF_MAP_TYPE_TASK_STORAGE);
-	__uint(map_flags, BPF_F_NO_PREALLOC);
-	__type(key, int);
-	__type(value, struct snake_task_cell);
-} task_cells SEC(".maps");
-
-static __always_inline struct snake_task_cell *
-snake_task_cell_annotation(struct task_struct *p)
-{
-	return bpf_task_storage_get(&task_cells, p, NULL, 0);
-}
 
 struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);

@@ -4,42 +4,6 @@
 
 const volatile u32 fairness_mode = SNAKE_FAIRNESS_FIFO;
 
-struct snake_task_runtime {
-	struct bpf_cpumask __kptr *queue_cpumask;
-	u64 started_exec_runtime;
-	u64 service_budget;
-	u64 vruntime;
-	u64 affinity_vruntime;
-	u64 deadline;
-	u64 request_remaining_ns;
-	u64 queue_timing_session_id;
-	u64 queue_timing_dsq_id;
-	u64 queue_timing_enqueued_at_ns;
-	s64 sleep_lag;
-	u32 active_weight;
-	u32 pending_weight;
-	u32 cell_index;
-	u32 affinity_cell_index;
-	u32 run_cell_index;
-	u32 run_owner_cell_index;
-	u32 selected_cpu;
-	u32 direct_cell_index;
-	u32 queue_timing_cell_index;
-	u32 queue_timing_depth_after_insert;
-	u32 queue_timing_queue_class;
-	u8  runtime_valid;
-	u8  initialized;
-	u8  runnable_accounted;
-	u8  has_sleep_lag;
-	u8  run_direct;
-	u8  cell_initialized;
-	u8  affinity_initialized;
-	u8  selected_cpu_valid;
-	u8  queue_class;
-	u8  run_queue_class;
-	u8  direct_cell_valid;
-};
-
 struct snake_eevdf_domain {
 	struct bpf_spin_lock lock;
 	u32		     pad;
@@ -52,13 +16,6 @@ struct snake_vtime_domain {
 	u32		     pad;
 	u64		     vtime_now;
 };
-
-struct {
-	__uint(type, BPF_MAP_TYPE_TASK_STORAGE);
-	__uint(map_flags, BPF_F_NO_PREALLOC);
-	__type(key, int);
-	__type(value, struct snake_task_runtime);
-} task_runtimes SEC(".maps");
 
 struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
@@ -211,9 +168,7 @@ fairness_task(struct snake_ladder_ctx *ctx, struct task_struct *p, bool create)
 {
 	struct snake_task_runtime *runtime;
 
-	runtime = bpf_task_storage_get(&task_runtimes, p, 0,
-				       create ? BPF_LOCAL_STORAGE_GET_F_CREATE :
-						0);
+	runtime = create ? task_state_get_or_create(p) : task_state_lookup(p);
 	if (!runtime && create) {
 		stat_inc(ctx, SNAKE_STAT_INVALID_ERRORS);
 		fairness_accounting_error(ctx);
@@ -564,7 +519,7 @@ fairness_promote(struct snake_ladder_ctx *ctx, u64 virtual_time,
 
 		if (moved >= SNAKE_EEVDF_PROMOTE_BATCH)
 			break;
-		runtime = bpf_task_storage_get(&task_runtimes, p, 0, 0);
+		runtime = task_state_lookup(p);
 		if (!runtime) {
 			stat_inc(ctx, SNAKE_STAT_EEVDF_ACCOUNTING_ERRORS);
 			break;
@@ -606,7 +561,7 @@ fairness_advance_to_cpu_future(struct snake_ladder_ctx *ctx, s32 cpu)
 		}
 		bpf_task_release(task);
 
-		runtime = bpf_task_storage_get(&task_runtimes, p, 0, 0);
+		runtime = task_state_lookup(p);
 		if (runtime) {
 			head  = runtime->vruntime;
 			found = true;

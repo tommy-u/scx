@@ -67,7 +67,7 @@ static __always_inline u32 queue_task_cell_index(struct task_struct *p)
 
 	if (!header || !header->nr_cells)
 		return 0;
-	annotation = snake_task_cell_annotation(p);
+	annotation = task_annotation(p);
 	if (!annotation)
 		return 0;
 	cell_id = READ_ONCE(annotation->cell_id);
@@ -87,7 +87,7 @@ static __always_inline u32 queue_task_membership_kind(struct task_struct *p)
 	u32			   *encoded;
 	u32			    cell_id;
 
-	annotation = snake_task_cell_annotation(p);
+	annotation = task_annotation(p);
 	if (!annotation)
 		return SNAKE_MEMBERSHIP_NO_CELL;
 	cell_id = READ_ONCE(annotation->cell_id);

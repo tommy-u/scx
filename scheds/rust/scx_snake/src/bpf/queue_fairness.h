@@ -44,7 +44,7 @@ queue_pick_task_cell_cpu(struct task_struct *p, u32 kind, bool whole_core,
 	u32			    cell_index;
 	s32			    selected;
 
-	runtime = bpf_task_storage_get(&task_runtimes, p, NULL, 0);
+	runtime = task_state_lookup(p);
 	cell_index = queue_task_cell_index(p);
 	source = queue_cell_mask(cell_index, kind);
 	if (!runtime || !source)
@@ -111,7 +111,7 @@ queue_clear_rehome_if_cell(struct task_struct *p, u32 cell_index)
 	if (!cell)
 		return;
 	external_id = READ_ONCE(cell->external_id);
-	annotation = snake_task_cell_annotation(p);
+	annotation = task_annotation(p);
 	if (!annotation || READ_ONCE(annotation->cell_id) != external_id)
 		return;
 	WRITE_ONCE(annotation->needs_rehome, 0);
@@ -169,7 +169,7 @@ queue_fairness_prepare_task_for_cell(struct snake_ladder_ctx *ctx,
 	}
 	fine_timing_finish(fine, SNAKE_FINE_TIMING_ENQUEUE_PREPARE_CELL_CLOCK,
 			   stage_started_at);
-	annotation = snake_task_cell_annotation(p);
+	annotation = task_annotation(p);
 	if (clear_rehome && annotation)
 		WRITE_ONCE(annotation->needs_rehome, 0);
 	runtime->active_weight  = fairness_task_weight(p);
@@ -298,11 +298,7 @@ queue_fairness_select_cpu(struct snake_ladder_ctx *ctx, struct task_struct *p,
 {
 	struct snake_task_runtime *runtime = queue_fairness_prepare_task(ctx, p);
 
-	if (!runtime || cpu < 0 || cpu >= nr_cpu_ids)
-		return -EINVAL;
-	runtime->selected_cpu = cpu;
-	runtime->selected_cpu_valid = 1;
-	return 0;
+	return task_route_record_selected_cpu(runtime, cpu);
 }
 
 static __always_inline int
@@ -324,7 +320,7 @@ queue_fairness_direct_borrow(struct snake_ladder_ctx *ctx, struct task_struct *p
 	if (!cell || !cpuq || !queue_mask_contains(&cell->borrowable, cpu) ||
 	    cpuq->owner_cell_index == cell_index)
 		return -EINVAL;
-	runtime->selected_cpu_valid = 0;
+	task_route_clear_selected_cpu(runtime);
 	runtime->queue_class = SNAKE_QUEUE_CLASS_NORMAL;
 	runtime->run_direct = 1;
 	runtime->direct_cell_index = cell_index;
@@ -591,7 +587,7 @@ queue_fairness_rehome_pending(struct task_struct *p,
 
 	if (!runtime || !runtime->cell_initialized)
 		return false;
-	annotation = snake_task_cell_annotation(p);
+	annotation = task_annotation(p);
 	if (annotation && READ_ONCE(annotation->needs_rehome))
 		return true;
 	return queue_task_cell_index(p) != runtime->cell_index;
@@ -945,7 +941,7 @@ queue_fairness_running(struct snake_ladder_ctx *ctx, struct task_struct *p)
 		bpf_spin_unlock(&domain->lock);
 	}
 	/* select_cpu() may be followed directly by running() when prev is kept. */
-	runtime->selected_cpu_valid = 0;
+	task_route_clear_selected_cpu(runtime);
 	runtime->run_cell_index = runtime->cell_index;
 	runtime->run_owner_cell_index = cpuq ? cpuq->owner_cell_index : 0;
 	runtime->run_queue_class = runtime->queue_class;

@@ -96,10 +96,7 @@ queue_ladder_enqueue(struct snake_ladder_ctx *ctx, struct task_struct *p,
 			   stage_started_at);
 	if (!runtime)
 		return -EINVAL;
-	if (runtime->selected_cpu_valid && runtime->selected_cpu < nr_cpu_ids &&
-	    bpf_cpumask_test_cpu(runtime->selected_cpu, p->cpus_ptr))
-		selected_cpu = runtime->selected_cpu;
-	runtime->selected_cpu_valid = 0;
+	selected_cpu = task_route_take_selected_cpu(runtime, p);
 
 	bpf_for(i, 0, SNAKE_MAX_QUEUE_RUNGS)
 	{

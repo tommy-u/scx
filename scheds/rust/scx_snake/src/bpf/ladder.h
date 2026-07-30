@@ -166,7 +166,7 @@ static __noinline s32 execute_rung(const struct snake_ladder_ctx *ctx,
 			struct snake_task_cell *cell;
 			s32			  exists, cpu;
 
-			cell = snake_task_cell_annotation(p);
+			cell = task_annotation(p);
 			if (!cell)
 				return -ENOENT;
 			exists = mask_table_has_key(ctx, rung->data,
@@ -204,7 +204,7 @@ static __noinline s32 execute_rung(const struct snake_ladder_ctx *ctx,
 			struct snake_task_cell *cell;
 			s32			  exists, cpu;
 
-			cell = snake_task_cell_annotation(p);
+			cell = task_annotation(p);
 			if (!cell)
 				return -ENOENT;
 			exists = mask_table_has_key(ctx, rung->data,
@@ -253,7 +253,7 @@ static __always_inline s32 try_enqueue_task_cell(struct snake_ladder_ctx *ctx,
 	bool			 rehome_pending;
 	u32			 i;
 
-	cell = snake_task_cell_annotation(p);
+	cell = task_annotation(p);
 	if (!cell)
 		return 0;
 	rehome_pending = READ_ONCE(cell->needs_rehome);
