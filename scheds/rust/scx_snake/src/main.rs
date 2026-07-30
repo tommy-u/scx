@@ -3124,6 +3124,61 @@ scope = "task_allowed"
     }
 
     #[test]
+    fn bpf_random_idle_reservoir_sampling_is_shared() {
+        let bpf_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bpf");
+        let shared = fs::read_to_string(bpf_dir.join("cpu_pick.h"))
+            .expect("random idle CPU sampling should have a shared owner");
+        let ladder = fs::read_to_string(bpf_dir.join("ladder.h")).unwrap();
+        let queue = fs::read_to_string(bpf_dir.join("queue_fairness.h")).unwrap();
+        let masks = fs::read_to_string(bpf_dir.join("mask_table.h")).unwrap();
+
+        assert!(shared.contains("#include \"bpf_common.h\""));
+        assert!(shared.contains("static __always_inline s32 cpu_pick_random_idle("));
+        assert!(shared.contains("cpu_pick_random_idle("));
+        assert!(shared.contains("bpf_for(cpu, 0, SNAKE_MAX_CPUS)"));
+        assert!(shared.contains("bpf_cpumask_test_cpu(cpu, allowed)"));
+        assert!(shared.contains("bpf_cpumask_test_cpu(cpu, idle)"));
+        assert!(shared.contains("bpf_get_prandom_u32() % candidates"));
+        assert!(shared.contains("scx_bpf_test_and_clear_cpu_idle(selected)"));
+        assert_eq!(shared.matches("scx_bpf_put_idle_cpumask(idle)").count(), 2);
+        assert!(ladder.contains("return cpu_pick_random_idle(p->cpus_ptr, whole_core);"));
+        assert!(queue.contains("static __noinline s32\nqueue_pick_random_idle_cpu("));
+        assert!(queue.contains("return cpu_pick_random_idle(candidates, whole_core);"));
+        let ladder_wrapper = ladder
+            .split_once("pick_random_idle(")
+            .and_then(|(_, body)| body.split_once("try_sync_wake_affine("))
+            .map(|(body, _)| body)
+            .unwrap();
+        let queue_wrapper = queue
+            .split_once("queue_pick_random_idle_cpu(")
+            .and_then(|(_, body)| body.split_once("queue_pick_task_cell_cpu("))
+            .map(|(body, _)| body)
+            .unwrap();
+        assert!(!ladder_wrapper.contains("bpf_for("));
+        assert!(!queue_wrapper.contains("bpf_for("));
+        let queue_cell_pick = queue
+            .split_once("queue_pick_task_cell_cpu(")
+            .and_then(|(_, body)| body.split_once("queue_cell_domain("))
+            .map(|(body, _)| body)
+            .unwrap();
+        assert_text_order(
+            queue_cell_pick,
+            &[
+                "bpf_cpumask_and(scratch, source, p->cpus_ptr)",
+                "queue_pick_random_idle_cpu(",
+                "(const struct cpumask *)scratch",
+            ],
+        );
+        let mask_random = masks
+            .split_once("pick_random_idle_from_mask_table(")
+            .map(|(_, body)| body)
+            .unwrap();
+        assert!(mask_random.contains("(const struct cpumask *)table_mask"));
+        assert!(mask_random.contains("p->cpus_ptr"));
+        assert!(!mask_random.contains("cpu_pick_random_idle("));
+    }
+
+    #[test]
     fn bpf_dsq_identity_is_independent_from_dsq_operations() {
         let bpf_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bpf");
         let identity = fs::read_to_string(bpf_dir.join("dsq_id.h"))

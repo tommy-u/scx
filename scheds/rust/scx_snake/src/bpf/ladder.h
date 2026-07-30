@@ -3,40 +3,13 @@
 #define __SCX_SNAKE_LADDER_H
 
 #include "mask_table.h"
+#include "cpu_pick.h"
 
 /* Uniformly choose and claim one CPU from the task's allowed idle set. */
 static __always_inline s32 pick_random_idle(const struct task_struct *p,
 					    bool whole_core)
 {
-	const struct cpumask *idle;
-	u32		      cpu, candidates = 0;
-	s32		      selected = -1;
-	bool		      claimed;
-
-	idle = whole_core ? scx_bpf_get_idle_smtmask() :
-			    scx_bpf_get_idle_cpumask();
-	if (!idle)
-		return -EINVAL;
-
-	bpf_for(cpu, 0, SNAKE_MAX_CPUS)
-	{
-		if (cpu >= nr_cpu_ids)
-			break;
-		if (bpf_cpumask_test_cpu(cpu, p->cpus_ptr) &&
-		    bpf_cpumask_test_cpu(cpu, idle)) {
-			candidates++;
-			if (bpf_get_prandom_u32() % candidates == 0)
-				selected = cpu;
-		}
-	}
-	if (selected < 0) {
-		scx_bpf_put_idle_cpumask(idle);
-		return -ENOENT;
-	}
-
-	claimed = scx_bpf_test_and_clear_cpu_idle(selected);
-	scx_bpf_put_idle_cpumask(idle);
-	return claimed ? selected : -ENOENT;
+	return cpu_pick_random_idle(p->cpus_ptr, whole_core);
 }
 
 /* Apply the kernel-style synchronous wake-affine placement checks. */

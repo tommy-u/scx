@@ -2,36 +2,12 @@
 #ifndef __SCX_SNAKE_QUEUE_FAIRNESS_H
 #define __SCX_SNAKE_QUEUE_FAIRNESS_H
 
+#include "cpu_pick.h"
+
 static __noinline s32
 queue_pick_random_idle_cpu(const struct cpumask *candidates, bool whole_core)
 {
-	const struct cpumask *idle;
-	u32 candidates_seen = 0, cpu;
-	s32 selected = -1;
-	bool claimed;
-
-	idle = whole_core ? scx_bpf_get_idle_smtmask() :
-			    scx_bpf_get_idle_cpumask();
-	if (!idle)
-		return -EINVAL;
-	bpf_for(cpu, 0, SNAKE_MAX_CPUS)
-	{
-		if (cpu >= nr_cpu_ids)
-			break;
-		if (bpf_cpumask_test_cpu(cpu, candidates) &&
-		    bpf_cpumask_test_cpu(cpu, idle)) {
-			candidates_seen++;
-			if (bpf_get_prandom_u32() % candidates_seen == 0)
-				selected = cpu;
-		}
-	}
-	if (selected < 0) {
-		scx_bpf_put_idle_cpumask(idle);
-		return -ENOENT;
-	}
-	claimed = scx_bpf_test_and_clear_cpu_idle(selected);
-	scx_bpf_put_idle_cpumask(idle);
-	return claimed ? selected : -ENOENT;
+	return cpu_pick_random_idle(candidates, whole_core);
 }
 
 static __always_inline s32
