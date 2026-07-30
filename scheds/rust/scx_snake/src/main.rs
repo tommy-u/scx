@@ -2868,6 +2868,41 @@ scope = "task_allowed"
     }
 
     #[test]
+    fn bpf_dsq_identity_is_independent_from_dsq_operations() {
+        let bpf_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bpf");
+        let identity = fs::read_to_string(bpf_dir.join("dsq_id.h"))
+            .expect("DSQ identity should have a dedicated header");
+        let operations = fs::read_to_string(bpf_dir.join("dsq.h")).unwrap();
+
+        assert!(identity.contains("#include \"bpf_common.h\""));
+        assert!(identity.contains("typedef union"));
+        for constructor in [
+            "dsq_from_raw(",
+            "dsq_invalid(",
+            "dsq_eevdf_eligible(",
+            "dsq_eevdf_future(",
+            "dsq_vtime_global(",
+            "dsq_vtime_cpu(",
+            "dsq_affinity(",
+            "dsq_normal(",
+            "dsq_fifo(",
+            "dsq_local(",
+            "dsq_local_on(",
+            "dsq_queue_class(",
+        ] {
+            assert!(
+                identity.contains(constructor),
+                "DSQ identity header is missing {constructor}"
+            );
+        }
+        assert!(!identity.contains("scx_bpf_dsq_"));
+        assert!(!identity.contains("fine_timing_"));
+        assert!(operations.contains("#include \"dsq_id.h\""));
+        assert!(operations.contains("#include \"timing.h\""));
+        assert!(!operations.contains("typedef union"));
+    }
+
+    #[test]
     fn queue_timing_covers_fairness_and_direct_local_paths() {
         let bpf_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bpf");
         let fairness = fs::read_to_string(bpf_dir.join("fairness.h")).unwrap();
