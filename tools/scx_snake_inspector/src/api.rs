@@ -24,8 +24,8 @@ use crate::collector::{
     CallbackTimingRateResponse, CollectorCommand, FineTimingCallback, FineTimingControlResponse,
     StatsResetResponse,
 };
-use crate::dashboard::Dashboard;
-use crate::launcher::{LaunchOptions, LaunchRequest, SnakeLauncher};
+use crate::dashboard::{Dashboard, RuntimeContextView};
+use crate::launcher::{LaunchFairness, LaunchOptions, LaunchRequest, SnakeLauncher};
 use crate::policies::PolicyActivation;
 use crate::scope::{resolve_scope, ScopeRequest};
 use crate::workload::{WorkloadCellResponse, WorkloadTarget};
@@ -305,19 +305,54 @@ async fn policies(State(context): State<ApiContext>) -> impl IntoResponse {
 struct SchedulerPolicyControl {
     id: String,
     name: String,
+    apply_mode: PolicyApplyMode,
+    reasons: Vec<PolicyReason>,
+    supported_fairness: Vec<LaunchFairness>,
+    // Compatibility fields for older inspector clients.
     change_mode: &'static str,
     reload_reasons: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum PolicyApplyMode {
+    Live,
+    Restart,
+    Invalid,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum PolicyReasonCode {
+    DsqTopology,
+    TaskMembership,
+    EnqueueTargets,
+    DispatchSources,
+    ValidationFailed,
+    NotValidated,
+    SchedulerStopped,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+struct PolicyReason {
+    code: PolicyReasonCode,
+    label: &'static str,
+    detail: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
 struct SchedulerSettingControl {
     name: &'static str,
     value: serde_json::Value,
+    effective: serde_json::Value,
+    launch_override: serde_json::Value,
+    runtime_observed: bool,
     change_mode: &'static str,
 }
 
 #[derive(Clone, Debug, Serialize)]
 struct SchedulerControl {
+    context: RuntimeContextView,
     managed: bool,
     controllable: bool,
     control_error: Option<String>,
@@ -344,6 +379,8 @@ async fn start_scheduler(
     Json(request): Json<LaunchRequest>,
 ) -> Result<Json<SchedulerControl>, ApiError> {
     require_session_token(&headers, &context.token)?;
+    let control = scheduler_control_response(&context)?;
+    validate_lifecycle_policy(&control, &request, "started")?;
     let launcher = context
         .launcher
         .clone()
@@ -362,7 +399,7 @@ async fn restart_scheduler(
 ) -> Result<Json<SchedulerControl>, ApiError> {
     require_session_token(&headers, &context.token)?;
     let control = scheduler_control_response(&context)?;
-    validate_lifecycle_policy(&control, &request.policy_id, "restarted")?;
+    validate_lifecycle_policy(&control, &request, "restarted")?;
     let launcher = context
         .launcher
         .clone()
@@ -429,47 +466,49 @@ fn scheduler_control_response(context: &ApiContext) -> Result<SchedulerControl, 
     let active_source = inspection.snapshot.as_ref().and_then(active_policy_source);
     let policy_id = status.policy_id.clone().or_else(|| {
         let source = active_source?;
-        catalog
+        let mut matches = catalog
             .catalog
             .as_ref()?
             .policies
             .iter()
-            .find_map(|policy| (policy.source.trim() == source.trim()).then(|| policy.id.clone()))
+            .filter(|policy| policy.source.trim() == source.trim());
+        let policy_id = matches.next()?.id.clone();
+        matches.next().is_none().then_some(policy_id)
     });
 
     let launch_known = status.launch.is_some();
-    let mut launch = status.launch.unwrap_or_default();
-    if !launch_known && !status.managed && status.active && launch.fairness.is_none() {
-        launch.fairness = inspection
-            .snapshot
-            .as_ref()
-            .and_then(|snapshot| snapshot.get("fairness"))
-            .and_then(|fairness| fairness.get("mode_name"))
-            .and_then(serde_json::Value::as_str)
-            .and_then(|mode| serde_json::from_value(serde_json::Value::String(mode.into())).ok());
-    }
-    if !launch_known
-        && !status.managed
-        && status.active
-        && launch.callback_timing_sample_rate.is_none()
-    {
-        launch.callback_timing_sample_rate = inspection
-            .snapshot
-            .as_ref()
-            .and_then(|snapshot| snapshot.get("callback_timing_sample_rate"))
-            .and_then(serde_json::Value::as_u64)
-            .and_then(|rate| u32::try_from(rate).ok());
-    }
+    let launch = status.launch.unwrap_or_default();
+    let observed_fairness = inspection
+        .snapshot
+        .as_ref()
+        .and_then(|snapshot| snapshot.pointer("/fairness/mode_name"))
+        .and_then(serde_json::Value::as_str)
+        .and_then(|mode| serde_json::from_value(serde_json::Value::String(mode.into())).ok());
+    let observed_sample_rate = inspection
+        .snapshot
+        .as_ref()
+        .and_then(|snapshot| snapshot.get("callback_timing_sample_rate"))
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|rate| u32::try_from(rate).ok());
+    let effective_fairness = observed_fairness.or_else(|| {
+        (status.active && launch_known).then_some(launch.fairness.unwrap_or(LaunchFairness::Fifo))
+    });
+    let effective_sample_rate = observed_sample_rate.or_else(|| {
+        (status.active && launch_known).then_some(launch.callback_timing_sample_rate.unwrap_or(64))
+    });
+    let effective_exit_dump_len =
+        (status.active && launch_known).then_some(launch.exit_dump_len.unwrap_or_default());
+    let effective_verbose = (status.active && launch_known).then_some(launch.verbose);
 
-    let dynamic = catalog
+    let valid = catalog
         .catalog
         .as_ref()
         .map(|catalog| {
             catalog
                 .policies
                 .iter()
-                .map(|policy| policy.id.as_str())
-                .collect::<std::collections::BTreeSet<_>>()
+                .map(|policy| (policy.id.as_str(), policy))
+                .collect::<std::collections::BTreeMap<_, _>>()
         })
         .unwrap_or_default();
     let reload = catalog
@@ -488,76 +527,146 @@ fn scheduler_control_response(context: &ApiContext) -> Result<SchedulerControl, 
         .map_err(|error| ApiError::unavailable(format!("reading policy library: {error:#}")))?
         .into_iter()
         .map(|policy| {
-            if status.active && dynamic.contains(policy.id.as_str()) {
-                SchedulerPolicyControl {
-                    id: policy.id,
-                    name: policy.name,
-                    change_mode: "dynamic",
-                    reload_reasons: Vec::new(),
-                }
-            } else {
-                let validation_error = reload
-                    .get(policy.id.as_str())
-                    .map(|reason| (*reason).to_owned());
-                let reason = validation_error.clone().unwrap_or_else(|| {
-                    catalog.error.clone().unwrap_or_else(|| {
-                        if status.active {
-                            "Policy compatibility has not been validated yet.".into()
-                        } else {
-                            "Starting this policy requires launching Snake.".into()
-                        }
+            let validated = valid.get(policy.id.as_str()).copied();
+            let validation_error = reload
+                .get(policy.id.as_str())
+                .map(|reason| (*reason).to_owned());
+            let source_uses_queues = validated
+                .map(|candidate| candidate.source.as_str())
+                .or_else(|| {
+                    catalog.catalog.as_ref().and_then(|catalog| {
+                        catalog
+                            .invalid
+                            .iter()
+                            .find(|candidate| candidate.id == policy.id)
+                            .map(|candidate| candidate.source.as_str())
                     })
-                });
-                SchedulerPolicyControl {
-                    id: policy.id,
-                    name: policy.name,
-                    change_mode: if status.active
-                        && (!validation_error
-                            .as_deref()
-                            .is_some_and(policy_requires_restart))
-                    {
-                        "invalid"
-                    } else {
-                        "reload"
-                    },
-                    reload_reasons: vec![reason],
-                }
+                })
+                .is_some_and(policy_source_uses_queues);
+            let supported_fairness = if validated.is_some_and(|candidate| candidate.queue_policy)
+                || source_uses_queues
+            {
+                vec![LaunchFairness::Vtime]
+            } else {
+                vec![
+                    LaunchFairness::Fifo,
+                    LaunchFairness::Vtime,
+                    LaunchFairness::Eevdf,
+                ]
+            };
+            let (apply_mode, reasons) = if status.active && validated.is_some() {
+                (PolicyApplyMode::Live, Vec::new())
+            } else if let Some(error) = validation_error {
+                let mode = if status.active && !policy_requires_restart(&error) {
+                    PolicyApplyMode::Invalid
+                } else {
+                    PolicyApplyMode::Restart
+                };
+                (mode, vec![policy_reason_from_error(error)])
+            } else if status.active {
+                let detail = catalog
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| "Policy compatibility has not been validated yet.".into());
+                (
+                    PolicyApplyMode::Invalid,
+                    vec![PolicyReason {
+                        code: PolicyReasonCode::NotValidated,
+                        label: "Compatibility not validated",
+                        detail,
+                    }],
+                )
+            } else {
+                (
+                    PolicyApplyMode::Restart,
+                    vec![PolicyReason {
+                        code: PolicyReasonCode::SchedulerStopped,
+                        label: "Snake is stopped",
+                        detail: "Starting this policy requires a new Snake attachment.".into(),
+                    }],
+                )
+            };
+            let change_mode = match apply_mode {
+                PolicyApplyMode::Live => "dynamic",
+                PolicyApplyMode::Restart => "reload",
+                PolicyApplyMode::Invalid => "invalid",
+            };
+            SchedulerPolicyControl {
+                id: policy.id,
+                name: policy.name,
+                apply_mode,
+                reload_reasons: reasons.iter().map(|reason| reason.detail.clone()).collect(),
+                reasons,
+                supported_fairness,
+                change_mode,
             }
         })
         .collect();
 
+    let effective_fairness_value = serde_json::to_value(effective_fairness)
+        .map_err(|error| ApiError::unavailable(error.to_string()))?;
+    let fairness_override_value = serde_json::to_value(launch.fairness)
+        .map_err(|error| ApiError::unavailable(error.to_string()))?;
+    let effective_sample_rate_value = serde_json::to_value(effective_sample_rate)
+        .map_err(|error| ApiError::unavailable(error.to_string()))?;
+    let sample_rate_override_value = serde_json::to_value(launch.callback_timing_sample_rate)
+        .map_err(|error| ApiError::unavailable(error.to_string()))?;
+    let effective_exit_dump_value = serde_json::to_value(effective_exit_dump_len)
+        .map_err(|error| ApiError::unavailable(error.to_string()))?;
+    let exit_dump_override_value = serde_json::to_value(launch.exit_dump_len)
+        .map_err(|error| ApiError::unavailable(error.to_string()))?;
+    let effective_verbose_value = serde_json::to_value(effective_verbose)
+        .map_err(|error| ApiError::unavailable(error.to_string()))?;
+    let verbose_override_value = if launch.verbose {
+        serde_json::Value::Bool(true)
+    } else {
+        serde_json::Value::Null
+    };
     let settings = vec![
         SchedulerSettingControl {
             name: "fairness",
-            value: serde_json::to_value(launch.fairness)
-                .map_err(|error| ApiError::unavailable(error.to_string()))?,
+            value: effective_fairness_value.clone(),
+            effective: effective_fairness_value,
+            launch_override: fairness_override_value,
+            runtime_observed: observed_fairness.is_some(),
             change_mode: "reload",
         },
         SchedulerSettingControl {
             name: "callback_timing_sample_rate",
-            value: serde_json::to_value(launch.callback_timing_sample_rate)
-                .map_err(|error| ApiError::unavailable(error.to_string()))?,
+            value: effective_sample_rate_value.clone(),
+            effective: effective_sample_rate_value,
+            launch_override: sample_rate_override_value,
+            runtime_observed: observed_sample_rate.is_some(),
             change_mode: "dynamic",
         },
         SchedulerSettingControl {
             name: "exit_dump_len",
-            value: serde_json::to_value(launch.exit_dump_len)
-                .map_err(|error| ApiError::unavailable(error.to_string()))?,
+            value: effective_exit_dump_value.clone(),
+            effective: effective_exit_dump_value,
+            launch_override: exit_dump_override_value,
+            runtime_observed: false,
             change_mode: "reload",
         },
         SchedulerSettingControl {
             name: "verbose",
-            value: serde_json::Value::Bool(launch.verbose),
+            value: effective_verbose_value.clone(),
+            effective: effective_verbose_value,
+            launch_override: verbose_override_value,
+            runtime_observed: false,
             change_mode: "reload",
         },
         SchedulerSettingControl {
             name: "stats_reset",
             value: serde_json::Value::String("On demand".into()),
+            effective: serde_json::Value::String("On demand".into()),
+            launch_override: serde_json::Value::Null,
+            runtime_observed: false,
             change_mode: "dynamic",
         },
     ];
 
     Ok(SchedulerControl {
+        context: context.dashboard.runtime_context(),
         managed: status.managed,
         controllable: status.controllable,
         control_error: status.control_error,
@@ -575,29 +684,89 @@ fn scheduler_control_response(context: &ApiContext) -> Result<SchedulerControl, 
 
 fn policy_requires_restart(error: &str) -> bool {
     error.contains("restart Snake to apply it")
+        || error.contains("cannot remove active queue enqueue target")
+        || error.contains("cannot remove active queue dispatch source")
+}
+
+fn policy_source_uses_queues(source: &str) -> bool {
+    source.lines().any(|line| {
+        let line = line.split('#').next().unwrap_or_default().trim();
+        let Some(table) = line
+            .strip_prefix('[')
+            .and_then(|line| line.strip_suffix(']'))
+        else {
+            return false;
+        };
+        let table = table
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect::<String>();
+        table == "queues" || table.starts_with("queues.")
+    })
+}
+
+fn policy_reason_from_error(detail: String) -> PolicyReason {
+    let lower = detail.to_ascii_lowercase();
+    let (code, label) = if lower.contains("queue topology") {
+        (PolicyReasonCode::DsqTopology, "DSQ topology changes")
+    } else if lower.contains("task membership") {
+        (PolicyReasonCode::TaskMembership, "Task membership changes")
+    } else if lower.contains("enqueue target") {
+        (
+            PolicyReasonCode::EnqueueTargets,
+            "Queue enqueue targets change",
+        )
+    } else if lower.contains("dispatch source") {
+        (
+            PolicyReasonCode::DispatchSources,
+            "Queue dispatch sources change",
+        )
+    } else {
+        (
+            PolicyReasonCode::ValidationFailed,
+            "Policy validation failed",
+        )
+    };
+    PolicyReason {
+        code,
+        label,
+        detail,
+    }
 }
 
 fn validate_lifecycle_policy(
     control: &SchedulerControl,
-    policy_id: &str,
+    request: &LaunchRequest,
     action: &str,
 ) -> Result<(), ApiError> {
     let policy = control
         .policies
         .iter()
-        .find(|policy| policy.id == policy_id)
+        .find(|policy| policy.id == request.policy_id)
         .ok_or_else(|| ApiError::bad_request("selected policy is not available"))?;
-    if policy.change_mode != "invalid" {
-        return Ok(());
+    if policy.apply_mode == PolicyApplyMode::Invalid {
+        let reason = policy
+            .reload_reasons
+            .first()
+            .map(String::as_str)
+            .unwrap_or("policy validation failed");
+        return Err(ApiError::bad_request(format!(
+            "selected policy is invalid and cannot be {action}: {reason}"
+        )));
     }
-    let reason = policy
-        .reload_reasons
-        .first()
-        .map(String::as_str)
-        .unwrap_or("policy validation failed");
-    Err(ApiError::bad_request(format!(
-        "selected policy is invalid and cannot be {action}: {reason}"
-    )))
+    let fairness = request.fairness.unwrap_or(LaunchFairness::Fifo);
+    if !policy.supported_fairness.contains(&fairness) {
+        let supported = policy
+            .supported_fairness
+            .iter()
+            .map(|mode| format!("{mode:?}").to_ascii_uppercase())
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(ApiError::bad_request(format!(
+            "selected policy cannot be {action} with {fairness:?} fairness; choose {supported}"
+        )));
+    }
+    Ok(())
 }
 
 fn active_policy_source(snapshot: &serde_json::Value) -> Option<&str> {

@@ -19,6 +19,78 @@ export function routeFromHash(hash) {
   return ROUTES.has(route) ? route : "activity";
 }
 
+export function contextsMatch(left, right) {
+  if (!left || !right) {
+    return true;
+  }
+  if (left.scheduler_attach_seq !== right.scheduler_attach_seq) {
+    return false;
+  }
+  return left.policy_generation == null
+    || right.policy_generation == null
+    || left.policy_generation === right.policy_generation;
+}
+
+export function runtimeContextModel({ snapshot, inspection, control } = {}) {
+  const contexts = [inspection?.context, snapshot?.context, control?.context]
+    .filter(Boolean);
+  const context = contexts[0] || null;
+  const synchronizing = contexts.some((candidate) => !contextsMatch(context, candidate));
+  if (!context) {
+    return {
+      synchronizing: false,
+      statusLabel: "Waiting for Snake",
+      detailLabel: "Runtime context unavailable",
+    };
+  }
+
+  const status = context.scheduler_active ? "Snake active" : "Snake stopped";
+  const detail = synchronizing
+    ? "Synchronizing runtime state…"
+    : [
+        control?.policy_id || "Policy unknown",
+        context.fairness ? String(context.fairness).toUpperCase() : null,
+        context.policy_generation == null
+          ? null
+          : `policy gen ${context.policy_generation}`,
+        context.active_slot == null ? null : `slot ${context.active_slot}`,
+        context.callback_sample_rate == null
+          ? null
+          : context.callback_sample_rate === 0
+            ? "sampling off"
+            : `sampling 1/${context.callback_sample_rate}`,
+      ].filter(Boolean).join(" · ");
+  return {
+    synchronizing,
+    statusLabel: `${status} · Attach #${context.scheduler_attach_seq}`,
+    detailLabel: detail,
+  };
+}
+
+export function freshnessModel({
+  hasData,
+  error,
+  lastSuccessAt,
+  pollIntervalMs,
+  now = Date.now(),
+} = {}) {
+  if (!hasData) {
+    return error
+      ? { state: "unavailable", label: "Unavailable", detail: error }
+      : { state: "waiting", label: "Waiting for Snake", detail: null };
+  }
+  const ageMs = Math.max(0, now - Number(lastSuccessAt || 0));
+  const stale = Boolean(error) || ageMs > Number(pollIntervalMs || 0) * 2.5;
+  if (!stale) {
+    return { state: "fresh", label: "Updated just now", detail: null };
+  }
+  return {
+    state: "stale",
+    label: `Stale · updated ${Math.round(ageMs / 1_000)}s ago`,
+    detail: error || null,
+  };
+}
+
 export function captureKeyedRenderState(nodes, activeElement = null) {
   const entries = new Map();
   let focusedKey = null;
@@ -228,6 +300,24 @@ function restartReasonLabel(reason) {
   return /[.!?]$/.test(withoutRestart) ? withoutRestart : `${withoutRestart}.`;
 }
 
+function legacyPolicyReason(reason) {
+  const detail = String(reason || "").trim() || "Policy compatibility is unknown.";
+  const lower = detail.toLowerCase();
+  if (lower.includes("queue topology")) {
+    return { code: "dsq_topology", label: "DSQ topology changes", detail };
+  }
+  if (lower.includes("task membership")) {
+    return { code: "task_membership", label: "Task membership changes", detail };
+  }
+  if (lower.includes("enqueue target")) {
+    return { code: "enqueue_targets", label: "Queue enqueue targets change", detail };
+  }
+  if (lower.includes("dispatch source")) {
+    return { code: "dispatch_sources", label: "Queue dispatch sources change", detail };
+  }
+  return { code: "validation_failed", label: "Policy validation failed", detail };
+}
+
 export function policyLibraryModels(
   catalog,
   control,
@@ -242,35 +332,68 @@ export function policyLibraryModels(
         ...(catalog?.policies || []).map((policy) => ({
           id: policy.id,
           name: policy.name,
+          apply_mode: "live",
+          reasons: [],
+          supported_fairness: policy.queue_policy
+            || /^\s*\[\s*queues(?:\s*\]|\s*\.)/m.test(policy.source || "")
+            ? ["vtime"]
+            : ["fifo", "vtime", "eevdf"],
           change_mode: "dynamic",
           reload_reasons: [],
         })),
         ...(catalog?.invalid || []).map((policy) => ({
           id: policy.id,
           name: policy.id,
+          apply_mode: "invalid",
+          reasons: [legacyPolicyReason(policy.error)],
+          supported_fairness: /^\s*\[\s*queues(?:\s*\]|\s*\.)/m.test(policy.source || "")
+            ? ["vtime"]
+            : ["fifo", "vtime", "eevdf"],
           change_mode: "invalid",
           reload_reasons: [policy.error],
         })),
       ];
-  const activeFairness = control?.launch?.fairness || "fifo";
+  const activeFairness = control?.context?.fairness || control?.launch?.fairness || "fifo";
+  const controlPolicyId = controls.some((entry) => entry.id === control?.policy_id)
+    ? control.policy_id
+    : null;
+  const sourceMatches = activeSource
+    ? controls.filter((entry) => {
+        const details = valid.get(entry.id) || invalid.get(entry.id);
+        return details?.source?.trim() === activeSource.trim();
+      })
+    : [];
+  const activePolicyId = controlPolicyId
+    || (sourceMatches.length === 1 ? sourceMatches[0].id : null);
   return controls.map((entry) => {
     const details = valid.get(entry.id);
     const invalidDetails = invalid.get(entry.id);
     const source = details?.source || invalidDetails?.source || null;
-    const fairnessModes = /^\s*\[\s*queues(?:\s*\]|\s*\.)/m.test(source || "")
-      ? ["vtime"]
-      : ["fifo", "vtime", "eevdf"];
-    const configuredChangeMode = ["dynamic", "reload", "invalid"].includes(entry.change_mode)
-      ? entry.change_mode
-      : "invalid";
-    const changeMode = selectedFairness
+    const fairnessModes = Array.isArray(entry.supported_fairness)
+      && entry.supported_fairness.length > 0
+      ? entry.supported_fairness
+      : /^\s*\[\s*queues(?:\s*\]|\s*\.)/m.test(source || "")
+        ? ["vtime"]
+        : ["fifo", "vtime", "eevdf"];
+    const configuredApplyMode = ["live", "restart", "invalid"].includes(entry.apply_mode)
+      ? entry.apply_mode
+      : entry.change_mode === "dynamic"
+        ? "live"
+        : entry.change_mode === "reload"
+          ? "restart"
+          : "invalid";
+    const applyMode = selectedFairness
       && selectedFairness !== activeFairness
-      && configuredChangeMode !== "invalid"
-      ? "reload"
-      : configuredChangeMode;
+      && configuredApplyMode !== "invalid"
+      ? "restart"
+      : configuredApplyMode;
+    const changeMode = applyMode === "live"
+      ? "dynamic"
+      : applyMode === "restart"
+        ? "reload"
+        : "invalid";
     const active = (!selectedFairness || selectedFairness === activeFairness)
-      && (control?.policy_id === entry.id
-        || Boolean(details?.source && activeSource && details.source.trim() === activeSource.trim()));
+      && activePolicyId === entry.id;
     const actionKind = active
       ? "active"
       : changeMode === "dynamic"
@@ -281,41 +404,42 @@ export function policyLibraryModels(
     const actionLabel = actionKind === "active"
       ? "Active"
       : actionKind === "activate"
-        ? "Activate"
+        ? "Apply live"
         : actionKind === "lifecycle"
-          ? (control?.active ? "Select for restart" : "Select to start")
+          ? (control?.active ? "Restart Snake" : "Start Snake")
           : "Unavailable";
-    const reasons = entry.reload_reasons || [];
-    const restartReasons = [];
-    if (changeMode === "reload" && selectedFairness && selectedFairness !== activeFairness) {
-      restartReasons.push(
-        `Fairness approach changes from ${activeFairness.toUpperCase()} to ${selectedFairness.toUpperCase()}.`,
-      );
+    const reasons = Array.isArray(entry.reasons) && entry.reasons.length > 0
+      ? entry.reasons.map((reason) => ({ ...reason }))
+      : (entry.reload_reasons || []).map(legacyPolicyReason);
+    if (applyMode === "restart" && selectedFairness && selectedFairness !== activeFairness) {
+      reasons.unshift({
+        code: "fairness_change",
+        label: "Fairness changes",
+        detail: `Fairness approach changes from ${activeFairness.toUpperCase()} to ${selectedFairness.toUpperCase()}.`,
+      });
     }
-    if (changeMode === "reload") {
-      restartReasons.push(...reasons.map(restartReasonLabel));
+    if (applyMode === "invalid" && reasons.length === 0) {
+      reasons.push(legacyPolicyReason(invalidDetails?.error || "Policy arguments are invalid."));
     }
-    const uniqueRestartReasons = [...new Set(restartReasons)];
-    const hoverDetail = uniqueRestartReasons.length > 0
-      ? `Restart required:\n${uniqueRestartReasons.map((reason) => `• ${reason}`).join("\n")}`
-      : changeMode === "invalid"
-        ? reasons[0] || invalidDetails?.error || "Policy arguments are invalid."
-        : null;
+    const uniqueReasons = reasons.filter((reason, index, all) =>
+      all.findIndex((candidate) => candidate.code === reason.code && candidate.detail === reason.detail)
+        === index);
     return {
       ...entry,
       name: details?.name || invalidDetails?.name || entry.name || entry.id,
       source,
       summary: invalidDetails || changeMode === "invalid"
         ? null
-        : details?.summary || reasons[0] || "No policy details available.",
-      hoverDetail,
-      restartReasons: uniqueRestartReasons,
+        : details?.summary || "No policy details available.",
+      reasons: uniqueReasons,
+      restartReasons: uniqueReasons.map((reason) => restartReasonLabel(reason.detail)),
       fairnessModes,
       selectedFairness,
       active,
+      applyMode,
       changeMode,
       changeLabel: changeMode === "dynamic"
-        ? "Dynamic"
+        ? (active ? "Dynamic" : "Applies live")
         : changeMode === "reload"
           ? "Restart required"
           : "Invalid",
@@ -335,6 +459,49 @@ export function policyCategoryGroups(policies) {
     groups[DEMO_POLICY_IDS.has(policy.id) ? 1 : 0].policies.push(policy);
   }
   return groups;
+}
+
+export function policySlotComparison(slots) {
+  const active = (slots || []).find((slot) => slot.state === "active") || null;
+  const previous = (slots || []).find((slot) => slot.state === "inactive") || null;
+  const label = (role, slot) => slot ? `${role} · slot ${slot.slot}` : `${role} unavailable`;
+  if (!active?.policy || !previous?.policy) {
+    return {
+      activeLabel: label("Active", active),
+      previousLabel: label("Previous", previous),
+      comparable: false,
+      rows: [],
+    };
+  }
+  const fallback = (slot) => slot.policy.fallback?.selected?.label
+    || slot.policy.fallback?.selected?.value
+    || "Unknown";
+  const ladder = (slot, kind) => {
+    const rungs = slot.policy.queues?.[kind] || [];
+    return rungs.length > 0
+      ? rungs.map((rung) => rung.operation).join(" → ")
+      : "Not configured";
+  };
+  const values = [
+    ["Generation", active.generation, previous.generation],
+    ["Idle rungs", active.policy.rungs?.length || 0, previous.policy.rungs?.length || 0],
+    ["Fallback", fallback(active), fallback(previous)],
+    ["Mask tables", active.policy.mask_tables?.length || 0, previous.policy.mask_tables?.length || 0],
+    ["Queue layout", active.policy.queues?.layout || "Not configured", previous.policy.queues?.layout || "Not configured"],
+    ["Enqueue ladder", ladder(active, "enqueue"), ladder(previous, "enqueue")],
+    ["Dispatch ladder", ladder(active, "dispatch"), ladder(previous, "dispatch")],
+  ];
+  return {
+    activeLabel: label("Active", active),
+    previousLabel: label("Previous", previous),
+    comparable: true,
+    rows: values.map(([name, activeValue, previousValue]) => ({
+      name,
+      active: String(activeValue ?? "Unknown"),
+      previous: String(previousValue ?? "Unknown"),
+      changed: String(activeValue ?? "Unknown") !== String(previousValue ?? "Unknown"),
+    })),
+  };
 }
 
 export function fieldReferenceGroups(reference) {
@@ -578,6 +745,21 @@ export function schedulerCommandPreview(request, preservedArgs = []) {
   return args.join(" ");
 }
 
+export function launchDiff(current, proposed) {
+  const fields = [
+    ["policy_id", "Policy"],
+    ["fairness", "Fairness"],
+    ["callback_timing_sample_rate", "Callback sample rate"],
+    ["exit_dump_len", "Exit dump length"],
+    ["verbose", "Verbose logging"],
+  ];
+  return fields.flatMap(([field, name]) => {
+    const before = field === "verbose" ? Boolean(current?.[field]) : current?.[field] ?? null;
+    const after = field === "verbose" ? Boolean(proposed?.[field]) : proposed?.[field] ?? null;
+    return Object.is(before, after) ? [] : [{ name, before, after }];
+  });
+}
+
 export function schedulerCurrentCommand(control) {
   if (!control) {
     return "Command line unavailable.";
@@ -601,13 +783,41 @@ export function schedulerSettingModels(settings) {
   };
   return (settings || []).map((setting) => {
     const changeMode = setting.change_mode === "dynamic" ? "dynamic" : "reload";
+    const effective = setting.effective ?? setting.value ?? null;
+    const launchOverride = setting.launch_override ?? null;
+    const overrideValue = setting.name === "stats_reset"
+      ? "—"
+      : launchOverride == null
+        ? "Omitted; Snake default applies"
+        : formatSchedulerSettingValue(setting.name, launchOverride);
     return {
       name: labels[setting.name] || String(setting.name || "Unknown setting"),
-      value: String(setting.value ?? "Unavailable"),
+      effectiveValue: effective == null
+        ? "Not observed"
+        : formatSchedulerSettingValue(setting.name, effective),
+      overrideValue,
+      runtimeObserved: Boolean(setting.runtime_observed),
+      differs: effective != null
+        && launchOverride != null
+        && String(effective) !== String(launchOverride),
       changeMode,
       changeLabel: changeMode === "dynamic" ? "Dynamic" : "Reload required",
     };
   });
+}
+
+function formatSchedulerSettingValue(name, value) {
+  if (name === "fairness") {
+    return String(value).toUpperCase();
+  }
+  if (name === "callback_timing_sample_rate") {
+    const rate = Number(value);
+    return rate === 0 ? "Off" : `1 / ${rate.toLocaleString()}`;
+  }
+  if (name === "verbose") {
+    return value ? "Enabled" : "Disabled";
+  }
+  return String(value);
 }
 
 export function statsResetDisabled(control, pending) {
@@ -730,4 +940,29 @@ export function queueTopologyModel(fairness, topology, onlineCpus = null) {
     .sort((left, right) => left.cpu - right.cpu);
   model.routesComplete = model.cpuRoutes.length === expectedCpuCount;
   return model;
+}
+
+export function cellQueueFacts(topologyModel, cellId) {
+  const cell = (topologyModel?.cells || [])
+    .find((candidate) => Number(candidate.external_id) === Number(cellId));
+  if (!cell) {
+    return {
+      configured: false,
+      primaryCpus: [],
+      borrowableCpus: [],
+      clock: "Not configured",
+      weight: null,
+      normalDsqs: [],
+    };
+  }
+  return {
+    configured: true,
+    primaryCpus: [...(cell.primary_cpus || [])],
+    borrowableCpus: [...(cell.borrowable_cpus || [])],
+    clock: `cell:${cell.clock_index}`,
+    weight: cell.cpu_weight ?? null,
+    normalDsqs: (topologyModel.normalQueues || [])
+      .filter((queue) => Number(queue.cell_id) === Number(cellId))
+      .map((queue) => queue.dsq),
+  };
 }

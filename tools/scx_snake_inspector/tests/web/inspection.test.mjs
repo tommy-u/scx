@@ -45,6 +45,124 @@ test("inspection routes default to activity and accept every inspector view", ()
   assert.equal(routeFromHash("#/unknown"), "activity");
 });
 
+test("runtime contexts match only within the same scheduler attachment and policy generation", () => {
+  assert.equal(typeof inspectionState.contextsMatch, "function");
+  if (typeof inspectionState.contextsMatch !== "function") {
+    return;
+  }
+
+  const current = { scheduler_attach_seq: 24, policy_generation: 2 };
+  assert.equal(inspectionState.contextsMatch(current, { ...current }), true);
+  assert.equal(
+    inspectionState.contextsMatch(current, {
+      scheduler_attach_seq: 25,
+      policy_generation: 2,
+    }),
+    false,
+  );
+  assert.equal(
+    inspectionState.contextsMatch(current, {
+      scheduler_attach_seq: 24,
+      policy_generation: 3,
+    }),
+    false,
+  );
+  assert.equal(
+    inspectionState.contextsMatch(current, {
+      scheduler_attach_seq: 24,
+      policy_generation: null,
+    }),
+    true,
+  );
+});
+
+test("runtime context model distinguishes scheduler attachment from policy generation", () => {
+  assert.equal(typeof inspectionState.runtimeContextModel, "function");
+  if (typeof inspectionState.runtimeContextModel !== "function") {
+    return;
+  }
+
+  const context = {
+    scheduler_attach_seq: 24,
+    scheduler_active: true,
+    policy_generation: 2,
+    active_slot: 1,
+    fairness: "vtime",
+    callback_sample_rate: 64,
+  };
+  assert.deepEqual(
+    inspectionState.runtimeContextModel({
+      snapshot: { context },
+      inspection: { context },
+      control: { context, policy_id: "cell-min-vtime.toml" },
+    }),
+    {
+      synchronizing: false,
+      statusLabel: "Snake active · Attach #24",
+      detailLabel: "cell-min-vtime.toml · VTIME · policy gen 2 · slot 1 · sampling 1/64",
+    },
+  );
+
+  assert.equal(
+    inspectionState.runtimeContextModel({
+      snapshot: { context },
+      inspection: {
+        context: { ...context, policy_generation: 3 },
+      },
+      control: { context, policy_id: "cell-min-vtime.toml" },
+    }).synchronizing,
+    true,
+  );
+});
+
+test("freshness model retains data but labels failed or overdue polling as stale", () => {
+  assert.equal(typeof inspectionState.freshnessModel, "function");
+  if (typeof inspectionState.freshnessModel !== "function") {
+    return;
+  }
+
+  assert.deepEqual(
+    inspectionState.freshnessModel({
+      hasData: true,
+      error: null,
+      lastSuccessAt: 9_500,
+      pollIntervalMs: 1_000,
+      now: 10_000,
+    }),
+    { state: "fresh", label: "Updated just now", detail: null },
+  );
+  assert.deepEqual(
+    inspectionState.freshnessModel({
+      hasData: true,
+      error: "request failed",
+      lastSuccessAt: 8_000,
+      pollIntervalMs: 1_000,
+      now: 10_000,
+    }),
+    { state: "stale", label: "Stale · updated 2s ago", detail: "request failed" },
+  );
+  assert.equal(
+    inspectionState.freshnessModel({
+      hasData: true,
+      error: null,
+      lastSuccessAt: 7_000,
+      pollIntervalMs: 1_000,
+      now: 10_000,
+    }).state,
+    "stale",
+  );
+  assert.deepEqual(
+    inspectionState.freshnessModel({
+      hasData: false,
+      error: "request failed",
+      lastSuccessAt: 0,
+      pollIntervalMs: 1_000,
+      now: 10_000,
+    }),
+    { state: "unavailable", label: "Unavailable", detail: "request failed" },
+  );
+});
+
 test("feedback entries keep first-entry order and one draft per element", () => {
   assert.equal(typeof inspectionState.updateFeedbackEntries, "function");
   if (typeof inspectionState.updateFeedbackEntries !== "function") {
@@ -233,29 +351,56 @@ test("scheduler command preview shows required policy and selected flags", () =>
   );
 });
 
-test("scheduler settings distinguish dynamic changes from reload requirements", () => {
+test("scheduler settings separate effective runtime values from launch overrides", () => {
   assert.deepEqual(
     schedulerSettingModels([
-      { name: "callback_timing_sample_rate", value: 64, change_mode: "dynamic" },
-      { name: "fairness", value: "fifo", change_mode: "reload" },
-      { name: "stats_reset", value: "On demand", change_mode: "dynamic" },
+      {
+        name: "callback_timing_sample_rate",
+        effective: 128,
+        launch_override: 64,
+        runtime_observed: true,
+        change_mode: "dynamic",
+      },
+      {
+        name: "fairness",
+        effective: "vtime",
+        launch_override: null,
+        runtime_observed: true,
+        change_mode: "reload",
+      },
+      {
+        name: "stats_reset",
+        effective: "On demand",
+        launch_override: null,
+        runtime_observed: false,
+        change_mode: "dynamic",
+      },
     ]),
     [
       {
         name: "Callback sample rate",
-        value: "64",
+        effectiveValue: "1 / 128",
+        overrideValue: "1 / 64",
+        runtimeObserved: true,
+        differs: true,
         changeMode: "dynamic",
         changeLabel: "Dynamic",
       },
       {
         name: "Fairness",
-        value: "fifo",
+        effectiveValue: "VTIME",
+        overrideValue: "Omitted; Snake default applies",
+        runtimeObserved: true,
+        differs: false,
         changeMode: "reload",
         changeLabel: "Reload required",
       },
       {
         name: "Stats reset",
-        value: "On demand",
+        effectiveValue: "On demand",
+        overrideValue: "—",
+        runtimeObserved: false,
+        differs: false,
         changeMode: "dynamic",
         changeLabel: "Dynamic",
       },
@@ -376,6 +521,11 @@ test("control page exposes managed launch controls and settings table", () => {
     assert.match(page, new RegExp(control), `missing ${control}`);
   }
   assert.match(page, /value="eevdf"/i);
+  assert.match(page, /Launch argument overrides/);
+  assert.match(page, /Override fairness/);
+  assert.match(page, /Override callback sampling/);
+  assert.match(page, /Effective now/);
+  assert.match(page, /Launch override/);
 });
 
 test("control client uses the scheduler lifecycle endpoints", () => {
@@ -389,6 +539,30 @@ test("control client uses the scheduler lifecycle endpoints", () => {
   assert.match(script, /schedulerMutation\("\/api\/scheduler\/stop"/);
   assert.match(script, /fetch\("\/api\/stats\/reset"/);
   assert.match(script, /confirm\("Reset all inspector and Snake statistics\?"\)/);
+});
+
+test("the global runtime banner names attachment and policy generations unambiguously", () => {
+  const page = readFileSync(
+    new URL("../../src/web/index.html", import.meta.url),
+    "utf8",
+  );
+  const script = readFileSync(
+    new URL("../../src/web/app.js", import.meta.url),
+    "utf8",
+  );
+  assert.match(page, /id="runtimeContextDetail"/);
+  assert.match(script, /runtimeContextModel\(/);
+  assert.doesNotMatch(script, /Snake active \| generation/);
+});
+
+test("poll failures retain the last successful callback and inspection payloads", () => {
+  const script = readFileSync(
+    new URL("../../src/web/app.js", import.meta.url),
+    "utf8",
+  );
+  assert.doesNotMatch(script, /catch \(error\) \{\s*state\.callbackTiming = null;/);
+  assert.doesNotMatch(script, /catch \(error\) \{\s*state\.inspection = null;/);
+  assert.match(script, /freshnessModel\(/);
 });
 
 test("policy library separates dynamic, restart-required, and invalid choices", () => {
@@ -416,23 +590,46 @@ test("policy library separates dynamic, restart-required, and invalid choices", 
     {
       active: true,
       policy_id: "basic.toml",
+      context: { fairness: "fifo" },
       policies: [
-        { id: "basic.toml", name: "Basic", change_mode: "dynamic", reload_reasons: [] },
-        { id: "random.toml", name: "Random", change_mode: "dynamic", reload_reasons: [] },
+        {
+          id: "basic.toml",
+          name: "Basic",
+          apply_mode: "live",
+          reasons: [],
+          supported_fairness: ["fifo", "vtime", "eevdf"],
+        },
+        {
+          id: "random.toml",
+          name: "Random",
+          apply_mode: "live",
+          reasons: [],
+          supported_fairness: ["fifo", "vtime", "eevdf"],
+        },
         {
           id: "cell.toml",
           name: "Cell",
-          change_mode: "reload",
-          reload_reasons: [
-            "candidate changes the attachment-time queue topology; restart Snake to apply it",
-            "candidate changes attachment-time task membership; restart Snake to apply it",
+          apply_mode: "restart",
+          reasons: [
+            {
+              code: "dsq_topology",
+              label: "DSQ topology changes",
+              detail: "candidate changes the attachment-time queue topology",
+            },
+            {
+              code: "task_membership",
+              label: "Task membership changes",
+              detail: "candidate changes attachment-time task membership",
+            },
           ],
+          supported_fairness: ["vtime"],
         },
         {
           id: "broken.toml",
           name: "Broken",
-          change_mode: "invalid",
-          reload_reasons: ["missing rung"],
+          apply_mode: "invalid",
+          reasons: [{ code: "validation_failed", label: "Policy validation failed", detail: "missing rung" }],
+          supported_fairness: ["fifo", "vtime", "eevdf"],
         },
       ],
     },
@@ -456,16 +653,16 @@ test("policy library separates dynamic, restart-required, and invalid choices", 
       },
       {
         id: "random.toml",
-        changeLabel: "Dynamic",
+        changeLabel: "Applies live",
         actionKind: "activate",
-        actionLabel: "Activate",
+        actionLabel: "Apply live",
         disabled: false,
       },
       {
         id: "cell.toml",
         changeLabel: "Restart required",
         actionKind: "lifecycle",
-        actionLabel: "Select for restart",
+        actionLabel: "Restart Snake",
         disabled: false,
       },
       {
@@ -480,17 +677,43 @@ test("policy library separates dynamic, restart-required, and invalid choices", 
 
   const invalid = models.find((model) => model.id === "broken.toml");
   assert.equal(invalid.summary, null);
-  assert.equal(invalid.hoverDetail, "missing rung");
+  assert.equal(invalid.reasons[0].detail, "missing rung");
   const restartRequired = models.find((model) => model.id === "cell.toml");
   assert.equal(restartRequired.summary, null);
-  assert.deepEqual(restartRequired.restartReasons, [
-    "DSQ topology changes.",
-    "Task membership changes.",
+  assert.deepEqual(restartRequired.reasons.map((reason) => reason.code), [
+    "dsq_topology",
+    "task_membership",
   ]);
-  assert.equal(
-    restartRequired.hoverDetail,
-    "Restart required:\n• DSQ topology changes.\n• Task membership changes.",
-  );
+});
+
+test("policy library resolves at most one active policy when sources are duplicated", () => {
+  const catalog = {
+    policies: [
+      { id: "copy-a.toml", name: "Copy A", source: "same source", summary: "One rung" },
+      { id: "copy-b.toml", name: "Copy B", source: "same source", summary: "One rung" },
+    ],
+    invalid: [],
+  };
+  const policies = [
+    { id: "copy-a.toml", name: "Copy A", change_mode: "dynamic", reload_reasons: [] },
+    { id: "copy-b.toml", name: "Copy B", change_mode: "dynamic", reload_reasons: [] },
+  ];
+
+  const authoritative = policyLibraryModels(
+    { ...catalog },
+    { active: true, policy_id: "copy-b.toml", launch: { fairness: "fifo" }, policies },
+    "same source",
+    "fifo",
+  ).filter((policy) => policy.active);
+  assert.deepEqual(authoritative.map((policy) => policy.id), ["copy-b.toml"]);
+
+  const ambiguousFallback = policyLibraryModels(
+    { ...catalog },
+    { active: true, policy_id: null, launch: { fairness: "fifo" }, policies },
+    "same source",
+    "fifo",
+  ).filter((policy) => policy.active);
+  assert.deepEqual(ambiguousFallback, []);
 });
 
 test("policy library filters policies beneath the selected fairness approach", () => {
@@ -520,14 +743,16 @@ test("policy library filters policies beneath the selected fairness approach", (
       {
         id: "placement.toml",
         name: "Placement",
-        change_mode: "dynamic",
-        reload_reasons: [],
+        apply_mode: "live",
+        reasons: [],
+        supported_fairness: ["fifo", "vtime", "eevdf"],
       },
       {
         id: "cell-queues.toml",
         name: "Cell queues",
-        change_mode: "reload",
-        reload_reasons: ["restart Snake to apply it"],
+        apply_mode: "restart",
+        reasons: [{ code: "dsq_topology", label: "DSQ topology changes", detail: "restart required" }],
+        supported_fairness: ["vtime"],
       },
     ],
   };
@@ -546,12 +771,102 @@ test("policy library filters policies beneath the selected fairness approach", (
   );
   assert.equal(
     policyLibraryModels(catalog, control, null, "eevdf")[0].actionLabel,
-    "Select for restart",
+    "Restart Snake",
   );
-  assert.equal(
-    policyLibraryModels(catalog, control, null, "eevdf")[0].hoverDetail,
-    "Restart required:\n• Fairness approach changes from FIFO to EEVDF.",
+  assert.deepEqual(
+    policyLibraryModels(catalog, control, null, "eevdf")[0].reasons[0],
+    {
+      code: "fairness_change",
+      label: "Fairness changes",
+      detail: "Fairness approach changes from FIFO to EEVDF.",
+    },
   );
+});
+
+test("launch diff reports only current-versus-proposed changes", () => {
+  assert.equal(typeof inspectionState.launchDiff, "function");
+  if (typeof inspectionState.launchDiff !== "function") {
+    return;
+  }
+  assert.deepEqual(
+    inspectionState.launchDiff(
+      {
+        policy_id: "basic.toml",
+        fairness: "fifo",
+        callback_timing_sample_rate: 64,
+        verbose: false,
+      },
+      {
+        policy_id: "cell.toml",
+        fairness: "vtime",
+        callback_timing_sample_rate: 64,
+        verbose: false,
+      },
+    ),
+    [
+      { name: "Policy", before: "basic.toml", after: "cell.toml" },
+      { name: "Fairness", before: "fifo", after: "vtime" },
+    ],
+  );
+});
+
+test("Policy exposes a tuning context strip and accessible change reasons", () => {
+  const page = readFileSync(
+    new URL("../../src/web/index.html", import.meta.url),
+    "utf8",
+  );
+  const script = readFileSync(
+    new URL("../../src/web/app.js", import.meta.url),
+    "utf8",
+  );
+  assert.match(page, /id="policyContextBar"/);
+  assert.match(page, /id="policyCandidateAction"/);
+  assert.match(script, /policy-reason-details/);
+  assert.match(script, /data-render-key="policy-choice:/);
+  assert.doesNotMatch(script, /policy\.hoverDetail \? `title=/);
+});
+
+test("policy slot comparison distinguishes active and previous structural state", () => {
+  assert.equal(typeof inspectionState.policySlotComparison, "function");
+  if (typeof inspectionState.policySlotComparison !== "function") {
+    return;
+  }
+  const comparison = inspectionState.policySlotComparison([
+    {
+      slot: 0,
+      state: "inactive",
+      generation: 4,
+      policy: {
+        rungs: [{ operation: "pick_idle" }],
+        fallback: { selected: { label: "Previous CPU" } },
+        mask_tables: [],
+        queues: null,
+      },
+    },
+    {
+      slot: 1,
+      state: "active",
+      generation: 5,
+      policy: {
+        rungs: [{ operation: "pick_idle" }, { operation: "pick_any" }],
+        fallback: { selected: { label: "Any allowed CPU" } },
+        mask_tables: [{ id: 0 }],
+        queues: {
+          layout: "cell",
+          enqueue: [{ operation: "cell" }],
+          dispatch: [{ operation: "min_vtime(cell,affinity)" }],
+        },
+      },
+    },
+  ]);
+
+  assert.equal(comparison.activeLabel, "Active · slot 1");
+  assert.equal(comparison.previousLabel, "Previous · slot 0");
+  assert.deepEqual(
+    comparison.rows.filter((row) => row.changed).map((row) => row.name),
+    ["Generation", "Idle rungs", "Fallback", "Mask tables", "Queue layout", "Enqueue ladder", "Dispatch ladder"],
+  );
+  assert.equal(comparison.rows.find((row) => row.name === "Queue layout").previous, "Not configured");
 });
 
 test("policy library renders fairness parents and stacks status over actions", () => {
@@ -566,7 +881,7 @@ test("policy library renders fairness parents and stacks status over actions", (
 
   assert.match(script, /data-policy-fairness=/);
   assert.match(script, /option\.active \? " active"/);
-  assert.match(script, /class="change-mode \$\{policy\.changeMode\}"[^>]*title=/);
+  assert.match(script, /class="policy-reason-details"/);
   assert.match(script, /class="policy-choice-actions"/);
   assert.match(stylesheet, /\.policy-fairness-options\s*\{/);
   assert.match(stylesheet, /\.policy-fairness-option\.active\s*\{/);
@@ -692,6 +1007,14 @@ test("callback page contains the fine timing panel host", () => {
   );
   assert.match(page, /id="fineTimingPanels"/);
   assert.match(page, /id="fineTimingNotice"/);
+  assert.match(page, /id="callbackThresholdLegend"/);
+  assert.match(page, /1,000 ns/);
+  const script = readFileSync(
+    new URL("../../src/web/app.js", import.meta.url),
+    "utf8",
+  );
+  assert.match(script, /capture\.started_at_ms/);
+  assert.match(script, /capture\.stopped_at_ms/);
 });
 
 test("field references keep context-valid and other ABI choices separate", () => {
@@ -918,6 +1241,15 @@ test("resolved queue topology model labels cells and DSQs for display", () => {
   assert.equal(model.cells[1].label, "Cell 7");
   assert.equal(model.normalQueues[0].dsq, "0x20000000");
   assert.equal(model.cpuRoutes[0].affinityDsq, "0x10000000");
+  assert.equal(typeof inspectionState.cellQueueFacts, "function");
+  assert.deepEqual(inspectionState.cellQueueFacts(model, 7), {
+    configured: true,
+    primaryCpus: [1],
+    borrowableCpus: [0],
+    clock: "cell:1",
+    weight: 2,
+    normalDsqs: [],
+  });
 });
 
 test("CPU masks are compacted into readable ranges", () => {

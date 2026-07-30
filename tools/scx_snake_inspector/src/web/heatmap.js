@@ -24,10 +24,50 @@ export function buildMatrix(topology, cells, orderMode) {
   }
 
   let max = 0;
+  let minPositive = Number.POSITIVE_INFINITY;
   for (const value of values) {
     max = Math.max(max, value);
+    if (value > 0) {
+      minPositive = Math.min(minPositive, value);
+    }
   }
-  return { order, positions, values, max, total };
+  return {
+    order,
+    positions,
+    values,
+    max,
+    minPositive: Number.isFinite(minPositive) ? minPositive : 0,
+    total,
+  };
+}
+
+export function migrationLocality(topology, from, to) {
+  const cpus = new Map((topology?.cpus || []).map((cpu) => [cpu.cpu, cpu]));
+  const source = cpus.get(from);
+  const destination = cpus.get(to);
+  if (!source || !destination) {
+    return { code: "unknown", label: "Topology unknown" };
+  }
+  if (from === to) {
+    return { code: "same_cpu", label: "Same CPU" };
+  }
+  if (source.core === destination.core
+      && source.package === destination.package
+      && source.node === destination.node) {
+    return { code: "same_core", label: "Same core" };
+  }
+  if (source.llc === destination.llc
+      && source.package === destination.package
+      && source.node === destination.node) {
+    return { code: "same_llc", label: "Same LLC" };
+  }
+  if (source.package === destination.package && source.node === destination.node) {
+    return { code: "same_package", label: "Same package" };
+  }
+  if (source.node === destination.node) {
+    return { code: "same_node", label: "Same NUMA node" };
+  }
+  return { code: "cross_node", label: "Cross-NUMA" };
 }
 
 export function buildCpuUsage(topology, entries, orderMode) {

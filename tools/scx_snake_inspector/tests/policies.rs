@@ -41,12 +41,14 @@ fn policy_library_lists_only_direct_regular_toml_files_and_separates_invalid_ent
             rung_count: 1,
             mask_table_count: 0,
             cell_count: 0,
+            queue_policy: true,
             summary: "1 rung, 0 mask tables, 0 cells".into(),
         })
     });
 
     assert_eq!(catalog.policies.len(), 1);
     assert_eq!(catalog.policies[0].id, "balanced.toml");
+    assert!(catalog.policies[0].queue_policy);
     assert_eq!(catalog.invalid.len(), 1);
     assert_eq!(catalog.invalid[0].id, "broken.toml");
     let serialized = serde_json::to_value(&catalog).unwrap();

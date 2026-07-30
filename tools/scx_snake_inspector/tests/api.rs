@@ -155,6 +155,33 @@ fn fine_timing_snapshot() -> Value {
 }
 
 #[test]
+fn runtime_context_tracks_scheduler_attachment_and_policy_generation() {
+    let dashboard = dashboard();
+    dashboard.ingest(1_000, &BTreeMap::new());
+    dashboard.set_scheduler("snake", true, 24);
+    let mut inspection = fine_timing_snapshot();
+    inspection["active_slot"] = json!(0);
+    inspection["fairness"] = json!({"mode_name": "vtime"});
+    dashboard.set_inspection_at(1_000, Some(inspection), None);
+
+    let snapshot = dashboard.snapshot(1_000).unwrap();
+    assert_eq!(snapshot.context.scheduler_attach_seq, 24);
+    assert!(snapshot.context.scheduler_active);
+    assert_eq!(snapshot.context.policy_generation, Some(7));
+    assert_eq!(snapshot.context.active_slot, Some(0));
+    assert_eq!(snapshot.context.fairness.as_deref(), Some("vtime"));
+    assert_eq!(snapshot.context.callback_sample_rate, Some(64));
+    assert_eq!(snapshot.context.observed_at_ms, Some(1_000));
+
+    assert_eq!(dashboard.inspection().context, snapshot.context);
+    assert_eq!(
+        dashboard.callback_timing_lifetime().context,
+        snapshot.context
+    );
+    assert_eq!(dashboard.fine_timing().context, snapshot.context);
+}
+
+#[test]
 fn dashboard_stats_reset_rebases_all_histories_without_changing_scope() {
     let dashboard = dashboard();
     let pair = CpuPair::new(0, 1);
@@ -447,6 +474,21 @@ async fn scheduler_control_preserves_omitted_launch_flags() {
 
     assert_eq!(body["launch"]["fairness"], Value::Null);
     assert_eq!(body["launch"]["callback_timing_sample_rate"], Value::Null);
+    let settings = body["settings"].as_array().unwrap();
+    let fairness = settings
+        .iter()
+        .find(|setting| setting["name"] == "fairness")
+        .unwrap();
+    assert_eq!(fairness["effective"], "fifo");
+    assert_eq!(fairness["launch_override"], Value::Null);
+    assert_eq!(fairness["runtime_observed"], true);
+    let sampling = settings
+        .iter()
+        .find(|setting| setting["name"] == "callback_timing_sample_rate")
+        .unwrap();
+    assert_eq!(sampling["effective"], 64);
+    assert_eq!(sampling["launch_override"], Value::Null);
+    assert_eq!(sampling["runtime_observed"], true);
 }
 
 #[tokio::test]
@@ -484,12 +526,13 @@ async fn scheduler_control_uses_external_argv_without_inventing_launch_flags() {
     std::os::unix::fs::symlink(&binary, process.join("exe")).unwrap();
     let launcher = SnakeLauncher::with_paths(&binary, &policies, &ops, &proc_root).unwrap();
     let dashboard = dashboard();
+    dashboard.set_scheduler("snake_test", true, 24);
     dashboard.set_inspection(
         Some(json!({
             "active_slot": 0,
             "callback_timing_sample_rate": 64,
             "fairness": {"mode_name": "vtime"},
-            "slots": [{"slot": 0, "policy": {"source": "basic"}}]
+            "slots": [{"slot": 0, "generation": 7, "policy": {"source": "basic"}}]
         })),
         None,
     );
@@ -524,6 +567,9 @@ async fn scheduler_control_uses_external_argv_without_inventing_launch_flags() {
     );
     assert_eq!(body["launch"]["callback_timing_sample_rate"], Value::Null);
     assert_eq!(body["launch"]["preserved_args"], json!(["--stats", "1"]));
+    assert_eq!(body["context"]["scheduler_attach_seq"], 24);
+    assert_eq!(body["context"]["policy_generation"], 7);
+    assert_eq!(body["context"]["fairness"], "vtime");
 
     child.kill().unwrap();
     child.wait().unwrap();
@@ -532,22 +578,41 @@ async fn scheduler_control_uses_external_argv_without_inventing_launch_flags() {
 #[tokio::test]
 async fn scheduler_control_distinguishes_dynamic_restart_and_invalid_policies() {
     let (root, launcher) = launcher_fixture();
-    for name in ["cell.toml", "broken.toml"] {
+    for name in [
+        "cell.toml",
+        "broken.toml",
+        "enqueue.toml",
+        "dispatch.toml",
+        "legacy-queue.toml",
+    ] {
         fs::write(root.path().join("policies").join(name), "candidate").unwrap();
     }
     fs::write(root.path().join("ops"), "snake_test\n").unwrap();
     let dashboard = dashboard();
     dashboard.set_policy_catalog(
         Some(PolicyCatalog {
-            policies: vec![PolicyChoice {
-                id: "basic.toml".into(),
-                name: "basic".into(),
-                source: "basic".into(),
-                rung_count: 1,
-                mask_table_count: 0,
-                cell_count: 0,
-                summary: "dynamic".into(),
-            }],
+            policies: vec![
+                PolicyChoice {
+                    id: "basic.toml".into(),
+                    name: "basic".into(),
+                    source: "basic".into(),
+                    rung_count: 1,
+                    mask_table_count: 0,
+                    cell_count: 0,
+                    queue_policy: false,
+                    summary: "dynamic".into(),
+                },
+                PolicyChoice {
+                    id: "legacy-queue.toml".into(),
+                    name: "legacy queue".into(),
+                    source: "[ queues ] # old Snake response".into(),
+                    rung_count: 1,
+                    mask_table_count: 0,
+                    cell_count: 1,
+                    queue_policy: false,
+                    summary: "legacy queue response".into(),
+                },
+            ],
             invalid: vec![
                 InvalidPolicy {
                     id: "cell.toml".into(),
@@ -561,6 +626,20 @@ async fn scheduler_control_distinguishes_dynamic_restart_and_invalid_policies() 
                     name: "broken".into(),
                     source: "candidate".into(),
                     error: "compiling candidate policy: missing rung".into(),
+                },
+                InvalidPolicy {
+                    id: "enqueue.toml".into(),
+                    name: "enqueue".into(),
+                    source: "[queues]".into(),
+                    error: "cannot remove active queue enqueue target `cell` during live replacement"
+                        .into(),
+                },
+                InvalidPolicy {
+                    id: "dispatch.toml".into(),
+                    name: "dispatch".into(),
+                    source: "[queues]".into(),
+                    error: "cannot remove active queue dispatch source `affinity` during live replacement"
+                        .into(),
                 },
             ],
         }),
@@ -598,6 +677,40 @@ async fn scheduler_control_distinguishes_dynamic_restart_and_invalid_policies() 
     assert_eq!(modes["basic.toml"], "dynamic");
     assert_eq!(modes["cell.toml"], "reload");
     assert_eq!(modes["broken.toml"], "invalid");
+    assert_eq!(modes["enqueue.toml"], "reload");
+    assert_eq!(modes["dispatch.toml"], "reload");
+    let policy = |id| {
+        body["policies"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|policy| policy["id"] == id)
+            .unwrap()
+    };
+    assert_eq!(policy("basic.toml")["apply_mode"], "live");
+    assert_eq!(
+        policy("basic.toml")["supported_fairness"],
+        json!(["fifo", "vtime", "eevdf"])
+    );
+    assert_eq!(policy("cell.toml")["apply_mode"], "restart");
+    assert_eq!(policy("cell.toml")["reasons"][0]["code"], "dsq_topology");
+    assert_eq!(policy("broken.toml")["apply_mode"], "invalid");
+    assert_eq!(
+        policy("broken.toml")["reasons"][0]["code"],
+        "validation_failed"
+    );
+    assert_eq!(
+        policy("legacy-queue.toml")["supported_fairness"],
+        json!(["vtime"])
+    );
+    assert_eq!(
+        policy("enqueue.toml")["reasons"][0]["code"],
+        "enqueue_targets"
+    );
+    assert_eq!(
+        policy("dispatch.toml")["reasons"][0]["code"],
+        "dispatch_sources"
+    );
 
     let rejected = router(context.clone())
         .oneshot(
@@ -635,6 +748,110 @@ async fn scheduler_control_distinguishes_dynamic_restart_and_invalid_policies() 
         .unwrap()
         .iter()
         .all(|policy| policy["change_mode"] == "reload"));
+}
+
+#[tokio::test]
+async fn scheduler_restart_rejects_unsupported_fairness_without_stopping_snake() {
+    let (root, launcher) = launcher_fixture();
+    fs::write(root.path().join("policies/queue.toml"), "[queues]\n").unwrap();
+    let dashboard = dashboard();
+    dashboard.set_policy_catalog(
+        Some(PolicyCatalog {
+            policies: vec![
+                PolicyChoice {
+                    id: "basic.toml".into(),
+                    name: "basic".into(),
+                    source: "basic".into(),
+                    rung_count: 1,
+                    mask_table_count: 0,
+                    cell_count: 0,
+                    queue_policy: false,
+                    summary: "placement".into(),
+                },
+                PolicyChoice {
+                    id: "queue.toml".into(),
+                    name: "queue".into(),
+                    source: "[queues]".into(),
+                    rung_count: 1,
+                    mask_table_count: 0,
+                    cell_count: 1,
+                    queue_policy: true,
+                    summary: "queue topology".into(),
+                },
+            ],
+            invalid: Vec::new(),
+        }),
+        None,
+    );
+    let (tx, _rx) = mpsc::channel();
+    let cgroup_root = tempfile::tempdir().unwrap();
+    let context = ApiContext::new(dashboard, tx, "secret", cgroup_root.path().to_path_buf())
+        .with_launcher(launcher);
+
+    let rejected_start = router(context.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/scheduler/start")
+                .header("host", "127.0.0.1")
+                .header("content-type", "application/json")
+                .header(CSRF_HEADER, "secret")
+                .body(Body::from(r#"{"policy_id":"queue.toml","verbose":false}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(rejected_start.status(), StatusCode::BAD_REQUEST);
+
+    let started = router(context.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/scheduler/start")
+                .header("host", "127.0.0.1")
+                .header("content-type", "application/json")
+                .header(CSRF_HEADER, "secret")
+                .body(Body::from(r#"{"policy_id":"basic.toml","verbose":false}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(started.status(), StatusCode::OK);
+    let started: Value =
+        serde_json::from_slice(&started.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    let original_pid = started["pid"].as_u64().unwrap();
+
+    let rejected = router(context.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/scheduler/restart")
+                .header("host", "127.0.0.1")
+                .header("content-type", "application/json")
+                .header(CSRF_HEADER, "secret")
+                .body(Body::from(
+                    r#"{"policy_id":"queue.toml","fairness":"fifo","verbose":false}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+
+    let current = router(context)
+        .oneshot(
+            Request::builder()
+                .uri("/api/scheduler/control")
+                .header("host", "127.0.0.1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let current: Value =
+        serde_json::from_slice(&current.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(current["managed"], true);
+    assert_eq!(current["pid"], original_pid);
 }
 
 #[tokio::test]
@@ -1192,6 +1409,7 @@ async fn policy_catalog_is_readable_and_activation_requires_the_session_token() 
                 rung_count: 1,
                 mask_table_count: 0,
                 cell_count: 0,
+                queue_policy: false,
                 summary: "1 rung, 0 mask tables, 0 cells".into(),
             }],
             invalid: Vec::new(),

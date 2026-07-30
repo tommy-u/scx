@@ -30,6 +30,8 @@ pub struct PolicyValidationResponse {
     pub rung_count: usize,
     pub mask_table_count: usize,
     pub cell_count: usize,
+    #[serde(default)]
+    pub queue_policy: bool,
     pub summary: String,
 }
 
@@ -38,10 +40,12 @@ impl PolicyValidationResponse {
         let rung_count = policy.rungs.len();
         let mask_table_count = policy.mask_tables.len();
         let cell_count = policy.cells.len();
+        let queue_policy = policy.queues.is_some();
         Self {
             rung_count,
             mask_table_count,
             cell_count,
+            queue_policy,
             summary: format!(
                 "{rung_count} {}, {mask_table_count} mask {}, {cell_count} {}",
                 if rung_count == 1 { "rung" } else { "rungs" },
@@ -353,6 +357,25 @@ scope = "task_allowed"
         assert_eq!(response.rung_count, 1);
         assert_eq!(response.mask_table_count, 0);
         assert_eq!(response.summary, "1 rung, 0 mask tables");
+    }
+
+    #[test]
+    fn policy_validation_reports_whether_queue_topology_is_configured() {
+        let placement = policy::compile_policy(INITIAL).unwrap();
+        assert!(!PolicyValidationResponse::from_policy(&placement).queue_policy);
+
+        let queued = policy::compile_policy(
+            r#"
+[queues]
+layout = "cell"
+
+[[rung]]
+operation = "pick_idle"
+scope = "task_allowed"
+"#,
+        )
+        .unwrap();
+        assert!(PolicyValidationResponse::from_policy(&queued).queue_policy);
     }
 
     #[test]

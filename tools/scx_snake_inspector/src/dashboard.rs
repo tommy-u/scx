@@ -32,6 +32,17 @@ pub struct SchedulerView {
     pub enable_seq: u64,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct RuntimeContextView {
+    pub scheduler_attach_seq: u64,
+    pub observed_at_ms: Option<u64>,
+    pub scheduler_active: bool,
+    pub policy_generation: Option<u64>,
+    pub active_slot: Option<u32>,
+    pub fairness: Option<String>,
+    pub callback_sample_rate: Option<u32>,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct CpuUsageView {
     pub cpu: u32,
@@ -42,6 +53,7 @@ pub struct CpuUsageView {
 #[derive(Clone, Debug, Serialize)]
 pub struct InspectionSnapshotView {
     pub sequence: u64,
+    pub context: RuntimeContextView,
     pub error: Option<String>,
     pub snapshot: Option<serde_json::Value>,
 }
@@ -75,6 +87,7 @@ pub struct CallbackTimingRowView {
 #[derive(Clone, Debug, Serialize)]
 pub struct CallbackTimingView {
     pub sequence: u64,
+    pub context: RuntimeContextView,
     pub status: CallbackTimingStatus,
     pub error: Option<String>,
     pub scope: &'static str,
@@ -127,6 +140,7 @@ pub struct FineTimingCaptureView {
 #[derive(Clone, Debug, Serialize)]
 pub struct FineTimingView {
     pub sequence: u64,
+    pub context: RuntimeContextView,
     pub status: FineTimingStatus,
     pub error: Option<String>,
     pub sample_rate: u32,
@@ -136,6 +150,7 @@ pub struct FineTimingView {
 #[derive(Clone, Debug, Serialize)]
 pub struct SnapshotView {
     pub sequence: u64,
+    pub context: RuntimeContextView,
     pub window_ms: u64,
     pub observed_ms: u64,
     pub total: u64,
@@ -228,6 +243,11 @@ impl Dashboard {
 
     pub fn topology(&self) -> Arc<TopologyView> {
         Arc::clone(&self.topology)
+    }
+
+    pub fn runtime_context(&self) -> RuntimeContextView {
+        let live = self.live.read().expect("dashboard lock poisoned");
+        runtime_context(&live)
     }
 
     pub fn ingest(&self, at_ms: u64, counts: &BTreeMap<CpuPair, u64>) {
@@ -413,6 +433,7 @@ impl Dashboard {
         let live = self.live.read().expect("dashboard lock poisoned");
         InspectionSnapshotView {
             sequence: live.inspection_sequence,
+            context: runtime_context(&live),
             error: live.inspection_error.clone(),
             snapshot: live.inspection.clone(),
         }
@@ -491,6 +512,7 @@ impl Dashboard {
         {
             Ok(payload) => FineTimingView {
                 sequence: live.inspection_sequence,
+                context: runtime_context(&live),
                 status: FineTimingStatus::Ready,
                 error: None,
                 sample_rate: payload.sample_rate,
@@ -577,6 +599,7 @@ impl Dashboard {
 
         Ok(SnapshotView {
             sequence: live.sequence,
+            context: runtime_context(&live),
             window_ms,
             observed_ms: view.observed_ms,
             total: view.total,
@@ -597,6 +620,43 @@ impl Dashboard {
 
     pub fn subscribe(&self) -> watch::Receiver<u64> {
         self.updates.subscribe()
+    }
+}
+
+fn runtime_context(live: &LiveData) -> RuntimeContextView {
+    let inspection = live.inspection.as_ref();
+    let active_slot = inspection
+        .and_then(|snapshot| snapshot.get("active_slot"))
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|slot| u32::try_from(slot).ok());
+    let policy_generation = active_slot.and_then(|active_slot| {
+        inspection?
+            .get("slots")?
+            .as_array()?
+            .iter()
+            .find(|slot| {
+                slot.get("slot").and_then(serde_json::Value::as_u64) == Some(u64::from(active_slot))
+            })?
+            .get("generation")?
+            .as_u64()
+    });
+    let fairness = inspection
+        .and_then(|snapshot| snapshot.pointer("/fairness/mode_name"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
+    let callback_sample_rate = inspection
+        .and_then(|snapshot| snapshot.get("callback_timing_sample_rate"))
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|rate| u32::try_from(rate).ok());
+
+    RuntimeContextView {
+        scheduler_attach_seq: live.scheduler.enable_seq,
+        observed_at_ms: (live.callback_timing_now_ms > 0).then_some(live.callback_timing_now_ms),
+        scheduler_active: live.scheduler.active,
+        policy_generation,
+        active_slot,
+        fairness,
+        callback_sample_rate,
     }
 }
 
@@ -651,6 +711,7 @@ fn empty_fine_timing_view(
 ) -> FineTimingView {
     FineTimingView {
         sequence: live.inspection_sequence,
+        context: runtime_context(live),
         status,
         error,
         sample_rate: 0,
@@ -685,6 +746,7 @@ fn callback_timing_view(
     });
     CallbackTimingView {
         sequence: live.inspection_sequence,
+        context: runtime_context(live),
         status: live.callback_timing_status,
         error: live.callback_timing_error.clone(),
         scope,

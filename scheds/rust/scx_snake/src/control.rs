@@ -497,6 +497,7 @@ scope = "task_allowed"
                         rung_count: 1,
                         mask_table_count: 0,
                         cell_count: 0,
+                        queue_policy: false,
                         summary: "1 rung, 0 mask tables, 0 cells".into(),
                     },
                 )))

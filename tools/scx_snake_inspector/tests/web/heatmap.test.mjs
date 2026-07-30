@@ -45,7 +45,28 @@ test("buildMatrix places sparse CPU IDs in the selected order", () => {
   assert.equal(result.values[0 * 4 + 2], 7);
   assert.equal(result.values[3 * 4 + 0], 4);
   assert.equal(result.max, 7);
+  assert.equal(result.minPositive, 4);
   assert.equal(result.total, 11);
+});
+
+test("migration locality describes the narrowest shared CPU boundary", () => {
+  assert.equal(typeof heatmapModule.migrationLocality, "function");
+  if (typeof heatmapModule.migrationLocality !== "function") {
+    return;
+  }
+  const extended = {
+    ...topology,
+    cpus: [
+      ...topology.cpus,
+      { cpu: 4, node: 0, package: 0, llc: 0, core: 2 },
+    ],
+  };
+  assert.equal(heatmapModule.migrationLocality(extended, 1, 1).code, "same_cpu");
+  assert.equal(heatmapModule.migrationLocality(extended, 1, 2).code, "same_core");
+  assert.equal(heatmapModule.migrationLocality(extended, 1, 4).code, "same_llc");
+  assert.equal(heatmapModule.migrationLocality(extended, 1, 3).code, "same_package");
+  assert.equal(heatmapModule.migrationLocality(extended, 3, 0).code, "cross_node");
+  assert.equal(heatmapModule.migrationLocality(extended, 99, 1).code, "unknown");
 });
 
 test("normalizeCount supports linear and logarithmic scales", () => {
@@ -144,4 +165,15 @@ test("the Activity viewport delegates vertical scrolling to the document", () =>
 
   assert.ok(viewportRules.length > 0);
   assert.equal(viewportRules.some((match) => /max-height\s*:/.test(match[1])), false);
+});
+
+test("Activity exposes numeric heat bounds and a persistent-in-session pair inspection", () => {
+  const page = readFileSync(new URL("../../src/web/index.html", import.meta.url), "utf8");
+  const script = readFileSync(new URL("../../src/web/app.js", import.meta.url), "utf8");
+
+  assert.match(page, /id="legendLow"/);
+  assert.match(page, /id="legendHigh"/);
+  assert.match(page, /id="migrationPairInspection"/);
+  assert.match(script, /pinnedMigrationPair/);
+  assert.match(script, /canvas\.addEventListener\("click"/);
 });

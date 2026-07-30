@@ -26,6 +26,8 @@ pub struct PolicyValidation {
     pub rung_count: usize,
     pub mask_table_count: usize,
     pub cell_count: usize,
+    #[serde(default)]
+    pub queue_policy: bool,
     pub summary: String,
 }
 
@@ -45,6 +47,7 @@ pub struct PolicyChoice {
     pub rung_count: usize,
     pub mask_table_count: usize,
     pub cell_count: usize,
+    pub queue_policy: bool,
     pub summary: String,
 }
 
@@ -112,6 +115,7 @@ pub fn validate_policy_files(
                 rung_count: validation.rung_count,
                 mask_table_count: validation.mask_table_count,
                 cell_count: validation.cell_count,
+                queue_policy: validation.queue_policy,
                 summary: validation.summary,
             }),
             Err(error) => catalog.invalid.push(InvalidPolicy {

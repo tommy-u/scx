@@ -9,6 +9,7 @@ import {
   buildMatrix,
   heatmapLayout,
   infernoColor,
+  migrationLocality,
   normalizeCount,
   normalizeUtilization,
   parseTgids,
@@ -18,20 +19,25 @@ import {
   callbackDurationClass,
   callbackSampleRateOptions,
   captureKeyedRenderState,
+  cellQueueFacts,
   cellCpuOrder,
   compactCpuList,
   decorateCells,
   fieldReferenceGroups,
   fineTimingCaptureModels,
+  freshnessModel,
   formatCallbackDuration,
   formatFeedbackTranscript,
   ladderPercentages,
+  launchDiff,
   parseFeedbackEntries,
   policyCategoryGroups,
   policyLibraryModels,
+  policySlotComparison,
   queueLadderSections,
   queueTopologyModel,
   routeFromHash,
+  runtimeContextModel,
   restoreKeyedRenderState,
   schedulerCommandPreview,
   schedulerControlModel,
@@ -112,10 +118,18 @@ const elements = {
   workloadAssignmentNotice: document.querySelector("#workloadAssignmentNotice"),
   liveStatus: document.querySelector("#liveStatus"),
   liveStatusText: document.querySelector("#liveStatusText"),
+  legendHigh: document.querySelector("#legendHigh"),
+  legendLow: document.querySelector("#legendLow"),
+  runtimeContextDetail: document.querySelector("#runtimeContextDetail"),
   migrationRate: document.querySelector("#migrationRate"),
+  migrationPairInspection: document.querySelector("#migrationPairInspection"),
   notice: document.querySelector("#notice"),
   policyFreshness: document.querySelector("#policyFreshness"),
   policyActivationNotice: document.querySelector("#policyActivationNotice"),
+  policyActiveContext: document.querySelector("#policyActiveContext"),
+  policyCandidateAction: document.querySelector("#policyCandidateAction"),
+  policyCandidateContext: document.querySelector("#policyCandidateContext"),
+  policyCandidateImpact: document.querySelector("#policyCandidateImpact"),
   policyChoices: document.querySelector("#policyChoices"),
   policyDialog: document.querySelector("#policyDialog"),
   policyDialogName: document.querySelector("#policyDialogName"),
@@ -135,6 +149,7 @@ const elements = {
   scopeMode: document.querySelector("#scopeMode"),
   scopeSummary: document.querySelector("#scopeSummary"),
   schedulerCommandPreview: document.querySelector("#schedulerCommandPreview"),
+  schedulerPendingChanges: document.querySelector("#schedulerPendingChanges"),
   schedulerCurrentCommand: document.querySelector("#schedulerCurrentCommand"),
   schedulerControlNotice: document.querySelector("#schedulerControlNotice"),
   schedulerControlState: document.querySelector("#schedulerControlState"),
@@ -174,17 +189,22 @@ const state = {
   fineTiming: null,
   fineTimingError: null,
   fineTimingLoading: false,
+  lastFineTimingAt: 0,
   fineTimingPending: new Set(),
   feedbackEntries: loadFeedbackEntries(),
   expandedFeedbackKeys: new Set(),
   eventSource: null,
   geometry: null,
   inspection: null,
+  inspectionContext: null,
   inspectionError: null,
   inspectionLoading: false,
   inspectionSequence: 0,
   lastInspectionAt: 0,
   lastCallbackTimingAt: 0,
+  lastPolicyCatalogAt: 0,
+  lastSchedulerControlAt: 0,
+  lastSnapshotAt: 0,
   orderMode: "topology",
   popoverPinned: false,
   policyCatalog: null,
@@ -192,6 +212,7 @@ const state = {
   policyCatalogLoading: false,
   policyLibraryMessage: null,
   policyActivationPending: false,
+  policyCandidate: null,
   selectedPolicy: null,
   schedulerControl: null,
   schedulerControlError: null,
@@ -203,12 +224,14 @@ const state = {
   selectedLifecyclePolicyId: null,
   statsResetPending: false,
   referenceId: 0,
+  pinnedMigrationPair: null,
   references: new Map(),
   route: routeFromHash(window.location.hash),
   scale: "log",
   selectedCellId: null,
   workloadAssignmentPending: false,
   snapshot: null,
+  snapshotError: null,
   topology: null,
   windowMs: initialWindowMs,
   zoom: 1,
@@ -345,6 +368,13 @@ function bindControls() {
   elements.applyScope.addEventListener("click", applyScope);
   elements.canvas.addEventListener("pointermove", showTooltip);
   elements.canvas.addEventListener("pointerleave", hideTooltip);
+  elements.canvas.addEventListener("click", pinMigrationPair);
+  elements.migrationPairInspection.addEventListener("click", (event) => {
+    if (event.target.closest("[data-clear-migration-pair]")) {
+      state.pinnedMigrationPair = null;
+      renderHeatmap();
+    }
+  });
   window.addEventListener("hashchange", renderRoute);
   elements.cellList.addEventListener("click", (event) => {
     const control = event.target.closest("[data-cell-id]");
@@ -433,15 +463,15 @@ function bindControls() {
     if (!control || control.disabled) {
       return;
     }
-    if (control.dataset.policyAction === "lifecycle") {
-      selectPolicyForLifecycle(
-        control.dataset.policyId,
-        control.dataset.policyFairness,
-      );
-    } else {
-      openPolicyDialog(control.dataset.policyId);
-    }
+    state.policyCandidate = {
+      policyId: control.dataset.policyId,
+      fairness: control.dataset.policyFairness,
+      actionKind: control.dataset.policyAction,
+    };
+    renderPolicyLibrary();
+    runPolicyCandidate();
   });
+  elements.policyCandidateAction.addEventListener("click", runPolicyCandidate);
   elements.confirmPolicyActivation.addEventListener("click", activateSelectedPolicy);
   elements.policyDialog.addEventListener("close", () => {
     state.selectedPolicy = null;
@@ -724,16 +754,21 @@ function connectEvents() {
   state.eventSource = source;
   source.addEventListener("snapshot", (event) => {
     state.snapshot = JSON.parse(event.data);
+    state.snapshotError = null;
+    state.lastSnapshotAt = Date.now();
     renderSnapshot();
   });
   source.addEventListener("error", (event) => {
     if (event.data) {
       const error = JSON.parse(event.data);
+      state.snapshotError = error.error || "Stream error";
       showNotice(error.error || "Stream error");
+      renderRuntimeContext();
       return;
     }
     if (source.readyState !== EventSource.OPEN) {
-      setStatus("waiting", "Reconnecting");
+      state.snapshotError = "Activity stream is reconnecting.";
+      renderRuntimeContext();
     }
   });
 }
@@ -748,19 +783,12 @@ function renderSnapshot() {
 
   const notices = [];
   if (snapshot.collector_error) {
-    setStatus("error", "Collector unavailable");
     notices.push(snapshot.collector_error);
   } else {
     if (snapshot.pair_map_failures || snapshot.task_storage_failures) {
       notices.push(
         `${numberFormat.format(snapshot.pair_map_failures)} pair-map failures | ${numberFormat.format(snapshot.task_storage_failures)} task-state failures`,
       );
-    }
-    if (snapshot.scheduler.active) {
-      setStatus("active", `Snake active | generation ${snapshot.scheduler.enable_seq}`);
-    } else {
-      const current = snapshot.scheduler.name || "none";
-      setStatus("waiting", `Waiting for Snake | current ${current}`);
     }
   }
   if (snapshot.cpu_usage_error) {
@@ -771,6 +799,7 @@ function renderSnapshot() {
   } else {
     hideNotice();
   }
+  renderRuntimeContext();
   renderHeatmap();
 }
 
@@ -797,6 +826,14 @@ function renderHeatmap() {
     width,
   } = heatmapLayout(cpuCount, viewportWidth, state.zoom);
   const pixelRatio = Math.min(2, window.devicePixelRatio || 1);
+
+  elements.legendLow.textContent = numberFormat.format(matrix.minPositive);
+  elements.legendHigh.textContent = numberFormat.format(matrix.max);
+  elements.legendLow.parentElement.setAttribute(
+    "aria-label",
+    `${state.scale === "log" ? "Logarithmic" : "Linear"} heat intensity from ${numberFormat.format(matrix.minPositive)} to ${numberFormat.format(matrix.max)} migrations`,
+  );
+  renderMigrationPairInspection(matrix);
 
   elements.canvas.style.width = `${width}px`;
   elements.canvas.style.height = `${height}px`;
@@ -826,6 +863,7 @@ function renderHeatmap() {
   }
 
   drawBoundaries(context, matrix, margins, matrixSize, cellSize);
+  drawPinnedMigrationPair(context, matrix, margins, cellSize);
   drawAxes(context, matrix.order, margins, matrixSize, cellSize);
   drawCpuUsage(context, usage, margins, matrixSize, cellSize, usageTop, usageHeight);
   state.geometry = {
@@ -840,6 +878,87 @@ function renderHeatmap() {
   elements.canvas.setAttribute(
     "aria-label",
     `CPU migration heatmap with ${numberFormat.format(matrix.total)} transitions and all-Snake utilization across ${cpuCount} CPUs`,
+  );
+}
+
+function renderMigrationPairInspection(matrix) {
+  const top = topMigrationPair(matrix);
+  const topMarkup = top
+    ? migrationPairMarkup("Busiest route", top.from, top.to, top.count, matrix.total)
+    : '<div><span>Busiest route</span><strong>No migrations in this window</strong></div>';
+  const pinned = state.pinnedMigrationPair;
+  let pinnedMarkup = `
+    <div class="migration-pair-empty">
+      <span>Selected route</span>
+      <strong>Click a matrix cell to keep its details here</strong>
+    </div>`;
+  if (pinned) {
+    const row = matrix.positions.get(pinned.from);
+    const column = matrix.positions.get(pinned.to);
+    const count = row == null || column == null
+      ? 0
+      : matrix.values[row * matrix.order.length + column];
+    pinnedMarkup = migrationPairMarkup(
+      "Selected route",
+      pinned.from,
+      pinned.to,
+      count,
+      matrix.total,
+    );
+  }
+  replaceKeyedHtml(elements.migrationPairInspection, `
+    ${topMarkup}
+    ${pinnedMarkup}
+    <button class="secondary-button" type="button" data-clear-migration-pair
+      data-render-key="activity:migration-pair:clear" ${pinned ? "" : "disabled"}>Clear selection</button>`);
+}
+
+function migrationPairMarkup(title, from, to, count, total) {
+  const locality = migrationLocality(state.topology, from, to);
+  const share = total > 0 ? count * 100 / total : 0;
+  return `
+    <div>
+      <span>${escapeHtml(title)}</span>
+      <strong>CPU ${formatCount(from)} → CPU ${formatCount(to)}</strong>
+      <small>${formatCount(count)} migrations · ${formatPercentage(share)} · ${escapeHtml(locality.label)}</small>
+    </div>`;
+}
+
+function topMigrationPair(matrix) {
+  if (matrix.max <= 0) {
+    return null;
+  }
+  const size = matrix.order.length;
+  let offset = 0;
+  for (let index = 1; index < matrix.values.length; index += 1) {
+    if (matrix.values[index] > matrix.values[offset]) {
+      offset = index;
+    }
+  }
+  return {
+    from: matrix.order[Math.floor(offset / size)],
+    to: matrix.order[offset % size],
+    count: matrix.values[offset],
+  };
+}
+
+function drawPinnedMigrationPair(context, matrix, margins, cellSize) {
+  const pinned = state.pinnedMigrationPair;
+  if (!pinned) {
+    return;
+  }
+  const row = matrix.positions.get(pinned.from);
+  const column = matrix.positions.get(pinned.to);
+  if (row == null || column == null) {
+    return;
+  }
+  context.strokeStyle = "#00d6a3";
+  context.lineWidth = Math.max(2, Math.min(4, cellSize / 2));
+  context.strokeRect(
+    margins.left + column * cellSize + 1,
+    margins.top + row * cellSize + 1,
+    Math.max(1, cellSize - 2),
+    Math.max(1, cellSize - 2),
   );
 }
 
@@ -971,6 +1090,29 @@ function showTooltip(event) {
   positionTooltip(event);
 }
 
+function pinMigrationPair(event) {
+  const geometry = state.geometry;
+  if (!geometry) {
+    return;
+  }
+  const bounds = elements.canvas.getBoundingClientRect();
+  const column = Math.floor(
+    (event.clientX - bounds.left - geometry.margins.left) / geometry.cellSize,
+  );
+  const row = Math.floor(
+    (event.clientY - bounds.top - geometry.margins.top) / geometry.cellSize,
+  );
+  const size = geometry.matrix.order.length;
+  if (row < 0 || column < 0 || row >= size || column >= size) {
+    return;
+  }
+  state.pinnedMigrationPair = {
+    from: geometry.matrix.order[row],
+    to: geometry.matrix.order[column],
+  };
+  renderHeatmap();
+}
+
 function positionTooltip(event) {
   const viewportBounds = elements.viewport.getBoundingClientRect();
   const left = event.clientX - viewportBounds.left + elements.viewport.scrollLeft + 14;
@@ -1034,11 +1176,11 @@ async function loadCallbackTiming() {
     state.callbackTimingError = null;
     state.lastCallbackTimingAt = Date.now();
   } catch (error) {
-    state.callbackTiming = null;
     state.callbackTimingError = error.message;
   } finally {
     state.callbackTimingLoading = false;
   }
+  renderRuntimeContext();
   if (state.route === "callbacks") {
     renderCallbackTiming();
   }
@@ -1057,11 +1199,13 @@ async function loadFineTiming() {
     }
     state.fineTiming = await response.json();
     state.fineTimingError = null;
+    state.lastFineTimingAt = Date.now();
   } catch (error) {
     state.fineTimingError = error.message;
   } finally {
     state.fineTimingLoading = false;
   }
+  renderRuntimeContext();
   if (state.route === "callbacks") {
     renderFineTiming();
   }
@@ -1157,6 +1301,7 @@ async function loadInspection() {
     }
     const payload = await response.json();
     state.inspection = payload.snapshot;
+    state.inspectionContext = payload.context || null;
     state.inspectionError = payload.error;
     state.inspectionSequence = payload.sequence;
     state.lastInspectionAt = Date.now();
@@ -1165,6 +1310,7 @@ async function loadInspection() {
   } finally {
     state.inspectionLoading = false;
   }
+  renderRuntimeContext();
   renderInspectionViews();
 }
 
@@ -1181,6 +1327,7 @@ async function loadPolicyCatalog() {
     const payload = await response.json();
     state.policyCatalog = payload.catalog;
     state.policyCatalogError = payload.error;
+    state.lastPolicyCatalogAt = Date.now();
   } catch (error) {
     state.policyCatalogError = error.message;
   } finally {
@@ -1204,11 +1351,13 @@ async function loadSchedulerControl() {
     }
     state.schedulerControl = payload;
     state.schedulerControlError = null;
+    state.lastSchedulerControlAt = Date.now();
   } catch (error) {
     state.schedulerControlError = error.message;
   } finally {
     state.schedulerControlLoading = false;
   }
+  renderRuntimeContext();
   if (state.route === "control") {
     renderSchedulerControl();
   } else if (state.route === "policy") {
@@ -1238,6 +1387,7 @@ function renderSchedulerControl() {
     elements.schedulerFairnessEnabled.checked = true;
     elements.schedulerFairness.value = state.selectedLifecycleFairness;
   }
+  syncSchedulerFairnessOptions(control);
 
   const active = Boolean(control?.active);
   const managed = Boolean(control?.managed);
@@ -1286,7 +1436,7 @@ function renderSchedulerControl() {
 
 function syncSchedulerPolicyOptions(policies) {
   const signature = policies
-    .map((policy) => `${policy.id}:${policy.name}:${policy.change_mode}`)
+    .map((policy) => `${policy.id}:${policy.name}:${policy.change_mode}:${policy.supported_fairness?.join(",") || ""}`)
     .join("|");
   if (elements.schedulerPolicy.dataset.signature === signature) {
     return;
@@ -1306,6 +1456,24 @@ function syncSchedulerPolicyOptions(policies) {
     elements.schedulerPolicy.value = selected;
   }
   elements.schedulerPolicy.dataset.signature = signature;
+}
+
+function syncSchedulerFairnessOptions(control) {
+  const policy = control?.policies?.find(
+    (candidate) => candidate.id === elements.schedulerPolicy.value,
+  );
+  const supported = policy?.supported_fairness?.length
+    ? policy.supported_fairness
+    : ["fifo", "vtime", "eevdf"];
+  for (const option of elements.schedulerFairness.options) {
+    option.disabled = !supported.includes(option.value);
+  }
+  if (!supported.includes(elements.schedulerFairness.value)) {
+    elements.schedulerFairness.value = supported[0];
+  }
+  if (supported.length === 1 && supported[0] !== "fifo") {
+    elements.schedulerFairnessEnabled.checked = true;
+  }
 }
 
 function hydrateSchedulerLaunchForm(control) {
@@ -1355,19 +1523,44 @@ function renderSchedulerCommandPreview() {
       request,
       state.schedulerControl?.launch?.preserved_args || [],
     );
+    const current = {
+      policy_id: state.schedulerControl?.policy_id ?? null,
+      fairness: state.schedulerControl?.launch?.fairness ?? null,
+      callback_timing_sample_rate:
+        state.schedulerControl?.launch?.callback_timing_sample_rate ?? null,
+      exit_dump_len: state.schedulerControl?.launch?.exit_dump_len ?? null,
+      verbose: Boolean(state.schedulerControl?.launch?.verbose),
+    };
+    const changes = launchDiff(current, request);
+    elements.schedulerPendingChanges.innerHTML = changes.length === 0
+      ? "No launch changes selected."
+      : `<strong>${changes.length} pending launch ${changes.length === 1 ? "change" : "changes"}</strong><ul>${changes.map((change) => `
+          <li><span>${escapeHtml(change.name)}</span><code>${escapeHtml(formatLaunchDiffValue(change.before))}</code><span aria-hidden="true">→</span><code>${escapeHtml(formatLaunchDiffValue(change.after))}</code></li>`).join("")}</ul>`;
   } catch (error) {
     elements.schedulerCommandPreview.textContent = error.message;
+    elements.schedulerPendingChanges.textContent = "Select a valid launch configuration to compare changes.";
   }
+}
+
+function formatLaunchDiffValue(value) {
+  if (value == null) {
+    return "default";
+  }
+  if (typeof value === "boolean") {
+    return value ? "enabled" : "disabled";
+  }
+  return String(value);
 }
 
 function renderSchedulerSettings(control) {
   const settings = schedulerSettingModels(control?.settings || []);
   elements.schedulerSettingsRows.innerHTML = settings.length === 0
-    ? '<tr><td class="scheduler-settings-empty" colspan="3">No scheduler settings reported.</td></tr>'
+    ? '<tr><td class="scheduler-settings-empty" colspan="4">No scheduler settings reported.</td></tr>'
     : settings.map((setting) => `
       <tr>
         <th scope="row">${escapeHtml(setting.name)}</th>
-        <td><code>${escapeHtml(setting.value)}</code></td>
+        <td><code>${escapeHtml(setting.effectiveValue)}</code><small>${setting.runtimeObserved ? "Observed from Snake" : "Derived from launch state"}</small></td>
+        <td class="${setting.differs ? "setting-differs" : ""}"><code>${escapeHtml(setting.overrideValue)}</code></td>
         <td><span class="change-mode ${setting.changeMode}">${setting.changeLabel}</span></td>
       </tr>`).join("");
 }
@@ -1484,9 +1677,13 @@ function renderInspectionViews() {
 
 function renderCallbackTiming() {
   const timing = state.callbackTiming;
-  elements.callbackFreshness.textContent = state.lastCallbackTimingAt
-    ? `Updated ${new Date(state.lastCallbackTimingAt).toLocaleTimeString()}`
-    : "Waiting for Snake";
+  renderFreshness(
+    elements.callbackFreshness,
+    Boolean(timing),
+    state.callbackTimingError,
+    state.lastCallbackTimingAt,
+    1_000,
+  );
   elements.callbackSampleRate.textContent = timing?.sample_rate > 0
     ? `1 / ${numberFormat.format(timing.sample_rate)}`
     : "Off";
@@ -1569,7 +1766,7 @@ function renderFineTiming() {
         : `${capture.availabilityLabel}: ${capture.unavailable_reason || "Not supported in current mode."}`;
       const metadata = capture.session_id == null
         ? "No capture"
-        : `Session ${formatCount(capture.session_id)} · generation ${formatCount(capture.policy_generation)}`;
+        : `Session ${formatCount(capture.session_id)} · policy generation ${formatCount(capture.policy_generation)} · started ${formatTimestamp(capture.started_at_ms)} · ${capture.stopped_at_ms ? `stopped ${formatTimestamp(capture.stopped_at_ms)}` : capture.state === "collecting" ? "collecting now" : "stop time unavailable"}`;
       const stages = capture.stages?.length
         ? capture.stages.map((stage) => `
             <tr>
@@ -1634,9 +1831,38 @@ function renderPolicy() {
   }
   replaceKeyedHtml(
     elements.slotComparison,
-    state.inspection.slots.map(renderSlot).join(""),
+    `${renderPolicySlotComparison(state.inspection.slots)}${state.inspection.slots.map(renderSlot).join("")}`,
   );
   renderResolvedQueueTopology();
+}
+
+function renderPolicySlotComparison(slots) {
+  const comparison = policySlotComparison(slots);
+  if (!comparison.comparable) {
+    return `
+      <section class="policy-slot-diff unavailable">
+        <header><h3>Policy structure comparison</h3><p>A previous installed policy is not available yet.</p></header>
+      </section>`;
+  }
+  const changed = comparison.rows.filter((row) => row.changed).length;
+  return `
+    <section class="policy-slot-diff">
+      <header>
+        <div><h3>Policy structure comparison</h3><p>${formatCount(changed)} of ${formatCount(comparison.rows.length)} fields changed</p></div>
+        <span>Metrics are excluded because the two slots cover different time periods.</span>
+      </header>
+      <div class="policy-slot-diff-table-wrap">
+        <table>
+          <thead><tr><th scope="col">Structure</th><th scope="col">${escapeHtml(comparison.activeLabel)}</th><th scope="col">${escapeHtml(comparison.previousLabel)}</th></tr></thead>
+          <tbody>${comparison.rows.map((row) => `
+            <tr class="${row.changed ? "changed" : "unchanged"}">
+              <th scope="row">${escapeHtml(row.name)}${row.changed ? '<span class="visually-hidden"> changed</span>' : ""}</th>
+              <td>${escapeHtml(row.active)}</td>
+              <td>${escapeHtml(row.previous)}</td>
+            </tr>`).join("")}</tbody>
+        </table>
+      </div>
+    </section>`;
 }
 
 function renderResolvedQueueTopology() {
@@ -1724,14 +1950,20 @@ function renderSlot(slot) {
   const stateLabel = slot.state === "active"
     ? "Active"
     : slot.state === "inactive"
-      ? "Inactive"
+      ? "Previous"
       : "Empty";
+  const roleHeading = slot.state === "active"
+    ? "Active policy"
+    : slot.state === "inactive"
+      ? "Previous policy"
+      : `Slot ${slot.slot}`;
   if (!slot.policy) {
     return `
       <section class="slot-panel empty-slot" aria-label="Ladder slot ${slot.slot}, empty"
         data-feedback-key="Policy:Slot-${slot.slot}">
         <header class="slot-heading">
-          <h3>Slot ${slot.slot}</h3>
+          <h3>${roleHeading}</h3>
+          <p>Slot ${slot.slot}</p>
           <span class="slot-state empty">${stateLabel}</span>
         </header>
         <p>No ladder is installed in this slot.</p>
@@ -1739,7 +1971,7 @@ function renderSlot(slot) {
   }
   const metrics = slot.metrics || {};
   const ladderRates = ladderPercentages(metrics);
-  const metricKind = slot.state === "active" ? "Live cumulative metrics" : "Frozen last-active metrics";
+  const metricKind = slot.state === "active" ? "Live cumulative metrics" : "Frozen previous-policy metrics";
   const timestamp = slot.state === "active" ? slot.activated_at_ms : slot.deactivated_at_ms;
   const rungs = slot.policy.rungs
     .map((rung, index) => renderRung(
@@ -1762,8 +1994,8 @@ function renderSlot(slot) {
       data-feedback-key="Policy:Slot-${slot.slot}">
       <header class="slot-heading">
         <div>
-          <h3>Slot ${slot.slot}</h3>
-          <p>Generation ${numberFormat.format(slot.generation)} · ${metricKind}</p>
+          <h3>${roleHeading}</h3>
+          <p>Slot ${slot.slot} · Generation ${numberFormat.format(slot.generation)} · ${metricKind}</p>
         </div>
         <span class="slot-state ${escapeHtml(slot.state)}">${stateLabel}</span>
       </header>
@@ -1881,7 +2113,8 @@ function renderPolicyLibrary() {
   const activeSource = state.inspection?.slots
     ?.find((slot) => slot.state === "active")
     ?.policy?.source?.trim();
-  const activeFairness = state.schedulerControl?.launch?.fairness
+  const activeFairness = state.schedulerControl?.context?.fairness
+    || state.schedulerControl?.launch?.fairness
     || state.inspection?.fairness?.mode_name
     || "fifo";
   if (!POLICY_FAIRNESS_OPTIONS.some((option) => option.id === state.selectedPolicyFairness)) {
@@ -1901,6 +2134,7 @@ function renderPolicyLibrary() {
   const selectedModel = fairnessModels.find((option) => option.id === selectedFairness)
     || fairnessModels[0];
   const policies = selectedModel.policies;
+  renderPolicyContextBar(fairnessModels, activeFairness);
   const policyCount = new Set(
     fairnessModels.flatMap((option) => option.policies.map((policy) => policy.id)),
   ).size;
@@ -1916,15 +2150,23 @@ function renderPolicyLibrary() {
   const policySections = policyCategoryGroups(policies).map((group) => {
     const policyCards = group.policies.length === 0
       ? '<p class="empty-state">No policies in this group.</p>'
-      : group.policies.map((policy) => `
-      <article class="policy-choice${policy.active ? " active" : ""}${policy.changeMode === "invalid" ? " invalid" : ""}"
-        ${policy.hoverDetail ? `title="${escapeHtml(policy.hoverDetail)}"` : ""}>
+      : group.policies.map((policy) => {
+        const changeStatus = policy.reasons.length > 0
+          ? `<details class="policy-reason-details" data-render-key="policy-choice:${escapeHtml(selectedFairness)}:${escapeHtml(policy.id)}:reasons">
+              <summary class="change-mode ${policy.changeMode}" data-render-key="policy-choice:${escapeHtml(selectedFairness)}:${escapeHtml(policy.id)}:reasons:summary">${escapeHtml(policy.changeLabel)}</summary>
+              <ul class="policy-reason-list">
+                ${policy.reasons.map((reason) => `<li><strong>${escapeHtml(reason.label)}</strong><span>${escapeHtml(reason.detail)}</span></li>`).join("")}
+              </ul>
+            </details>`
+          : `<span class="change-mode ${policy.changeMode}">${escapeHtml(policy.changeLabel)}</span>`;
+        return `
+      <article class="policy-choice${policy.active ? " active" : ""}${policy.changeMode === "invalid" ? " invalid" : ""}">
         <div class="policy-choice-copy">
           <h4>${escapeHtml(policy.name)}</h4>
           <p><code>${escapeHtml(policy.id)}</code>${policy.summary ? ` · ${escapeHtml(policy.summary)}` : ""}</p>
         </div>
         <div class="policy-choice-actions">
-          <span class="change-mode ${policy.changeMode}"${policy.hoverDetail ? ` title="${escapeHtml(policy.hoverDetail)}"` : ""}>${escapeHtml(policy.changeLabel)}</span>
+          ${changeStatus}
           <button class="${policy.actionKind === "activate" || policy.actionKind === "lifecycle" ? "apply-button" : "secondary-button"}" type="button"
             data-policy-id="${escapeHtml(policy.id)}"
             data-policy-fairness="${escapeHtml(selectedFairness)}"
@@ -1932,14 +2174,15 @@ function renderPolicyLibrary() {
             ${escapeHtml(policy.actionLabel)}
           </button>
         </div>
-      </article>`).join("");
+      </article>`;
+      }).join("");
     return `
       <section class="policy-category-section" data-policy-category="${group.id}">
         <header><h5>${escapeHtml(group.label)}</h5><span>${formatCount(group.policies.length)}</span></header>
         <div class="policy-choice-list">${policyCards}</div>
       </section>`;
   }).join("");
-  elements.policyChoices.innerHTML = `
+  replaceKeyedHtml(elements.policyChoices, `
     <div class="policy-fairness-options" role="tablist" aria-label="Fairness approach">
       ${fairnessOptions}
     </div>
@@ -1951,8 +2194,53 @@ function renderPolicyLibrary() {
         </div>
       </header>
       ${policySections}
-    </section>`;
+    </section>`);
   elements.invalidPolicies.classList.add("hidden");
+}
+
+function renderPolicyContextBar(fairnessModels, activeFairness) {
+  const active = fairnessModels
+    .flatMap((branch) => branch.policies)
+    .find((policy) => policy.active);
+  elements.policyActiveContext.textContent = active
+    ? `${active.name} · ${activeFairness.toUpperCase()}`
+    : state.schedulerControl?.active
+      ? `Unknown policy · ${activeFairness.toUpperCase()}`
+      : "Snake stopped";
+
+  const candidateState = state.policyCandidate;
+  const candidate = candidateState
+    ? fairnessModels
+        .find((branch) => branch.id === candidateState.fairness)
+        ?.policies.find((policy) => policy.id === candidateState.policyId)
+    : null;
+  if (!candidate) {
+    elements.policyCandidateContext.textContent = "None selected";
+    elements.policyCandidateImpact.textContent = "—";
+    elements.policyCandidateAction.textContent = "Select a policy";
+    elements.policyCandidateAction.disabled = true;
+    return;
+  }
+  elements.policyCandidateContext.textContent = `${candidate.name} · ${candidate.selectedFairness.toUpperCase()}`;
+  const reasonLabels = candidate.reasons.map((reason) => reason.label);
+  elements.policyCandidateImpact.textContent = reasonLabels.length > 0
+    ? `${candidate.changeLabel}: ${reasonLabels.join(", ")}`
+    : candidate.changeLabel;
+  state.policyCandidate.actionKind = candidate.actionKind;
+  elements.policyCandidateAction.textContent = candidate.actionLabel;
+  elements.policyCandidateAction.disabled = candidate.disabled;
+}
+
+function runPolicyCandidate() {
+  const candidate = state.policyCandidate;
+  if (!candidate) {
+    return;
+  }
+  if (candidate.actionKind === "lifecycle") {
+    selectPolicyForLifecycle(candidate.policyId, candidate.fairness);
+  } else if (candidate.actionKind === "activate") {
+    openPolicyDialog(candidate.policyId);
+  }
 }
 
 function selectPolicyForLifecycle(policyId, fairnessMode) {
@@ -2009,6 +2297,7 @@ async function activateSelectedPolicy() {
       throw new Error(body.error || `Policy activation failed (${response.status})`);
     }
     elements.policyDialog.close();
+    state.policyCandidate = null;
     state.policyLibraryMessage = {
       text: `Activated ${policy.name} as generation ${numberFormat.format(body.generation)}.`,
       kind: "success",
@@ -2182,7 +2471,15 @@ function renderCells() {
     ${cells.map(renderCellRow).join("")}`,
   );
   const selected = cells.find((cell) => cell.id === state.selectedCellId);
-  replaceKeyedHtml(elements.cellDetail, renderCellDetail(selected));
+  const topology = queueTopologyModel(
+    state.inspection.fairness,
+    state.inspection.queue_topology,
+    state.topology.numeric_order || [],
+  );
+  replaceKeyedHtml(
+    elements.cellDetail,
+    renderCellDetail(selected, cellQueueFacts(topology, selected.id)),
+  );
 }
 
 function renderWorkloadTargetField() {
@@ -2335,8 +2632,10 @@ function hideCellBarTooltip() {
   elements.cellBarTooltip.classList.add("hidden");
 }
 
-function renderCellDetail(cell) {
-  const cpuList = cell.cpus.length > 0 ? cell.cpus.join(", ") : "No active CPU definition";
+function renderCellDetail(cell, queueFacts) {
+  const cpuList = cell.cpus.length > 0
+    ? compactCpuList(cell.cpus)
+    : "No active CPU definition";
   const overlap = cell.overlapIds.length > 0
     ? cell.overlapIds.map((id) => `Cell ${id}`).join(", ")
     : "None";
@@ -2349,8 +2648,13 @@ function renderCellDetail(cell) {
       ${cell.undefined ? '<span class="slot-state warning">Undefined</span>' : ""}
     </header>
     <dl class="cell-facts">
-      <div><dt>CPUs</dt><dd>${escapeHtml(cpuList)}</dd></div>
+      <div><dt>Policy CPUs</dt><dd>${escapeHtml(cpuList)}</dd></div>
       <div><dt>Overlapping cells</dt><dd>${escapeHtml(overlap)}</dd></div>
+      <div><dt>Primary CPUs</dt><dd>${escapeHtml(queueFacts.configured ? compactCpuList(queueFacts.primaryCpus) : "Not configured")}</dd></div>
+      <div><dt>Borrowable CPUs</dt><dd>${escapeHtml(queueFacts.configured ? compactCpuList(queueFacts.borrowableCpus) : "Not configured")}</dd></div>
+      <div><dt>VTIME clock</dt><dd><code>${escapeHtml(queueFacts.clock)}</code></dd></div>
+      <div><dt>Normal DSQs</dt><dd>${escapeHtml(queueFacts.configured ? queueFacts.normalDsqs.join(", ") || "None" : "Not configured")}</dd></div>
+      <div><dt>CPU weight</dt><dd>${queueFacts.weight == null ? "—" : formatCount(queueFacts.weight)}</dd></div>
     </dl>
     <div class="task-mappings">${tasks}</div>`;
 }
@@ -2379,9 +2683,13 @@ function renderTaskMapping(task, cellId) {
 }
 
 function renderInspectionStatus(notice, freshness) {
-  freshness.textContent = state.lastInspectionAt
-    ? `Updated ${new Date(state.lastInspectionAt).toLocaleTimeString()}`
-    : "Waiting for Snake";
+  renderFreshness(
+    freshness,
+    Boolean(state.inspection),
+    state.inspectionError,
+    state.lastInspectionAt,
+    1_000,
+  );
   if (state.inspectionError) {
     notice.textContent = state.inspectionError;
     notice.classList.remove("hidden");
@@ -2427,6 +2735,47 @@ function topologyLine(label, cpu) {
 function setStatus(kind, text) {
   elements.liveStatus.className = `live-status ${kind}`;
   elements.liveStatusText.textContent = text;
+}
+
+function renderRuntimeContext() {
+  const model = runtimeContextModel({
+    snapshot: state.snapshot,
+    inspection: state.inspectionContext ? { context: state.inspectionContext } : null,
+    control: state.schedulerControl,
+  });
+  const collectorError = state.snapshot?.collector_error;
+  const kind = collectorError
+    ? "error"
+    : state.snapshotError || model.synchronizing
+      ? "waiting"
+      : state.snapshot?.context?.scheduler_active
+        || state.inspectionContext?.scheduler_active
+        || state.schedulerControl?.context?.scheduler_active
+        ? "active"
+        : "waiting";
+  const suffix = state.snapshotError ? " · reconnecting" : "";
+  setStatus(kind, `${model.statusLabel}${suffix}`);
+  elements.runtimeContextDetail.textContent = model.detailLabel;
+  elements.runtimeContextDetail.classList.toggle(
+    "synchronizing",
+    model.synchronizing || Boolean(state.snapshotError),
+  );
+}
+
+function renderFreshness(element, hasData, error, lastSuccessAt, pollIntervalMs) {
+  const model = freshnessModel({
+    hasData,
+    error,
+    lastSuccessAt,
+    pollIntervalMs,
+  });
+  element.className = `view-freshness ${model.state}`;
+  element.textContent = model.label;
+  if (model.detail) {
+    element.title = model.detail;
+  } else {
+    element.removeAttribute("title");
+  }
 }
 
 function showNotice(message) {
