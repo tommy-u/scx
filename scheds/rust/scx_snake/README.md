@@ -18,6 +18,9 @@ The focused references are:
 - [Fairness](docs/FAIRNESS.md): FIFO, VTIME, EEVDF, clocks, and accounting.
 - [Policy Lowering and BPF Data Flow](docs/POLICY_LOWERING.md): compiler stages,
   ABI records, map ownership, and the userspace/BPF boundary.
+- [BPF Backend Architecture](docs/BPF_ARCHITECTURE.md): implementation
+  ownership, verifier boundaries, stable surfaces, and Mitosis extraction
+  seams.
 
 ## Policies
 
