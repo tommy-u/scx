@@ -4,6 +4,7 @@
 
 #include "mask_table.h"
 #include "cpu_pick.h"
+#include "queue_fairness.h"
 
 /* Uniformly choose and claim one CPU from the task's allowed idle set. */
 static __always_inline s32 pick_random_idle(const struct task_struct *p,

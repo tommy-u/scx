@@ -3092,7 +3092,7 @@ scope = "task_allowed"
         let vtime = fs::read_to_string(bpf_dir.join("fairness_vtime.h")).unwrap();
         let eevdf = fs::read_to_string(bpf_dir.join("fairness_eevdf.h")).unwrap();
         assert!(vtime.contains("vtime_domain"));
-        assert!(vtime.contains("cell_vtime_domains"));
+        assert!(!vtime.contains("cell_vtime_domains"));
         assert!(!vtime.contains("eevdf_domain SEC"));
         assert!(eevdf.contains("eevdf_domain"));
         assert!(!eevdf.contains("cell_vtime_domains"));
@@ -3105,8 +3105,8 @@ scope = "task_allowed"
                 "dsq_create(dsq_vtime_global()",
             ],
         );
-        let queue = fs::read_to_string(bpf_dir.join("queue_fairness.h")).unwrap();
-        assert!(queue.contains("#include \"fairness_vtime.h\""));
+        let queue = fs::read_to_string(bpf_dir.join("queue_vtime.h")).unwrap();
+        assert!(queue.contains("#include \"fairness.h\""));
 
         type VtimeDomain = bpf_skel::types::snake_vtime_domain;
         type EevdfDomain = bpf_skel::types::snake_eevdf_domain;
@@ -3119,6 +3119,117 @@ scope = "task_allowed"
         assert_eq!(offset_of!(EevdfDomain, pad), 4);
         assert_eq!(offset_of!(EevdfDomain, virtual_time), 8);
         assert_eq!(offset_of!(EevdfDomain, runnable_weight), 16);
+    }
+
+    #[test]
+    fn bpf_queue_pipeline_has_explicit_owners_and_stable_facades() {
+        let bpf_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bpf");
+        let vtime = fs::read_to_string(bpf_dir.join("queue_vtime.h"))
+            .expect("queue VTIME state should have a dedicated owner");
+        let enqueue = fs::read_to_string(bpf_dir.join("queue_enqueue.h"))
+            .expect("queue enqueue path should have a dedicated owner");
+        let dispatch = fs::read_to_string(bpf_dir.join("queue_dispatch.h"))
+            .expect("queue dispatch path should have a dedicated owner");
+        let fairness = fs::read_to_string(bpf_dir.join("queue_fairness.h")).unwrap();
+        let ladder = fs::read_to_string(bpf_dir.join("queue_ladder.h")).unwrap();
+
+        for include in ["queue_vtime.h", "queue_enqueue.h", "queue_dispatch.h"] {
+            assert!(fairness.contains(&format!("#include \"{include}\"")));
+        }
+        assert!(ladder.contains("#include \"queue_enqueue.h\""));
+        assert!(ladder.contains("#include \"queue_dispatch.h\""));
+        for implementation in [&vtime, &enqueue, &dispatch] {
+            assert!(!implementation.contains("#include \"queue_fairness.h\""));
+            assert!(!implementation.contains("#include \"queue_ladder.h\""));
+        }
+
+        for symbol in [
+            "cell_vtime_domains",
+            "queue_fairness_prepare_task_for_cell(",
+            "queue_fairness_prepare_runnable(",
+            "queue_fairness_prepare_affinity(",
+            "queue_fairness_cancel_direct(",
+            "queue_fairness_replenish(",
+            "queue_fairness_running(",
+            "queue_fairness_stopping(",
+        ] {
+            assert!(
+                vtime.contains(symbol),
+                "queue VTIME owner is missing {symbol}"
+            );
+        }
+        for symbol in [
+            "queue_fairness_direct_borrow(",
+            "queue_fairness_enqueue_cell(",
+            "queue_fairness_enqueue_affinity(",
+            "queue_ladder_enqueue(",
+        ] {
+            assert!(
+                enqueue.contains(symbol),
+                "queue enqueue owner is missing {symbol}"
+            );
+        }
+        for symbol in [
+            "struct snake_queue_candidate",
+            "queue_fairness_normal_candidate(",
+            "queue_fairness_affinity_candidate(",
+            "queue_fairness_dispatch_min(",
+            "queue_fairness_dispatch_source(",
+            "queue_ladder_dispatch(",
+        ] {
+            assert!(
+                dispatch.contains(symbol),
+                "queue dispatch owner is missing {symbol}"
+            );
+        }
+
+        assert!(fairness.contains("static __noinline s32\nqueue_pick_random_idle_cpu("));
+        assert!(vtime.contains("static __noinline void queue_clear_rehome_if_cell("));
+        assert!(vtime.contains("static __noinline void\nqueue_fairness_cancel_direct("));
+        assert!(ladder.contains("validate_queue_ladders("));
+        assert!(enqueue.contains("static __always_inline int\nqueue_ladder_enqueue("));
+        assert!(dispatch.contains("static __always_inline int queue_ladder_dispatch("));
+
+        let queue_api = [
+            fairness.as_str(),
+            vtime.as_str(),
+            enqueue.as_str(),
+            dispatch.as_str(),
+        ]
+        .join("\n");
+        for entrypoint in [
+            "queue_pick_task_cell_cpu(",
+            "queue_fairness_select_cpu(",
+            "queue_fairness_direct_borrow(",
+            "queue_fairness_prepare_runnable(",
+            "queue_fairness_cancel_direct(",
+            "queue_fairness_running(",
+            "queue_fairness_stopping(",
+        ] {
+            assert!(
+                queue_api.contains(entrypoint),
+                "queue API lost {entrypoint}"
+            );
+        }
+        let ladder_api = [ladder.as_str(), enqueue.as_str(), dispatch.as_str()].join("\n");
+        for entrypoint in [
+            "validate_queue_ladders(",
+            "queue_ladder_enqueue(",
+            "queue_ladder_dispatch(",
+        ] {
+            assert!(
+                ladder_api.contains(entrypoint),
+                "queue ladder lost {entrypoint}"
+            );
+        }
+
+        let sources = bpf_sources(&bpf_dir);
+        let cell_map_owners = sources
+            .iter()
+            .filter(|(_, source)| source.contains("} cell_vtime_domains"))
+            .collect::<Vec<_>>();
+        assert_eq!(cell_map_owners.len(), 1);
+        assert_eq!(cell_map_owners[0].0.file_name().unwrap(), "queue_vtime.h");
     }
 
     fn raw_percpu_stats() -> Vec<Vec<Vec<u8>>> {
@@ -3250,7 +3361,7 @@ scope = "task_allowed"
         assert!(!queue_wrapper.contains("bpf_for("));
         let queue_cell_pick = queue
             .split_once("queue_pick_task_cell_cpu(")
-            .and_then(|(_, body)| body.split_once("queue_cell_domain("))
+            .and_then(|(_, body)| body.split_once("queue_fairness_select_cpu("))
             .map(|(body, _)| body)
             .unwrap();
         assert_text_order(

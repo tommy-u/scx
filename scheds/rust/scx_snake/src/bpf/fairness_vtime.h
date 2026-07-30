@@ -17,14 +17,7 @@ struct {
 	__type(key, u32);
 	__type(value, struct snake_vtime_domain);
 	__uint(max_entries, 1);
-} vtime_domain SEC(".maps");
-
-struct {
-	__uint(type, BPF_MAP_TYPE_ARRAY);
-	__type(key, u32);
-	__type(value, struct snake_vtime_domain);
-	__uint(max_entries, SNAKE_MAX_QUEUE_CELLS);
-} cell_vtime_domains	   SEC(".maps");
+} vtime_domain		   SEC(".maps");
 
 static __always_inline u64 fairness_vtime_slice(u32 weight)
 {
