@@ -3029,6 +3029,98 @@ scope = "task_allowed"
         }
     }
 
+    #[test]
+    fn bpf_fairness_facade_vectors_to_separate_policy_modules() {
+        const CALLBACKS: &[&str] = &[
+            "runnable",
+            "dispatch_slice",
+            "enqueue",
+            "dispatch",
+            "running",
+            "stopping",
+            "quiescent",
+            "set_weight",
+            "init",
+        ];
+        let bpf_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bpf");
+        let facade = fs::read_to_string(bpf_dir.join("fairness.h")).unwrap();
+        let common = fs::read_to_string(bpf_dir.join("fairness_common.h")).unwrap();
+
+        for policy in ["fifo", "vtime", "eevdf"] {
+            let module = fs::read_to_string(bpf_dir.join(format!("fairness_{policy}.h")))
+                .unwrap_or_else(|_| panic!("fairness policy module {policy} should exist"));
+            assert!(facade.contains(&format!("#include \"fairness_{policy}.h\"")));
+            for callback in CALLBACKS {
+                let implementation = format!("fairness_{policy}_{callback}(");
+                assert!(
+                    module.contains(&implementation),
+                    "{policy} module is missing {implementation}"
+                );
+                assert!(
+                    facade.contains(&implementation),
+                    "facade does not vector to {implementation}"
+                );
+            }
+        }
+        assert!(!facade.contains("SEC(\".maps\")"));
+        assert!(!facade.contains("bpf_map_lookup_elem"));
+        assert!(!facade.contains("bpf_spin_lock"));
+        assert!(!facade.contains("bpf_for_each"));
+        assert!(!facade.contains("(*"));
+        assert_eq!(facade.matches("switch (fairness_mode)").count(), 9);
+        for mode in [
+            "SNAKE_FAIRNESS_FIFO",
+            "SNAKE_FAIRNESS_VTIME",
+            "SNAKE_FAIRNESS_EEVDF",
+        ] {
+            assert_eq!(facade.matches(&format!("case {mode}:")).count(), 9);
+        }
+        assert!(facade.contains("static __noinline u64 fairness_dispatch_slice("));
+
+        for helper in [
+            "fairness_task_weight(",
+            "fairness_scale_inverse(",
+            "fairness_runtime_begin(",
+            "fairness_runtime_delta(",
+        ] {
+            assert!(
+                common.contains(helper),
+                "fairness common is missing {helper}"
+            );
+        }
+
+        let vtime = fs::read_to_string(bpf_dir.join("fairness_vtime.h")).unwrap();
+        let eevdf = fs::read_to_string(bpf_dir.join("fairness_eevdf.h")).unwrap();
+        assert!(vtime.contains("vtime_domain"));
+        assert!(vtime.contains("cell_vtime_domains"));
+        assert!(!vtime.contains("eevdf_domain SEC"));
+        assert!(eevdf.contains("eevdf_domain"));
+        assert!(!eevdf.contains("cell_vtime_domains"));
+        assert_text_order(
+            &vtime,
+            &[
+                "fairness_vtime_init(",
+                "queue_topology_enabled()",
+                "return 0",
+                "dsq_create(dsq_vtime_global()",
+            ],
+        );
+        let queue = fs::read_to_string(bpf_dir.join("queue_fairness.h")).unwrap();
+        assert!(queue.contains("#include \"fairness_vtime.h\""));
+
+        type VtimeDomain = bpf_skel::types::snake_vtime_domain;
+        type EevdfDomain = bpf_skel::types::snake_eevdf_domain;
+        assert_eq!(size_of::<VtimeDomain>(), 16);
+        assert_eq!(offset_of!(VtimeDomain, lock), 0);
+        assert_eq!(offset_of!(VtimeDomain, pad), 4);
+        assert_eq!(offset_of!(VtimeDomain, vtime_now), 8);
+        assert_eq!(size_of::<EevdfDomain>(), 24);
+        assert_eq!(offset_of!(EevdfDomain, lock), 0);
+        assert_eq!(offset_of!(EevdfDomain, pad), 4);
+        assert_eq!(offset_of!(EevdfDomain, virtual_time), 8);
+        assert_eq!(offset_of!(EevdfDomain, runnable_weight), 16);
+    }
+
     fn raw_percpu_stats() -> Vec<Vec<Vec<u8>>> {
         (0..bpf_intf::snake_stat_SNAKE_NR_STATS)
             .map(|_| vec![0_u64.to_ne_bytes().to_vec(); 2])
@@ -3272,7 +3364,7 @@ scope = "task_allowed"
                 .iter()
                 .map(|source| source.matches("queue_timing_complete_pending(").count())
                 .sum::<usize>(),
-            2
+            4
         );
         assert_eq!(
             outside_owner

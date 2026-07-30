@@ -3,6 +3,7 @@
 #define __SCX_SNAKE_QUEUE_FAIRNESS_H
 
 #include "cpu_pick.h"
+#include "fairness_vtime.h"
 
 static __noinline s32
 queue_pick_random_idle_cpu(const struct cpumask *candidates, bool whole_core)
