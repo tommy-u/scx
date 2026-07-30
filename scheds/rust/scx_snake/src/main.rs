@@ -2934,6 +2934,47 @@ scope = "task_allowed"
     }
 
     #[test]
+    fn bpf_mask_runtime_and_initialization_have_distinct_owners() {
+        let bpf_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bpf");
+        let runtime = fs::read_to_string(bpf_dir.join("mask_table.h")).unwrap();
+        let init = fs::read_to_string(bpf_dir.join("mask_table_init.h"))
+            .expect("mask-table initialization should have a dedicated owner");
+        let main = fs::read_to_string(bpf_dir.join("main.bpf.c")).unwrap();
+
+        assert!(init.contains("#include \"mask_table.h\""));
+        assert!(main.contains("#include \"mask_table_init.h\""));
+        for initializer in [
+            "init_mask_table_scratch(",
+            "mask_data_test_cpu(",
+            "build_mask_from_data(",
+            "prepare_mask_tables(",
+        ] {
+            assert!(
+                init.contains(initializer),
+                "mask init is missing {initializer}"
+            );
+            assert!(!runtime.contains(initializer));
+        }
+        for runtime_symbol in [
+            "mask_data SEC(\".maps\")",
+            "mask_slots",
+            "mask_scratch SEC(\".maps\")",
+            "mask_table_scratch(",
+            "mask_table_index(",
+            "mask_table_has_key(",
+            "mask_table_contains(",
+            "mask_table_intersects(",
+            "pick_idle_from_mask_table(",
+            "pick_random_idle_from_mask_table(",
+        ] {
+            assert!(
+                runtime.contains(runtime_symbol),
+                "mask runtime is missing {runtime_symbol}"
+            );
+        }
+    }
+
+    #[test]
     fn fairness_callback_facade_surface_is_stable() {
         const ENTRYPOINTS: &[&str] = &[
             "fairness_init(",
@@ -3102,13 +3143,26 @@ scope = "task_allowed"
     #[test]
     fn mask_preparation_releases_removed_table_slots() {
         let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let mask_table = fs::read_to_string(manifest.join("src/bpf/mask_table.h")).unwrap();
-        let prepare = mask_table
+        let mask_init = fs::read_to_string(manifest.join("src/bpf/mask_table_init.h")).unwrap();
+        let prepare = mask_init
             .split_once("prepare_mask_tables(")
-            .and_then(|(_, rest)| rest.split_once("mask_table_has_key("))
+            .map(|(_, body)| body)
+            .expect("prepare_mask_tables should have one initialization owner");
+        assert!(prepare.contains("table_id >= ladder->nr_mask_tables"));
+        assert!(prepare.contains("data->valid != 1"));
+        let removed = prepare
+            .split_once("table_id >= ladder->nr_mask_tables")
+            .and_then(|(_, body)| body.split_once("continue;"))
             .map(|(body, _)| body)
-            .expect("prepare_mask_tables should precede mask_table_has_key");
-        assert!(prepare.contains("table_id >= ladder->nr_mask_tables || data->valid != 1"));
+            .expect("removed mask-table slots should be cleared before continuing");
+        assert_text_order(
+            removed,
+            &[
+                "bpf_kptr_xchg(&mask_slot->mask, NULL)",
+                "if (stale)",
+                "bpf_cpumask_release(stale)",
+            ],
+        );
 
         let rust = fs::read_to_string(manifest.join("src/main.rs")).unwrap();
         let clear = rust
