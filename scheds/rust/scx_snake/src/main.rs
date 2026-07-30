@@ -3240,6 +3240,182 @@ scope = "task_allowed"
         assert_eq!(cell_map_owners[0].0.file_name().unwrap(), "queue_vtime.h");
     }
 
+    #[test]
+    fn bpf_scheduler_mode_facade_routes_callback_families() {
+        let bpf_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bpf");
+        let mode = fs::read_to_string(bpf_dir.join("scheduler_mode.h"))
+            .expect("scheduler callback routing should have one facade");
+        let main = fs::read_to_string(bpf_dir.join("main.bpf.c")).unwrap();
+        let normalized_mode = mode.split_whitespace().collect::<Vec<_>>().join(" ");
+
+        assert!(main.contains("#include \"scheduler_mode.h\""));
+        assert!(normalized_mode.contains("static __always_inline void scheduler_mode_dispatch("));
+        assert_text_order(
+            &mode,
+            &[
+                "scheduler_mode_dispatch(",
+                "queue_topology_enabled()",
+                "queue_ladder_dispatch(",
+                "fairness_dispatch(",
+            ],
+        );
+        for (callback, queue, global) in [
+            ("enqueue", "queue_ladder_enqueue(", "fairness_enqueue("),
+            ("dispatch", "queue_ladder_dispatch(", "fairness_dispatch("),
+            (
+                "runnable",
+                "queue_fairness_prepare_runnable(",
+                "fairness_runnable(",
+            ),
+            ("running", "queue_fairness_running(", "fairness_running("),
+            ("stopping", "queue_fairness_stopping(", "fairness_stopping("),
+            (
+                "quiescent",
+                "queue_fairness_cancel_direct(",
+                "fairness_quiescent(",
+            ),
+        ] {
+            let symbol = format!("scheduler_mode_{callback}(");
+            assert!(mode.contains(&symbol), "mode facade is missing {symbol}");
+            let mode_body = mode
+                .split_once(&symbol)
+                .and_then(|(_, body)| body.split_once("\nstatic __always_inline"))
+                .map(|(body, _)| body)
+                .unwrap_or_else(|| panic!("{symbol} should have one bounded body"));
+            assert!(mode_body.contains(queue), "{symbol} is missing {queue}");
+            assert!(mode_body.contains(global), "{symbol} is missing {global}");
+
+            let callback_body = main
+                .split_once(&format!("BPF_STRUCT_OPS(snake_{callback}"))
+                .and_then(|(_, body)| body.split_once("BPF_STRUCT_OPS(snake_"))
+                .map(|(body, _)| body)
+                .unwrap_or_else(|| panic!("snake_{callback} callback should be bounded"));
+            assert!(callback_body.contains(&symbol));
+            assert!(!callback_body.contains(queue));
+            assert!(!callback_body.contains(global));
+            let expected_releases = usize::from(callback != "dispatch");
+            assert_eq!(
+                callback_body.matches("release_timed_callback(").count(),
+                expected_releases,
+                "snake_{callback} has the wrong callback cleanup ownership"
+            );
+        }
+
+        for symbol in ["scheduler_mode_set_weight(", "scheduler_mode_init_task("] {
+            assert!(mode.contains(symbol), "mode facade is missing {symbol}");
+            assert!(main.contains(symbol), "main callback does not use {symbol}");
+        }
+        assert_text_order(
+            &mode,
+            &[
+                "scheduler_mode_enqueue(",
+                "fairness_dispatch_slice(",
+                "try_enqueue_task_cell(",
+                "if (cell_enqueued)",
+                "fairness_enqueue(",
+            ],
+        );
+        assert_text_order(
+            &mode,
+            &[
+                "scheduler_mode_running(",
+                "stat_inc(ctx, SNAKE_STAT_RUNNING)",
+                "queue_account_task_membership(",
+                "queue_fairness_running(",
+            ],
+        );
+        assert_text_order(
+            &mode,
+            &[
+                "scheduler_mode_quiescent(",
+                "stat_inc(ctx, SNAKE_STAT_QUIESCENT)",
+                "queue_timing_cancel(",
+                "queue_topology_enabled()",
+            ],
+        );
+        let stopping = main
+            .split_once("BPF_STRUCT_OPS(snake_stopping")
+            .and_then(|(_, body)| body.split_once("BPF_STRUCT_OPS(snake_quiescent"))
+            .map(|(body, _)| body)
+            .unwrap();
+        assert_text_order(
+            stopping,
+            &[
+                "scheduler_mode_stopping(",
+                "if (ret)",
+                "else",
+                "stat_add(&ladder_ctx, SNAKE_STAT_RUNTIME_NS, runtime_ns)",
+                "release_timed_callback(",
+            ],
+        );
+        assert!(
+            mode.contains("return queue_topology_enabled() ? task_state_init_queue_mask(p) : 0;")
+        );
+
+        let select = main
+            .split_once("BPF_STRUCT_OPS(snake_select_cpu")
+            .and_then(|(_, body)| body.split_once("BPF_STRUCT_OPS(snake_enqueue"))
+            .map(|(body, _)| body)
+            .unwrap();
+        assert!(!select.contains("scheduler_mode_"));
+        assert!(select.contains("queue_fairness_select_cpu("));
+        assert_eq!(select.matches("release_timed_callback(").count(), 1);
+        assert_eq!(select.matches("finish_select(&ladder_ctx").count(), 1);
+        assert_text_order(
+            select,
+            &[
+                "out_success:",
+                "finish_select(&ladder_ctx",
+                "out:",
+                "release_timed_callback(",
+                "return cpu;",
+            ],
+        );
+        let post_acquire = select
+            .split_once("stat_inc(&ladder_ctx, SNAKE_STAT_SELECT_CALLS)")
+            .map(|(_, body)| body)
+            .unwrap();
+        assert_eq!(post_acquire.matches("return ").count(), 1);
+
+        let enqueue = main
+            .split_once("BPF_STRUCT_OPS(snake_enqueue")
+            .and_then(|(_, body)| body.split_once("BPF_STRUCT_OPS(snake_dispatch"))
+            .map(|(body, _)| body)
+            .unwrap();
+        assert_text_order(
+            enqueue,
+            &[
+                "scheduler_mode_enqueue(",
+                "if (ret && queue_topology_enabled())",
+                "snake queue enqueue failed",
+                "SNAKE_FINE_TIMING_ENQUEUE_FINISH",
+                "release_timed_callback(",
+                "if (ret && !queue_error)",
+                "snake fairness enqueue failed",
+            ],
+        );
+        let dispatch = mode
+            .split_once("scheduler_mode_dispatch(")
+            .and_then(|(_, body)| body.split_once("scheduler_mode_runnable("))
+            .map(|(body, _)| body)
+            .unwrap();
+        assert_eq!(dispatch.matches("release_timed_callback(").count(), 2);
+        assert_text_order(
+            dispatch,
+            &[
+                "queue_topology_enabled()",
+                "queue_ladder_dispatch(",
+                "snake queue dispatch failed",
+                "SNAKE_FINE_TIMING_DISPATCH_FINISH",
+                "release_timed_callback(",
+                "return;",
+                "fairness_dispatch(",
+                "release_timed_callback(",
+                "snake fairness dispatch failed",
+            ],
+        );
+    }
+
     fn raw_percpu_stats() -> Vec<Vec<Vec<u8>>> {
         (0..bpf_intf::snake_stat_SNAKE_NR_STATS)
             .map(|_| vec![0_u64.to_ne_bytes().to_vec(); 2])
@@ -3448,9 +3624,16 @@ scope = "task_allowed"
                 "queue timing owner is missing {symbol}"
             );
         }
-        assert_eq!(main.matches("u64 queue_timing_session_id;").count(), 1);
+        let normalized_main = main.split_whitespace().collect::<Vec<_>>().join(" ");
         assert_eq!(
-            main.matches("struct snake_queue_timing_counters queue_timing_counters;")
+            normalized_main
+                .matches("u64 queue_timing_session_id;")
+                .count(),
+            1
+        );
+        assert_eq!(
+            normalized_main
+                .matches("struct snake_queue_timing_counters queue_timing_counters;")
                 .count(),
             1
         );
@@ -3495,9 +3678,7 @@ scope = "task_allowed"
         assert_eq!(
             outside_owner
                 .iter()
-                .map(|source| source
-                    .matches("queue_timing_cancel(&ladder_ctx, p)")
-                    .count())
+                .map(|source| source.matches("queue_timing_cancel(").count())
                 .sum::<usize>(),
             1
         );
@@ -3545,17 +3726,22 @@ scope = "task_allowed"
 
     #[test]
     fn quiescence_cancels_an_unfinished_queue_timing_sample() {
-        let main = fs::read_to_string(
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bpf/main.bpf.c"),
-        )
-        .unwrap();
+        let bpf_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bpf");
+        let main = fs::read_to_string(bpf_dir.join("main.bpf.c")).unwrap();
+        let mode = fs::read_to_string(bpf_dir.join("scheduler_mode.h")).unwrap();
         let quiescent = main
             .split_once("void BPF_STRUCT_OPS(snake_quiescent")
             .and_then(|(_, rest)| rest.split_once("void BPF_STRUCT_OPS(snake_set_weight"))
             .map(|(body, _)| body)
             .expect("snake_quiescent should precede snake_set_weight");
+        let mode_quiescent = mode
+            .split_once("scheduler_mode_quiescent(")
+            .and_then(|(_, rest)| rest.split_once("scheduler_mode_set_weight("))
+            .map(|(body, _)| body)
+            .expect("scheduler mode should own quiescent routing");
 
-        assert!(quiescent.contains("queue_timing_cancel(&ladder_ctx, p);"));
+        assert!(quiescent.contains("scheduler_mode_quiescent(&ladder_ctx, p, deq_flags);"));
+        assert!(mode_quiescent.contains("queue_timing_cancel(ctx, p);"));
     }
 
     #[test]
