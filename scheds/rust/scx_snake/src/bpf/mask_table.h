@@ -2,7 +2,7 @@
 #ifndef __SCX_SNAKE_MASK_TABLE_H
 #define __SCX_SNAKE_MASK_TABLE_H
 
-#include "main.h"
+#include "policy_bank.h"
 
 struct snake_mask_slot {
 	struct bpf_cpumask __kptr *mask;

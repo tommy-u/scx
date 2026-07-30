@@ -2515,6 +2515,32 @@ scope = "task_allowed"
         sources
     }
 
+    fn assert_acyclic_bpf_includes(
+        name: &str,
+        sources: &BTreeMap<String, &str>,
+        visiting: &mut BTreeSet<String>,
+        visited: &mut BTreeSet<String>,
+    ) {
+        if visited.contains(name) {
+            return;
+        }
+        assert!(
+            visiting.insert(name.to_owned()),
+            "BPF local include cycle reaches {name}"
+        );
+        let source = sources
+            .get(name)
+            .unwrap_or_else(|| panic!("BPF source `{name}` should exist"));
+        for include in source
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("#include \"")?.strip_suffix('"'))
+        {
+            assert_acyclic_bpf_includes(include, sources, visiting, visited);
+        }
+        visiting.remove(name);
+        visited.insert(name.to_owned());
+    }
+
     #[test]
     fn bpf_is_one_translation_unit_and_all_headers_are_reachable() {
         let bpf_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bpf");
@@ -2557,6 +2583,20 @@ scope = "task_allowed"
         }
         let expected = by_name.keys().cloned().collect::<BTreeSet<_>>();
         assert_eq!(reachable, expected);
+
+        for (name, source) in &by_name {
+            if name != "main.bpf.c" {
+                assert!(
+                    !source.contains("#include \"main.h\""),
+                    "only main.bpf.c may include the BPF umbrella; found in {name}"
+                );
+            }
+        }
+        let mut visiting = BTreeSet::new();
+        let mut visited = BTreeSet::new();
+        for name in by_name.keys() {
+            assert_acyclic_bpf_includes(name, &by_name, &mut visiting, &mut visited);
+        }
     }
 
     #[test]
