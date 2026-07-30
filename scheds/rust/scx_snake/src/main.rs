@@ -2975,6 +2975,33 @@ scope = "task_allowed"
     }
 
     #[test]
+    fn bpf_fairness_common_owns_mode_and_task_adapter() {
+        let bpf_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bpf");
+        let common = fs::read_to_string(bpf_dir.join("fairness_common.h"))
+            .expect("fairness mode and task access should have a common owner");
+        let fairness = fs::read_to_string(bpf_dir.join("fairness.h")).unwrap();
+
+        assert!(common.contains("#include \"stats.h\""));
+        assert!(common.contains("#include \"task_state.h\""));
+        for symbol in [
+            "fairness_mode = SNAKE_FAIRNESS_FIFO",
+            "fairness_is_eevdf(",
+            "fairness_is_vtime(",
+            "fairness_is_ordered(",
+            "fairness_accounting_error(",
+            "fairness_task(",
+        ] {
+            assert!(
+                common.contains(symbol),
+                "fairness common is missing {symbol}"
+            );
+        }
+        assert!(fairness.contains("#include \"fairness_common.h\""));
+        assert!(!fairness.contains("const volatile u32 fairness_mode"));
+        assert!(!fairness.contains("fairness_task(struct snake_ladder_ctx"));
+    }
+
+    #[test]
     fn fairness_callback_facade_surface_is_stable() {
         const ENTRYPOINTS: &[&str] = &[
             "fairness_init(",
