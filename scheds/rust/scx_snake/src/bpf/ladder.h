@@ -419,7 +419,10 @@ walk_policy_ladder(struct snake_ladder_ctx *ctx, struct task_struct *p,
 	result = walk_policy_rung(ctx, p, 6, walk_args);
 	if (result != -ENOENT || ctx->ladder->nr_rungs <= 7)
 		return result;
-	return walk_policy_rung(ctx, p, 7, walk_args);
+	result = walk_policy_rung(ctx, p, 7, walk_args);
+	if (result != -ENOENT || ctx->ladder->nr_rungs <= 8)
+		return result;
+	return walk_policy_rung(ctx, p, 8, walk_args);
 }
 
 #endif /* __SCX_SNAKE_LADDER_H */
