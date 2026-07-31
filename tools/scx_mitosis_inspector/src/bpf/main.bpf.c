@@ -45,6 +45,7 @@ struct {
 
 struct task_observation {
 	u64 wakeup_at;
+	u64 running_at;
 };
 
 struct {
@@ -60,6 +61,13 @@ struct {
 	__type(key, u32);
 	__type(value, struct mitosis_callback_timing);
 } wakeup_latency SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, u32);
+	__type(value, struct mitosis_callback_timing);
+} cpu_slice_duration SEC(".maps");
 
 static __always_inline void count_callback(enum callback_index callback)
 {
@@ -239,12 +247,28 @@ int BPF_PROG(on_sched_switch, bool preempt, struct task_struct *prev,
 
 	if (!next)
 		return 0;
-	observation = bpf_task_storage_get(&task_observations, next, 0, 0);
-	if (!observation || !observation->wakeup_at)
-		return 0;
 	now = bpf_ktime_get_ns();
-	timing = bpf_map_lookup_elem(&wakeup_latency, &key);
-	record_elapsed(timing, now - observation->wakeup_at);
-	observation->wakeup_at = 0;
+	if (prev) {
+		observation = bpf_task_storage_get(&task_observations, prev, 0, 0);
+		if (observation && observation->running_at) {
+			timing = bpf_map_lookup_elem(&cpu_slice_duration, &key);
+			record_elapsed(timing, now - observation->running_at);
+			observation->running_at = 0;
+		}
+	}
+	observation = bpf_task_storage_get(&task_observations, next, 0, 0);
+	if (observation && observation->wakeup_at) {
+		timing = bpf_map_lookup_elem(&wakeup_latency, &key);
+		record_elapsed(timing, now - observation->wakeup_at);
+		observation->wakeup_at = 0;
+	}
+	if (should_sample(READ_ONCE(event_timing_sample_rate))) {
+		if (!observation)
+			observation = bpf_task_storage_get(
+				&task_observations, next, 0,
+				BPF_LOCAL_STORAGE_GET_F_CREATE);
+		if (observation)
+			observation->running_at = now;
+	}
 	return 0;
 }
