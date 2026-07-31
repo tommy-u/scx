@@ -11,6 +11,7 @@
 char _license[] SEC("license") = "GPL";
 
 const volatile u32 callback_timing_sample_rate;
+const volatile u32 event_timing_sample_rate;
 
 enum callback_index {
 	CALLBACK_SELECT_CPU,
@@ -42,6 +43,24 @@ struct {
 	__type(value, struct mitosis_callback_timing);
 } callback_timings SEC(".maps");
 
+struct task_observation {
+	u64 wakeup_at;
+};
+
+struct {
+	__uint(type, BPF_MAP_TYPE_TASK_STORAGE);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
+	__type(key, int);
+	__type(value, struct task_observation);
+} task_observations SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, u32);
+	__type(value, struct mitosis_callback_timing);
+} wakeup_latency SEC(".maps");
+
 static __always_inline void count_callback(enum callback_index callback)
 {
 	u32  key = callback;
@@ -69,10 +88,32 @@ static __always_inline void start_callback_timing(enum callback_index callback)
 	*started_at = bpf_ktime_get_ns();
 }
 
+static __always_inline bool should_sample(u32 rate)
+{
+	if (!rate)
+		return false;
+	return rate == 1 || !(bpf_get_prandom_u32() & (rate - 1));
+}
+
+static __always_inline void record_elapsed(struct mitosis_callback_timing *timing,
+					   u64 elapsed)
+{
+	u32 bucket = 0;
+
+	if (!timing)
+		return;
+	if (elapsed > 1)
+		bucket = log2_u64(elapsed) - 1;
+	if (bucket >= MITOSIS_CALLBACK_TIMING_BUCKETS)
+		bucket = MITOSIS_CALLBACK_TIMING_BUCKETS - 1;
+	timing->total_ns += elapsed;
+	timing->buckets[bucket]++;
+}
+
 static __always_inline void finish_callback_timing(enum callback_index callback)
 {
 	struct mitosis_callback_timing *timing;
-	u32 key = callback, bucket = 0;
+	u32 key = callback;
 	u64 *started_at, elapsed;
 
 	started_at = bpf_map_lookup_elem(&callback_timing_starts, &key);
@@ -80,15 +121,8 @@ static __always_inline void finish_callback_timing(enum callback_index callback)
 		return;
 	elapsed = bpf_ktime_get_ns() - *started_at;
 	*started_at = 0;
-	if (elapsed > 1)
-		bucket = log2_u64(elapsed) - 1;
-	if (bucket >= MITOSIS_CALLBACK_TIMING_BUCKETS)
-		bucket = MITOSIS_CALLBACK_TIMING_BUCKETS - 1;
 	timing = bpf_map_lookup_elem(&callback_timings, &key);
-	if (!timing)
-		return;
-	timing->total_ns += elapsed;
-	timing->buckets[bucket]++;
+	record_elapsed(timing, elapsed);
 }
 
 static __always_inline void observe_callback(enum callback_index callback)
@@ -166,5 +200,51 @@ SEC("fexit")
 int BPF_PROG(observe_stopping_exit, struct task_struct *p, bool runnable)
 {
 	finish_callback_timing(CALLBACK_STOPPING);
+	return 0;
+}
+
+static __always_inline int record_wakeup(struct task_struct *p)
+{
+	struct task_observation *observation;
+
+	if (!p || !should_sample(READ_ONCE(event_timing_sample_rate)))
+		return 0;
+	observation = bpf_task_storage_get(&task_observations, p, 0,
+					   BPF_LOCAL_STORAGE_GET_F_CREATE);
+	if (observation)
+		observation->wakeup_at = bpf_ktime_get_ns();
+	return 0;
+}
+
+SEC("tp_btf/sched_wakeup")
+int BPF_PROG(on_sched_wakeup, struct task_struct *p)
+{
+	return record_wakeup(p);
+}
+
+SEC("tp_btf/sched_wakeup_new")
+int BPF_PROG(on_sched_wakeup_new, struct task_struct *p)
+{
+	return record_wakeup(p);
+}
+
+SEC("tp_btf/sched_switch")
+int BPF_PROG(on_sched_switch, bool preempt, struct task_struct *prev,
+	     struct task_struct *next, u64 prev_state)
+{
+	struct mitosis_callback_timing *timing;
+	struct task_observation *observation;
+	u32 key = 0;
+	u64 now;
+
+	if (!next)
+		return 0;
+	observation = bpf_task_storage_get(&task_observations, next, 0, 0);
+	if (!observation || !observation->wakeup_at)
+		return 0;
+	now = bpf_ktime_get_ns();
+	timing = bpf_map_lookup_elem(&wakeup_latency, &key);
+	record_elapsed(timing, now - observation->wakeup_at);
+	observation->wakeup_at = 0;
 	return 0;
 }

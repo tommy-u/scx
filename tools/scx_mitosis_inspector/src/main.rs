@@ -38,6 +38,15 @@ struct Opts {
         value_name = "N"
     )]
     callback_timing_sample_rate: u32,
+
+    /// Sample one in every N scheduler events for latency; zero disables it.
+    #[clap(
+        long,
+        default_value_t = 64,
+        value_parser = parse_callback_timing_sample_rate,
+        value_name = "N"
+    )]
+    event_timing_sample_rate: u32,
 }
 
 #[tokio::main]
@@ -51,21 +60,25 @@ async fn main() -> Result<()> {
         uptime_seconds: 0,
         counters: build_counters([0; 5], [0; 5], Duration::ZERO),
         callback_timing_sample_rate: opts.callback_timing_sample_rate,
+        event_timing_sample_rate: opts.event_timing_sample_rate,
         callback_timings: build_callback_timing_rows(&vec![
             CallbackTimingCounters::default();
             CALLBACK_NAMES.len()
         ]),
+        scheduler_timings: Vec::new(),
     }));
     let (ready_tx, ready_rx) = mpsc::channel();
     let collector_state = state.clone();
     let collector_shutdown = shutdown.clone();
     let callback_timing_sample_rate = opts.callback_timing_sample_rate;
+    let event_timing_sample_rate = opts.event_timing_sample_rate;
     let collector = std::thread::spawn(move || {
         collector::run(
             collector_state,
             collector_shutdown,
             ready_tx,
             callback_timing_sample_rate,
+            event_timing_sample_rate,
         )
     });
 

@@ -30,6 +30,9 @@ mean and approximate p50/p95/p99 values. The default samples one in 1024 calls;
 set `--callback-timing-sample-rate 1` to measure every call or `0` to disable
 latency capture. Non-zero rates must be powers of two through 4096.
 
+Wakeup-to-running latency is collected from sched tracepoints and uses
+`--event-timing-sample-rate`, which defaults to one in 64 events.
+
 For the 16-vCPU development guest, expose the guest port with QEMU user-mode
 networking and run `run-in-vm.sh` as the guest command. The script owns the
 scheduler, creates two workload cells with configurable dummy CPU workers, and
