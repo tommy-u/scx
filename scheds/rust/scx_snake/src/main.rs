@@ -4462,6 +4462,31 @@ scope = "task_allowed"
     }
 
     #[test]
+    fn veristat_configs_cover_nondefault_fairness_and_queue_modes() {
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("veristat");
+        let mut modes = BTreeSet::new();
+        for entry in fs::read_dir(dir).expect("Snake veristat directory should exist") {
+            let path = entry.expect("veristat entry should be readable").path();
+            if path.extension().and_then(|value| value.to_str()) != Some("json") {
+                continue;
+            }
+            let document: serde_json::Value =
+                serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+            let rodata = document[0]["formatted"]["value"][".rodata"]
+                .as_array()
+                .unwrap();
+            let value = |name: &str| {
+                rodata
+                    .iter()
+                    .find_map(|entry| entry.get(name).and_then(serde_json::Value::as_u64))
+                    .unwrap()
+            };
+            modes.insert((value("fairness_mode"), value("queue_mode")));
+        }
+        assert_eq!(modes, BTreeSet::from([(2, 0), (3, 0), (3, 1), (3, 2)]));
+    }
+
+    #[test]
     fn bpf_dsq_head_peek_has_one_shared_implementation() {
         let bpf_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bpf");
         let sources = bpf_sources(&bpf_dir);
