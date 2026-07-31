@@ -59,10 +59,14 @@ belong to another layer.
 
 ## Verifier boundaries
 
-The placement ladder, placement-only task-cell enqueue walk, queue enqueue
-ladder, queue dispatch ladder, and queue allowed-CPU scan use `bpf_loop()`.
-Each callback checks both the compile-time maximum and the active runtime
-count before indexing policy or queue state.
+The placement ladder uses eight fixed, bounds-checked calls. This avoids
+carrying the large dynamic opcode switch through the callback SCC that Linux
+7.1 creates for `bpf_loop()`, which exceeds the standard verifier complexity
+limit. The placement-only task-cell enqueue walk, cell queue enqueue ladder,
+cell queue dispatch ladder, and queue allowed-CPU scan use `bpf_loop()`; each
+callback checks both the compile-time maximum and the active runtime count
+before indexing policy or queue state. Fixed global queue walks follow the
+same verifier-safe pattern as the placement ladder.
 
 The loop context contains only the state that must survive callback
 invocations. It copies small value contexts such as `snake_ladder_ctx` and

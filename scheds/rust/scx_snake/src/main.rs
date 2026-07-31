@@ -4144,14 +4144,20 @@ scope = "task_allowed"
             .and_then(|(_, body)| body.split_once("#endif"))
             .map(|(body, _)| body)
             .expect("policy walker should have one definition");
-        assert!(normalized_ladder
-            .contains("bpf_loop(SNAKE_MAX_RUNGS, walk_policy_ladder_callback, &loop_ctx, 0)"));
-        assert!(normalized_ladder.contains(
-            "walk_policy_rung(&loop_ctx->ladder_ctx, loop_ctx->p, i, &loop_ctx->walk_args)"
-        ));
-        assert!(normalized_ladder.contains(
-            "if (i >= SNAKE_MAX_RUNGS || i >= loop_ctx->ladder_ctx.ladder->nr_rungs) return 1;"
-        ));
+        let normalized_walk = walk.split_whitespace().collect::<Vec<_>>().join(" ");
+        for index in 0..bpf_intf::SNAKE_MAX_RUNGS {
+            let call = format!("walk_policy_rung(ctx, p, {index}, walk_args)");
+            assert_eq!(normalized_walk.matches(&call).count(), 1);
+            if index > 0 {
+                assert!(normalized_walk.contains(&format!("ctx->ladder->nr_rungs <= {index}")));
+            }
+        }
+        assert_eq!(
+            normalized_walk.matches("walk_policy_rung(ctx, p,").count(),
+            bpf_intf::SNAKE_MAX_RUNGS as usize
+        );
+        assert!(normalized_walk.contains("if (!ctx->ladder->nr_rungs) return -ENOENT;"));
+        assert!(!walk.contains("bpf_loop(SNAKE_MAX_RUNGS"));
         assert!(!walk.contains("execute_rung(ctx, p, &rung, &args)"));
         assert!(!walk.contains("rung_is_valid(&rung"));
         assert!(!walk.contains("bpf_for(i, 0, SNAKE_MAX_RUNGS)"));
