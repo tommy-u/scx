@@ -3417,8 +3417,10 @@ scope = "task_allowed"
     fn eevdf_dispatch_has_a_verifier_boundary() {
         let bpf_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bpf");
         let eevdf = fs::read_to_string(bpf_dir.join("fairness_eevdf.h")).unwrap();
+        let dsq = fs::read_to_string(bpf_dir.join("dsq.h")).unwrap();
 
         assert!(eevdf.contains("static __noinline int\nfairness_eevdf_dispatch("));
+        assert!(dsq.contains("static __noinline bool\ndsq_move_vtime("));
     }
 
     #[test]
