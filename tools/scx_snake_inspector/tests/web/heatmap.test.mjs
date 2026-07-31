@@ -10,6 +10,7 @@ import test from "node:test";
 import * as heatmapModule from "../../src/web/heatmap.js";
 import {
   buildCpuUsage,
+  buildLlcUsage,
   buildMatrix,
   infernoColor,
   normalizeCount,
@@ -97,6 +98,74 @@ test("buildCpuUsage aligns runtime with the selected CPU order", () => {
   assert.deepEqual([...grouped.utilizationPct], [0, 0, 30, 0]);
 });
 
+test("buildLlcUsage reports capacity-normalized utilization for each LLC", () => {
+  const result = buildLlcUsage(
+    topology,
+    [
+      { cpu: 1, runtime_ns: 25, utilization_pct: 10 },
+      { cpu: 3, runtime_ns: 75, utilization_pct: 30 },
+      { cpu: 99, runtime_ns: 500, utilization_pct: 100 },
+    ],
+    "topology",
+  );
+
+  assert.deepEqual(result.groups, [
+    {
+      key: "0:0:0",
+      node: 0,
+      package: 0,
+      llc: 0,
+      cpuCount: 2,
+      runtimeNs: 25,
+      utilizationPct: 5,
+    },
+    {
+      key: "0:0:1",
+      node: 0,
+      package: 0,
+      llc: 1,
+      cpuCount: 1,
+      runtimeNs: 75,
+      utilizationPct: 30,
+    },
+    {
+      key: "1:1:2",
+      node: 1,
+      package: 1,
+      llc: 2,
+      cpuCount: 1,
+      runtimeNs: 0,
+      utilizationPct: 0,
+    },
+  ]);
+  assert.deepEqual(result.spans, [
+    { start: 0, end: 2, groupIndex: 0 },
+    { start: 2, end: 3, groupIndex: 1 },
+    { start: 3, end: 4, groupIndex: 2 },
+  ]);
+});
+
+test("buildLlcUsage keeps repeated LLC IDs separate across packages", () => {
+  const repeatedIds = {
+    cpus: [
+      { cpu: 0, node: 0, package: 0, llc: 0, core: 0 },
+      { cpu: 1, node: 0, package: 1, llc: 0, core: 1 },
+    ],
+    numeric_order: [0, 1],
+    topology_order: [0, 1],
+  };
+
+  const result = buildLlcUsage(repeatedIds, [
+    { cpu: 0, runtime_ns: 10, utilization_pct: 10 },
+    { cpu: 1, runtime_ns: 90, utilization_pct: 90 },
+  ], "topology");
+
+  assert.deepEqual(result.groups.map((group) => [group.key, group.utilizationPct]), [
+    ["0:0:0", 10],
+    ["0:1:0", 90],
+  ]);
+});
+
 test("normalizeUtilization uses an absolute zero-to-one-hundred scale", () => {
   assert.equal(normalizeUtilization(0, "linear"), 0);
   assert.equal(normalizeUtilization(25, "linear"), 0.25);
@@ -151,7 +220,8 @@ test("heatmap layout places utilization above the migration matrix", () => {
   assert.equal(typeof heatmapModule.heatmapLayout, "function");
   const layout = heatmapModule.heatmapLayout(316, 1440, 1);
 
-  assert.ok(layout.usageTop + layout.usageHeight < layout.margins.top);
+  assert.ok(layout.usageTop + layout.usageHeight <= layout.llcTop);
+  assert.ok(layout.llcTop + layout.llcHeight < layout.margins.top);
   assert.equal(layout.matrixSize, 316 * layout.cellSize);
   assert.ok(layout.height > layout.margins.top + layout.matrixSize);
 });

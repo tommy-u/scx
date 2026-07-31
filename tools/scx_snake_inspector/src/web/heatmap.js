@@ -90,6 +90,58 @@ export function buildCpuUsage(topology, entries, orderMode) {
   return { order, positions, runtimeNs, utilizationPct };
 }
 
+export function buildLlcUsage(topology, entries, orderMode) {
+  const usage = buildCpuUsage(topology, entries, orderMode);
+  const cpuInfo = new Map(topology.cpus.map((cpu) => [cpu.cpu, cpu]));
+  const groups = [];
+  const groupIndexes = new Map();
+  const cpuGroups = new Int32Array(usage.order.length).fill(-1);
+
+  for (let index = 0; index < usage.order.length; index += 1) {
+    const cpu = cpuInfo.get(usage.order[index]);
+    if (!cpu) {
+      continue;
+    }
+    const key = `${cpu.node}:${cpu.package}:${cpu.llc}`;
+    let groupIndex = groupIndexes.get(key);
+    if (groupIndex === undefined) {
+      groupIndex = groups.length;
+      groupIndexes.set(key, groupIndex);
+      groups.push({
+        key,
+        node: cpu.node,
+        package: cpu.package,
+        llc: cpu.llc,
+        cpuCount: 0,
+        runtimeNs: 0,
+        utilizationPct: 0,
+      });
+    }
+    const group = groups[groupIndex];
+    group.cpuCount += 1;
+    group.runtimeNs += usage.runtimeNs[index];
+    group.utilizationPct += usage.utilizationPct[index];
+    cpuGroups[index] = groupIndex;
+  }
+  for (const group of groups) {
+    group.utilizationPct = group.cpuCount > 0
+      ? group.utilizationPct / group.cpuCount
+      : 0;
+  }
+
+  const spans = [];
+  let start = 0;
+  for (let index = 1; index <= cpuGroups.length; index += 1) {
+    if (index === cpuGroups.length || cpuGroups[index] !== cpuGroups[start]) {
+      if (cpuGroups[start] >= 0) {
+        spans.push({ start, end: index, groupIndex: cpuGroups[start] });
+      }
+      start = index;
+    }
+  }
+  return { groups, spans };
+}
+
 export function axisLabelIndices(count, maxLabels = 24) {
   const total = Math.max(0, Math.trunc(Number(count) || 0));
   if (total === 0) {
@@ -112,13 +164,17 @@ export function heatmapLayout(cpuCount, viewportWidth, zoom) {
   const cellSize = Math.max(2, Math.min(9, fitCell)) * (Number(zoom) || 1);
   const usageHeight = Math.max(13, Math.min(26, cellSize * 2.5));
   const usageTop = 20;
-  const margins = { left: 64, top: usageTop + usageHeight + 10, right: 18 };
+  const llcHeight = Math.max(16, Math.min(24, cellSize * 2.5));
+  const llcTop = usageTop + usageHeight + 4;
+  const margins = { left: 64, top: llcTop + llcHeight + 10, right: 18 };
   const matrixSize = count * cellSize;
   const width = Math.ceil(margins.left + matrixSize + margins.right);
   const height = Math.ceil(margins.top + matrixSize + 46);
   return {
     cellSize,
     height,
+    llcHeight,
+    llcTop,
     margins,
     matrixSize,
     usageHeight,

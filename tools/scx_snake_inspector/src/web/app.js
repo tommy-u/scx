@@ -6,6 +6,7 @@
 import {
   axisLabelIndices,
   buildCpuUsage,
+  buildLlcUsage,
   buildMatrix,
   heatmapLayout,
   infernoColor,
@@ -69,6 +70,7 @@ import {
   rungTimingSummary,
   selectionRungHitFlow,
   testingMatrixModel,
+  vtimeDebugModel,
   workloadAssignmentRequest,
 } from "/assets/inspection.js";
 
@@ -159,7 +161,18 @@ const elements = {
   debuggingPolicySource: document.querySelector("#debuggingPolicySource"),
   debuggingSettingsRows: document.querySelector("#debuggingSettingsRows"),
   debuggingSnapshot: document.querySelector("#debuggingSnapshot"),
-  debuggingView: document.querySelector("#debuggingView"),
+  debuggingView: document.querySelector("#debuggingSchedulerView"),
+  debuggingVtimeFreshness: document.querySelector("#debuggingVtimeFreshness"),
+  debuggingVtimeNotice: document.querySelector("#debuggingVtimeNotice"),
+  debuggingVtimeView: document.querySelector("#debuggingVtimeView"),
+  vtimeAccountingErrors: document.querySelector("#vtimeAccountingErrors"),
+  vtimeAffinityEnqueueShare: document.querySelector("#vtimeAffinityEnqueueShare"),
+  vtimeClampCount: document.querySelector("#vtimeClampCount"),
+  vtimeClampRate: document.querySelector("#vtimeClampRate"),
+  vtimeCounterRows: document.querySelector("#vtimeCounterRows"),
+  vtimeDispatchRows: document.querySelector("#vtimeDispatchRows"),
+  vtimeGeneration: document.querySelector("#vtimeGeneration"),
+  vtimeQueuedRuntimeShare: document.querySelector("#vtimeQueuedRuntimeShare"),
   operationsView: document.querySelector("#operationsView"),
   roadmapView: document.querySelector("#roadmapView"),
   policyFreshness: document.querySelector("#policyFreshness"),
@@ -1067,7 +1080,7 @@ function renderSnapshot() {
     renderCells();
   } else if (state.route === "overview") {
     renderOverview();
-  } else if (state.route === "debugging") {
+  } else if (state.route === "debugging/scheduler") {
     renderDebugging();
   }
 }
@@ -1106,11 +1119,18 @@ function renderHeatmap() {
     state.snapshot?.cpu_usage || [],
     state.orderMode,
   );
+  const llcUsage = buildLlcUsage(
+    state.topology,
+    state.snapshot?.cpu_usage || [],
+    state.orderMode,
+  );
   const cpuCount = matrix.order.length;
   const viewportWidth = Math.max(320, elements.viewport.clientWidth || 800);
   const {
     cellSize,
     height,
+    llcHeight,
+    llcTop,
     margins,
     matrixSize,
     usageHeight,
@@ -1158,8 +1178,12 @@ function renderHeatmap() {
   drawPinnedMigrationPair(context, matrix, margins, cellSize);
   drawAxes(context, matrix.order, margins, matrixSize, cellSize);
   drawCpuUsage(context, usage, margins, matrixSize, cellSize, usageTop, usageHeight);
+  drawLlcUsage(context, llcUsage, margins, cellSize, llcTop, llcHeight);
   state.geometry = {
     cellSize,
+    llcHeight,
+    llcTop,
+    llcUsage,
     margins,
     matrix,
     matrixSize,
@@ -1169,7 +1193,7 @@ function renderHeatmap() {
   };
   elements.canvas.setAttribute(
     "aria-label",
-    `CPU migration heatmap with ${numberFormat.format(matrix.total)} transitions and all-Snake utilization across ${cpuCount} CPUs`,
+    `CPU migration heatmap with ${numberFormat.format(matrix.total)} transitions, all-Snake utilization across ${cpuCount} CPUs, and capacity-normalized utilization across ${llcUsage.groups.length} LLCs`,
   );
 }
 
@@ -1289,6 +1313,39 @@ function drawCpuUsage(context, usage, margins, matrixSize, cellSize, top, height
   }
 }
 
+function drawLlcUsage(context, llcUsage, margins, cellSize, top, height) {
+  for (const span of llcUsage.spans) {
+    const group = llcUsage.groups[span.groupIndex];
+    const left = margins.left + span.start * cellSize;
+    const width = (span.end - span.start) * cellSize;
+    const intensity = normalizeUtilization(group.utilizationPct, state.scale);
+    context.fillStyle = infernoColor(intensity);
+    context.fillRect(left, top, Math.ceil(width), height);
+    context.strokeStyle = "#ffffff";
+    context.lineWidth = 2;
+    context.strokeRect(left, top, Math.ceil(width), height);
+
+    context.font = "600 9px ui-sans-serif, system-ui, sans-serif";
+    context.textAlign = "center";
+    context.textBaseline = "middle";
+    context.fillStyle = intensity > 0.72 ? "#11161c" : "#ffffff";
+    const labels = [
+      `LLC ${group.llc} · ${group.utilizationPct.toFixed(1)}%`,
+      `${group.llc} · ${group.utilizationPct.toFixed(0)}%`,
+    ];
+    const label = labels.find((candidate) => context.measureText(candidate).width <= width - 6);
+    if (label) {
+      context.fillText(label, left + width / 2, top + height / 2);
+    }
+  }
+
+  context.fillStyle = "#25313b";
+  context.font = "600 10px ui-sans-serif, system-ui, sans-serif";
+  context.textAlign = "right";
+  context.textBaseline = "middle";
+  context.fillText("LLC util", margins.left - 7, top + height / 2);
+}
+
 function drawBoundaries(context, matrix, margins, matrixSize, cellSize) {
   const widths = { node: 3, package: 2.5, llc: 2, core: 1 };
   const colors = { node: "#ffffff", package: "#d7dee4", llc: "#98a8b5", core: "#536471" };
@@ -1363,6 +1420,26 @@ function showTooltip(event) {
     positionTooltip(event);
     return;
   }
+  if (
+    column >= 0 && column < size &&
+    canvasY >= geometry.llcTop &&
+    canvasY < geometry.llcTop + geometry.llcHeight
+  ) {
+    const span = geometry.llcUsage.spans.find((candidate) => (
+      column >= candidate.start && column < candidate.end
+    ));
+    const group = span && geometry.llcUsage.groups[span.groupIndex];
+    if (group) {
+      elements.tooltip.textContent = [
+        `LLC ${group.llc}`,
+        `All Snake utilization: ${group.utilizationPct.toFixed(1)}% of LLC capacity`,
+        `${formatRuntime(group.runtimeNs)} runtime across ${numberFormat.format(group.cpuCount)} CPUs`,
+        `Node ${group.node} · package ${group.package}`,
+      ].join("\n");
+      positionTooltip(event);
+      return;
+    }
+  }
   if (row < 0 || column < 0 || row >= size || column >= size) {
     hideTooltip();
     return;
@@ -1432,6 +1509,7 @@ function renderRoute({ focusHeading = false } = {}) {
     elements.schedulerControlView,
     elements.testingView,
     elements.debuggingView,
+    elements.debuggingVtimeView,
     elements.operationsView,
     elements.roadmapView,
   ]) {
@@ -1454,8 +1532,10 @@ function renderRoute({ focusHeading = false } = {}) {
     renderSchedulerControl();
   } else if (state.route === "validate/testing") {
     renderTesting();
-  } else if (state.route === "debugging") {
+  } else if (state.route === "debugging/scheduler") {
     renderDebugging();
+  } else if (state.route === "debugging/vtime") {
+    renderVtimeDebugging();
   } else {
     renderInspectionViews();
   }
@@ -1740,6 +1820,76 @@ function renderDebugging() {
   decorateFeedbackTargets(elements.debuggingView);
 }
 
+function renderVtimeDebugging() {
+  const inspection = state.inspection
+    ? { ...state.inspection, context: state.inspectionContext }
+    : null;
+  const model = vtimeDebugModel(inspection);
+  renderFreshness(
+    elements.debuggingVtimeFreshness,
+    model.available,
+    state.inspectionError,
+    state.lastInspectionAt,
+    2_000,
+  );
+  const message = state.inspectionError
+    || (!model.available
+      ? "Snake inspection data is unavailable."
+      : !model.modeActive
+        ? `VTIME is not active; current fairness mode is ${String(model.modeName || "unknown").toUpperCase()}.`
+        : model.accountingErrors > 0
+          ? `${formatCount(model.accountingErrors)} VTIME accounting errors were reported in this generation.`
+          : null);
+  if (message) {
+    showElementNotice(
+      elements.debuggingVtimeNotice,
+      message,
+      model.available && model.modeActive ? "warning" : "info",
+    );
+  } else {
+    hideElementNotice(elements.debuggingVtimeNotice);
+  }
+
+  elements.vtimeClampCount.textContent = formatCount(model.clamps.count);
+  elements.vtimeClampRate.textContent = `${formatPercentage(model.clamps.enqueuePct)} of enqueues`;
+  elements.vtimeAccountingErrors.textContent = formatCount(model.accountingErrors);
+  elements.vtimeQueuedRuntimeShare.textContent = formatPercentage(model.runtime.queuedPct);
+  elements.vtimeAffinityEnqueueShare.textContent = formatPercentage(model.affinity.enqueuePct);
+  elements.vtimeGeneration.textContent = model.generation == null
+    ? "Generation unavailable"
+    : `Policy generation ${formatCount(model.generation)}`;
+
+  const affinityDispatchPct = model.dispatches > 0
+    ? model.affinity.dispatches * 100 / model.dispatches
+    : 0;
+  const counterRows = [
+    ["VTIME enqueues", model.enqueues, model.enqueues > 0 ? 100 : 0],
+    ["VTIME dispatches", model.dispatches, model.dispatchPct],
+    ["Affinity enqueues", model.affinity.enqueues, model.affinity.enqueuePct],
+    ["Affinity dispatches", model.affinity.dispatches, affinityDispatchPct],
+    ["Credit clamps", model.clamps.count, model.clamps.enqueuePct],
+    ["Equal-head ties", model.equalHeadTies, model.equalHeadTiePct],
+    ["Accounting errors", model.accountingErrors, null],
+  ];
+  replaceSortableTableBody(elements.vtimeCounterRows, counterRows.map(([label, value, share]) => `
+    <tr><th scope="row">${escapeHtml(label)}</th><td>${formatCount(value)}</td><td>${share == null ? "—" : formatPercentage(share)}</td></tr>`).join(""));
+
+  replaceSortableTableBody(elements.vtimeDispatchRows, model.dispatchRungs.length === 0
+    ? '<tr><td class="debugging-empty" colspan="8">Dispatch rung counters are unavailable.</td></tr>'
+    : model.dispatchRungs.map((rung) => `
+      <tr>
+        <th scope="row">${formatCount(rung.index)}</th>
+        <td><code>${escapeHtml(rung.operation)}</code></td>
+        <td>${formatCount(rung.attempts)}</td>
+        <td>${formatCount(rung.hits)}</td>
+        <td>${formatCount(rung.selected)}</td>
+        <td>${formatCount(rung.misses)}</td>
+        <td>${formatCount(rung.moveMisses)}</td>
+        <td>${formatCount(rung.errors)}</td>
+      </tr>`).join(""));
+  decorateFeedbackTargets(elements.debuggingVtimeView);
+}
+
 async function loadCallbackTiming({ force = false } = {}) {
   if (state.callbackTimingLoading && !force) {
     return;
@@ -1777,8 +1927,10 @@ async function loadCallbackTiming({ force = false } = {}) {
     renderCallbackTiming();
   } else if (state.route === "overview") {
     renderOverview();
-  } else if (state.route === "debugging") {
+  } else if (state.route === "debugging/scheduler") {
     renderDebugging();
+  } else if (state.route === "debugging/vtime") {
+    renderVtimeDebugging();
   }
 }
 
@@ -1922,7 +2074,7 @@ async function loadQueueTiming() {
     renderInspectionViews();
   } else if (state.route === "overview") {
     renderOverview();
-  } else if (state.route === "debugging") {
+  } else if (state.route === "debugging/scheduler") {
     renderDebugging();
   }
 }
@@ -2064,7 +2216,7 @@ async function loadSchedulerControl() {
     renderPolicyLibrary();
   } else if (state.route === "overview") {
     renderOverview();
-  } else if (state.route === "debugging") {
+  } else if (state.route === "debugging/scheduler") {
     renderDebugging();
   }
 }
@@ -2482,7 +2634,7 @@ function renderInspectionViews() {
     renderCallbackTiming();
   } else if (state.route === "overview") {
     renderOverview();
-  } else if (state.route === "debugging") {
+  } else if (state.route === "debugging/scheduler") {
     renderDebugging();
   }
 }

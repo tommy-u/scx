@@ -68,7 +68,11 @@
             <a href="#/project/operations" data-route="project/operations">Operations</a>
             <a href="#/project/roadmap" data-route="project/roadmap">Roadmap</a>
           </div>
-          <a class="navigation-debugging" href="#/debugging" data-route="debugging">Debugging</a>
+          <div class="navigation-group navigation-debugging-group">
+            <span class="navigation-group-label">Debugging</span>
+            <a href="#/debugging/scheduler" data-route="debugging/scheduler">Scheduler info</a>
+            <a href="#/debugging/vtime" data-route="debugging/vtime">VTIME</a>
+          </div>
         </nav>
         <button class="workspace-feedback-button" id="openFeedback" type="button" data-open-feedback aria-controls="feedbackDrawer">
           <span>Feedback</span>
@@ -514,7 +518,7 @@
             <nav class="project-quick-links" aria-label="Operations quick links">
               <a href="#/overview">Open Overview</a>
               <a href="#/configure">Review scheduler controls</a>
-              <a href="#/debugging">Copy a debugging snapshot</a>
+              <a href="#/debugging/scheduler">Copy a debugging snapshot</a>
             </nav>
           </section>
 
@@ -566,7 +570,7 @@
                     <text class="project-diagram-node-detail" x="810" y="98" text-anchor="middle">State and histories</text>
                   </g>
                 </a>
-                <a href="#/debugging" tabindex="0" focusable="true" aria-label="Open operational and debugging workspaces">
+                <a href="#/debugging/scheduler" tabindex="0" focusable="true" aria-label="Open operational and debugging workspaces">
                   <g class="project-diagram-node project-diagram-linked">
                     <rect x="960" y="42" width="140" height="80" rx="8"></rect>
                     <text x="1030" y="75" text-anchor="middle">Workspaces</text>
@@ -586,7 +590,7 @@
               <li><code>sched_switch</code> activity enters the <a href="#/observe/placement">Placement</a> probe.</li>
               <li>The Snake statistics and control socket supplies <a href="#/observe/callbacks">callback timing</a>, policy, queue, and task state.</li>
               <li>Dashboard owns the joined state and rolling histories supplied by the collector to <a href="#/overview">Overview</a> and the detailed workspaces.</li>
-              <li><a href="#/debugging">Debugging</a> packages the exact runtime context for escalation.</li>
+              <li><a href="#/debugging/scheduler">Debugging</a> packages the exact runtime context for escalation.</li>
             </ol>
           </section>
 
@@ -630,14 +634,14 @@
                 <a href="#/inspect/cells" tabindex="0" focusable="true" aria-label="Inspect cells and tasks"><g class="project-diagram-node project-diagram-linked"><rect x="250" y="278" width="190" height="70" rx="8"></rect><text x="345" y="310" text-anchor="middle">Cells &amp; tasks</text><text class="project-diagram-node-detail" x="345" y="331" text-anchor="middle">Ownership and identity</text></g></a>
                 <a href="#/inspect/policy-slots" tabindex="0" focusable="true" aria-label="Inspect policy rungs"><g class="project-diagram-node project-diagram-linked"><rect x="530" y="68" width="190" height="80" rx="8"></rect><text x="625" y="102" text-anchor="middle">Policy rungs</text><text class="project-diagram-node-detail" x="625" y="125" text-anchor="middle">Explain the decision</text></g></a>
                 <a href="#/configure" tabindex="0" focusable="true" aria-label="Review scheduler and policy controls"><g class="project-diagram-node project-diagram-linked"><rect x="790" y="68" width="190" height="80" rx="8"></rect><text x="885" y="102" text-anchor="middle">Scheduler &amp; policies</text><text class="project-diagram-node-detail" x="885" y="125" text-anchor="middle">Review before change</text></g></a>
-                <a href="#/debugging" tabindex="0" focusable="true" aria-label="Copy a debugging snapshot"><g class="project-diagram-node project-diagram-linked"><rect x="1030" y="68" width="130" height="80" rx="8"></rect><text x="1095" y="102" text-anchor="middle">Debugging</text><text class="project-diagram-node-detail" x="1095" y="125" text-anchor="middle">Escalate</text></g></a>
+                <a href="#/debugging/scheduler" tabindex="0" focusable="true" aria-label="Copy a debugging snapshot"><g class="project-diagram-node project-diagram-linked"><rect x="1030" y="68" width="130" height="80" rx="8"></rect><text x="1095" y="102" text-anchor="middle">Debugging</text><text class="project-diagram-node-detail" x="1095" y="125" text-anchor="middle">Escalate</text></g></a>
               </svg>
             </div>
             <ol class="project-diagram-equivalent" data-diagram-equivalent="operator-workflow">
               <li>Begin in <a href="#/overview">Overview</a> and identify whether the dominant signal is placement, callback cost, queueing, or cell ownership.</li>
               <li>Open the matching detailed workspace, then use <a href="#/inspect/policy-slots">Policy rungs</a> to explain the decision path.</li>
               <li>Use <a href="#/configure">Scheduler &amp; policies</a> only after the evidence is understood.</li>
-              <li>Capture <a href="#/debugging">Debugging</a> state before escalation or restart.</li>
+              <li>Capture <a href="#/debugging/scheduler">Debugging</a> state before escalation or restart.</li>
             </ol>
           </section>
 
@@ -814,7 +818,7 @@
                 <a href="#/inspect/queue-topology" tabindex="0" focusable="true" aria-label="Inspect affinity queues"><g class="project-diagram-node project-capability-present project-diagram-linked"><rect x="20" y="145" width="250" height="82" rx="8"></rect><text x="145" y="179" text-anchor="middle">Affinity queues</text><text class="project-diagram-status" x="145" y="204" text-anchor="middle">PRESENT</text></g></a>
                 <a href="#/inspect/queue-topology" tabindex="0" focusable="true" aria-label="Inspect borrowing and queue routing"><g class="project-diagram-node project-capability-partial project-diagram-linked"><rect x="305" y="145" width="250" height="82" rx="8"></rect><text x="430" y="179" text-anchor="middle">Wake / enqueue borrowing</text><text class="project-diagram-status" x="430" y="204" text-anchor="middle">PARTIAL</text></g></a>
                 <a href="#/observe/callbacks" tabindex="0" focusable="true" aria-label="Inspect latency and callback timing"><g class="project-diagram-node project-capability-partial project-diagram-linked"><rect x="590" y="145" width="250" height="82" rx="8"></rect><text x="715" y="179" text-anchor="middle">Pinned latency control</text><text class="project-diagram-status" x="715" y="204" text-anchor="middle">PARTIAL</text></g></a>
-                <a href="#/debugging" tabindex="0" focusable="true" aria-label="Open debugging and diagnostics"><g class="project-diagram-node project-capability-present project-diagram-linked"><rect x="875" y="145" width="250" height="82" rx="8"></rect><text x="1000" y="179" text-anchor="middle">Metrics &amp; inspection</text><text class="project-diagram-status" x="1000" y="204" text-anchor="middle">PRESENT · managed gaps</text></g></a>
+                <a href="#/debugging/scheduler" tabindex="0" focusable="true" aria-label="Open debugging and diagnostics"><g class="project-diagram-node project-capability-present project-diagram-linked"><rect x="875" y="145" width="250" height="82" rx="8"></rect><text x="1000" y="179" text-anchor="middle">Metrics &amp; inspection</text><text class="project-diagram-status" x="1000" y="204" text-anchor="middle">PRESENT · managed gaps</text></g></a>
                 <g class="project-parity-score" data-score-key="mitosis-static-data-plane" data-score-value="73"><text x="145" y="300" text-anchor="middle">Static data plane</text><text x="145" y="344" text-anchor="middle">73%</text></g>
                 <g class="project-parity-score" data-score-key="mitosis-dynamic-control" data-score-value="33"><text x="430" y="300" text-anchor="middle">Dynamic control</text><text x="430" y="344" text-anchor="middle">33%</text></g>
                 <g class="project-parity-score" data-score-key="mitosis-operations" data-score-value="67"><text x="715" y="300" text-anchor="middle">Operations</text><text x="715" y="344" text-anchor="middle">67%</text></g>
@@ -829,7 +833,7 @@
                 <tr><th scope="row">Demand controller</th><td>Missing</td><td><a href="#/overview">Current counters</a></td></tr>
                 <tr><th scope="row">Cell, LLC, and affinity queues</th><td>Present</td><td><a href="#/inspect/queue-topology">Queue topology</a></td></tr>
                 <tr><th scope="row">Borrowing and pinned latency</th><td>Partial</td><td><a href="#/observe/callbacks">Callback performance</a></td></tr>
-                <tr><th scope="row">Metrics and inspection</th><td>Present, with managed-control gaps</td><td><a href="#/debugging">Debugging</a></td></tr>
+                <tr><th scope="row">Metrics and inspection</th><td>Present, with managed-control gaps</td><td><a href="#/debugging/scheduler">Debugging</a></td></tr>
               </tbody>
             </table>
           </section>
@@ -854,7 +858,7 @@
                 <a href="#/inspect/cells" data-milestone-key="cpuset-cell0-allocation" tabindex="0" focusable="true" aria-label="Inspect cpuset allocation"><g class="project-diagram-node project-path-node project-diagram-linked"><rect x="645" y="60" width="175" height="90" rx="8"></rect><text x="732" y="91" text-anchor="middle">3 · Allocation</text><text class="project-diagram-node-detail" x="732" y="114" text-anchor="middle">Cpuset · cell 0</text><text class="project-diagram-node-detail" x="732" y="133" text-anchor="middle">pure plan only</text></g></a>
                 <a href="#/inspect/queue-topology" data-milestone-key="drain-live-publication" tabindex="0" focusable="true" aria-label="Inspect queue drain and publication"><g class="project-diagram-node project-path-node project-diagram-linked"><rect x="855" y="60" width="175" height="90" rx="8"></rect><text x="942" y="91" text-anchor="middle">4 · Drain</text><text class="project-diagram-node-detail" x="942" y="114" text-anchor="middle">Quiesce queues</text><text class="project-diagram-node-detail" x="942" y="133" text-anchor="middle">publish owners</text></g></a>
                 <a href="#/overview" data-milestone-key="demand-rebalance" tabindex="0" focusable="true" aria-label="Inspect demand and rebalance state"><g class="project-diagram-node project-path-node project-diagram-linked"><rect x="1065" y="60" width="175" height="90" rx="8"></rect><text x="1152" y="91" text-anchor="middle">5 · Demand</text><text class="project-diagram-node-detail" x="1152" y="114" text-anchor="middle">EWMA · cooldown</text><text class="project-diagram-node-detail" x="1152" y="133" text-anchor="middle">rebalance</text></g></a>
-                <a href="#/debugging" data-milestone-key="hardening" tabindex="0" focusable="true" aria-label="Inspect operational hardening"><g class="project-diagram-node project-path-node project-diagram-linked"><rect x="1275" y="60" width="195" height="90" rx="8"></rect><text x="1372" y="91" text-anchor="middle">6 · Hardening</text><text class="project-diagram-node-detail" x="1372" y="114" text-anchor="middle">Diagnostics · churn</text><text class="project-diagram-node-detail" x="1372" y="133" text-anchor="middle">scale · latency</text></g></a>
+                <a href="#/debugging/scheduler" data-milestone-key="hardening" tabindex="0" focusable="true" aria-label="Inspect operational hardening"><g class="project-diagram-node project-path-node project-diagram-linked"><rect x="1275" y="60" width="195" height="90" rx="8"></rect><text x="1372" y="91" text-anchor="middle">6 · Hardening</text><text class="project-diagram-node-detail" x="1372" y="114" text-anchor="middle">Diagnostics · churn</text><text class="project-diagram-node-detail" x="1372" y="133" text-anchor="middle">scale · latency</text></g></a>
               </svg>
             </div>
             <ol class="project-diagram-equivalent project-path-list" data-diagram-equivalent="mitosis-implementation-path">
@@ -864,7 +868,7 @@
               <li data-milestone-key="cpuset-cell0-allocation"><a href="#/inspect/cells">Pure cpuset and cell-0 allocation</a></li>
               <li data-milestone-key="drain-live-publication"><a href="#/inspect/queue-topology">Queue drain, then live ownership publication</a></li>
               <li data-milestone-key="demand-rebalance"><a href="#/overview">Demand EWMA and controlled rebalance</a></li>
-              <li data-milestone-key="hardening"><a href="#/debugging">Data-plane and operational hardening</a></li>
+              <li data-milestone-key="hardening"><a href="#/debugging/scheduler">Data-plane and operational hardening</a></li>
             </ol>
           </section>
         </div>
@@ -908,10 +912,10 @@
         </section>
       </section>
 
-      <section class="view-panel hidden" id="debuggingView" data-view="debugging" aria-labelledby="debuggingTitle">
+      <section class="view-panel hidden" id="debuggingSchedulerView" data-view="debugging/scheduler" aria-labelledby="debuggingTitle">
         <header class="view-heading">
           <div>
-            <h2 id="debuggingTitle">Debugging</h2>
+            <h2 id="debuggingTitle">Scheduler info</h2>
             <p>Exact scheduler process, runtime configuration, and installed policy</p>
           </div>
           <span class="view-freshness" id="debuggingFreshness">Waiting for Snake</span>
@@ -961,6 +965,50 @@
         </div>
       </section>
 
+      <section class="view-panel hidden" id="debuggingVtimeView" data-view="debugging/vtime" aria-labelledby="debuggingVtimeTitle">
+        <header class="view-heading">
+          <div>
+            <h2 id="debuggingVtimeTitle">VTIME</h2>
+            <p>Virtual-time fairness counters and queue arbitration</p>
+          </div>
+          <span class="view-freshness" id="debuggingVtimeFreshness">Waiting for Snake</span>
+        </header>
+        <p class="notice info" id="debuggingVtimeNotice" role="status">Waiting for VTIME inspection data.</p>
+        <section class="summary-band vtime-debug-summary" aria-label="VTIME summary">
+          <dl>
+            <div><dt>Credit clamps</dt><dd><span id="vtimeClampCount">0</span><small id="vtimeClampRate">0.0% of enqueues</small></dd></div>
+            <div><dt>Accounting errors</dt><dd id="vtimeAccountingErrors">0</dd></div>
+            <div><dt>Queued runtime</dt><dd id="vtimeQueuedRuntimeShare">0.0%</dd></div>
+            <div><dt>Affinity enqueues</dt><dd id="vtimeAffinityEnqueueShare">0.0%</dd></div>
+          </dl>
+          <p id="vtimeGeneration">Generation unavailable</p>
+        </section>
+        <div class="debugging-workspace">
+          <section class="debugging-section" aria-labelledby="vtimeCountersTitle" data-feedback-key="Debugging:VTIME-counters">
+            <header class="section-heading">
+              <h3 id="vtimeCountersTitle">Fairness counters</h3>
+            </header>
+            <div class="debugging-table-wrap">
+              <table data-sort-key="debugging:vtime-counters">
+                <thead><tr><th scope="col" data-sort-column="0" data-sort-type="text">Signal</th><th scope="col" data-sort-column="1" data-sort-type="number">Value</th><th scope="col" data-sort-column="2" data-sort-type="percentage">Share</th></tr></thead>
+                <tbody id="vtimeCounterRows"></tbody>
+              </table>
+            </div>
+          </section>
+          <section class="debugging-section" aria-labelledby="vtimeDispatchTitle" data-feedback-key="Debugging:VTIME-dispatch">
+            <header class="section-heading">
+              <h3 id="vtimeDispatchTitle">Dispatch arbitration</h3>
+            </header>
+            <div class="debugging-table-wrap">
+              <table data-sort-key="debugging:vtime-dispatch">
+                <thead><tr><th scope="col" data-sort-column="0" data-sort-type="number">Rung</th><th scope="col" data-sort-column="1" data-sort-type="text">Operation</th><th scope="col" data-sort-column="2" data-sort-type="number">Attempts</th><th scope="col" data-sort-column="3" data-sort-type="number">Hits</th><th scope="col" data-sort-column="4" data-sort-type="number">Selected</th><th scope="col" data-sort-column="5" data-sort-type="number">Misses</th><th scope="col" data-sort-column="6" data-sort-type="number">Move misses</th><th scope="col" data-sort-column="7" data-sort-type="number">Errors</th></tr></thead>
+                <tbody id="vtimeDispatchRows"></tbody>
+              </table>
+            </div>
+          </section>
+        </div>
+      </section>
+
       </main>
     </div>
 
@@ -998,7 +1046,11 @@
             <a href="#/project/operations" data-route="project/operations">Operations</a>
             <a href="#/project/roadmap" data-route="project/roadmap">Roadmap</a>
           </div>
-          <a class="navigation-debugging" href="#/debugging" data-route="debugging">Debugging</a>
+          <div class="navigation-group navigation-debugging-group">
+            <span class="navigation-group-label">Debugging</span>
+            <a href="#/debugging/scheduler" data-route="debugging/scheduler">Scheduler info</a>
+            <a href="#/debugging/vtime" data-route="debugging/vtime">VTIME</a>
+          </div>
         </nav>
       </div>
     </dialog>

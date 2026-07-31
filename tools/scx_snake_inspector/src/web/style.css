@@ -3596,7 +3596,7 @@ body {
   text-transform: uppercase;
 }
 
-.workspace-navigation .navigation-debugging {
+.workspace-navigation .navigation-debugging-group {
   margin-top: 14px;
   padding-top: 11px;
   border-top: 1px solid var(--border);
@@ -3685,6 +3685,14 @@ body {
 .debugging-workspace {
   min-width: 0;
   background: var(--surface);
+}
+
+.vtime-debug-summary dd small {
+  margin-top: 2px;
+  display: block;
+  color: var(--muted);
+  font-size: 0.65rem;
+  font-weight: 600;
 }
 
 .debugging-section {

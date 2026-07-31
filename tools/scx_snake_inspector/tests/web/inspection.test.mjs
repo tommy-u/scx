@@ -736,7 +736,7 @@ test("global statistics reset is exposed by callback performance, not Configure"
   );
   const configure = page.slice(
     page.indexOf('id="controlView"'),
-    page.indexOf('id="debuggingView"'),
+    page.indexOf('id="debuggingSchedulerView"'),
   );
 
   assert.match(callbacks, /id="resetAllStats"[^>]*>Reset all statistics<\/button>/);

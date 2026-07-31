@@ -12,7 +12,8 @@ const ROUTES = new Set([
   "inspect/queue-topology",
   "inspect/cells",
   "validate/testing",
-  "debugging",
+  "debugging/scheduler",
+  "debugging/vtime",
   "project/operations",
   "project/roadmap",
 ]);
@@ -22,6 +23,7 @@ const LEGACY_ROUTES = new Map([
   ["control", "configure"],
   ["policy", "inspect/policy-slots"],
   ["cells", "inspect/cells"],
+  ["debugging", "debugging/scheduler"],
 ]);
 const PRODUCTION_POLICY_IDS = new Set([
   "kernel-default-sim.toml",
@@ -2202,6 +2204,71 @@ export function schedulerDebugModel({ control, inspection } = {}) {
     nonDefaultSettings,
     policySource,
     snapshotText: JSON.stringify(snapshot, null, 2),
+  };
+}
+
+export function vtimeDebugModel(inspection) {
+  const context = inspection?.context || null;
+  const activeSlot = (inspection?.slots || []).find((slot) => (
+    slot.state === "active" || slot.slot === inspection?.active_slot
+  )) || null;
+  const metrics = activeSlot?.metrics || null;
+  const count = (name) => Math.max(0, Number(metrics?.[name]) || 0);
+  const percentage = (value, total) => total > 0 ? value * 100 / total : 0;
+  const enqueues = count("vtime_enqueues");
+  const dispatches = count("vtime_dispatches");
+  const cpuEnqueues = count("vtime_cpu_enqueues");
+  const cpuDispatches = count("vtime_cpu_dispatches");
+  const creditClamps = count("vtime_credit_clamps");
+  const equalHeadTies = count("vtime_equal_head_ties");
+  const directRuntimeNs = count("vtime_direct_runtime_ns");
+  const queuedRuntimeNs = count("vtime_queued_runtime_ns");
+  const totalRuntimeNs = directRuntimeNs + queuedRuntimeNs;
+  const modeName = String(
+    inspection?.fairness?.mode_name
+      ?? context?.fairness
+      ?? metrics?.fairness_mode
+      ?? "",
+  ).toLowerCase();
+  const dispatchRungs = Object.values(metrics?.dispatch_rungs || {})
+    .map((rung) => ({
+      index: Math.max(0, Number(rung?.index) || 0),
+      operation: String(rung?.operation || "Unknown"),
+      attempts: Math.max(0, Number(rung?.attempts) || 0),
+      hits: Math.max(0, Number(rung?.hits) || 0),
+      misses: Math.max(0, Number(rung?.misses) || 0),
+      selected: Math.max(0, Number(rung?.selected) || 0),
+      moveMisses: Math.max(0, Number(rung?.move_misses) || 0),
+      errors: Math.max(0, Number(rung?.errors) || 0),
+    }))
+    .sort((left, right) => left.index - right.index);
+
+  return {
+    available: Boolean(metrics),
+    modeActive: modeName === "vtime",
+    modeName: modeName || null,
+    generation: context?.policy_generation ?? activeSlot?.generation ?? null,
+    enqueues,
+    dispatches,
+    dispatchPct: percentage(dispatches, enqueues),
+    clamps: {
+      count: creditClamps,
+      enqueuePct: percentage(creditClamps, enqueues),
+    },
+    runtime: {
+      directNs: directRuntimeNs,
+      queuedNs: queuedRuntimeNs,
+      queuedPct: percentage(queuedRuntimeNs, totalRuntimeNs),
+    },
+    affinity: {
+      enqueues: cpuEnqueues,
+      dispatches: cpuDispatches,
+      enqueuePct: percentage(cpuEnqueues, enqueues),
+    },
+    accountingErrors: count("vtime_accounting_errors"),
+    equalHeadTies,
+    equalHeadTiePct: percentage(equalHeadTies, dispatches),
+    dispatchRungs,
   };
 }
 

@@ -19,8 +19,10 @@ The embedded interface is organized by purpose rather than a fixed view count:
 - **Project** contains **Operations**, a concise data-flow, operating-boundary,
   and troubleshooting guide, and **Roadmap**, a dated view of completion
   estimates, release blockers, Mitosis gaps, and implementation dependencies.
-- **Debugging** provides the exact scheduler identity, command, non-default
-  configuration, installed policy, and a copyable escalation snapshot.
+- **Debugging** contains **Scheduler info**, with the exact scheduler identity,
+  command, non-default configuration, installed policy, and copyable escalation
+  snapshot, and **VTIME**, with fairness, clamp, runtime-path, affinity-queue,
+  and dispatch-arbitration counters for the active policy generation.
 - **Validate** contains **Testing**, a VM-only failure matrix grouped by FIFO,
   VTIME, and EEVDF. Each compatible policy runs for one minute under CPU
   saturation, waker/wakee switching, mixed affinity, and fork/yield churn.

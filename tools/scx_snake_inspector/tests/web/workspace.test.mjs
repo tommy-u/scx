@@ -84,7 +84,8 @@ test("nested workspace routes are canonical and legacy hashes remain compatible"
     "inspect/policy-slots",
     "inspect/queue-topology",
     "inspect/cells",
-    "debugging",
+    "debugging/scheduler",
+    "debugging/vtime",
     "project/operations",
     "project/roadmap",
   ]) {
@@ -107,6 +108,10 @@ test("nested workspace routes are canonical and legacy hashes remain compatible"
   });
   assert.deepEqual(parseInspectorRoute("#/control"), {
     route: "configure",
+    feedbackOpen: false,
+  });
+  assert.deepEqual(parseInspectorRoute("#/debugging"), {
+    route: "debugging/scheduler",
     feedbackOpen: false,
   });
   assert.deepEqual(parseInspectorRoute("#/feedback"), {
@@ -467,6 +472,76 @@ test("debug model reports unavailable scheduler state without inventing configur
   assert.deepEqual(snapshot.configuration.non_default, []);
 });
 
+test("VTIME debug model summarizes the active generation without inventing thresholds", async () => {
+  const inspectionModule = await import("../../src/web/inspection.js");
+  assert.equal(typeof inspectionModule.vtimeDebugModel, "function");
+  const model = inspectionModule.vtimeDebugModel({
+    context: {
+      fairness: "vtime",
+      policy_generation: 9,
+      active_slot: 1,
+    },
+    fairness: { mode_name: "vtime" },
+    active_slot: 1,
+    slots: [{
+      slot: 1,
+      state: "active",
+      generation: 9,
+      metrics: {
+        vtime_enqueues: 100,
+        vtime_dispatches: 90,
+        vtime_cpu_enqueues: 10,
+        vtime_cpu_dispatches: 8,
+        vtime_credit_clamps: 25,
+        vtime_accounting_errors: 2,
+        vtime_equal_head_ties: 5,
+        vtime_direct_runtime_ns: 20,
+        vtime_queued_runtime_ns: 80,
+        dispatch_rungs: {
+          2: {
+            index: 2,
+            operation: "peek(remote)",
+            attempts: 40,
+            hits: 20,
+            misses: 20,
+            selected: 10,
+            move_misses: 3,
+            errors: 0,
+          },
+          0: {
+            index: 0,
+            operation: "peek(cpu)",
+            attempts: 40,
+            hits: 5,
+            misses: 35,
+            selected: 4,
+            move_misses: 0,
+            errors: 0,
+          },
+        },
+      },
+    }],
+  });
+
+  assert.equal(model.available, true);
+  assert.equal(model.modeActive, true);
+  assert.equal(model.generation, 9);
+  assert.deepEqual(model.clamps, { count: 25, enqueuePct: 25 });
+  assert.deepEqual(model.runtime, {
+    directNs: 20,
+    queuedNs: 80,
+    queuedPct: 80,
+  });
+  assert.deepEqual(model.affinity, {
+    enqueues: 10,
+    dispatches: 8,
+    enqueuePct: 10,
+  });
+  assert.equal(model.accountingErrors, 2);
+  assert.equal(model.equalHeadTies, 5);
+  assert.deepEqual(model.dispatchRungs.map((rung) => rung.index), [0, 2]);
+});
+
 test("page shell exposes grouped navigation and separate diagnostic workspaces", () => {
   for (const fragment of [
     'id="workspaceSidebar"',
@@ -478,7 +553,8 @@ test("page shell exposes grouped navigation and separate diagnostic workspaces",
     'href="#/inspect/policy-slots"',
     'href="#/inspect/queue-topology"',
     'href="#/inspect/cells"',
-    'href="#/debugging"',
+    'href="#/debugging/scheduler"',
+    'href="#/debugging/vtime"',
     'href="#/project/operations"',
     'href="#/project/roadmap"',
     'id="overviewView"',
@@ -494,7 +570,8 @@ test("page shell exposes grouped navigation and separate diagnostic workspaces",
     'id="overviewCharts"',
     'id="schedulerUptime"',
     'id="queueTopologyView"',
-    'id="debuggingView"',
+    'id="debuggingSchedulerView"',
+    'id="debuggingVtimeView"',
     'id="operationsView"',
     'id="roadmapView"',
     'data-view="configure"',
@@ -513,6 +590,24 @@ test("page shell exposes grouped navigation and separate diagnostic workspaces",
   assert.match(script, /hostContext: state\.hostContext/);
 });
 
+test("VTIME debugging workspace renders fairness and arbitration diagnostics", () => {
+  for (const fragment of [
+    'id="debuggingVtimeFreshness"',
+    'id="debuggingVtimeNotice"',
+    'id="vtimeClampCount"',
+    'id="vtimeClampRate"',
+    'id="vtimeAccountingErrors"',
+    'id="vtimeQueuedRuntimeShare"',
+    'id="vtimeAffinityEnqueueShare"',
+    'id="vtimeCounterRows"',
+    'id="vtimeDispatchRows"',
+  ]) {
+    assert.match(page, new RegExp(fragment), `missing ${fragment}`);
+  }
+  assert.match(script, /function renderVtimeDebugging\(\)/);
+  assert.match(script, /vtimeDebugModel\(inspection\)/);
+});
+
 test("each workspace heading matches its Explorer label", () => {
   const routes = [
     "overview",
@@ -522,7 +617,8 @@ test("each workspace heading matches its Explorer label", () => {
     "inspect/policy-slots",
     "inspect/queue-topology",
     "inspect/cells",
-    "debugging",
+    "debugging/scheduler",
+    "debugging/vtime",
     "project/operations",
     "project/roadmap",
   ];
