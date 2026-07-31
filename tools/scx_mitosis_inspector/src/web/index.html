@@ -28,6 +28,10 @@
           <a href="/system">System</a>
           <a href="/stats">Scheduler</a>
         </nav>
+        <button class="workspace-feedback-button" id="openFeedback" type="button" aria-controls="feedbackDrawer">
+          <span>Review feedback</span>
+          <span class="feedback-count" id="feedbackCount" aria-label="0 feedback drafts">0</span>
+        </button>
       </aside>
 
       <main id="app" tabindex="-1" aria-label="Mitosis callback inspector">
@@ -38,7 +42,7 @@
           </div>
         </header>
 
-        <section class="summary" aria-label="Host environment">
+        <section class="summary" aria-label="Host environment" data-feedback-key="Callbacks:Environment">
           <dl>
             <div><dt>Host</dt><dd id="hostname">--</dd></div>
             <div><dt>Kernel</dt><dd id="kernelRelease">--</dd></div>
@@ -49,7 +53,7 @@
           </dl>
         </section>
 
-        <section class="counter-grid" id="counterGrid" aria-label="Callback counters">
+        <section class="counter-grid" id="counterGrid" aria-label="Callback counters" data-feedback-key="Callbacks:Counters">
           <article class="counter-card" data-callback="select_cpu">
             <h2>select_cpu</h2>
             <strong class="count">0</strong>
@@ -82,7 +86,7 @@
           </article>
         </section>
 
-        <section class="table-section" aria-labelledby="callbackTimingHeading">
+        <section class="table-section" aria-labelledby="callbackTimingHeading" data-feedback-key="Callbacks:Latency">
           <div class="table-section-heading">
             <h2 id="callbackTimingHeading">Callback latency</h2>
             <p>Sampling <strong id="callbackTimingSampleRate">--</strong></p>
@@ -104,7 +108,7 @@
           </div>
         </section>
 
-        <section class="table-section" aria-labelledby="bpfRuntimeHeading">
+        <section class="table-section" aria-labelledby="bpfRuntimeHeading" data-feedback-key="Callbacks:BPF-runtime">
           <div class="table-section-heading">
             <h2 id="bpfRuntimeHeading">BPF program runtime</h2>
             <p id="bpfRuntimeStatus">Checking kernel counters</p>
@@ -127,7 +131,7 @@
           </div>
         </section>
 
-        <section class="table-section" aria-labelledby="schedulerTimingHeading">
+        <section class="table-section" aria-labelledby="schedulerTimingHeading" data-feedback-key="Callbacks:Scheduler-latency">
           <div class="table-section-heading">
             <h2 id="schedulerTimingHeading">Scheduler latency</h2>
             <p>Sampling <strong id="eventTimingSampleRate">--</strong></p>
@@ -149,7 +153,7 @@
           </div>
         </section>
 
-        <section class="table-section" aria-labelledby="cpuUtilizationHeading">
+        <section class="table-section" aria-labelledby="cpuUtilizationHeading" data-feedback-key="Callbacks:CPU-utilization">
           <div class="table-section-heading">
             <h2 id="cpuUtilizationHeading">CPU utilization</h2>
             <p>Whole host <strong id="overallCpuUtilization">--</strong></p>
@@ -185,14 +189,33 @@
           </div>
         </section>
 
-        <section class="table-section" aria-labelledby="migrationHeading">
-          <div class="table-section-heading">
-            <h2 id="migrationHeading">CPU migration matrix</h2>
-            <fieldset class="segmented" aria-label="CPU order">
-              <label><input type="radio" name="migrationOrder" value="topology" checked><span>Topology</span></label>
-              <label><input type="radio" name="migrationOrder" value="numeric"><span>Numeric</span></label>
-            </fieldset>
+        <section class="table-section migration-section" aria-labelledby="migrationHeading" data-feedback-key="Callbacks:CPU-migration-matrix">
+          <div class="table-section-heading migration-heading">
+            <div>
+              <h2 id="migrationHeading">CPU migration matrix</h2>
+              <p>Source CPU by destination CPU, with CPU, whole-core, and LLC utilization</p>
+            </div>
+            <div class="heatmap-heading-tools">
+              <div class="legend" aria-label="Heat intensity legend">
+                <span id="migrationLegendLow">0</span>
+                <span class="legend-ramp" aria-hidden="true"></span>
+                <span id="migrationLegendHigh">0</span>
+              </div>
+              <fieldset class="segmented" aria-label="CPU order">
+                <label><input type="radio" name="migrationOrder" value="topology" checked><span>Topology</span></label>
+                <label><input type="radio" name="migrationOrder" value="numeric"><span>Numeric</span></label>
+              </fieldset>
+              <fieldset class="segmented" aria-label="Color scale">
+                <label><input type="radio" name="migrationScale" value="log" checked><span>Log</span></label>
+                <label><input type="radio" name="migrationScale" value="linear"><span>Linear</span></label>
+              </fieldset>
+              <label class="heatmap-zoom">
+                <span>Zoom</span>
+                <input id="migrationZoom" type="range" min="0.25" max="3" step="0.25" value="1" aria-label="Heatmap zoom">
+              </label>
+            </div>
           </div>
+          <section class="migration-pair-inspection" id="migrationPairInspection" aria-live="polite"></section>
           <div class="heatmap-viewport" id="migrationHeatmapViewport">
             <canvas id="migrationHeatmapCanvas" width="800" height="800" role="img" aria-label="CPU migration heatmap"></canvas>
             <div class="heatmap-tooltip hidden" id="migrationHeatmapTooltip" role="tooltip"></div>
@@ -213,6 +236,28 @@
         </section>
       </main>
     </div>
+    <dialog class="feedback-drawer" id="feedbackDrawer" aria-labelledby="feedbackTitle">
+      <div class="feedback-drawer-surface">
+        <header class="feedback-drawer-heading">
+          <div>
+            <h2 id="feedbackTitle">Feedback</h2>
+            <p>Collected inspector change requests</p>
+          </div>
+          <button class="feedback-drawer-close" id="closeFeedback" type="button" aria-label="Close feedback">&times;</button>
+        </header>
+        <section class="feedback-workspace" aria-labelledby="feedbackTranscriptTitle">
+          <header class="feedback-workspace-heading">
+            <h3 id="feedbackTranscriptTitle">Collected feedback</h3>
+            <div class="feedback-actions">
+              <button id="copyFeedback" type="button" disabled>Copy</button>
+              <button id="clearFeedback" type="button" disabled>Clear</button>
+            </div>
+          </header>
+          <textarea id="feedbackTranscript" aria-label="Collected feedback" readonly spellcheck="false"></textarea>
+          <p class="feedback-notice hidden" id="feedbackNotice" role="status" aria-live="polite"></p>
+        </section>
+      </div>
+    </dialog>
     <script src="/assets/heatmap.js" defer></script>
     <script src="/assets/app.js" defer></script>
   </body>
