@@ -166,6 +166,66 @@ test("buildLlcUsage keeps repeated LLC IDs separate across packages", () => {
   ]);
 });
 
+test("buildCoreUsage combines sparse SMT siblings into whole-core capacity", () => {
+  assert.equal(typeof heatmapModule.buildCoreUsage, "function");
+  if (typeof heatmapModule.buildCoreUsage !== "function") {
+    return;
+  }
+
+  const sparseSiblings = {
+    cpus: [
+      { cpu: 0, node: 0, package: 0, llc: 0, core: 0 },
+      { cpu: 1, node: 0, package: 0, llc: 0, core: 1 },
+      { cpu: 158, node: 0, package: 0, llc: 0, core: 0 },
+      { cpu: 159, node: 0, package: 0, llc: 0, core: 1 },
+    ],
+    numeric_order: [0, 1, 158, 159],
+    topology_order: [0, 158, 1, 159],
+  };
+  const entries = [
+    { cpu: 0, runtime_ns: 60, utilization_pct: 60 },
+    { cpu: 1, runtime_ns: 100, utilization_pct: 100 },
+    { cpu: 158, runtime_ns: 40, utilization_pct: 40 },
+    { cpu: 159, runtime_ns: 0, utilization_pct: 0 },
+  ];
+
+  const grouped = heatmapModule.buildCoreUsage(sparseSiblings, entries, "topology");
+  assert.deepEqual(grouped.groups, [
+    {
+      key: "0:0:0",
+      node: 0,
+      package: 0,
+      core: 0,
+      cpus: [0, 158],
+      cpuCount: 2,
+      runtimeNs: 100,
+      utilizationPct: 50,
+    },
+    {
+      key: "0:0:1",
+      node: 0,
+      package: 0,
+      core: 1,
+      cpus: [1, 159],
+      cpuCount: 2,
+      runtimeNs: 100,
+      utilizationPct: 50,
+    },
+  ]);
+  assert.deepEqual(grouped.spans, [
+    { start: 0, end: 2, groupIndex: 0 },
+    { start: 2, end: 4, groupIndex: 1 },
+  ]);
+
+  const numeric = heatmapModule.buildCoreUsage(sparseSiblings, entries, "numeric");
+  assert.deepEqual(numeric.spans, [
+    { start: 0, end: 1, groupIndex: 0 },
+    { start: 1, end: 2, groupIndex: 1 },
+    { start: 2, end: 3, groupIndex: 0 },
+    { start: 3, end: 4, groupIndex: 1 },
+  ]);
+});
+
 test("normalizeUtilization uses an absolute zero-to-one-hundred scale", () => {
   assert.equal(normalizeUtilization(0, "linear"), 0);
   assert.equal(normalizeUtilization(25, "linear"), 0.25);
@@ -245,10 +305,20 @@ test("heatmap layout places utilization above the migration matrix", () => {
   assert.equal(typeof heatmapModule.heatmapLayout, "function");
   const layout = heatmapModule.heatmapLayout(316, 1440, 1);
 
-  assert.ok(layout.usageTop + layout.usageHeight <= layout.llcTop);
+  assert.ok(layout.usageTop + layout.usageHeight <= layout.coreTop);
+  assert.ok(layout.coreTop + layout.coreHeight <= layout.llcTop);
   assert.ok(layout.llcTop + layout.llcHeight < layout.margins.top);
   assert.equal(layout.matrixSize, 316 * layout.cellSize);
   assert.ok(layout.height > layout.margins.top + layout.matrixSize);
+});
+
+test("Activity labels logical CPU, whole-core, and LLC utilization rows", () => {
+  const script = readFileSync(new URL("../../src/web/app.js", import.meta.url), "utf8");
+
+  assert.match(script, /fillText\("CPU util"/);
+  assert.match(script, /fillText\("Core util"/);
+  assert.match(script, /buildCoreUsage/);
+  assert.match(script, /whole-core capacity/);
 });
 
 test("the Activity viewport delegates vertical scrolling to the document", () => {

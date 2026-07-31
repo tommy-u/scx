@@ -5,6 +5,7 @@
 
 import {
   axisLabelIndices,
+  buildCoreUsage,
   buildCpuUsage,
   buildLlcUsage,
   buildMatrix,
@@ -1140,6 +1141,11 @@ function renderHeatmap() {
     state.snapshot?.cpu_usage || [],
     state.orderMode,
   );
+  const coreUsage = buildCoreUsage(
+    state.topology,
+    state.snapshot?.cpu_usage || [],
+    state.orderMode,
+  );
   const llcUsage = buildLlcUsage(
     state.topology,
     state.snapshot?.cpu_usage || [],
@@ -1149,6 +1155,8 @@ function renderHeatmap() {
   const viewportWidth = Math.max(320, elements.viewport.clientWidth || 800);
   const {
     cellSize,
+    coreHeight,
+    coreTop,
     height,
     llcHeight,
     llcTop,
@@ -1199,10 +1207,14 @@ function renderHeatmap() {
   drawPinnedMigrationPair(context, matrix, margins, cellSize);
   drawAxes(context, matrix.order, margins, matrixSize, cellSize);
   drawCpuUsage(context, usage, margins, matrixSize, cellSize, usageTop, usageHeight);
+  drawCoreUsage(context, coreUsage, margins, cellSize, coreTop, coreHeight);
   drawLlcUsage(context, llcUsage, margins, cellSize, llcTop, llcHeight);
   drawLlcAnnotations(context, matrix.order, margins, cellSize);
   state.geometry = {
     cellSize,
+    coreHeight,
+    coreTop,
+    coreUsage,
     llcHeight,
     llcTop,
     llcUsage,
@@ -1215,7 +1227,7 @@ function renderHeatmap() {
   };
   elements.canvas.setAttribute(
     "aria-label",
-    `CPU migration heatmap with ${numberFormat.format(matrix.total)} transitions, LLC annotations, all-Snake utilization across ${cpuCount} CPUs, and capacity-normalized utilization across ${llcUsage.groups.length} LLCs`,
+    `CPU migration heatmap with ${numberFormat.format(matrix.total)} transitions, LLC annotations, logical CPU utilization across ${cpuCount} CPUs, capacity-normalized utilization across ${coreUsage.groups.length} whole cores, and capacity-normalized utilization across ${llcUsage.groups.length} LLCs`,
   );
 }
 
@@ -1321,7 +1333,7 @@ function drawCpuUsage(context, usage, margins, matrixSize, cellSize, top, height
   context.font = "600 10px ui-sans-serif, system-ui, sans-serif";
   context.textAlign = "right";
   context.textBaseline = "middle";
-  context.fillText("All Snake", margins.left - 7, top + height / 2);
+  context.fillText("CPU util", margins.left - 7, top + height / 2);
 
   const boundaries = topologyBoundaries(state.topology, usage.order);
   for (const boundary of boundaries) {
@@ -1333,6 +1345,39 @@ function drawCpuUsage(context, usage, margins, matrixSize, cellSize, top, height
     context.lineTo(x, top + height);
     context.stroke();
   }
+}
+
+function drawCoreUsage(context, coreUsage, margins, cellSize, top, height) {
+  for (const span of coreUsage.spans) {
+    const group = coreUsage.groups[span.groupIndex];
+    const left = margins.left + span.start * cellSize;
+    const width = (span.end - span.start) * cellSize;
+    const intensity = normalizeUtilization(group.utilizationPct, state.scale);
+    context.fillStyle = infernoColor(intensity);
+    context.fillRect(left, top, Math.ceil(width), height);
+    context.strokeStyle = "#ffffff";
+    context.lineWidth = 1;
+    context.strokeRect(left, top, Math.ceil(width), height);
+
+    context.font = "600 9px ui-sans-serif, system-ui, sans-serif";
+    context.textAlign = "center";
+    context.textBaseline = "middle";
+    context.fillStyle = intensity > 0.72 ? "#11161c" : "#ffffff";
+    const labels = [
+      `Core ${group.core} · ${group.utilizationPct.toFixed(1)}%`,
+      `${group.core} · ${group.utilizationPct.toFixed(0)}%`,
+    ];
+    const label = labels.find((candidate) => context.measureText(candidate).width <= width - 4);
+    if (label) {
+      context.fillText(label, left + width / 2, top + height / 2);
+    }
+  }
+
+  context.fillStyle = "#25313b";
+  context.font = "600 10px ui-sans-serif, system-ui, sans-serif";
+  context.textAlign = "right";
+  context.textBaseline = "middle";
+  context.fillText("Core util", margins.left - 7, top + height / 2);
 }
 
 function drawLlcUsage(context, llcUsage, margins, cellSize, top, height) {
@@ -1468,12 +1513,33 @@ function showTooltip(event) {
     const cpuInfo = new Map(state.topology.cpus.map((entry) => [entry.cpu, entry]));
     elements.tooltip.textContent = [
       `CPU ${cpu}`,
-      `All Snake utilization: ${utilization.toFixed(1)}%`,
+      `CPU utilization: ${utilization.toFixed(1)}%`,
       `${formatRuntime(runtimeNs)} runtime over ${formatDuration(state.snapshot?.cpu_usage_observed_ms || 0)}`,
       topologyLine("Topology", cpuInfo.get(cpu)),
     ].join("\n");
     positionTooltip(event);
     return;
+  }
+  if (
+    column >= 0 && column < size &&
+    canvasY >= geometry.coreTop &&
+    canvasY < geometry.coreTop + geometry.coreHeight
+  ) {
+    const span = geometry.coreUsage.spans.find((candidate) => (
+      column >= candidate.start && column < candidate.end
+    ));
+    const group = span && geometry.coreUsage.groups[span.groupIndex];
+    if (group) {
+      elements.tooltip.textContent = [
+        `Core ${group.core}`,
+        `CPUs ${compactCpuList(group.cpus)}`,
+        `CPU utilization: ${group.utilizationPct.toFixed(1)}% of whole-core capacity`,
+        `${formatRuntime(group.runtimeNs)} runtime across ${numberFormat.format(group.cpuCount)} logical CPUs`,
+        `Node ${group.node} · package ${group.package}`,
+      ].join("\n");
+      positionTooltip(event);
+      return;
+    }
   }
   if (
     column >= 0 && column < size &&

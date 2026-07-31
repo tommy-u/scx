@@ -90,7 +90,7 @@ export function buildCpuUsage(topology, entries, orderMode) {
   return { order, positions, runtimeNs, utilizationPct };
 }
 
-export function buildLlcUsage(topology, entries, orderMode) {
+function buildGroupedUsage(topology, entries, orderMode, identityForCpu) {
   const usage = buildCpuUsage(topology, entries, orderMode);
   const cpuInfo = new Map(topology.cpus.map((cpu) => [cpu.cpu, cpu]));
   const groups = [];
@@ -102,16 +102,17 @@ export function buildLlcUsage(topology, entries, orderMode) {
     if (!cpu) {
       continue;
     }
-    const key = `${cpu.node}:${cpu.package}:${cpu.llc}`;
+    const identity = identityForCpu(cpu);
+    if (!identity) {
+      continue;
+    }
+    const { key } = identity;
     let groupIndex = groupIndexes.get(key);
     if (groupIndex === undefined) {
       groupIndex = groups.length;
       groupIndexes.set(key, groupIndex);
       groups.push({
-        key,
-        node: cpu.node,
-        package: cpu.package,
-        llc: cpu.llc,
+        ...identity,
         cpuCount: 0,
         runtimeNs: 0,
         utilizationPct: 0,
@@ -121,6 +122,9 @@ export function buildLlcUsage(topology, entries, orderMode) {
     group.cpuCount += 1;
     group.runtimeNs += usage.runtimeNs[index];
     group.utilizationPct += usage.utilizationPct[index];
+    if (group.cpus) {
+      group.cpus.push(cpu.cpu);
+    }
     cpuGroups[index] = groupIndex;
   }
   for (const group of groups) {
@@ -140,6 +144,29 @@ export function buildLlcUsage(topology, entries, orderMode) {
     }
   }
   return { groups, spans };
+}
+
+export function buildLlcUsage(topology, entries, orderMode) {
+  return buildGroupedUsage(topology, entries, orderMode, (cpu) => ({
+    key: `${cpu.node}:${cpu.package}:${cpu.llc}`,
+    node: cpu.node,
+    package: cpu.package,
+    llc: cpu.llc,
+  }));
+}
+
+export function buildCoreUsage(topology, entries, orderMode) {
+  return buildGroupedUsage(topology, entries, orderMode, (cpu) => (
+    cpu.core == null
+      ? null
+      : {
+        key: `${cpu.node}:${cpu.package}:${cpu.core}`,
+        node: cpu.node,
+        package: cpu.package,
+        core: cpu.core,
+        cpus: [],
+      }
+  ));
 }
 
 export function axisLabelIndices(count, maxLabels = 24) {
@@ -164,14 +191,18 @@ export function heatmapLayout(cpuCount, viewportWidth, zoom) {
   const cellSize = Math.max(2, Math.min(9, fitCell)) * (Number(zoom) || 1);
   const usageHeight = Math.max(13, Math.min(26, cellSize * 2.5));
   const usageTop = 20;
+  const coreHeight = Math.max(16, Math.min(24, cellSize * 2.5));
+  const coreTop = usageTop + usageHeight + 4;
   const llcHeight = Math.max(16, Math.min(24, cellSize * 2.5));
-  const llcTop = usageTop + usageHeight + 4;
+  const llcTop = coreTop + coreHeight + 4;
   const margins = { left: 64, top: llcTop + llcHeight + 10, right: 18 };
   const matrixSize = count * cellSize;
   const width = Math.ceil(margins.left + matrixSize + margins.right);
   const height = Math.ceil(margins.top + matrixSize + 46);
   return {
     cellSize,
+    coreHeight,
+    coreTop,
     height,
     llcHeight,
     llcTop,
