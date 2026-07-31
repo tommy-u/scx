@@ -8,10 +8,12 @@ repo=${SNAKE_REPO:-$(cd -- "${script_dir}/../../../.." && pwd)}
 inspector_bin=${1:-${repo}/tools/scx_snake_inspector/target/release/scx_snake_inspector}
 snake_bin=${2:-${repo}/target/release/scx_snake}
 campaign_dir=${3:-/tmp/scx-snake-testing/campaign-$(date +%Y%m%d-%H%M%S)}
+source_policy_dir=${SNAKE_TESTING_POLICY_DIR:-${repo}/scheds/rust/scx_snake/examples}
 shard_count=${SNAKE_TESTING_SHARDS:-8}
 guest_cpus=${SNAKE_TESTING_GUEST_CPUS:-8}
 guest_memory=${SNAKE_TESTING_GUEST_MEMORY:-4G}
-vm_timeout_secs=${SNAKE_TESTING_VM_TIMEOUT_SECS:-2700}
+vm_timeout_secs=${SNAKE_TESTING_VM_TIMEOUT_SECS:-}
+case_budget_secs=${SNAKE_TESTING_CASE_BUDGET_SECS:-105}
 vng=${VNG:-vng}
 pids=()
 
@@ -41,13 +43,17 @@ command -v timeout >/dev/null || fail "timeout is required"
 [[ -r /sys/kernel/sched_ext/state ]] || fail "the host kernel does not expose sched_ext"
 [[ ${shard_count} =~ ^[1-9][0-9]*$ ]] || fail "SNAKE_TESTING_SHARDS must be positive"
 [[ ${guest_cpus} =~ ^[1-9][0-9]*$ ]] || fail "SNAKE_TESTING_GUEST_CPUS must be positive"
-[[ ${vm_timeout_secs} =~ ^[1-9][0-9]*$ ]] || fail "SNAKE_TESTING_VM_TIMEOUT_SECS must be positive"
+[[ ${case_budget_secs} =~ ^[1-9][0-9]*$ ]] || fail "SNAKE_TESTING_CASE_BUDGET_SECS must be positive"
+[[ -z ${vm_timeout_secs} || ${vm_timeout_secs} =~ ^[1-9][0-9]*$ ]] ||
+    fail "SNAKE_TESTING_VM_TIMEOUT_SECS must be positive"
 (( guest_cpus >= 2 )) || fail "each guest requires at least two CPUs"
 [[ -x ${inspector_bin} ]] || fail "inspector binary is not executable: ${inspector_bin}"
 [[ -x ${snake_bin} ]] || fail "Snake binary is not executable: ${snake_bin}"
+[[ -d ${source_policy_dir} ]] || fail "policy directory does not exist: ${source_policy_dir}"
 
 inspector_bin=$(realpath "${inspector_bin}")
 snake_bin=$(realpath "${snake_bin}")
+source_policy_dir=$(realpath "${source_policy_dir}")
 if [[ -e ${campaign_dir} ]]; then
     [[ -d ${campaign_dir} ]] || fail "campaign path is not a directory: ${campaign_dir}"
     [[ -z $(find "${campaign_dir}" -mindepth 1 -maxdepth 1 -print -quit) ]] ||
@@ -56,24 +62,47 @@ else
     mkdir -p "${campaign_dir}"
 fi
 campaign_dir=$(realpath "${campaign_dir}")
+inputs_dir=${campaign_dir}/inputs
+snapshot_snake=${inputs_dir}/scx_snake
+snapshot_inspector=${inputs_dir}/scx_snake_inspector
+snapshot_policies=${inputs_dir}/policies
+snapshot_shard=${inputs_dir}/vm_matrix_shard.sh
+mkdir -p "${inputs_dir}"
+cp "${snake_bin}" "${snapshot_snake}"
+cp "${inspector_bin}" "${snapshot_inspector}"
+cp "${script_dir}/vm_matrix_shard.sh" "${snapshot_shard}"
+cp -a "${source_policy_dir}" "${snapshot_policies}"
+chmod -R a-w "${inputs_dir}"
+
+snake_bin=${snapshot_snake}
+inspector_bin=${snapshot_inspector}
+policy_dir=${snapshot_policies}
+policy_count=$(find "${policy_dir}" -maxdepth 1 -type f -name '*.toml' | wc -l)
+(( policy_count > 0 )) || fail "snapshot contains no TOML policies"
+# Every policy can contribute at most three fairness modes by four workloads.
+max_cases_per_shard=$(((policy_count * 12 + shard_count - 1) / shard_count))
+if [[ -z ${vm_timeout_secs} ]]; then
+    vm_timeout_secs=$((max_cases_per_shard * case_budget_secs + 180))
+fi
 
 echo "Campaign: ${campaign_dir}"
 echo "Aggregate UI command:"
 printf '  %q --listen 127.0.0.1:8788 --snake-bin %q --policy-dir %q --enable-testing --testing-isolated --testing-duration 60s --testing-shard-count %q --testing-import-dir %q\n' \
-    "${inspector_bin}" "${snake_bin}" "${repo}/scheds/rust/scx_snake/examples" \
+    "${inspector_bin}" "${snake_bin}" "${policy_dir}" \
     "${shard_count}" "${campaign_dir}"
 
 declare -a shard_pids
 for ((shard = 0; shard < shard_count; shard++)); do
     shard_dir=${campaign_dir}/shard-${shard}
     mkdir -p "${shard_dir}"
-    printf -v shard_command '%q %q %q %q %q %q' \
-        "${script_dir}/vm_matrix_shard.sh" \
+    printf -v shard_command '%q %q %q %q %q %q %q' \
+        "${snapshot_shard}" \
         "${inspector_bin}" \
         "${snake_bin}" \
         "${shard}" \
         "${shard_count}" \
-        "${shard_dir}"
+        "${shard_dir}" \
+        "${policy_dir}"
     printf -v vm_boot_command '%q --run --name %q --cpus %q --memory %q --user root --rwdir %q --exec %q' \
         "${vng}" "snake-shard-${shard}" "${guest_cpus}" "${guest_memory}" \
         "${campaign_dir}" "${shard_command}"
