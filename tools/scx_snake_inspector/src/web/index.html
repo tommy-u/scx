@@ -999,11 +999,25 @@
             <header class="section-heading">
               <h3 id="vtimeCountersTitle">Fairness counters</h3>
             </header>
-            <div class="debugging-table-wrap">
-              <table data-sort-key="debugging:vtime-counters">
-                <thead><tr><th scope="col" data-sort-column="0" data-sort-type="text">Signal</th><th scope="col" data-sort-column="1" data-sort-type="number">Value</th><th scope="col" data-sort-column="2" data-sort-type="number">Count / sec</th><th scope="col" data-sort-column="3" data-sort-type="percentage">Share</th></tr></thead>
-                <tbody id="vtimeCounterRows"></tbody>
-              </table>
+            <div class="policy-counter-tabs" role="tablist" aria-label="Policy counter relevance">
+              <button class="policy-counter-tab" id="vtimeRelevantCountersTab" type="button" role="tab" aria-controls="vtimeRelevantCountersPanel" aria-selected="true" tabindex="0" data-vtime-counter-tab="relevant">Relevant to this policy</button>
+              <button class="policy-counter-tab" id="vtimeInactiveCountersTab" type="button" role="tab" aria-controls="vtimeInactiveCountersPanel" aria-selected="false" tabindex="-1" data-vtime-counter-tab="inactive">Not relevant to this policy</button>
+            </div>
+            <div id="vtimeRelevantCountersPanel" role="tabpanel" aria-labelledby="vtimeRelevantCountersTab" tabindex="0" data-vtime-counter-panel="relevant">
+              <div class="debugging-table-wrap">
+                <table data-sort-key="debugging:vtime-counters:relevant">
+                  <thead><tr><th scope="col" data-sort-column="0" data-sort-type="text">Signal</th><th scope="col" data-sort-column="1" data-sort-type="number">Value</th><th scope="col" data-sort-column="2" data-sort-type="number">Count / sec</th><th scope="col" data-sort-column="3" data-sort-type="percentage">Share</th></tr></thead>
+                  <tbody id="vtimeRelevantCounterRows"></tbody>
+                </table>
+              </div>
+            </div>
+            <div id="vtimeInactiveCountersPanel" role="tabpanel" aria-labelledby="vtimeInactiveCountersTab" tabindex="0" data-vtime-counter-panel="inactive" hidden>
+              <div class="debugging-table-wrap">
+                <table data-sort-key="debugging:vtime-counters:inactive">
+                  <thead><tr><th scope="col" data-sort-column="0" data-sort-type="text">Signal</th><th scope="col" data-sort-column="1" data-sort-type="number">Value</th><th scope="col" data-sort-column="2" data-sort-type="number">Count / sec</th><th scope="col" data-sort-column="3" data-sort-type="percentage">Share</th></tr></thead>
+                  <tbody id="vtimeInactiveCounterRows"></tbody>
+                </table>
+              </div>
             </div>
           </section>
           <section class="debugging-section" aria-labelledby="vtimeDispatchTitle" data-feedback-key="Debugging:VTIME-dispatch">

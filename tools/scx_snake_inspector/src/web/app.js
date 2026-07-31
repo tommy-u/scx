@@ -174,7 +174,8 @@ const elements = {
   vtimeAffinityEnqueueShare: document.querySelector("#vtimeAffinityEnqueueShare"),
   vtimeClampCount: document.querySelector("#vtimeClampCount"),
   vtimeClampRate: document.querySelector("#vtimeClampRate"),
-  vtimeCounterRows: document.querySelector("#vtimeCounterRows"),
+  vtimeRelevantCounterRows: document.querySelector("#vtimeRelevantCounterRows"),
+  vtimeInactiveCounterRows: document.querySelector("#vtimeInactiveCounterRows"),
   vtimeDispatchRows: document.querySelector("#vtimeDispatchRows"),
   vtimeGeneration: document.querySelector("#vtimeGeneration"),
   vtimeQueuedRuntimeShare: document.querySelector("#vtimeQueuedRuntimeShare"),
@@ -351,6 +352,7 @@ const state = {
   vtimeCounterElapsedMs: 0,
   vtimeCounterPreviousInspection: null,
   vtimeCounterSampleAt: 0,
+  vtimeCounterTab: "relevant",
   windowMs: initialWindowMs,
   zoom: 1,
 };
@@ -504,6 +506,34 @@ function bindControls() {
     }
     event.preventDefault();
     selectQueueTopologyTab(nextTab, true);
+  });
+  elements.debuggingVtimeView.addEventListener("click", (event) => {
+    const tab = event.target.closest("[data-vtime-counter-tab]");
+    if (tab) {
+      selectVtimeCounterTab(tab.dataset.vtimeCounterTab);
+    }
+  });
+  elements.debuggingVtimeView.addEventListener("keydown", (event) => {
+    const tab = event.target.closest("[data-vtime-counter-tab]");
+    if (!tab) {
+      return;
+    }
+    const tabs = ["relevant", "inactive"];
+    const index = tabs.indexOf(tab.dataset.vtimeCounterTab);
+    let next = index;
+    if (["ArrowLeft", "ArrowUp"].includes(event.key)) {
+      next = (index - 1 + tabs.length) % tabs.length;
+    } else if (["ArrowRight", "ArrowDown"].includes(event.key)) {
+      next = (index + 1) % tabs.length;
+    } else if (event.key === "Home") {
+      next = 0;
+    } else if (event.key === "End") {
+      next = tabs.length - 1;
+    } else {
+      return;
+    }
+    event.preventDefault();
+    selectVtimeCounterTab(tabs[next], true);
   });
   document.querySelectorAll('input[name="cpuOrder"]').forEach((control) => {
     control.addEventListener("change", () => {
@@ -2016,6 +2046,35 @@ function renderDebugging() {
   decorateFeedbackTargets(elements.debuggingView);
 }
 
+function selectVtimeCounterTab(tabId, focus = false) {
+  const selected = tabId === "inactive" ? "inactive" : "relevant";
+  state.vtimeCounterTab = selected;
+  elements.debuggingVtimeView
+    .querySelectorAll("[data-vtime-counter-tab]")
+    .forEach((tab) => {
+      const active = tab.dataset.vtimeCounterTab === selected;
+      tab.setAttribute("aria-selected", String(active));
+      tab.tabIndex = active ? 0 : -1;
+    });
+  elements.debuggingVtimeView
+    .querySelectorAll("[data-vtime-counter-panel]")
+    .forEach((panel) => {
+      panel.hidden = panel.dataset.vtimeCounterPanel !== selected;
+    });
+  if (focus) {
+    elements.debuggingVtimeView
+      .querySelector(`[data-vtime-counter-tab="${selected}"]`)
+      ?.focus({ preventScroll: true });
+  }
+}
+
+function renderVtimeCounterRows(target, counters, emptyMessage) {
+  replaceSortableTableBody(target, counters.length === 0
+    ? `<tr><td class="debugging-empty" colspan="4">${escapeHtml(emptyMessage)}</td></tr>`
+    : counters.map((counter) => `
+      <tr><th scope="row"><span>${escapeHtml(counter.label)}</span><small><code>${escapeHtml(counter.key)}</code></small></th><td>${formatCount(counter.value)}</td><td data-sort-value="${counter.rate ?? ""}">${counter.rate == null ? "—" : formatRate(counter.rate)}</td><td>${counter.share == null ? "—" : formatPercentage(counter.share)}</td></tr>`).join(""));
+}
+
 function renderVtimeDebugging() {
   const inspection = state.inspection
     ? { ...state.inspection, context: state.inspectionContext }
@@ -2058,20 +2117,17 @@ function renderVtimeDebugging() {
     ? "Generation unavailable"
     : `Policy generation ${formatCount(model.generation)}`;
 
-  const affinityDispatchPct = model.dispatches > 0
-    ? model.affinity.dispatches * 100 / model.dispatches
-    : 0;
-  const counterRows = [
-    ["VTIME enqueues", model.enqueues, model.rates.enqueues, model.enqueues > 0 ? 100 : 0],
-    ["VTIME dispatches", model.dispatches, model.rates.dispatches, model.dispatchPct],
-    ["Affinity enqueues", model.affinity.enqueues, model.rates.affinityEnqueues, model.affinity.enqueuePct],
-    ["Affinity dispatches", model.affinity.dispatches, model.rates.affinityDispatches, affinityDispatchPct],
-    ["Credit clamps", model.clamps.count, model.rates.clamps, model.clamps.enqueuePct],
-    ["Equal-head ties", model.equalHeadTies, model.rates.equalHeadTies, model.equalHeadTiePct],
-    ["Accounting errors", model.accountingErrors, model.rates.accountingErrors, null],
-  ];
-  replaceSortableTableBody(elements.vtimeCounterRows, counterRows.map(([label, value, rate, share]) => `
-    <tr><th scope="row">${escapeHtml(label)}</th><td>${formatCount(value)}</td><td data-sort-value="${rate ?? ""}">${rate == null ? "—" : formatRate(rate)}</td><td>${share == null ? "—" : formatPercentage(share)}</td></tr>`).join(""));
+  renderVtimeCounterRows(
+    elements.vtimeRelevantCounterRows,
+    model.counters.relevant,
+    "No counters are relevant to the active policy.",
+  );
+  renderVtimeCounterRows(
+    elements.vtimeInactiveCounterRows,
+    model.counters.inactive,
+    "All known counter families are active for this policy.",
+  );
+  selectVtimeCounterTab(state.vtimeCounterTab);
 
   replaceSortableTableBody(elements.vtimeDispatchRows, model.dispatchRungs.length === 0
     ? '<tr><td class="debugging-empty" colspan="8">Dispatch rung counters are unavailable.</td></tr>'

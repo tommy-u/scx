@@ -117,12 +117,7 @@ fine_timing_begin(u32 callback, u64 callback_started_at)
 	config = bpf_map_lookup_elem(&fine_timing_config, &key);
 	if (!config)
 		return ctx;
-	if (callback == SNAKE_FINE_TIMING_CALLBACK_SELECT_CPU)
-		mask = SNAKE_FINE_TIMING_SELECT_CPU;
-	else if (callback == SNAKE_FINE_TIMING_CALLBACK_ENQUEUE)
-		mask = SNAKE_FINE_TIMING_ENQUEUE;
-	else
-		mask = SNAKE_FINE_TIMING_DISPATCH;
+	mask = 1U << callback;
 	if (!(READ_ONCE(config->enabled_mask) & mask))
 		return ctx;
 	ctx.session_id = READ_ONCE(config->session_ids[callback]);
@@ -151,6 +146,18 @@ fine_timing_stage_valid(const struct snake_fine_timing_ctx *ctx, u32 stage)
 	if (ctx->callback == SNAKE_FINE_TIMING_CALLBACK_DISPATCH)
 		return stage >= SNAKE_FINE_TIMING_DISPATCH_ACQUIRE_LADDER &&
 		       stage <= SNAKE_FINE_TIMING_DISPATCH_FINISH;
+	if (ctx->callback == SNAKE_FINE_TIMING_CALLBACK_RUNNABLE)
+		return stage >= SNAKE_FINE_TIMING_RUNNABLE_ACQUIRE_LADDER &&
+		       stage <= SNAKE_FINE_TIMING_RUNNABLE_FINISH;
+	if (ctx->callback == SNAKE_FINE_TIMING_CALLBACK_RUNNING)
+		return stage >= SNAKE_FINE_TIMING_RUNNING_ACQUIRE_LADDER &&
+		       stage <= SNAKE_FINE_TIMING_RUNNING_FINISH;
+	if (ctx->callback == SNAKE_FINE_TIMING_CALLBACK_STOPPING)
+		return stage >= SNAKE_FINE_TIMING_STOPPING_ACQUIRE_LADDER &&
+		       stage <= SNAKE_FINE_TIMING_STOPPING_FINISH;
+	if (ctx->callback == SNAKE_FINE_TIMING_CALLBACK_QUIESCENT)
+		return stage >= SNAKE_FINE_TIMING_QUIESCENT_ACQUIRE_LADDER &&
+		       stage <= SNAKE_FINE_TIMING_QUIESCENT_FINISH;
 	return false;
 }
 
@@ -193,12 +200,7 @@ fine_timing_record_elapsed(const struct snake_fine_timing_ctx *ctx, u32 stage,
 	config = bpf_map_lookup_elem(&fine_timing_config, &key);
 	if (!config)
 		return;
-	if (callback == SNAKE_FINE_TIMING_CALLBACK_SELECT_CPU)
-		mask = SNAKE_FINE_TIMING_SELECT_CPU;
-	else if (callback == SNAKE_FINE_TIMING_CALLBACK_ENQUEUE)
-		mask = SNAKE_FINE_TIMING_ENQUEUE;
-	else
-		mask = SNAKE_FINE_TIMING_DISPATCH;
+	mask = 1U << callback;
 	if (!(READ_ONCE(config->enabled_mask) & mask) ||
 	    READ_ONCE(config->session_ids[callback]) != ctx->session_id)
 		return;
@@ -225,12 +227,7 @@ fine_timing_record_dsq_operation(const struct snake_fine_timing_ctx *ctx,
 	config = bpf_map_lookup_elem(&fine_timing_config, &key);
 	if (!config)
 		return;
-	if (callback == SNAKE_FINE_TIMING_CALLBACK_SELECT_CPU)
-		mask = SNAKE_FINE_TIMING_SELECT_CPU;
-	else if (callback == SNAKE_FINE_TIMING_CALLBACK_ENQUEUE)
-		mask = SNAKE_FINE_TIMING_ENQUEUE;
-	else
-		mask = SNAKE_FINE_TIMING_DISPATCH;
+	mask = 1U << callback;
 	if (!(READ_ONCE(config->enabled_mask) & mask) ||
 	    READ_ONCE(config->session_ids[callback]) != ctx->session_id)
 		return;

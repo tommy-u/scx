@@ -70,70 +70,108 @@ static __always_inline void scheduler_mode_dispatch(
 			      cpu, ret);
 }
 
-static __always_inline int scheduler_mode_runnable(struct snake_ladder_ctx *ctx,
-						   struct task_struct	   *p)
+static __always_inline int scheduler_mode_runnable(
+	struct snake_ladder_ctx *ctx, struct task_struct *p,
+	const struct snake_fine_timing_ctx *fine)
 {
-	if (queue_cell_mode_enabled())
-		return queue_fairness_prepare_runnable(ctx, p, NULL) ? 0 :
-								       -EINVAL;
+	u64  stage_started_at = fine_timing_start(fine);
+	bool prepared;
+
+	if (queue_cell_mode_enabled()) {
+		prepared = queue_fairness_prepare_runnable(ctx, p, NULL);
+		fine_timing_finish(fine,
+				   SNAKE_FINE_TIMING_RUNNABLE_RUNNABLE_STATE,
+				   stage_started_at);
+		return prepared ? 0 : -EINVAL;
+	}
 	if (queue_global_mode_enabled()) {
 		fairness_vtime_runnable(ctx, p);
+		fine_timing_finish(fine,
+				   SNAKE_FINE_TIMING_RUNNABLE_RUNNABLE_STATE,
+				   stage_started_at);
 		return 0;
 	}
 
 	fairness_runnable(ctx, p);
+	fine_timing_finish(fine, SNAKE_FINE_TIMING_RUNNABLE_RUNNABLE_STATE,
+			   stage_started_at);
 	return 0;
 }
 
-static __always_inline int scheduler_mode_running(struct snake_ladder_ctx *ctx,
-						  struct task_struct	  *p)
+static __always_inline int scheduler_mode_running(
+	struct snake_ladder_ctx *ctx, struct task_struct *p,
+	const struct snake_fine_timing_ctx *fine)
 {
+	u64 stage_started_at;
+	s32 ret = 0;
+
 	stat_inc(ctx, SNAKE_STAT_RUNNING);
 	if (queue_cell_mode_enabled()) {
+		stage_started_at = fine_timing_start(fine);
 		queue_account_task_membership(ctx, p);
-		return queue_fairness_running(ctx, p);
+		fine_timing_finish(
+			fine, SNAKE_FINE_TIMING_RUNNING_MEMBERSHIP_ACCOUNT,
+			stage_started_at);
 	}
-	if (queue_global_mode_enabled()) {
+	stage_started_at = fine_timing_start(fine);
+	if (queue_cell_mode_enabled())
+		ret = queue_fairness_running(ctx, p);
+	else if (queue_global_mode_enabled())
 		fairness_vtime_running(ctx, p);
-		return 0;
-	}
-
-	fairness_running(ctx, p);
-	return 0;
+	else
+		fairness_running(ctx, p);
+	fine_timing_finish(fine, SNAKE_FINE_TIMING_RUNNING_RUN_STATE,
+			   stage_started_at);
+	return ret;
 }
 
-static __always_inline int scheduler_mode_stopping(struct snake_ladder_ctx *ctx,
-						   struct task_struct	   *p,
-						   u64 *runtime_ns)
+static __always_inline int scheduler_mode_stopping(
+	struct snake_ladder_ctx *ctx, struct task_struct *p, u64 *runtime_ns,
+	const struct snake_fine_timing_ctx *fine)
 {
+	u64 stage_started_at = fine_timing_start(fine);
+	s32 ret		     = 0;
+
 	stat_inc(ctx, SNAKE_STAT_STOPPING);
 	if (queue_cell_mode_enabled())
-		return queue_fairness_stopping(ctx, p, runtime_ns);
-	if (queue_global_mode_enabled()) {
+		ret = queue_fairness_stopping(ctx, p, runtime_ns);
+	else if (queue_global_mode_enabled())
 		*runtime_ns = fairness_vtime_stopping(ctx, p);
-		return 0;
-	}
-
-	*runtime_ns = fairness_stopping(ctx, p);
-	return 0;
+	else
+		*runtime_ns = fairness_stopping(ctx, p);
+	fine_timing_finish(fine, SNAKE_FINE_TIMING_STOPPING_RUN_STATE,
+			   stage_started_at);
+	return ret;
 }
 
 static __always_inline void
 scheduler_mode_quiescent(struct snake_ladder_ctx *ctx, struct task_struct *p,
-			 u64 deq_flags)
+			 u64 deq_flags,
+			 const struct snake_fine_timing_ctx *fine)
 {
-	stat_inc(ctx, SNAKE_STAT_QUIESCENT);
-	queue_timing_cancel(ctx, p);
-	if (queue_cell_mode_enabled()) {
-		queue_fairness_cancel_direct(ctx, p);
-		return;
-	}
-	if (queue_global_mode_enabled()) {
-		fairness_vtime_quiescent(ctx, p, deq_flags);
-		return;
-	}
+	u64 stage_started_at;
 
-	fairness_quiescent(ctx, p, deq_flags);
+	stat_inc(ctx, SNAKE_STAT_QUIESCENT);
+	stage_started_at = fine_timing_start(fine);
+	queue_timing_cancel(ctx, p);
+	fine_timing_finish(fine,
+			   SNAKE_FINE_TIMING_QUIESCENT_QUEUE_TIMING_CANCEL,
+			   stage_started_at);
+	if (queue_cell_mode_enabled()) {
+		stage_started_at = fine_timing_start(fine);
+		queue_fairness_cancel_direct(ctx, p);
+		fine_timing_finish(fine,
+				   SNAKE_FINE_TIMING_QUIESCENT_DIRECT_CANCEL,
+				   stage_started_at);
+		return;
+	}
+	stage_started_at = fine_timing_start(fine);
+	if (queue_global_mode_enabled())
+		fairness_vtime_quiescent(ctx, p, deq_flags);
+	else
+		fairness_quiescent(ctx, p, deq_flags);
+	fine_timing_finish(fine, SNAKE_FINE_TIMING_QUIESCENT_FAIRNESS_STATE,
+			   stage_started_at);
 }
 
 static __always_inline void

@@ -1308,6 +1308,10 @@ const FINE_TIMING_CALLBACKS = [
   { callback: "select_cpu", label: "Select CPU" },
   { callback: "enqueue", label: "Enqueue" },
   { callback: "dispatch", label: "Dispatch" },
+  { callback: "runnable", label: "Runnable" },
+  { callback: "running", label: "Running" },
+  { callback: "stopping", label: "Stopping" },
+  { callback: "quiescent", label: "Quiescent" },
 ];
 
 export function fineTimingCaptureModels(payload) {
@@ -2341,6 +2345,65 @@ export function schedulerDebugModel({ control, inspection } = {}) {
   };
 }
 
+const POLICY_COUNTER_CATALOG = [
+  ["select_calls", "Select CPU calls", "always"],
+  ["dispatch_calls", "Dispatch calls", "always"],
+  ["direct_dispatches", "Direct dispatches", "always"],
+  ["ladder_exhaustions", "Ladder exhaustions", "always"],
+  ["fallback_prev", "Previous CPU fallbacks", "always"],
+  ["fallback_any", "Any CPU fallbacks", "always"],
+  ["invalid_errors", "Invalid instructions and errors", "always"],
+  ["enqueues", "Enqueue calls", "always"],
+  ["running", "Running calls", "always"],
+  ["stopping", "Stopping calls", "always"],
+  ["quiescent", "Quiescent calls", "always"],
+  ["select_latency_ns", "Select CPU latency (ns)", "always"],
+  ["select_latency_max_ns", "Maximum select CPU latency (ns)", "always", false],
+  ["fifo_shared_enqueues", "FIFO shared enqueues", "fifo"],
+  ["fifo_shared_dispatches", "FIFO shared dispatches", "fifo"],
+  ["membership_no_cell_runs", "Runs without a cell", "cell"],
+  ["membership_invalid_runs", "Runs with an invalid cell", "cell"],
+  ["cell_rehomes", "Cell rehomes", "cell"],
+  ["cell_rehome_misses", "Cell rehome misses", "cell"],
+  ["queue_rehome_preemptions", "Queue rehome preemptions", "cell"],
+  ["queue_stale_rehome_runs", "Stale rehome runs", "cell"],
+  ["queue_borrow_yields", "Borrow yields", "cell"],
+  ["vtime_enqueues", "VTIME enqueues", "vtime"],
+  ["vtime_dispatches", "VTIME dispatches", "vtime"],
+  ["vtime_cpu_enqueues", "Affinity enqueues", "vtime"],
+  ["vtime_cpu_dispatches", "Affinity dispatches", "vtime"],
+  ["vtime_strict_preempt_queues", "Strict preemption queues", "vtime"],
+  ["vtime_direct_runtime_ns", "Direct runtime (ns)", "vtime"],
+  ["vtime_queued_runtime_ns", "Queued runtime (ns)", "vtime"],
+  ["vtime_credit_clamps", "Credit clamps", "vtime"],
+  ["vtime_accounting_errors", "VTIME accounting errors", "vtime"],
+  ["vtime_equal_head_ties", "Equal-head ties", "vtime_queue"],
+  ["eevdf_eligible_enqueues", "EEVDF eligible enqueues", "eevdf"],
+  ["eevdf_future_enqueues", "EEVDF future enqueues", "eevdf"],
+  ["eevdf_promotions", "EEVDF promotions", "eevdf"],
+  ["eevdf_forced_advances", "EEVDF forced advances", "eevdf"],
+  ["eevdf_dispatches", "EEVDF dispatches", "eevdf"],
+  ["eevdf_strict_preempt_queues", "EEVDF strict preemption queues", "eevdf"],
+  ["eevdf_direct_runtime_ns", "EEVDF direct runtime (ns)", "eevdf"],
+  ["eevdf_queued_runtime_ns", "EEVDF queued runtime (ns)", "eevdf"],
+  ["eevdf_lag_clamps", "EEVDF lag clamps", "eevdf"],
+  ["eevdf_run_lag_clamps", "EEVDF run-start lag clamps", "eevdf"],
+  ["eevdf_accounting_errors", "EEVDF accounting errors", "eevdf"],
+];
+
+function policyCounterRelevant(family, modeName, queueLayout) {
+  if (family === "always") {
+    return true;
+  }
+  if (family === "cell") {
+    return queueLayout === "cell" || queueLayout === "cell_llc";
+  }
+  if (family === "vtime_queue") {
+    return modeName === "vtime" && Boolean(queueLayout);
+  }
+  return family === modeName;
+}
+
 export function vtimeDebugModel(
   inspection,
   { previousInspection = null, elapsedMs = 0 } = {},
@@ -2396,6 +2459,9 @@ export function vtimeDebugModel(
       ?? metrics?.fairness_mode
       ?? "",
   ).toLowerCase();
+  const queueLayout = inspection?.queue_topology?.layout
+    ?? activeSlot?.policy?.queues?.layout
+    ?? null;
   const dispatchRungs = Object.values(metrics?.dispatch_rungs || {})
     .map((rung) => ({
       index: Math.max(0, Number(rung?.index) || 0),
@@ -2408,6 +2474,37 @@ export function vtimeDebugModel(
       errors: Math.max(0, Number(rung?.errors) || 0),
     }))
     .sort((left, right) => left.index - right.index);
+  const share = (key) => {
+    switch (key) {
+      case "vtime_enqueues":
+        return enqueues > 0 ? 100 : 0;
+      case "vtime_dispatches":
+        return percentage(dispatches, enqueues);
+      case "vtime_cpu_enqueues":
+        return percentage(cpuEnqueues, enqueues);
+      case "vtime_cpu_dispatches":
+        return percentage(cpuDispatches, dispatches);
+      case "vtime_credit_clamps":
+        return percentage(creditClamps, enqueues);
+      case "vtime_equal_head_ties":
+        return percentage(equalHeadTies, dispatches);
+      default:
+        return null;
+    }
+  };
+  const counters = POLICY_COUNTER_CATALOG.map(([
+    key,
+    label,
+    family,
+    supportsRate = true,
+  ]) => ({
+    key,
+    label,
+    value: count(key),
+    rate: supportsRate ? perSecond(key) : null,
+    share: share(key),
+    relevant: policyCounterRelevant(family, modeName, queueLayout),
+  }));
 
   return {
     available: Boolean(metrics),
@@ -2442,6 +2539,10 @@ export function vtimeDebugModel(
       clamps: perSecond("vtime_credit_clamps"),
       equalHeadTies: perSecond("vtime_equal_head_ties"),
       accountingErrors: perSecond("vtime_accounting_errors"),
+    },
+    counters: {
+      relevant: counters.filter((counter) => counter.relevant),
+      inactive: counters.filter((counter) => !counter.relevant),
     },
     dispatchRungs,
   };

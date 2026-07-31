@@ -13,16 +13,32 @@ pub enum FineTimingCallback {
     SelectCpu,
     Enqueue,
     Dispatch,
+    Runnable,
+    Running,
+    Stopping,
+    Quiescent,
 }
 
 impl FineTimingCallback {
-    pub const ALL: [Self; 3] = [Self::SelectCpu, Self::Enqueue, Self::Dispatch];
+    pub const ALL: [Self; 7] = [
+        Self::SelectCpu,
+        Self::Enqueue,
+        Self::Dispatch,
+        Self::Runnable,
+        Self::Running,
+        Self::Stopping,
+        Self::Quiescent,
+    ];
 
     pub const fn index(self) -> usize {
         match self {
             Self::SelectCpu => 0,
             Self::Enqueue => 1,
             Self::Dispatch => 2,
+            Self::Runnable => 3,
+            Self::Running => 4,
+            Self::Stopping => 5,
+            Self::Quiescent => 6,
         }
     }
 
@@ -31,6 +47,10 @@ impl FineTimingCallback {
             Self::SelectCpu => bpf_intf::SNAKE_FINE_TIMING_SELECT_CPU,
             Self::Enqueue => bpf_intf::SNAKE_FINE_TIMING_ENQUEUE,
             Self::Dispatch => bpf_intf::SNAKE_FINE_TIMING_DISPATCH,
+            Self::Runnable => bpf_intf::SNAKE_FINE_TIMING_RUNNABLE,
+            Self::Running => bpf_intf::SNAKE_FINE_TIMING_RUNNING,
+            Self::Stopping => bpf_intf::SNAKE_FINE_TIMING_STOPPING,
+            Self::Quiescent => bpf_intf::SNAKE_FINE_TIMING_QUIESCENT,
         }
     }
 
@@ -39,6 +59,10 @@ impl FineTimingCallback {
             Self::SelectCpu => "select_cpu",
             Self::Enqueue => "enqueue",
             Self::Dispatch => "dispatch",
+            Self::Runnable => "runnable",
+            Self::Running => "running",
+            Self::Stopping => "stopping",
+            Self::Quiescent => "quiescent",
         }
     }
 }
@@ -51,6 +75,10 @@ impl std::str::FromStr for FineTimingCallback {
             "select_cpu" => Ok(Self::SelectCpu),
             "enqueue" => Ok(Self::Enqueue),
             "dispatch" => Ok(Self::Dispatch),
+            "runnable" => Ok(Self::Runnable),
+            "running" => Ok(Self::Running),
+            "stopping" => Ok(Self::Stopping),
+            "quiescent" => Ok(Self::Quiescent),
             _ => Err(format!("unknown fine timing callback `{value}`")),
         }
     }
@@ -238,11 +266,91 @@ const DISPATCH_STAGES: [FineTimingStage; 19] = [
     },
 ];
 
+const RUNNABLE_STAGES: [FineTimingStage; 3] = [
+    FineTimingStage {
+        id: bpf_intf::snake_fine_timing_stage_SNAKE_FINE_TIMING_RUNNABLE_ACQUIRE_LADDER,
+        name: "acquire_ladder",
+    },
+    FineTimingStage {
+        id: bpf_intf::snake_fine_timing_stage_SNAKE_FINE_TIMING_RUNNABLE_RUNNABLE_STATE,
+        name: "runnable_state",
+    },
+    FineTimingStage {
+        id: bpf_intf::snake_fine_timing_stage_SNAKE_FINE_TIMING_RUNNABLE_FINISH,
+        name: "finish",
+    },
+];
+
+const RUNNING_STAGES: [FineTimingStage; 4] = [
+    FineTimingStage {
+        id: bpf_intf::snake_fine_timing_stage_SNAKE_FINE_TIMING_RUNNING_ACQUIRE_LADDER,
+        name: "acquire_ladder",
+    },
+    FineTimingStage {
+        id: bpf_intf::snake_fine_timing_stage_SNAKE_FINE_TIMING_RUNNING_MEMBERSHIP_ACCOUNT,
+        name: "membership_account",
+    },
+    FineTimingStage {
+        id: bpf_intf::snake_fine_timing_stage_SNAKE_FINE_TIMING_RUNNING_RUN_STATE,
+        name: "run_state",
+    },
+    FineTimingStage {
+        id: bpf_intf::snake_fine_timing_stage_SNAKE_FINE_TIMING_RUNNING_FINISH,
+        name: "finish",
+    },
+];
+
+const STOPPING_STAGES: [FineTimingStage; 4] = [
+    FineTimingStage {
+        id: bpf_intf::snake_fine_timing_stage_SNAKE_FINE_TIMING_STOPPING_ACQUIRE_LADDER,
+        name: "acquire_ladder",
+    },
+    FineTimingStage {
+        id: bpf_intf::snake_fine_timing_stage_SNAKE_FINE_TIMING_STOPPING_RUN_STATE,
+        name: "run_state",
+    },
+    FineTimingStage {
+        id: bpf_intf::snake_fine_timing_stage_SNAKE_FINE_TIMING_STOPPING_RUNTIME_STAT,
+        name: "runtime_stat",
+    },
+    FineTimingStage {
+        id: bpf_intf::snake_fine_timing_stage_SNAKE_FINE_TIMING_STOPPING_FINISH,
+        name: "finish",
+    },
+];
+
+const QUIESCENT_STAGES: [FineTimingStage; 5] = [
+    FineTimingStage {
+        id: bpf_intf::snake_fine_timing_stage_SNAKE_FINE_TIMING_QUIESCENT_ACQUIRE_LADDER,
+        name: "acquire_ladder",
+    },
+    FineTimingStage {
+        id: bpf_intf::snake_fine_timing_stage_SNAKE_FINE_TIMING_QUIESCENT_QUEUE_TIMING_CANCEL,
+        name: "queue_timing_cancel",
+    },
+    FineTimingStage {
+        id: bpf_intf::snake_fine_timing_stage_SNAKE_FINE_TIMING_QUIESCENT_DIRECT_CANCEL,
+        name: "direct_cancel",
+    },
+    FineTimingStage {
+        id: bpf_intf::snake_fine_timing_stage_SNAKE_FINE_TIMING_QUIESCENT_FAIRNESS_STATE,
+        name: "fairness_state",
+    },
+    FineTimingStage {
+        id: bpf_intf::snake_fine_timing_stage_SNAKE_FINE_TIMING_QUIESCENT_FINISH,
+        name: "finish",
+    },
+];
+
 pub fn stages(callback: FineTimingCallback) -> &'static [FineTimingStage] {
     match callback {
         FineTimingCallback::SelectCpu => &SELECT_STAGES,
         FineTimingCallback::Enqueue => &ENQUEUE_STAGES,
         FineTimingCallback::Dispatch => &DISPATCH_STAGES,
+        FineTimingCallback::Runnable => &RUNNABLE_STAGES,
+        FineTimingCallback::Running => &RUNNING_STAGES,
+        FineTimingCallback::Stopping => &STOPPING_STAGES,
+        FineTimingCallback::Quiescent => &QUIESCENT_STAGES,
     }
 }
 
@@ -257,7 +365,7 @@ pub struct FineTimingSession {
 #[derive(Clone, Debug, Default)]
 pub struct FineTimingState {
     next_session_id: u64,
-    sessions: [Option<FineTimingSession>; 3],
+    sessions: [Option<FineTimingSession>; 7],
 }
 
 impl FineTimingState {
@@ -294,7 +402,7 @@ impl FineTimingState {
         let stopped_active_capture = FineTimingCallback::ALL
             .into_iter()
             .any(|callback| self.is_enabled(callback));
-        self.sessions = [None, None, None];
+        self.sessions = [None, None, None, None, None, None, None];
         stopped_active_capture
     }
 
@@ -309,7 +417,7 @@ impl FineTimingState {
 
     pub fn bpf_config(&self) -> bpf_intf::snake_fine_timing_config {
         let mut config = bpf_intf::snake_fine_timing_config {
-            session_ids: [0; 3],
+            session_ids: [0; 7],
             enabled_mask: 0,
             reserved: 0,
         };
@@ -331,6 +439,80 @@ mod tests {
     use super::*;
 
     #[test]
+    fn callback_inventory_covers_every_coarse_timed_callback() {
+        let expected = [
+            (FineTimingCallback::SelectCpu, "select_cpu"),
+            (FineTimingCallback::Enqueue, "enqueue"),
+            (FineTimingCallback::Dispatch, "dispatch"),
+            (FineTimingCallback::Runnable, "runnable"),
+            (FineTimingCallback::Running, "running"),
+            (FineTimingCallback::Stopping, "stopping"),
+            (FineTimingCallback::Quiescent, "quiescent"),
+        ];
+
+        assert_eq!(FineTimingCallback::ALL.len(), expected.len());
+        for (index, (callback, name)) in expected.into_iter().enumerate() {
+            assert_eq!(FineTimingCallback::ALL[index], callback);
+            assert_eq!(callback.index(), index);
+            assert_eq!(callback.as_str(), name);
+            assert_eq!(name.parse::<FineTimingCallback>(), Ok(callback));
+            assert_eq!(callback.enabled_mask(), 1_u32 << index);
+        }
+    }
+
+    #[test]
+    fn remaining_callback_stage_inventories_are_semantic_and_disjoint() {
+        let names = |callback| {
+            stages(callback)
+                .iter()
+                .map(|stage| stage.name)
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            names(FineTimingCallback::Runnable),
+            ["acquire_ladder", "runnable_state", "finish"]
+        );
+        assert_eq!(
+            names(FineTimingCallback::Running),
+            [
+                "acquire_ladder",
+                "membership_account",
+                "run_state",
+                "finish"
+            ]
+        );
+        assert_eq!(
+            names(FineTimingCallback::Stopping),
+            ["acquire_ladder", "run_state", "runtime_stat", "finish"]
+        );
+        assert_eq!(
+            names(FineTimingCallback::Quiescent),
+            [
+                "acquire_ladder",
+                "queue_timing_cancel",
+                "direct_cancel",
+                "fairness_state",
+                "finish",
+            ]
+        );
+
+        let mut ids = FineTimingCallback::ALL
+            .into_iter()
+            .flat_map(stages)
+            .map(|stage| stage.id)
+            .collect::<Vec<_>>();
+        let stage_count = ids.len();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), stage_count);
+        assert_eq!(
+            stage_count,
+            bpf_intf::snake_fine_timing_stage_SNAKE_NR_FINE_TIMING_STAGES as usize
+        );
+    }
+
+    #[test]
     fn clear_discards_active_and_historical_sessions() {
         let mut state = FineTimingState::default();
         let previous = state.start(FineTimingCallback::SelectCpu, 4, 100);
@@ -346,7 +528,7 @@ mod tests {
         }
         let config = state.bpf_config();
         assert_eq!(config.enabled_mask, 0);
-        assert_eq!(config.session_ids, [0; 3]);
+        assert_eq!(config.session_ids, [0; 7]);
         let next = state.start(FineTimingCallback::SelectCpu, 4, 400);
         assert_ne!(next.session_id, previous.session_id);
     }

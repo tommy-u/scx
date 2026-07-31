@@ -4775,7 +4775,8 @@ scope = "task_allowed"
             .map(|(body, _)| body)
             .expect("scheduler mode should own quiescent routing");
 
-        assert!(quiescent.contains("scheduler_mode_quiescent(&ladder_ctx, p, deq_flags);"));
+        assert!(quiescent
+            .contains("scheduler_mode_quiescent(&ladder_ctx, p, deq_flags, &fine_timing);"));
         assert!(mode_quiescent.contains("queue_timing_cancel(ctx, p);"));
     }
 
@@ -4911,7 +4912,7 @@ scope = "task_allowed"
         let policy = policy::compile_policy(policy_source()).expect("policy should compile");
         let encoded = encode_ladder(&policy, 42).expect("ladder should encode");
 
-        assert_eq!(bpf_intf::SNAKE_ABI_VERSION, 23);
+        assert_eq!(bpf_intf::SNAKE_ABI_VERSION, 24);
         assert_eq!(size_of::<bpf_intf::snake_callback_timing>(), 520);
         assert_eq!(offset_of!(bpf_intf::snake_callback_timing, total_ns), 0);
         assert_eq!(offset_of!(bpf_intf::snake_callback_timing, buckets), 8);
@@ -4929,16 +4930,16 @@ scope = "task_allowed"
         assert_field_type::<bpf_intf::snake_rung_timing_event, u64>(|value| &value.elapsed_ns);
         assert_field_type::<bpf_intf::snake_rung_timing_event, u32>(|value| &value.ladder);
         assert_field_type::<bpf_intf::snake_rung_timing_event, u32>(|value| &value.rung);
-        assert_eq!(size_of::<bpf_intf::snake_fine_timing_config>(), 32);
+        assert_eq!(size_of::<bpf_intf::snake_fine_timing_config>(), 64);
         assert_eq!(
             offset_of!(bpf_intf::snake_fine_timing_config, session_ids),
             0
         );
         assert_eq!(
             offset_of!(bpf_intf::snake_fine_timing_config, enabled_mask),
-            24
+            56
         );
-        assert_eq!(offset_of!(bpf_intf::snake_fine_timing_config, reserved), 28);
+        assert_eq!(offset_of!(bpf_intf::snake_fine_timing_config, reserved), 60);
         assert_field_type::<
             bpf_intf::snake_fine_timing_config,
             [u64; bpf_intf::snake_fine_timing_callback_SNAKE_NR_FINE_TIMING_CALLBACKS as usize],
@@ -6310,9 +6311,49 @@ scope = "task_allowed"
         assert!(enqueue
             .iter()
             .all(|left| dispatch.iter().all(|right| left.id != right.id)));
+        let remaining = [
+            FineTimingCallback::Runnable,
+            FineTimingCallback::Running,
+            FineTimingCallback::Stopping,
+            FineTimingCallback::Quiescent,
+        ];
         assert_eq!(
-            select.len() + enqueue.len() + dispatch.len(),
+            select.len()
+                + enqueue.len()
+                + dispatch.len()
+                + remaining
+                    .into_iter()
+                    .map(|callback| stages(callback).len())
+                    .sum::<usize>(),
             bpf_intf::snake_fine_timing_stage_SNAKE_NR_FINE_TIMING_STAGES as usize
         );
+    }
+
+    #[test]
+    fn remaining_coarse_timed_callbacks_emit_fine_timing_stages() {
+        let bpf_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bpf");
+        let callbacks = fs::read_to_string(bpf_dir.join("main.bpf.c")).unwrap();
+        let modes = fs::read_to_string(bpf_dir.join("scheduler_mode.h")).unwrap();
+        let instrumented = format!("{callbacks}\n{modes}");
+
+        for callback in ["RUNNABLE", "RUNNING", "STOPPING", "QUIESCENT"] {
+            assert!(callbacks.contains(&format!(
+                "fine_timing_begin(SNAKE_FINE_TIMING_CALLBACK_{callback}"
+            )));
+            assert!(callbacks.contains(&format!("SNAKE_FINE_TIMING_{callback}_ACQUIRE_LADDER")));
+            assert!(callbacks.contains(&format!("SNAKE_FINE_TIMING_{callback}_FINISH")));
+        }
+        for stage in [
+            "SNAKE_FINE_TIMING_RUNNABLE_RUNNABLE_STATE",
+            "SNAKE_FINE_TIMING_RUNNING_MEMBERSHIP_ACCOUNT",
+            "SNAKE_FINE_TIMING_RUNNING_RUN_STATE",
+            "SNAKE_FINE_TIMING_STOPPING_RUN_STATE",
+            "SNAKE_FINE_TIMING_STOPPING_RUNTIME_STAT",
+            "SNAKE_FINE_TIMING_QUIESCENT_QUEUE_TIMING_CANCEL",
+            "SNAKE_FINE_TIMING_QUIESCENT_DIRECT_CANCEL",
+            "SNAKE_FINE_TIMING_QUIESCENT_FAIRNESS_STATE",
+        ] {
+            assert!(instrumented.contains(stage), "missing timing stage {stage}");
+        }
     }
 }

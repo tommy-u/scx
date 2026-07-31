@@ -146,7 +146,7 @@ fn fine_timing_snapshot() -> Value {
                 "started_at_ms": 1000,
                 "stopped_at_ms": null,
                 "stages": {
-                    "normal_dsq_insert": {"total_ns": 0, "buckets": empty_buckets}
+                    "normal_dsq_insert": {"total_ns": 0, "buckets": empty_buckets.clone()}
                 }
             },
             {
@@ -165,6 +165,50 @@ fn fine_timing_snapshot() -> Value {
                     "outcome": "success",
                     "timing": {"total_ns": 13107200, "buckets": dsq_buckets}
                 }]
+            },
+            {
+                "callback": "runnable",
+                "state": "inactive",
+                "session_id": null,
+                "policy_generation": null,
+                "started_at_ms": null,
+                "stopped_at_ms": null,
+                "stages": {
+                    "runnable_state": {"total_ns": 0, "buckets": empty_buckets.clone()}
+                }
+            },
+            {
+                "callback": "running",
+                "state": "inactive",
+                "session_id": null,
+                "policy_generation": null,
+                "started_at_ms": null,
+                "stopped_at_ms": null,
+                "stages": {
+                    "run_state": {"total_ns": 0, "buckets": empty_buckets.clone()}
+                }
+            },
+            {
+                "callback": "stopping",
+                "state": "inactive",
+                "session_id": null,
+                "policy_generation": null,
+                "started_at_ms": null,
+                "stopped_at_ms": null,
+                "stages": {
+                    "runtime_stat": {"total_ns": 0, "buckets": empty_buckets.clone()}
+                }
+            },
+            {
+                "callback": "quiescent",
+                "state": "inactive",
+                "session_id": null,
+                "policy_generation": null,
+                "started_at_ms": null,
+                "stopped_at_ms": null,
+                "stages": {
+                    "fairness_state": {"total_ns": 0, "buckets": empty_buckets}
+                }
             }
         ]
     });
@@ -1472,7 +1516,7 @@ async fn fine_timing_endpoint_summarizes_stages_and_controls_callbacks_independe
         else {
             panic!("expected fine timing command");
         };
-        assert_eq!(callback, FineTimingCallback::SelectCpu);
+        assert_eq!(callback, FineTimingCallback::Stopping);
         assert!(enabled);
         response
             .send(Ok(FineTimingControlResponse {
@@ -1490,7 +1534,7 @@ async fn fine_timing_endpoint_summarizes_stages_and_controls_callbacks_independe
                 .header("host", "127.0.0.1")
                 .header("content-type", "application/json")
                 .header(CSRF_HEADER, "secret")
-                .body(Body::from(r#"{"callback":"select_cpu","enabled":true}"#))
+                .body(Body::from(r#"{"callback":"stopping","enabled":true}"#))
                 .unwrap(),
         )
         .await
@@ -1498,7 +1542,7 @@ async fn fine_timing_endpoint_summarizes_stages_and_controls_callbacks_independe
     assert_eq!(response.status(), StatusCode::OK);
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let body: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(body["callback"], "select_cpu");
+    assert_eq!(body["callback"], "stopping");
     assert_eq!(body["enabled"], true);
     assert_eq!(body["session_id"], 11);
     responder.join().unwrap();
@@ -1699,6 +1743,22 @@ fn fine_timing_availability_tracks_callback_sampling() {
             && capture["unavailable_reason"]
                 == "Enable callback sampling to collect fine-grained timestamps."
     }));
+}
+
+#[test]
+fn fine_timing_accepts_legacy_three_callback_payloads() {
+    let dashboard = dashboard();
+    let mut snapshot = fine_timing_snapshot();
+    snapshot["fine_timing"]["captures"]
+        .as_array_mut()
+        .unwrap()
+        .truncate(3);
+
+    dashboard.set_inspection(Some(snapshot), None);
+
+    let view = dashboard.fine_timing();
+    assert_eq!(view.status, FineTimingStatus::Ready);
+    assert_eq!(view.captures.len(), 3);
 }
 
 #[tokio::test]

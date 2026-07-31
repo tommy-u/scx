@@ -3,7 +3,7 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, RwLock};
 
 use serde::{Deserialize, Serialize};
@@ -1228,7 +1228,16 @@ fn empty_queue_timing_view(
     }
 }
 
-const FINE_TIMING_CALLBACKS: [&str; 3] = ["select_cpu", "enqueue", "dispatch"];
+const REQUIRED_FINE_TIMING_CALLBACKS: [&str; 3] = ["select_cpu", "enqueue", "dispatch"];
+const FINE_TIMING_CALLBACKS: [&str; 7] = [
+    "select_cpu",
+    "enqueue",
+    "dispatch",
+    "runnable",
+    "running",
+    "stopping",
+    "quiescent",
+];
 const FINE_TIMING_BUCKETS: usize = 32;
 
 #[derive(Deserialize)]
@@ -1259,13 +1268,24 @@ struct FineTimingDsqOperationPayload {
 }
 
 fn validate_fine_timing(payload: FineTimingPayload) -> Result<FineTimingPayload, String> {
-    if payload.captures.len() != FINE_TIMING_CALLBACKS.len()
-        || !FINE_TIMING_CALLBACKS.iter().all(|callback| {
-            payload
-                .captures
-                .iter()
-                .any(|capture| capture.callback == *callback)
-        })
+    let mut callbacks = BTreeSet::new();
+    for capture in &payload.captures {
+        if !FINE_TIMING_CALLBACKS.contains(&capture.callback.as_str()) {
+            return Err(format!(
+                "fine timing data contains unknown callback `{}`",
+                capture.callback
+            ));
+        }
+        if !callbacks.insert(capture.callback.as_str()) {
+            return Err(format!(
+                "fine timing data contains duplicate callback `{}`",
+                capture.callback
+            ));
+        }
+    }
+    if !REQUIRED_FINE_TIMING_CALLBACKS
+        .iter()
+        .all(|callback| callbacks.contains(callback))
     {
         return Err("fine timing data must contain select_cpu, enqueue, and dispatch".into());
     }

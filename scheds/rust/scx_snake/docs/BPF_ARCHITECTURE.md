@@ -85,7 +85,7 @@ ABI version 21 introduced queue rungs using the mechanical
 `{ opcode, input, flags, reserved, data }` record and adds global queue mode,
 normal consumer masks, per-CPU remote cursors, and queue-rung counters. From
 that version onward, the coordinated surfaces are listed below. The current
-ABI is version 23: placement ladders have nine entries while enqueue and dispatch
+ABI is version 24: placement ladders have nine entries while enqueue and dispatch
 ladders retain eight entries.
 
 - map names, map types, or map key/value records;

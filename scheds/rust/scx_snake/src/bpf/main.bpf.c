@@ -305,80 +305,141 @@ void BPF_STRUCT_OPS(snake_dispatch, s32 cpu, struct task_struct *prev)
 
 void BPF_STRUCT_OPS(snake_runnable, struct task_struct *p, u64 enq_flags)
 {
-	struct snake_ladder_ctx ladder_ctx	    = {};
-	u64			callback_started_at = callback_timing_start();
-	s32			ret;
+	struct snake_ladder_ctx	     ladder_ctx = {};
+	struct snake_fine_timing_ctx fine_timing;
+	u64 callback_started_at = callback_timing_start();
+	u64 stage_started_at;
+	s32 ret;
 
 	(void)enq_flags;
+	fine_timing = fine_timing_begin(SNAKE_FINE_TIMING_CALLBACK_RUNNABLE,
+					callback_started_at);
+	stage_started_at = fine_timing_start(&fine_timing);
 	if (acquire_active_ladder(&ladder_ctx)) {
+		fine_timing_finish(&fine_timing,
+				   SNAKE_FINE_TIMING_RUNNABLE_ACQUIRE_LADDER,
+				   stage_started_at);
 		scx_bpf_error(
 			"snake failed to acquire active ladder in runnable");
 		return;
 	}
-	ret = scheduler_mode_runnable(&ladder_ctx, p);
+	fine_timing_finish(&fine_timing,
+			   SNAKE_FINE_TIMING_RUNNABLE_ACQUIRE_LADDER,
+			   stage_started_at);
+	ret = scheduler_mode_runnable(&ladder_ctx, p, &fine_timing);
 	if (ret)
 		scx_bpf_error(
 			"snake runnable preparation failed for pid %d: %d",
 			p->pid, ret);
+	stage_started_at = fine_timing_start(&fine_timing);
 	release_timed_callback(&ladder_ctx, SNAKE_CALLBACK_RUNNABLE,
 			       callback_started_at);
+	fine_timing_finish(&fine_timing, SNAKE_FINE_TIMING_RUNNABLE_FINISH,
+			   stage_started_at);
 }
 
 void BPF_STRUCT_OPS(snake_running, struct task_struct *p)
 {
-	struct snake_ladder_ctx ladder_ctx	    = {};
-	u64			callback_started_at = callback_timing_start();
-	s32			ret;
+	struct snake_ladder_ctx	     ladder_ctx = {};
+	struct snake_fine_timing_ctx fine_timing;
+	u64 callback_started_at = callback_timing_start();
+	u64 stage_started_at;
+	s32 ret;
 
+	fine_timing = fine_timing_begin(SNAKE_FINE_TIMING_CALLBACK_RUNNING,
+					callback_started_at);
+	stage_started_at = fine_timing_start(&fine_timing);
 	if (acquire_active_ladder(&ladder_ctx)) {
+		fine_timing_finish(&fine_timing,
+				   SNAKE_FINE_TIMING_RUNNING_ACQUIRE_LADDER,
+				   stage_started_at);
 		scx_bpf_error(
 			"snake failed to acquire active ladder in running");
 		return;
 	}
-	ret = scheduler_mode_running(&ladder_ctx, p);
+	fine_timing_finish(&fine_timing,
+			   SNAKE_FINE_TIMING_RUNNING_ACQUIRE_LADDER,
+			   stage_started_at);
+	ret = scheduler_mode_running(&ladder_ctx, p, &fine_timing);
 	if (ret)
 		scx_bpf_error("snake running accounting failed for pid %d: %d",
 			      p->pid, ret);
+	stage_started_at = fine_timing_start(&fine_timing);
 	release_timed_callback(&ladder_ctx, SNAKE_CALLBACK_RUNNING,
 			       callback_started_at);
+	fine_timing_finish(&fine_timing, SNAKE_FINE_TIMING_RUNNING_FINISH,
+			   stage_started_at);
 }
 
 void BPF_STRUCT_OPS(snake_stopping, struct task_struct *p, bool runnable)
 {
-	struct snake_ladder_ctx ladder_ctx	    = {};
-	u64			callback_started_at = callback_timing_start();
-	u64			runtime_ns;
-	s32			ret;
+	struct snake_ladder_ctx	     ladder_ctx = {};
+	struct snake_fine_timing_ctx fine_timing;
+	u64 callback_started_at = callback_timing_start();
+	u64 stage_started_at;
+	u64 runtime_ns;
+	s32 ret;
 
 	(void)runnable;
+	fine_timing = fine_timing_begin(SNAKE_FINE_TIMING_CALLBACK_STOPPING,
+					callback_started_at);
+	stage_started_at = fine_timing_start(&fine_timing);
 	if (acquire_active_ladder(&ladder_ctx)) {
+		fine_timing_finish(&fine_timing,
+				   SNAKE_FINE_TIMING_STOPPING_ACQUIRE_LADDER,
+				   stage_started_at);
 		scx_bpf_error(
 			"snake failed to acquire active ladder in stopping");
 		return;
 	}
-	ret = scheduler_mode_stopping(&ladder_ctx, p, &runtime_ns);
+	fine_timing_finish(&fine_timing,
+			   SNAKE_FINE_TIMING_STOPPING_ACQUIRE_LADDER,
+			   stage_started_at);
+	ret = scheduler_mode_stopping(&ladder_ctx, p, &runtime_ns,
+				      &fine_timing);
+	stage_started_at = fine_timing_start(&fine_timing);
 	if (ret)
 		scx_bpf_error("snake stopping accounting failed for pid %d: %d",
 			      p->pid, ret);
 	else
 		stat_add(&ladder_ctx, SNAKE_STAT_RUNTIME_NS, runtime_ns);
+	fine_timing_finish(&fine_timing,
+			   SNAKE_FINE_TIMING_STOPPING_RUNTIME_STAT,
+			   stage_started_at);
+	stage_started_at = fine_timing_start(&fine_timing);
 	release_timed_callback(&ladder_ctx, SNAKE_CALLBACK_STOPPING,
 			       callback_started_at);
+	fine_timing_finish(&fine_timing, SNAKE_FINE_TIMING_STOPPING_FINISH,
+			   stage_started_at);
 }
 
 void BPF_STRUCT_OPS(snake_quiescent, struct task_struct *p, u64 deq_flags)
 {
-	struct snake_ladder_ctx ladder_ctx	    = {};
-	u64			callback_started_at = callback_timing_start();
+	struct snake_ladder_ctx	     ladder_ctx = {};
+	struct snake_fine_timing_ctx fine_timing;
+	u64 callback_started_at = callback_timing_start();
+	u64 stage_started_at;
 
+	fine_timing = fine_timing_begin(SNAKE_FINE_TIMING_CALLBACK_QUIESCENT,
+					callback_started_at);
+	stage_started_at = fine_timing_start(&fine_timing);
 	if (acquire_active_ladder(&ladder_ctx)) {
+		fine_timing_finish(&fine_timing,
+				   SNAKE_FINE_TIMING_QUIESCENT_ACQUIRE_LADDER,
+				   stage_started_at);
 		scx_bpf_error(
 			"snake failed to acquire active ladder in quiescent");
 		return;
 	}
-	scheduler_mode_quiescent(&ladder_ctx, p, deq_flags);
+	fine_timing_finish(&fine_timing,
+			   SNAKE_FINE_TIMING_QUIESCENT_ACQUIRE_LADDER,
+			   stage_started_at);
+	scheduler_mode_quiescent(&ladder_ctx, p, deq_flags, &fine_timing);
+	stage_started_at = fine_timing_start(&fine_timing);
 	release_timed_callback(&ladder_ctx, SNAKE_CALLBACK_QUIESCENT,
 			       callback_started_at);
+	fine_timing_finish(&fine_timing, SNAKE_FINE_TIMING_QUIESCENT_FINISH,
+			   stage_started_at);
 }
 
 void BPF_STRUCT_OPS(snake_set_weight, struct task_struct *p, u32 weight)

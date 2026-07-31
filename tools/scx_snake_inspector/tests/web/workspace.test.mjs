@@ -482,6 +482,7 @@ test("VTIME debug model summarizes the active generation without inventing thres
       active_slot: 1,
     },
     fairness: { mode_name: "vtime" },
+    queue_topology: { layout: "llc" },
     active_slot: 1,
     slots: [{
       slot: 1,
@@ -497,6 +498,9 @@ test("VTIME debug model summarizes the active generation without inventing thres
         vtime_equal_head_ties: 5,
         vtime_direct_runtime_ns: 20,
         vtime_queued_runtime_ns: 80,
+        select_calls: 120,
+        fifo_shared_enqueues: 11,
+        eevdf_lag_clamps: 4,
         dispatch_rungs: {
           2: {
             index: 2,
@@ -541,6 +545,11 @@ test("VTIME debug model summarizes the active generation without inventing thres
   assert.equal(model.accountingErrors, 2);
   assert.equal(model.equalHeadTies, 5);
   assert.deepEqual(model.dispatchRungs.map((rung) => rung.index), [0, 2]);
+  assert.ok(model.counters.relevant.some((counter) => counter.key === "select_calls"));
+  assert.ok(model.counters.relevant.some((counter) => counter.key === "vtime_credit_clamps"));
+  assert.ok(model.counters.inactive.some((counter) => counter.key === "fifo_shared_enqueues"));
+  assert.ok(model.counters.inactive.some((counter) => counter.key === "eevdf_lag_clamps"));
+  assert.ok(!model.counters.inactive.some((counter) => counter.key.startsWith("vtime_")));
 
   const previous = {
     context: {
@@ -644,13 +653,19 @@ test("VTIME debugging workspace renders fairness and arbitration diagnostics", (
     'id="vtimeAccountingErrors"',
     'id="vtimeQueuedRuntimeShare"',
     'id="vtimeAffinityEnqueueShare"',
-    'id="vtimeCounterRows"',
+    'id="vtimeRelevantCountersTab"',
+    'id="vtimeInactiveCountersTab"',
+    'id="vtimeRelevantCounterRows"',
+    'id="vtimeInactiveCounterRows"',
     'id="vtimeDispatchRows"',
   ]) {
     assert.match(page, new RegExp(fragment), `missing ${fragment}`);
   }
   assert.match(script, /function renderVtimeDebugging\(\)/);
   assert.match(script, /vtimeDebugModel\(inspection,\s*\{/);
+  assert.match(page, /role="tablist"[^>]*aria-label="Policy counter relevance"/);
+  assert.match(page, />Relevant to this policy<\/button>/);
+  assert.match(page, />Not relevant to this policy<\/button>/);
   assert.match(page, />Count \/ sec<\/th>/);
 });
 

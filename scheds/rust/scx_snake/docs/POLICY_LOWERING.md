@@ -300,7 +300,7 @@ Userspace encodes the lowered rungs into `snake_compiled_ladder` with:
 - at most nine fixed-size placement rungs;
 - enqueue and dispatch callback rung counts and arrays.
 
-ABI version 23 limits placement ladders to nine rungs and enqueue/dispatch
+ABI version 24 limits placement ladders to nine rungs and enqueue/dispatch
 ladders to eight rungs. It also limits generic placement to four mask tables,
 CPU and mask keys to 1024, queue cells to 32 including cell 0, and policy
 storage to two ladder slots. Userspace and BPF share definitions from

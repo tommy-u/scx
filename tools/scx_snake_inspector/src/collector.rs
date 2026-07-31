@@ -219,6 +219,10 @@ pub enum FineTimingCallback {
     SelectCpu,
     Enqueue,
     Dispatch,
+    Runnable,
+    Running,
+    Stopping,
+    Quiescent,
 }
 
 impl FineTimingCallback {
@@ -227,6 +231,10 @@ impl FineTimingCallback {
             Self::SelectCpu => "select_cpu",
             Self::Enqueue => "enqueue",
             Self::Dispatch => "dispatch",
+            Self::Runnable => "runnable",
+            Self::Running => "running",
+            Self::Stopping => "stopping",
+            Self::Quiescent => "quiescent",
         }
     }
 }
