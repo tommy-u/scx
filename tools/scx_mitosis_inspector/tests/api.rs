@@ -7,6 +7,7 @@ use scx_mitosis_inspector::api::{router, ApiContext};
 use scx_mitosis_inspector::collector::Snapshot;
 use scx_mitosis_inspector::host_context::{HostContextView, HostIdentityView};
 use scx_mitosis_inspector::stats::StatsSnapshot;
+use scx_mitosis_inspector::system_stats::SystemStatsCollector;
 use scx_mitosis_inspector::topology::{CpuInfo, TopologyView};
 use scx_mitosis_inspector::{
     CallbackCounter, CallbackTimingRow, CpuRuntimeRow, MigrationRow, TimingMetricRow,
@@ -108,6 +109,7 @@ fn app() -> axum::Router {
     router(ApiContext::new(
         Arc::new(RwLock::new(snapshot())),
         Arc::new(RwLock::new(stats_snapshot())),
+        Arc::new(RwLock::new(SystemStatsCollector::new().collect())),
         HostContextView {
             identity: HostIdentityView {
                 hostname: "mitosis-vm".into(),
@@ -220,7 +222,7 @@ async fn stats_endpoint_returns_every_scheduler_stat() {
 }
 
 #[tokio::test]
-async fn stats_is_a_distinct_second_page() {
+async fn scheduler_stats_is_a_distinct_third_page() {
     let response = app()
         .oneshot(
             Request::builder()
@@ -234,8 +236,28 @@ async fn stats_is_a_distinct_second_page() {
     assert_eq!(response.status(), StatusCode::OK);
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let html = std::str::from_utf8(&body).unwrap();
-    assert!(html.contains("Mitosis stats"));
+    assert!(html.contains("Scheduler stats"));
     assert!(html.contains("class=\"workspace-sidebar\""));
-    assert!(html.contains("aria-current=\"page\" href=\"/stats\">Stats"));
+    assert!(html.contains("aria-current=\"page\" href=\"/stats\">Scheduler"));
     assert!(html.contains("/assets/stats.js"));
+}
+
+#[tokio::test]
+async fn system_is_a_distinct_page() {
+    let response = app()
+        .oneshot(
+            Request::builder()
+                .uri("/system")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let html = std::str::from_utf8(&body).unwrap();
+    assert!(html.contains("System stats"));
+    assert!(html.contains("aria-current=\"page\" href=\"/system\">System"));
+    assert!(html.contains("/assets/system.js"));
 }

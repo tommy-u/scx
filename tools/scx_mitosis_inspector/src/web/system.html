@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>System stats</title>
+    <link rel="stylesheet" href="/assets/style.css">
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="topbar-product">
+        <div class="product-title">
+          <h1>Mitosis inspector</h1>
+          <p>Scheduler activity and runtime statistics</p>
+        </div>
+      </div>
+      <div class="status" id="status" role="status" aria-live="polite">
+        <span class="status-dot" aria-hidden="true"></span>
+        <span id="statusText">Connecting</span>
+      </div>
+    </header>
+
+    <div class="workspace-shell">
+      <aside class="workspace-sidebar">
+        <nav class="workspace-navigation" aria-label="Inspector workspaces">
+          <span class="navigation-group-label">Observe</span>
+          <a href="/">Callbacks</a>
+          <a class="active" aria-current="page" href="/system">System</a>
+          <a href="/stats">Scheduler</a>
+        </nav>
+      </aside>
+
+      <main id="app" tabindex="-1" aria-label="Host system statistics">
+        <header class="view-heading">
+          <div>
+            <h2>System stats</h2>
+            <p>Host-wide kernel and hardware counters</p>
+          </div>
+        </header>
+
+        <section class="summary" aria-label="System summary">
+          <dl>
+            <div><dt>Source</dt><dd>procfs and sysfs</dd></div>
+            <div><dt>Interval</dt><dd id="interval">--</dd></div>
+            <div><dt>Last refresh</dt><dd id="refreshed">--</dd></div>
+          </dl>
+        </section>
+
+        <section class="table-section" aria-labelledby="systemCpuHeading">
+          <h2 id="systemCpuHeading">CPU</h2>
+          <div class="table-scroll"><table><tbody id="systemCpuRows"></tbody></table></div>
+        </section>
+
+        <section class="table-section" aria-labelledby="pressureHeading">
+          <h2 id="pressureHeading">Pressure</h2>
+          <div class="table-scroll">
+            <table>
+              <thead><tr><th scope="col">Resource</th><th scope="col">Scope</th><th scope="col">avg10</th><th scope="col">avg60</th><th scope="col">avg300</th><th scope="col">Total (us)</th></tr></thead>
+              <tbody id="pressureRows"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="table-section" aria-labelledby="memoryHeading">
+          <h2 id="memoryHeading">Memory</h2>
+          <div class="table-scroll"><table><tbody id="memoryRows"></tbody></table></div>
+        </section>
+
+        <section class="table-section" aria-labelledby="frequencyHeading">
+          <h2 id="frequencyHeading">CPU frequency</h2>
+          <div class="table-scroll">
+            <table>
+              <thead><tr><th scope="col">CPU</th><th scope="col">Current (kHz)</th><th scope="col">Status</th></tr></thead>
+              <tbody id="frequencyRows"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="table-section" aria-labelledby="networkHeading">
+          <h2 id="networkHeading">Network</h2>
+          <div class="table-scroll">
+            <table>
+              <thead><tr><th scope="col">Interface</th><th scope="col">RX bytes/s</th><th scope="col">TX bytes/s</th><th scope="col">RX errors</th><th scope="col">TX errors</th><th scope="col">Drops</th></tr></thead>
+              <tbody id="networkRows"></tbody>
+            </table>
+          </div>
+        </section>
+      </main>
+    </div>
+    <script src="/assets/system.js" defer></script>
+  </body>
+</html>

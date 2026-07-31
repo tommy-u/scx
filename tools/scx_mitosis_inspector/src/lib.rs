@@ -11,6 +11,7 @@ pub mod collector;
 pub mod host_context;
 pub mod model;
 pub mod stats;
+pub mod system_stats;
 pub mod topology;
 
 pub use model::{

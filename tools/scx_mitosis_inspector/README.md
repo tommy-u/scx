@@ -20,10 +20,11 @@ sudo tools/scx_mitosis_inspector/target/release/scx_mitosis_inspector \
 The process needs permission to enumerate loaded BPF programs and load tracing
 BPF programs. The default listen address is `0.0.0.0:44105`.
 
-The callback view is served at `/`. The `/stats` view reads the existing
-Mitosis `top` stats operation from `/var/run/scx/root/stats` and renders every
-global and per-cell field without changing the scheduler. Override the socket
-with `--stats-path` when needed.
+The callback view is served at `/`. `/system` reports host CPU, pressure,
+memory, frequency, and network data from procfs/sysfs. `/stats` is the third,
+scheduler-only page: it reads the existing Mitosis `top` stats operation from
+`/var/run/scx/root/stats` and renders every global and per-cell field without
+changing the scheduler. Override the socket with `--stats-path` when needed.
 
 Callback latency is sampled by separate fentry/fexit BPF programs and shown as
 mean and approximate p50/p95/p99 values. The default samples one in 1024 calls;
