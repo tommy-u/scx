@@ -297,12 +297,13 @@ Userspace encodes the lowered rungs into `snake_compiled_ladder` with:
 - ABI version;
 - rung and mask-table counts;
 - exhaustion fallback mode;
-- at most eight fixed-size placement rungs;
+- at most nine fixed-size placement rungs;
 - enqueue and dispatch callback rung counts and arrays.
 
-ABI version 21 limits each ladder to eight rungs, generic placement to four
-mask tables, CPU and mask keys to 1024, queue cells to 32 including cell 0, and
-policy storage to two ladder slots. Userspace and BPF share definitions from
+ABI version 23 limits placement ladders to nine rungs and enqueue/dispatch
+ladders to eight rungs. It also limits generic placement to four mask tables,
+CPU and mask keys to 1024, queue cells to 32 including cell 0, and policy
+storage to two ladder slots. Userspace and BPF share definitions from
 [`src/bpf/intf.h`](../src/bpf/intf.h); an ABI-version mismatch is rejected.
 
 Use the compiler dump to inspect the exact result without attaching BPF:
@@ -312,6 +313,20 @@ Use the compiler dump to inspect the exact result without attaching BPF:
   --policy scheds/rust/scx_snake/examples/kernel-default-sim.toml \
   --dump-compiled-policy
 ```
+
+For automation, validate without loading BPF and emit a versioned JSON record:
+
+```bash
+./target/release/scx_snake \
+  --policy scheds/rust/scx_snake/examples/kernel-default-sim.toml \
+  --validate-policy
+```
+
+A valid policy exits zero and reports its ABI, fixed limits, and compiled counts.
+An invalid policy exits 2 and reports a stable error code, message, and source
+line/column when TOML deserialization provides a span. Schema version 1 uses the
+error codes `policy_read_failed`, `invalid_policy_toml`, `invalid_policy`,
+`mask_resolution_failed`, and `queue_topology_resolution_failed`.
 
 ## Stage 5: prepare and atomically publish
 

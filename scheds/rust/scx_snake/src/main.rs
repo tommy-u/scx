@@ -9,6 +9,7 @@ mod inspection;
 mod mask_tables;
 mod membership;
 mod policy;
+mod policy_validation;
 mod queue_timing;
 mod queue_topology;
 mod runtime_policy;
@@ -89,7 +90,7 @@ struct Opts {
         value_parser = parse_callback_timing_sample_rate,
         default_value_t = 64,
         value_name = "N",
-        conflicts_with_all = ["update_policy", "dump_compiled_policy", "stats", "monitor", "help_stats", "set_thread_cell", "clear_thread_cell"]
+        conflicts_with_all = ["update_policy", "dump_compiled_policy", "validate_policy", "stats", "monitor", "help_stats", "set_thread_cell", "clear_thread_cell"]
     )]
     callback_timing_sample_rate: u32,
 
@@ -125,6 +126,10 @@ struct Opts {
     /// Print the lowered mechanical ladder and exit without loading BPF.
     #[arg(long)]
     dump_compiled_policy: bool,
+
+    /// Validate a policy and emit one machine-readable JSON report.
+    #[arg(long, conflicts_with = "dump_compiled_policy")]
+    validate_policy: bool,
 
     /// Print in-process statistics at this interval in seconds.
     #[arg(long, value_parser = parse_positive_seconds, value_name = "SECONDS")]
@@ -167,6 +172,7 @@ enum RunMode {
     SetThreadCell(ThreadCellAssignment),
     ClearThreadCell(i32),
     Dump(PathBuf),
+    Validate(PathBuf),
     Launch(PathBuf),
 }
 
@@ -201,7 +207,8 @@ fn resolve_mode(opts: &Opts) -> Result<RunMode> {
         + usize::from(opts.update_policy.is_some())
         + usize::from(opts.set_thread_cell.is_some())
         + usize::from(opts.clear_thread_cell.is_some())
-        + usize::from(opts.dump_compiled_policy);
+        + usize::from(opts.dump_compiled_policy)
+        + usize::from(opts.validate_policy);
     if special_modes > 1 {
         bail!("control, monitoring, update, and dump modes are mutually exclusive");
     }
@@ -225,12 +232,13 @@ fn resolve_mode(opts: &Opts) -> Result<RunMode> {
         return Ok(RunMode::ClearThreadCell(tid));
     }
 
-    let policy = opts
-        .policy
-        .clone()
-        .ok_or_else(|| anyhow!("--policy PATH is required when launching or dumping a policy"))?;
+    let policy = opts.policy.clone().ok_or_else(|| {
+        anyhow!("--policy PATH is required when launching, dumping, or validating a policy")
+    })?;
     if opts.dump_compiled_policy {
         Ok(RunMode::Dump(policy))
+    } else if opts.validate_policy {
+        Ok(RunMode::Validate(policy))
     } else {
         Ok(RunMode::Launch(policy))
     }
@@ -2581,6 +2589,14 @@ fn main() -> Result<()> {
             print!("{}{}", policy.dump(), dump_mask_tables(&mask_tables));
             if let Some(topology) = resolve_host_queue_topology(&policy)? {
                 print!("{}", dump_queue_topology(&topology));
+            }
+            return Ok(());
+        }
+        RunMode::Validate(path) => {
+            let report = policy_validation::validate_policy_file(&path);
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            if !report.is_valid() {
+                std::process::exit(2);
             }
             return Ok(());
         }

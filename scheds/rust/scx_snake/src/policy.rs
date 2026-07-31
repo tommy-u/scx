@@ -377,6 +377,25 @@ impl fmt::Display for PolicyError {
 
 impl std::error::Error for PolicyError {}
 
+impl PolicyError {
+    pub fn code(&self) -> &'static str {
+        if self.0.starts_with("invalid policy TOML:") {
+            "invalid_policy_toml"
+        } else {
+            "invalid_policy"
+        }
+    }
+
+    pub fn source_span(&self, source: &str) -> Option<std::ops::Range<usize>> {
+        if self.code() != "invalid_policy_toml" {
+            return None;
+        }
+        toml::from_str::<SemanticPolicy>(source)
+            .err()
+            .and_then(|error| error.span())
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SemanticPolicy {
