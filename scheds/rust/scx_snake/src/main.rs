@@ -4421,6 +4421,25 @@ scope = "task_allowed"
     }
 
     #[test]
+    fn dsq_fine_timing_reuses_the_caller_event_stack() {
+        let bpf_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bpf");
+        let dsq = fs::read_to_string(bpf_dir.join("dsq.h")).unwrap();
+        let timing = fs::read_to_string(bpf_dir.join("timing.h")).unwrap();
+        let recorder = timing
+            .split_once("fine_timing_record_dsq_operation(")
+            .unwrap()
+            .1
+            .split_once("fine_timing_finish(")
+            .unwrap()
+            .0;
+
+        assert!(dsq.contains("event.session_id"));
+        assert!(dsq.contains("fine->session_id"));
+        assert!(!recorder.contains("event;"));
+        assert!(recorder.contains("sample, sizeof(*sample), 0"));
+    }
+
+    #[test]
     fn bpf_dsq_head_peek_has_one_shared_implementation() {
         let bpf_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bpf");
         let sources = bpf_sources(&bpf_dir);
