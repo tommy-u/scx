@@ -474,8 +474,9 @@ test("debug model reports unavailable scheduler state without inventing configur
 test("VTIME debug model summarizes the active generation without inventing thresholds", async () => {
   const inspectionModule = await import("../../src/web/inspection.js");
   assert.equal(typeof inspectionModule.vtimeDebugModel, "function");
-  const model = inspectionModule.vtimeDebugModel({
+  const current = {
     context: {
+      scheduler_attach_seq: 4,
       fairness: "vtime",
       policy_generation: 9,
       active_slot: 1,
@@ -520,7 +521,8 @@ test("VTIME debug model summarizes the active generation without inventing thres
         },
       },
     }],
-  });
+  };
+  const model = inspectionModule.vtimeDebugModel(current);
 
   assert.equal(model.available, true);
   assert.equal(model.modeActive, true);
@@ -539,6 +541,50 @@ test("VTIME debug model summarizes the active generation without inventing thres
   assert.equal(model.accountingErrors, 2);
   assert.equal(model.equalHeadTies, 5);
   assert.deepEqual(model.dispatchRungs.map((rung) => rung.index), [0, 2]);
+
+  const previous = {
+    context: {
+      scheduler_attach_seq: 4,
+      fairness: "vtime",
+      policy_generation: 9,
+      active_slot: 1,
+    },
+    fairness: { mode_name: "vtime" },
+    active_slot: 1,
+    slots: [{
+      slot: 1,
+      state: "active",
+      generation: 9,
+      metrics: {
+        vtime_enqueues: 80,
+        vtime_dispatches: 70,
+        vtime_cpu_enqueues: 6,
+        vtime_cpu_dispatches: 4,
+        vtime_credit_clamps: 20,
+        vtime_accounting_errors: 1,
+        vtime_equal_head_ties: 1,
+      },
+    }],
+  };
+  const sampled = inspectionModule.vtimeDebugModel(current, {
+    previousInspection: previous,
+    elapsedMs: 2_000,
+  });
+  assert.deepEqual(sampled.rates, {
+    enqueues: 10,
+    dispatches: 10,
+    affinityEnqueues: 2,
+    affinityDispatches: 2,
+    clamps: 2.5,
+    equalHeadTies: 2,
+    accountingErrors: 0.5,
+  });
+  assert.equal(inspectionModule.vtimeDebugModel(current).rates.enqueues, null);
+  previous.context.policy_generation = 8;
+  assert.equal(inspectionModule.vtimeDebugModel(current, {
+    previousInspection: previous,
+    elapsedMs: 2_000,
+  }).rates.enqueues, null);
 });
 
 test("page shell exposes grouped navigation and separate diagnostic workspaces", () => {
@@ -604,7 +650,8 @@ test("VTIME debugging workspace renders fairness and arbitration diagnostics", (
     assert.match(page, new RegExp(fragment), `missing ${fragment}`);
   }
   assert.match(script, /function renderVtimeDebugging\(\)/);
-  assert.match(script, /vtimeDebugModel\(inspection\)/);
+  assert.match(script, /vtimeDebugModel\(inspection,\s*\{/);
+  assert.match(page, />Count \/ sec<\/th>/);
 });
 
 test("each workspace heading matches its Explorer label", () => {

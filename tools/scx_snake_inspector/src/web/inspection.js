@@ -2222,12 +2222,20 @@ export function schedulerDebugModel({ control, inspection } = {}) {
   };
 }
 
-export function vtimeDebugModel(inspection) {
+export function vtimeDebugModel(
+  inspection,
+  { previousInspection = null, elapsedMs = 0 } = {},
+) {
   const context = inspection?.context || null;
   const activeSlot = (inspection?.slots || []).find((slot) => (
     slot.state === "active" || slot.slot === inspection?.active_slot
   )) || null;
   const metrics = activeSlot?.metrics || null;
+  const previousContext = previousInspection?.context || null;
+  const previousSlot = (previousInspection?.slots || []).find((slot) => (
+    slot.state === "active" || slot.slot === previousInspection?.active_slot
+  )) || null;
+  const previousMetrics = previousSlot?.metrics || null;
   const count = (name) => Math.max(0, Number(metrics?.[name]) || 0);
   const percentage = (value, total) => total > 0 ? value * 100 / total : 0;
   const enqueues = count("vtime_enqueues");
@@ -2239,6 +2247,30 @@ export function vtimeDebugModel(inspection) {
   const directRuntimeNs = count("vtime_direct_runtime_ns");
   const queuedRuntimeNs = count("vtime_queued_runtime_ns");
   const totalRuntimeNs = directRuntimeNs + queuedRuntimeNs;
+  const generation = context?.policy_generation ?? activeSlot?.generation ?? null;
+  const previousGeneration = previousContext?.policy_generation
+    ?? previousSlot?.generation
+    ?? null;
+  const intervalMs = Number(elapsedMs);
+  const rateWindowValid = Boolean(
+    metrics
+    && previousMetrics
+    && Number.isFinite(intervalMs)
+    && intervalMs > 0
+    && contextsMatch(context, previousContext)
+    && generation != null
+    && generation === previousGeneration,
+  );
+  const perSecond = (name) => {
+    if (!rateWindowValid) {
+      return null;
+    }
+    const current = count(name);
+    const previous = Math.max(0, Number(previousMetrics?.[name]) || 0);
+    return current >= previous
+      ? (current - previous) * 1_000 / intervalMs
+      : null;
+  };
   const modeName = String(
     inspection?.fairness?.mode_name
       ?? context?.fairness
@@ -2262,7 +2294,7 @@ export function vtimeDebugModel(inspection) {
     available: Boolean(metrics),
     modeActive: modeName === "vtime",
     modeName: modeName || null,
-    generation: context?.policy_generation ?? activeSlot?.generation ?? null,
+    generation,
     enqueues,
     dispatches,
     dispatchPct: percentage(dispatches, enqueues),
@@ -2283,6 +2315,15 @@ export function vtimeDebugModel(inspection) {
     accountingErrors: count("vtime_accounting_errors"),
     equalHeadTies,
     equalHeadTiePct: percentage(equalHeadTies, dispatches),
+    rates: {
+      enqueues: perSecond("vtime_enqueues"),
+      dispatches: perSecond("vtime_dispatches"),
+      affinityEnqueues: perSecond("vtime_cpu_enqueues"),
+      affinityDispatches: perSecond("vtime_cpu_dispatches"),
+      clamps: perSecond("vtime_credit_clamps"),
+      equalHeadTies: perSecond("vtime_equal_head_ties"),
+      accountingErrors: perSecond("vtime_accounting_errors"),
+    },
     dispatchRungs,
   };
 }

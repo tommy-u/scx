@@ -336,6 +336,9 @@ const state = {
   testingLoading: false,
   testingPendingMutation: false,
   selectedTestingCaseId: null,
+  vtimeCounterElapsedMs: 0,
+  vtimeCounterPreviousInspection: null,
+  vtimeCounterSampleAt: 0,
   windowMs: initialWindowMs,
   zoom: 1,
 };
@@ -1945,7 +1948,10 @@ function renderVtimeDebugging() {
   const inspection = state.inspection
     ? { ...state.inspection, context: state.inspectionContext }
     : null;
-  const model = vtimeDebugModel(inspection);
+  const model = vtimeDebugModel(inspection, {
+    previousInspection: state.vtimeCounterPreviousInspection,
+    elapsedMs: state.vtimeCounterElapsedMs,
+  });
   renderFreshness(
     elements.debuggingVtimeFreshness,
     model.available,
@@ -1984,16 +1990,16 @@ function renderVtimeDebugging() {
     ? model.affinity.dispatches * 100 / model.dispatches
     : 0;
   const counterRows = [
-    ["VTIME enqueues", model.enqueues, model.enqueues > 0 ? 100 : 0],
-    ["VTIME dispatches", model.dispatches, model.dispatchPct],
-    ["Affinity enqueues", model.affinity.enqueues, model.affinity.enqueuePct],
-    ["Affinity dispatches", model.affinity.dispatches, affinityDispatchPct],
-    ["Credit clamps", model.clamps.count, model.clamps.enqueuePct],
-    ["Equal-head ties", model.equalHeadTies, model.equalHeadTiePct],
-    ["Accounting errors", model.accountingErrors, null],
+    ["VTIME enqueues", model.enqueues, model.rates.enqueues, model.enqueues > 0 ? 100 : 0],
+    ["VTIME dispatches", model.dispatches, model.rates.dispatches, model.dispatchPct],
+    ["Affinity enqueues", model.affinity.enqueues, model.rates.affinityEnqueues, model.affinity.enqueuePct],
+    ["Affinity dispatches", model.affinity.dispatches, model.rates.affinityDispatches, affinityDispatchPct],
+    ["Credit clamps", model.clamps.count, model.rates.clamps, model.clamps.enqueuePct],
+    ["Equal-head ties", model.equalHeadTies, model.rates.equalHeadTies, model.equalHeadTiePct],
+    ["Accounting errors", model.accountingErrors, model.rates.accountingErrors, null],
   ];
-  replaceSortableTableBody(elements.vtimeCounterRows, counterRows.map(([label, value, share]) => `
-    <tr><th scope="row">${escapeHtml(label)}</th><td>${formatCount(value)}</td><td>${share == null ? "—" : formatPercentage(share)}</td></tr>`).join(""));
+  replaceSortableTableBody(elements.vtimeCounterRows, counterRows.map(([label, value, rate, share]) => `
+    <tr><th scope="row">${escapeHtml(label)}</th><td>${formatCount(value)}</td><td data-sort-value="${rate ?? ""}">${rate == null ? "—" : formatRate(rate)}</td><td>${share == null ? "—" : formatPercentage(share)}</td></tr>`).join(""));
 
   replaceSortableTableBody(elements.vtimeDispatchRows, model.dispatchRungs.length === 0
     ? '<tr><td class="debugging-empty" colspan="8">Dispatch rung counters are unavailable.</td></tr>'
@@ -2271,11 +2277,21 @@ async function loadInspection() {
       throw new Error(`Inspection request failed (${response.status})`);
     }
     const payload = await response.json();
+    const sampledAt = Date.now();
+    if (payload.sequence !== state.inspectionSequence) {
+      state.vtimeCounterPreviousInspection = state.inspection
+        ? { ...state.inspection, context: state.inspectionContext }
+        : null;
+      state.vtimeCounterElapsedMs = state.vtimeCounterSampleAt > 0
+        ? sampledAt - state.vtimeCounterSampleAt
+        : 0;
+      state.vtimeCounterSampleAt = sampledAt;
+    }
     state.inspection = payload.snapshot;
     state.inspectionContext = payload.context || null;
     state.inspectionError = payload.error;
     state.inspectionSequence = payload.sequence;
-    state.lastInspectionAt = Date.now();
+    state.lastInspectionAt = sampledAt;
   } catch (error) {
     state.inspectionError = error.message;
   } finally {
