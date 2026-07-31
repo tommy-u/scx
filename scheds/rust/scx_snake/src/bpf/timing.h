@@ -209,11 +209,10 @@ fine_timing_record_elapsed(const struct snake_fine_timing_ctx *ctx, u32 stage,
 }
 
 static __noinline void
-fine_timing_record_dsq_operation(const struct snake_fine_timing_ctx   *ctx,
-				 const struct snake_fine_timing_event *sample)
+fine_timing_record_dsq_operation(const struct snake_fine_timing_ctx *ctx,
+				 struct snake_fine_timing_event	    *sample)
 {
 	struct snake_fine_timing_config *config;
-	struct snake_fine_timing_event	 event;
 	u32				 callback, key = 0, mask;
 
 	if (!ctx || !ctx->active || !sample ||
@@ -235,9 +234,7 @@ fine_timing_record_dsq_operation(const struct snake_fine_timing_ctx   *ctx,
 	if (!(READ_ONCE(config->enabled_mask) & mask) ||
 	    READ_ONCE(config->session_ids[callback]) != ctx->session_id)
 		return;
-	event		 = *sample;
-	event.session_id = ctx->session_id;
-	bpf_ringbuf_output(&fine_timing_events, &event, sizeof(event), 0);
+	bpf_ringbuf_output(&fine_timing_events, sample, sizeof(*sample), 0);
 }
 
 static __always_inline void

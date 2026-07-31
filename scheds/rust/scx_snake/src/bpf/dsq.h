@@ -64,6 +64,7 @@ dsq_record_operation(const struct snake_fine_timing_ctx *fine, dsq_id_t source,
 		return;
 	struct snake_fine_timing_event event = {};
 
+	event.session_id		     = fine->session_id;
 	event.elapsed_ns		     = bpf_ktime_get_ns() - started_at;
 	event.source_dsq_id		     = source.raw;
 	event.target_dsq_id		     = target.raw;
