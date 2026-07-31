@@ -338,8 +338,10 @@ pub struct Metrics {
     pub eevdf_direct_runtime_ns: u64,
     #[stat(desc = "Task runtime delivered through EEVDF ordered queues")]
     pub eevdf_queued_runtime_ns: u64,
-    #[stat(desc = "Sleeping-task lag values clamped to one virtual request")]
+    #[stat(desc = "EEVDF lag values clamped to one virtual request")]
     pub eevdf_lag_clamps: u64,
+    #[stat(desc = "Affinity-constrained run starts with stale lag clamped")]
+    pub eevdf_run_lag_clamps: u64,
     #[stat(desc = "EEVDF state or runnable-weight accounting errors")]
     pub eevdf_accounting_errors: u64,
     #[stat(desc = "Per-CPU Snake runtime")]
@@ -469,6 +471,9 @@ impl Metrics {
             eevdf_lag_clamps: self
                 .eevdf_lag_clamps
                 .saturating_sub(previous.eevdf_lag_clamps),
+            eevdf_run_lag_clamps: self
+                .eevdf_run_lag_clamps
+                .saturating_sub(previous.eevdf_run_lag_clamps),
             eevdf_accounting_errors: self
                 .eevdf_accounting_errors
                 .saturating_sub(previous.eevdf_accounting_errors),
@@ -533,7 +538,7 @@ impl Metrics {
                 "  VTIME enqueues: {} (per-CPU: {}) | dispatches: {} (per-CPU: {}) | strict sync queues: {}\n",
                 "  VTIME direct/queued runtime ns: {}/{} | credit clamps: {} | accounting errors: {} | equal-head ties: {}\n",
                 "  EEVDF eligible/future enqueues: {}/{} | promotions: {} | forced advances: {} | dispatches: {}\n",
-                "  EEVDF strict sync queues: {} | direct/queued runtime ns: {}/{} | lag clamps: {} | accounting errors: {}\n",
+                "  EEVDF strict sync queues: {} | direct/queued runtime ns: {}/{} | lag/run-start clamps: {}/{} | accounting errors: {}\n",
                 "  rungs:\n"
             ),
             self.policy_generation,
@@ -580,6 +585,7 @@ impl Metrics {
             self.eevdf_direct_runtime_ns,
             self.eevdf_queued_runtime_ns,
             self.eevdf_lag_clamps,
+            self.eevdf_run_lag_clamps,
             self.eevdf_accounting_errors,
         );
 

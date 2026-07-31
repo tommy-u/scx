@@ -96,6 +96,17 @@ run_case vtime_single_runner_rehome \
     env SNAKE_REHOME_ARTIFACT="${artifact}/vtime-single-runner-rehome" \
     "${script_dir}/vtime_single_runner_rehome.sh" "${snake_bin}"
 
+if (( $(nproc) >= 2 )); then
+    run_case eevdf_mixed_affinity \
+        env SNAKE_EEVDF_STALL_ARTIFACT="${artifact}/eevdf-mixed-affinity" \
+        "${script_dir}/eevdf_stall_workload.sh" "${snake_bin}" \
+        "${repo}/scheds/rust/scx_snake/examples/basic.toml" mixed_affinity
+    run_case eevdf_fork_yield \
+        env SNAKE_EEVDF_STALL_ARTIFACT="${artifact}/eevdf-fork-yield" \
+        "${script_dir}/eevdf_stall_workload.sh" "${snake_bin}" \
+        "${repo}/scheds/rust/scx_snake/examples/basic.toml" fork_yield
+fi
+
 if (( $(nproc) >= 32 )); then
     run_case vtime_max_cells \
         env SNAKE_QUEUE_LAYOUT=cell "${script_dir}/vtime_max_cells.sh" "${snake_bin}"
@@ -116,4 +127,4 @@ if grep -Eiq 'runnable task stall|scx_bpf_error|sched_ext:.*(error|stall|watchdo
 fi
 
 touch "${artifact}/PASS"
-echo "PASS: Snake FIFO/VTIME VM gauntlet completed on $(nproc) CPUs"
+echo "PASS: Snake FIFO/VTIME/EEVDF VM gauntlet completed on $(nproc) CPUs"

@@ -284,6 +284,17 @@ task.vruntime = new_V - clamp(lag, -virtual_request, virtual_request)
 
 The symmetric one-request clamp bounds both sleeper credit and sleeper debt.
 
+An affinity-constrained runnable task can fall far behind the global clock when
+its allowed CPUs cannot deliver its global entitlement. At run start, Snake
+bounds that task's stale lag to one weight-scaled virtual request and recomputes
+the deadline from the remaining physical request. Thus each stale task can
+carry at most one request of catch-up service; recovery time still scales with
+the number of tasks in the constrained cohort. This is not a separate fairness
+domain or an absolute latency bound. Persistent affinity overload can forfeit
+service credit that the allowed CPUs cannot deliver. The
+`eevdf_run_lag_clamps` counter records this path separately from sleeper-lag
+clamps.
+
 ### Placement interaction
 
 The ladder and task cells remain placement mechanisms. They do not contain
@@ -307,8 +318,8 @@ annotations. BPF reads the kernel task weight and runtime, maintains VTIME or
 EEVDF clocks and per-task state, and performs ordering, accounting, and dispatch
 decisions. Cell meanings remain entirely in userspace.
 
-Global fairness is implemented in
-[`src/bpf/fairness.h`](../src/bpf/fairness.h); queue-mode VTIME is in
+Global fairness is implemented in the `src/bpf/fairness_*.h` modules;
+queue-mode VTIME is in
 [`src/bpf/queue_fairness.h`](../src/bpf/queue_fairness.h). Placement execution
 remains in [`src/bpf/ladder.h`](../src/bpf/ladder.h).
 
@@ -363,6 +374,19 @@ For a local virtme-ng guest, `--cpus 8,sockets=2,cores=4,threads=1` exposes two
 four-CPU LLCs. The combined gauntlet always runs the focused test and derives
 the remote-path expectation from the compiled queue topology.
 
+The EEVDF watchdog regression runs targeted 60-second forms of the Inspector
+matrix's mixed-affinity and fork/yield workloads. The fork/yield form pins the
+yield cohort and uses a delayed wakee so the stale-lag path is deterministic:
+
+```bash
+sudo scheds/rust/scx_snake/tests/eevdf_stall_workload.sh \
+  target/release/scx_snake \
+  scheds/rust/scx_snake/examples/basic.toml mixed_affinity
+sudo scheds/rust/scx_snake/tests/eevdf_stall_workload.sh \
+  target/release/scx_snake \
+  scheds/rust/scx_snake/examples/basic.toml fork_yield
+```
+
 The VTIME watchdog regression requires at least 128 guest CPUs and preserves its
 artifacts under `/tmp`. It combines a nice-19 `khugepaged` thread, persistent
 normal tasks crossing cell clocks, and repeated affinity/yield-heavy
@@ -384,9 +408,10 @@ sudo scheds/rust/scx_snake/tests/vtime_cell_borrowing.sh \
   target/release/scx_snake
 ```
 
-Inside an isolated guest, the combined gauntlet runs the FIFO fallback and all
-applicable VTIME queue tests, adding max-cell coverage at 32 CPUs and the
-low-weight watchdog campaign at 128 CPUs. It never launches EEVDF:
+Inside an isolated guest, the combined gauntlet runs the FIFO fallback, the
+targeted EEVDF mixed-affinity and fork/yield regressions, and all applicable
+VTIME queue tests. It adds max-cell coverage at 32 CPUs and the low-weight
+watchdog campaign at 128 CPUs:
 
 ```bash
 sudo scheds/rust/scx_snake/tests/vm_gauntlet.sh \
@@ -399,6 +424,7 @@ Additional VM-only contracts cover the remaining queue boundaries:
 | --- | --- |
 | `fifo_fallback.sh` | Shared FIFO fallback is explicitly drained. |
 | `vtime_llc_queues.sh` | Global-clock LLC queues exercise local, CPU, and bounded remote-candidate paths with consistent rung counters. |
+| `eevdf_stall_workload.sh` | Bounded mixed-affinity and fork/yield cohorts retain progress across a 60-second watchdog window. |
 | `vtime_queue_ladders.sh` | Callback ladders activate, live reorder, switch to `min_vtime`, and dispatch both queue classes. |
 | `vtime_max_cells.sh` | 31 declared cells plus cell 0 run under `cell` and `cell_llc`. |
 | `vtime_single_runner_rehome.sh` | A sole running task is re-enqueued and cannot retain an obsolete cell indefinitely. |
