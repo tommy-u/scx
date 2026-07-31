@@ -36,6 +36,8 @@ Wakeup-to-running latency is collected from sched tracepoints and uses
 The same sampled sched-switch stream reports on-CPU slice duration.
 Blocked off-CPU duration is measured from a blocking switch until wakeup.
 CPU migration pairs are aggregated from `sched_migrate_task` in a bounded map.
+The callback page also reads kernel BPF program run counts and runtime totals;
+these fields are populated only when the host has `kernel.bpf_stats_enabled=1`.
 
 For the 16-vCPU development guest, expose the guest port with QEMU user-mode
 networking and run `run-in-vm.sh` as the guest command. The script owns the

@@ -7,6 +7,7 @@ pub mod bpf_skel {
     include!(concat!(env!("OUT_DIR"), "/bpf_skel.rs"));
 }
 pub mod api;
+pub mod bpf_program_stats;
 pub mod collector;
 pub mod host_context;
 pub mod model;

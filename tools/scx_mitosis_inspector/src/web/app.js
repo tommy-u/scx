@@ -8,6 +8,7 @@ const schedulerTimingRows = document.querySelector("#schedulerTimingRows");
 const migrationRows = document.querySelector("#migrationRows");
 const cpuUtilizationRows = document.querySelector("#cpuUtilizationRows");
 const llcUtilizationRows = document.querySelector("#llcUtilizationRows");
+const bpfProgramRows = document.querySelector("#bpfProgramRows");
 let topology = null;
 let latestSnapshot = null;
 
@@ -115,6 +116,22 @@ function renderCpuBreakdown(snapshot) {
   }));
 }
 
+function renderBpfPrograms(programs) {
+  const enabled = programs.some((program) => program.run_count > 0);
+  document.querySelector("#bpfRuntimeStatus").textContent = enabled
+    ? "Kernel runtime counters enabled"
+    : "Kernel runtime counters disabled";
+  bpfProgramRows.replaceChildren(...programs.map((program) => tableRow([
+    program.name,
+    number.format(program.id),
+    number.format(program.run_count),
+    number.format(program.run_time_ns),
+    program.average_runtime_ns == null ? "--" : number.format(program.average_runtime_ns),
+    number.format(program.recursion_misses),
+    program.verified_insns == null ? "--" : number.format(program.verified_insns),
+  ])));
+}
+
 function renderHostContext(context) {
   document.querySelector("#hostname").textContent = context.identity.hostname;
   document.querySelector("#kernelRelease").textContent = context.identity.kernel_release;
@@ -134,6 +151,7 @@ function render(snapshot) {
   renderTimings(snapshot);
   renderMigrations(snapshot.migrations);
   renderCpuBreakdown(snapshot);
+  renderBpfPrograms(snapshot.bpf_program_stats);
   MitosisHeatmap.update({ ...snapshot, topology });
 
   const counters = new Map(snapshot.counters.map((counter) => [counter.name, counter]));
