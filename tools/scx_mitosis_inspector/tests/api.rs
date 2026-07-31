@@ -4,6 +4,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use scx_mitosis_inspector::api::{router, ApiContext};
+use scx_mitosis_inspector::bpf_program_stats::BpfProgramStatsRow;
 use scx_mitosis_inspector::collector::Snapshot;
 use scx_mitosis_inspector::host_context::{HostContextView, HostIdentityView};
 use scx_mitosis_inspector::stats::StatsSnapshot;
@@ -52,6 +53,15 @@ fn snapshot() -> Snapshot {
             cpu: 0,
             runtime_ns: 1234,
             utilization_pct: 72.5,
+        }],
+        bpf_program_stats: vec![BpfProgramStatsRow {
+            id: 11,
+            name: "mitosis_select_".into(),
+            run_count: 42,
+            run_time_ns: 8_400,
+            average_runtime_ns: Some(200),
+            recursion_misses: 0,
+            verified_insns: Some(100),
         }],
     }
 }

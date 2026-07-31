@@ -16,6 +16,7 @@ use libbpf_rs::skel::{OpenSkel, SkelBuilder};
 use libbpf_rs::{Link, MapCore, MapFlags, OpenObject, Program, ProgramType};
 use serde::Serialize;
 
+use crate::bpf_program_stats::{query_bpf_program_stats, BpfProgramStatsRow};
 use crate::bpf_skel::{BpfSkel, BpfSkelBuilder};
 use crate::{
     build_callback_timing_rows, build_counters, build_cpu_runtime_rows, build_timing_metric_row,
@@ -48,6 +49,7 @@ pub struct Snapshot {
     pub scheduler_timings: Vec<TimingMetricRow>,
     pub migrations: Vec<MigrationRow>,
     pub cpu_runtime: Vec<CpuRuntimeRow>,
+    pub bpf_program_stats: Vec<BpfProgramStatsRow>,
 }
 
 fn find_targets() -> Result<[TargetProgram; 5]> {
@@ -329,6 +331,7 @@ pub fn run(
     let blocked_duration = read_blocked_duration(&skel)?;
     let migrations = read_migrations(&skel)?;
     let mut previous_cpu_runtime = read_cpu_runtime(&skel)?;
+    let bpf_program_stats = query_bpf_program_stats(&target_program_ids);
     let mut previous_at = Instant::now();
     {
         let mut snapshot = state.write().expect("snapshot lock poisoned");
@@ -351,6 +354,7 @@ pub fn run(
                 &previous_cpu_runtime,
                 Duration::ZERO,
             ),
+            bpf_program_stats,
         };
     }
     ready
@@ -367,6 +371,7 @@ pub fn run(
         let blocked_duration = read_blocked_duration(&skel)?;
         let migrations = read_migrations(&skel)?;
         let current_cpu_runtime = read_cpu_runtime(&skel)?;
+        let bpf_program_stats = query_bpf_program_stats(&target_program_ids);
         let elapsed = now.duration_since(previous_at);
         let counters = build_counters(current, previous, elapsed);
         previous = current;
@@ -383,6 +388,7 @@ pub fn run(
         snapshot.cpu_runtime =
             build_cpu_runtime_rows(&current_cpu_runtime, &previous_cpu_runtime, elapsed);
         previous_cpu_runtime = current_cpu_runtime;
+        snapshot.bpf_program_stats = bpf_program_stats;
         previous_at = now;
     }
     Ok(())
