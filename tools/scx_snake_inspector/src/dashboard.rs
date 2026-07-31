@@ -185,6 +185,13 @@ pub struct FineTimingDsqOperationView {
 }
 
 #[derive(Clone, Debug, Serialize)]
+pub struct FineTimingDsqTransferView {
+    pub source_dsq_id: String,
+    pub target_dsq_id: String,
+    pub samples: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
 pub struct FineTimingCaptureView {
     pub callback: String,
     pub available: bool,
@@ -196,6 +203,7 @@ pub struct FineTimingCaptureView {
     pub stopped_at_ms: Option<u64>,
     pub stages: Vec<FineTimingStageView>,
     pub dsq_operations: Vec<FineTimingDsqOperationView>,
+    pub dsq_transfers: Vec<FineTimingDsqTransferView>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -743,6 +751,15 @@ impl Dashboard {
                                     }
                                 })
                                 .collect(),
+                            dsq_transfers: capture
+                                .dsq_transfers
+                                .into_iter()
+                                .map(|transfer| FineTimingDsqTransferView {
+                                    source_dsq_id: transfer.source_dsq_id.to_string(),
+                                    target_dsq_id: transfer.target_dsq_id.to_string(),
+                                    samples: transfer.samples,
+                                })
+                                .collect(),
                         }
                     })
                     .collect(),
@@ -1257,6 +1274,8 @@ struct FineTimingCapturePayload {
     stages: BTreeMap<String, CallbackTimingCounters>,
     #[serde(default)]
     dsq_operations: Vec<FineTimingDsqOperationPayload>,
+    #[serde(default)]
+    dsq_transfers: Vec<FineTimingDsqTransferPayload>,
 }
 
 #[derive(Deserialize)]
@@ -1265,6 +1284,13 @@ struct FineTimingDsqOperationPayload {
     operation: String,
     outcome: String,
     timing: CallbackTimingCounters,
+}
+
+#[derive(Deserialize)]
+struct FineTimingDsqTransferPayload {
+    source_dsq_id: u64,
+    target_dsq_id: u64,
+    samples: u64,
 }
 
 fn validate_fine_timing(payload: FineTimingPayload) -> Result<FineTimingPayload, String> {

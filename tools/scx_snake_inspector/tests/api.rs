@@ -164,6 +164,11 @@ fn fine_timing_snapshot() -> Value {
                     "operation": "insert",
                     "outcome": "success",
                     "timing": {"total_ns": 13107200, "buckets": dsq_buckets}
+                }],
+                "dsq_transfers": [{
+                    "source_dsq_id": 805306368,
+                    "target_dsq_id": 13835058055282163719_u64,
+                    "samples": 100
                 }]
             },
             {
@@ -1506,6 +1511,12 @@ async fn fine_timing_endpoint_summarizes_stages_and_controls_callbacks_independe
     assert_eq!(dispatch["dsq_operations"][0]["outcome"], "success");
     assert_eq!(dispatch["dsq_operations"][0]["samples"], 100);
     assert_eq!(dispatch["dsq_operations"][0]["p99_ns"], 262143);
+    assert_eq!(dispatch["dsq_transfers"][0]["source_dsq_id"], "805306368");
+    assert_eq!(
+        dispatch["dsq_transfers"][0]["target_dsq_id"],
+        "13835058055282163719"
+    );
+    assert_eq!(dispatch["dsq_transfers"][0]["samples"], 100);
 
     let responder = std::thread::spawn(move || {
         let CollectorCommand::SetFineTiming {

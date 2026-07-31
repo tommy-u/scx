@@ -187,6 +187,7 @@ pub struct FineTimingCaptureInspectionView {
     pub stopped_at_ms: Option<u64>,
     pub stages: BTreeMap<String, CallbackTimingMetrics>,
     pub dsq_operations: Vec<DsqOperationTimingInspectionView>,
+    pub dsq_transfers: Vec<DsqTransferInspectionView>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -195,6 +196,13 @@ pub struct DsqOperationTimingInspectionView {
     pub operation: String,
     pub outcome: String,
     pub timing: CallbackTimingMetrics,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct DsqTransferInspectionView {
+    pub source_dsq_id: u64,
+    pub target_dsq_id: u64,
+    pub samples: u64,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]

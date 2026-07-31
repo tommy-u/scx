@@ -416,6 +416,7 @@ struct FineTimingAccumulator {
     active: [bool; bpf_intf::snake_fine_timing_callback_SNAKE_NR_FINE_TIMING_CALLBACKS as usize],
     metrics: BTreeMap<(u64, u32), CallbackTimingMetrics>,
     dsq_metrics: BTreeMap<(u64, u64, u32, u32), CallbackTimingMetrics>,
+    dsq_transfers: BTreeMap<(u64, u64, u64), u64>,
 }
 
 impl FineTimingAccumulator {
@@ -424,6 +425,8 @@ impl FineTimingAccumulator {
             self.metrics.retain(|(session, _), _| *session != previous);
             self.dsq_metrics
                 .retain(|(session, _, _, _), _| *session != previous);
+            self.dsq_transfers
+                .retain(|(session, _, _), _| *session != previous);
         }
         self.active[callback.index()] = true;
         for stage in fine_timing::stages(callback) {
@@ -494,6 +497,10 @@ impl FineTimingAccumulator {
                     elapsed_ns,
                 );
                 if outcome == bpf_intf::snake_dsq_outcome_SNAKE_DSQ_OUTCOME_SUCCESS {
+                    *self
+                        .dsq_transfers
+                        .entry((session_id, source_dsq_id, target_dsq_id))
+                        .or_default() += 1;
                     self.record_dsq_metric(
                         session_id,
                         target_dsq_id,
@@ -549,6 +556,19 @@ impl FineTimingAccumulator {
             .collect()
     }
 
+    fn dsq_transfers(&self, session_id: u64) -> Vec<inspection::DsqTransferInspectionView> {
+        self.dsq_transfers
+            .iter()
+            .filter_map(|(&(session, source_dsq_id, target_dsq_id), &samples)| {
+                (session == session_id).then_some(inspection::DsqTransferInspectionView {
+                    source_dsq_id,
+                    target_dsq_id,
+                    samples,
+                })
+            })
+            .collect()
+    }
+
     fn stop(&mut self, callback: fine_timing::FineTimingCallback) {
         self.active[callback.index()] = false;
     }
@@ -560,6 +580,7 @@ impl FineTimingAccumulator {
             [false; bpf_intf::snake_fine_timing_callback_SNAKE_NR_FINE_TIMING_CALLBACKS as usize];
         self.metrics.clear();
         self.dsq_metrics.clear();
+        self.dsq_transfers.clear();
     }
 
     fn metrics(&self, session_id: u64, stage: u32) -> CallbackTimingMetrics {
@@ -2208,6 +2229,14 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
                             .lock()
                             .map_err(|_| anyhow!("fine timing accumulator lock poisoned"))?
                             .dsq_operations(session.session_id),
+                        None => Vec::new(),
+                    },
+                    dsq_transfers: match session {
+                        Some(session) => self
+                            .fine_timing_accumulator
+                            .lock()
+                            .map_err(|_| anyhow!("fine timing accumulator lock poisoned"))?
+                            .dsq_transfers(session.session_id),
                         None => Vec::new(),
                     },
                 })
@@ -6227,6 +6256,17 @@ scope = "task_allowed"
         assert_eq!(operations[1].dsq_id, 13_835_058_055_282_163_719);
         assert_eq!(operations[1].operation, "insert");
         assert_eq!(operations[1].outcome, "success");
+        let transfers = accumulator
+            .lock()
+            .expect("accumulator should lock")
+            .dsq_transfers(17);
+        assert_eq!(transfers.len(), 1);
+        assert_eq!(
+            transfers[0].source_dsq_id,
+            u64::from(bpf_intf::SNAKE_FIFO_DSQ)
+        );
+        assert_eq!(transfers[0].target_dsq_id, 13_835_058_055_282_163_719);
+        assert_eq!(transfers[0].samples, 1);
         let helper = accumulator
             .lock()
             .expect("accumulator should lock")
