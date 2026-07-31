@@ -1568,6 +1568,253 @@ button:focus-visible {
   font-size: 0.75rem;
 }
 
+.dsq-heatmap-section {
+  padding: 14px clamp(16px, 3vw, 40px);
+  border-bottom: 1px solid var(--border);
+}
+
+.dsq-heatmap-heading {
+  min-height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.dsq-heatmap-heading h4,
+.dsq-heatmap-heading p {
+  margin: 0;
+}
+
+.dsq-heatmap-heading h4 {
+  font-size: 0.75rem;
+  font-weight: 720;
+}
+
+.dsq-heatmap-heading p {
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 0.62rem;
+}
+
+.dsq-heatmap-scale {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--muted);
+  font-size: 0.58rem;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.dsq-heatmap-scale i {
+  width: 13px;
+  height: 13px;
+  background: var(--surface-muted);
+  background: color-mix(in srgb, #2166a5 calc(var(--heat) * 100%), var(--surface-muted));
+  border: 1px solid color-mix(in srgb, #2166a5 20%, var(--border));
+}
+
+.dsq-heatmap-wrap {
+  margin-top: 9px;
+  overflow: auto;
+  border: 1px solid var(--border);
+}
+
+.dsq-traffic-heatmap,
+.dsq-transfer-heatmap {
+  border-collapse: collapse;
+  font-size: 0.65rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.dsq-traffic-heatmap {
+  width: 100%;
+  min-width: 620px;
+  table-layout: fixed;
+}
+
+.dsq-traffic-heatmap th,
+.dsq-traffic-heatmap td,
+.dsq-transfer-heatmap th,
+.dsq-transfer-heatmap td {
+  height: 48px;
+  padding: 6px 8px;
+  border-right: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  text-align: center;
+  vertical-align: middle;
+}
+
+.dsq-traffic-heatmap tr:last-child > *,
+.dsq-transfer-heatmap tr:last-child > * {
+  border-bottom: 0;
+}
+
+.dsq-traffic-heatmap tr > *:last-child,
+.dsq-transfer-heatmap tr > *:last-child {
+  border-right: 0;
+}
+
+.dsq-traffic-heatmap thead th,
+.dsq-transfer-heatmap thead th {
+  height: 32px;
+  color: var(--muted);
+  background: var(--surface-muted);
+  font-size: 0.58rem;
+  font-weight: 720;
+  text-transform: uppercase;
+}
+
+.dsq-traffic-heatmap tr > th:first-child {
+  width: 220px;
+  text-align: left;
+}
+
+.dsq-traffic-heatmap tbody th,
+.dsq-transfer-heatmap tbody th {
+  background: var(--surface);
+  font-weight: 680;
+}
+
+.dsq-traffic-heatmap tbody th code,
+.dsq-traffic-heatmap tbody th small,
+.dsq-transfer-heatmap tbody th code,
+.dsq-transfer-heatmap tbody th small {
+  display: block;
+}
+
+.dsq-traffic-heatmap tbody th small,
+.dsq-transfer-heatmap tbody th small,
+.dsq-traffic-cell small {
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 0.56rem;
+  font-weight: 500;
+}
+
+.dsq-traffic-cell {
+  background: var(--surface-muted);
+  cursor: help;
+}
+
+.dsq-traffic-cell.insert {
+  background: color-mix(in srgb, #14755f calc(var(--heat) * 100%), var(--surface-muted));
+}
+
+.dsq-traffic-cell.remove {
+  background: color-mix(in srgb, #2166a5 calc(var(--heat) * 100%), var(--surface-muted));
+}
+
+.dsq-traffic-cell.failed {
+  background: color-mix(in srgb, #b85f12 calc(var(--heat) * 100%), var(--surface-muted));
+}
+
+.dsq-traffic-cell strong,
+.dsq-traffic-cell small {
+  display: block;
+}
+
+.dsq-traffic-cell.high,
+.dsq-traffic-cell.high small,
+.dsq-transfer-cell.high {
+  color: #ffffff;
+}
+
+.dsq-transfer-heatmap {
+  width: max-content;
+  min-width: 100%;
+  table-layout: fixed;
+}
+
+.dsq-transfer-heatmap tr > th:first-child {
+  width: 172px;
+  min-width: 172px;
+  position: sticky;
+  left: 0;
+  z-index: 2;
+  text-align: left;
+}
+
+.dsq-transfer-heatmap thead th:first-child {
+  z-index: 3;
+}
+
+.dsq-transfer-heatmap thead th:not(:first-child),
+.dsq-transfer-cell {
+  width: 76px;
+  min-width: 76px;
+  max-width: 76px;
+}
+
+.dsq-transfer-heatmap thead th:not(:first-child) span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dsq-transfer-cell {
+  background: var(--surface-muted);
+  background: color-mix(in srgb, #2166a5 calc(var(--heat) * 100%), var(--surface-muted));
+  cursor: crosshair;
+  outline: 0;
+}
+
+.dsq-transfer-cell strong {
+  font-size: 0.62rem;
+}
+
+.dsq-transfer-heatmap .is-related {
+  box-shadow: inset 0 0 0 1px #527a9e;
+}
+
+.dsq-transfer-heatmap .is-active {
+  position: relative;
+  z-index: 1;
+  box-shadow: inset 0 0 0 2px var(--ink);
+}
+
+.dsq-transfer-cell:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: -3px;
+}
+
+@media (max-width: 700px) {
+  .dsq-heatmap-heading {
+    align-items: flex-start;
+  }
+
+  .dsq-heatmap-scale {
+    padding-top: 2px;
+  }
+
+  .dsq-traffic-heatmap {
+    min-width: 100%;
+  }
+
+  .dsq-traffic-heatmap tr > th:first-child {
+    width: 40%;
+  }
+
+  .dsq-traffic-heatmap th,
+  .dsq-traffic-heatmap td {
+    padding: 5px 3px;
+  }
+
+  .dsq-traffic-heatmap tbody th {
+    padding-left: 8px;
+  }
+
+  .dsq-traffic-cell small {
+    display: none;
+  }
+
+  .dsq-traffic-cell strong {
+    font-size: 0.6rem;
+  }
+}
+
 .policy-context-bar {
   padding: 10px clamp(16px, 3vw, 40px);
   display: grid;

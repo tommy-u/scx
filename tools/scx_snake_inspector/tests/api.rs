@@ -154,6 +154,7 @@ fn fine_timing_snapshot() -> Value {
                 "state": "historical",
                 "session_id": 9,
                 "policy_generation": 7,
+                "sample_rate": 32,
                 "started_at_ms": 500,
                 "stopped_at_ms": 900,
                 "stages": {
@@ -1500,6 +1501,7 @@ async fn fine_timing_endpoint_summarizes_stages_and_controls_callbacks_independe
     assert_eq!(dispatch["available"], true);
     assert_eq!(dispatch["unavailable_reason"], Value::Null);
     assert_eq!(dispatch["state"], "historical");
+    assert_eq!(dispatch["sample_rate"], 32);
     assert_eq!(dispatch["stages"][0]["stage"], "remote_normal_scan");
     assert_eq!(dispatch["stages"][0]["samples"], 100);
     assert_eq!(dispatch["stages"][0]["mean_ns"], 63);

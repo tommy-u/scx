@@ -2016,7 +2016,12 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
 
         let mut next = self.fine_timing_state.clone();
         if enabled {
-            let session = next.start(callback, self.runtime.generation, unix_time_ms());
+            let session = next.start(
+                callback,
+                self.runtime.generation,
+                self.callback_timing_sample_rate,
+                unix_time_ms(),
+            );
             self.fine_timing_accumulator
                 .lock()
                 .map_err(|_| anyhow!("fine timing accumulator lock poisoned"))?
@@ -2220,6 +2225,7 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
                     state,
                     session_id: session.map(|session| session.session_id),
                     policy_generation: session.map(|session| session.policy_generation),
+                    sample_rate: session.map(|session| session.sample_rate),
                     started_at_ms: session.map(|session| session.started_at_ms),
                     stopped_at_ms: session.and_then(|session| session.stopped_at_ms),
                     stages,
@@ -6123,9 +6129,9 @@ scope = "task_allowed"
         use crate::fine_timing::{FineTimingCallback, FineTimingState};
 
         let mut state = FineTimingState::default();
-        let select = state.start(FineTimingCallback::SelectCpu, 7, 900);
-        let enqueue = state.start(FineTimingCallback::Enqueue, 7, 1_000);
-        let dispatch = state.start(FineTimingCallback::Dispatch, 7, 1_100);
+        let select = state.start(FineTimingCallback::SelectCpu, 7, 64, 900);
+        let enqueue = state.start(FineTimingCallback::Enqueue, 7, 64, 1_000);
+        let dispatch = state.start(FineTimingCallback::Dispatch, 7, 64, 1_100);
 
         assert_ne!(select.session_id, enqueue.session_id);
         assert_ne!(enqueue.session_id, dispatch.session_id);

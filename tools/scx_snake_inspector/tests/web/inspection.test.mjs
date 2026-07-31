@@ -1578,6 +1578,23 @@ test("DSQ activity heatmap estimates rates and ranks busiest queues", () => {
   assert.equal(model.maxRatePerSecond, 20);
 });
 
+test("DSQ activity heatmap uses the capture sampling denominator", () => {
+  const model = dsqActivityHeatmapModel({
+    sample_rate: 64,
+    captures: [{
+      sample_rate: 5,
+      started_at_ms: 1_000,
+      stopped_at_ms: 3_000,
+      dsq_operations: [
+        { dsq_id: 1, operation: "insert", outcome: "success", samples: 4 },
+      ],
+    }],
+  });
+
+  assert.equal(model.rows[0].insert.ratePerSecond, 10);
+  assert.equal(model.sampleRate, 5);
+});
+
 test("DSQ activity heatmap keeps top queues and aggregates the remainder", () => {
   const dsq_operations = Array.from({ length: 5 }, (_, index) => ({
     dsq_id: index + 1,
@@ -1598,6 +1615,7 @@ test("DSQ activity heatmap keeps top queues and aggregates the remainder", () =>
   assert.equal(model.rows[2].label, "Other");
   assert.equal(model.rows[2].otherCount, 3);
   assert.equal(model.rows[2].insert.samples, 6);
+  assert.equal(model.maxRatePerSecond, 5);
 });
 
 test("DSQ transfer heatmap preserves significant source-to-target flow", () => {
@@ -1640,6 +1658,27 @@ test("queue topology renders one unified DSQ activity table", () => {
   assert.match(script, /DSQ activity/);
   assert.doesNotMatch(script, /Observed DSQs/);
   assert.doesNotMatch(script, /Queue capture DSQs/);
+});
+
+test("queue topology renders accessible DSQ traffic heatmaps", () => {
+  const script = readFileSync(
+    new URL("../../src/web/app.js", import.meta.url),
+    "utf8",
+  );
+  const styles = readFileSync(
+    new URL("../../src/web/style.css", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(script, /Significant DSQ traffic/);
+  assert.match(script, /DSQ transfers/);
+  assert.match(script, /class="dsq-traffic-heatmap"/);
+  assert.match(script, /class="dsq-transfer-heatmap"/);
+  assert.match(script, /data-transfer-row=/);
+  assert.match(script, /scope="row"/);
+  assert.match(styles, /\.dsq-traffic-cell/);
+  assert.match(styles, /\.dsq-transfer-cell/);
+  assert.match(styles, /\.is-related/);
 });
 
 test("queue topology tabs validate selection and support keyboard navigation", () => {

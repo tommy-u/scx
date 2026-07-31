@@ -183,6 +183,7 @@ pub struct FineTimingCaptureInspectionView {
     pub state: FineTimingCaptureState,
     pub session_id: Option<u64>,
     pub policy_generation: Option<u64>,
+    pub sample_rate: Option<u32>,
     pub started_at_ms: Option<u64>,
     pub stopped_at_ms: Option<u64>,
     pub stages: BTreeMap<String, CallbackTimingMetrics>,

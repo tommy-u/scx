@@ -199,6 +199,7 @@ pub struct FineTimingCaptureView {
     pub state: FineTimingCaptureState,
     pub session_id: Option<u64>,
     pub policy_generation: Option<u64>,
+    pub sample_rate: u32,
     pub started_at_ms: Option<u64>,
     pub stopped_at_ms: Option<u64>,
     pub stages: Vec<FineTimingStageView>,
@@ -717,6 +718,7 @@ impl Dashboard {
                             state: capture.state,
                             session_id: capture.session_id,
                             policy_generation: capture.policy_generation,
+                            sample_rate: capture.sample_rate.unwrap_or(payload.sample_rate),
                             started_at_ms: capture.started_at_ms,
                             stopped_at_ms: capture.stopped_at_ms,
                             stages: capture
@@ -1269,6 +1271,8 @@ struct FineTimingCapturePayload {
     state: FineTimingCaptureState,
     session_id: Option<u64>,
     policy_generation: Option<u64>,
+    #[serde(default)]
+    sample_rate: Option<u32>,
     started_at_ms: Option<u64>,
     stopped_at_ms: Option<u64>,
     stages: BTreeMap<String, CallbackTimingCounters>,

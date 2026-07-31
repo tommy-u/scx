@@ -26,7 +26,9 @@ import {
   cellStatsModel,
   compactCpuList,
   decorateCells,
+  dsqActivityHeatmapModel,
   dsqActivityModels,
+  dsqTransferHeatmapModel,
   fieldReferenceGroups,
   fineTimingCaptureModels,
   fineTimingDsqModels,
@@ -534,6 +536,30 @@ function bindControls() {
     }
     event.preventDefault();
     selectVtimeCounterTab(tabs[next], true);
+  });
+  elements.queueTopology.addEventListener("pointerover", (event) => {
+    const cell = event.target.closest(".dsq-transfer-cell");
+    if (cell) {
+      highlightDsqTransferCell(cell);
+    }
+  });
+  elements.queueTopology.addEventListener("pointerout", (event) => {
+    const table = event.target.closest(".dsq-transfer-heatmap");
+    if (table && !table.contains(event.relatedTarget)) {
+      clearDsqTransferHighlight(table);
+    }
+  });
+  elements.queueTopology.addEventListener("focusin", (event) => {
+    const cell = event.target.closest(".dsq-transfer-cell");
+    if (cell) {
+      highlightDsqTransferCell(cell);
+    }
+  });
+  elements.queueTopology.addEventListener("focusout", (event) => {
+    const table = event.target.closest(".dsq-transfer-heatmap");
+    if (table && !table.contains(event.relatedTarget)) {
+      clearDsqTransferHighlight(table);
+    }
   });
   document.querySelectorAll('input[name="cpuOrder"]').forEach((control) => {
     control.addEventListener("change", () => {
@@ -3324,9 +3350,17 @@ function renderResolvedQueueTopology() {
     : timing.state === "historical" && !timing.topologyCompatible
       ? `<p class="notice queue-capture-notice">Historical capture policy generation ${formatNullableCount(timing.capture?.policy_generation)} does not match the current queue topology; DSQ measurements are not joined.</p>`
       : "";
+  const operationDsqs = fineTimingDsqModels(state.fineTiming);
   const dsqActivity = renderDsqActivity(dsqActivityModels(
-    fineTimingDsqModels(state.fineTiming),
+    operationDsqs,
     timing.dsqs,
+  ));
+  const activityHeatmap = renderDsqActivityHeatmap(dsqActivityHeatmapModel(
+    state.fineTiming,
+    timing.dsqs,
+  ));
+  const transferHeatmap = renderDsqTransferHeatmap(dsqTransferHeatmapModel(
+    state.fineTiming,
   ));
   const cells = model.cells.map((cell) => `
     <tr>
@@ -3397,6 +3431,8 @@ function renderResolvedQueueTopology() {
     </header>
     ${captureNotice}
     <p class="queue-fairness-guide"><strong>${escapeHtml(model.mode)} fairness</strong><span>${escapeHtml(applicability)}</span></p>
+    ${activityHeatmap}
+    ${transferHeatmap}
     ${dsqActivity}`;
   const layoutPanel = `
     <header class="queue-tab-heading">
@@ -3416,6 +3452,151 @@ function renderResolvedQueueTopology() {
     ${renderQueueTabPanel("activity", activityPanel)}
     ${renderQueueTabPanel("layout", layoutPanel)}
     ${renderQueueTabPanel("routes", routesPanel)}`);
+}
+
+function formatTrafficMetric(metric, rateAvailable) {
+  return rateAvailable && metric.ratePerSecond !== null
+    ? `${formatRate(metric.ratePerSecond)}/s`
+    : formatCount(metric.samples);
+}
+
+function dsqTrafficTooltip(dsq, metric, label, rateAvailable) {
+  const parts = [
+    `${dsq.label} · ${dsq.kind}`,
+    dsq.queueClass === "unknown" ? null : `${dsq.queueClass} class`,
+    `${label}: ${formatTrafficMetric(metric, rateAvailable)}${rateAvailable ? " estimated" : ""}`,
+    `${formatCount(metric.samples)} sampled operations`,
+    dsq.residence?.p95Ns == null
+      ? null
+      : `residence p95 ${formatCallbackDuration(dsq.residence.p95Ns)}`,
+    dsq.depth?.p95 == null ? null : `depth p95 ${formatCount(dsq.depth.p95)}`,
+  ];
+  return parts.filter(Boolean).join(" · ");
+}
+
+function renderDsqTrafficCell(dsq, metric, kind, label, rateAvailable) {
+  const high = metric.intensity >= 0.68 ? " high" : "";
+  const tooltip = dsqTrafficTooltip(dsq, metric, label, rateAvailable);
+  return `
+    <td class="dsq-traffic-cell ${kind}${high}" style="--heat:${metric.intensity.toFixed(3)}"
+      title="${escapeHtml(tooltip)}">
+      <strong>${escapeHtml(formatTrafficMetric(metric, rateAvailable))}</strong>
+      <small>${formatCount(metric.samples)} samples</small>
+    </td>`;
+}
+
+function renderTrafficScale(rateAvailable, maxRatePerSecond, maxSamples) {
+  const maximum = rateAvailable
+    ? `${formatRate(maxRatePerSecond)}/s`
+    : `${formatCount(maxSamples)} samples`;
+  return `
+    <span class="dsq-heatmap-scale" aria-label="Logarithmic color scale, maximum ${escapeHtml(maximum)}">
+      <span>Low</span>
+      ${[0.15, 0.35, 0.6, 0.82, 1].map((level) => (
+        `<i style="--heat:${level}" aria-hidden="true"></i>`
+      )).join("")}
+      <span>${escapeHtml(maximum)}</span>
+    </span>`;
+}
+
+function renderDsqActivityHeatmap(model) {
+  const rows = model.rows.map((dsq) => `
+    <tr>
+      <th scope="row" title="${escapeHtml(`${dsq.label} · ${dsq.kind} · ${dsq.queueClass} class`)}">
+        <code>${escapeHtml(dsq.label)}</code>
+        <small>${escapeHtml(dsq.kind)}${dsq.otherCount ? "" : ` · ${escapeHtml(dsq.queueClass)}`}</small>
+      </th>
+      ${renderDsqTrafficCell(dsq, dsq.insert, "insert", "Insert success", model.rateAvailable)}
+      ${renderDsqTrafficCell(dsq, dsq.remove, "remove", "Remove success", model.rateAvailable)}
+      ${renderDsqTrafficCell(dsq, dsq.failed, "failed", "Miss or error", model.rateAvailable)}
+    </tr>`).join("");
+  return `
+    <section class="dsq-heatmap-section" data-render-key="queue:dsq-activity-heatmap">
+      <header class="dsq-heatmap-heading">
+        <div><h4>Significant DSQ traffic</h4><p>${formatCount(model.totalDsqCount)} active queues · ${model.rateAvailable ? `estimated from ${model.sampleRate == null ? "mixed sample rates" : `1/${formatCount(model.sampleRate)} samples`} · ` : ""}top ${formatCount(Math.min(12, model.totalDsqCount))}${model.totalDsqCount > 12 ? " plus Other" : ""}</p></div>
+        ${renderTrafficScale(model.rateAvailable, model.maxRatePerSecond, model.maxSamples)}
+      </header>
+      <div class="dsq-heatmap-wrap">
+        <table class="dsq-traffic-heatmap" data-sort-key="queue:dsq-activity-heatmap">
+          <thead><tr><th scope="col">DSQ</th><th scope="col">Insert</th><th scope="col">Remove</th><th scope="col">Miss / error</th></tr></thead>
+          <tbody>${rows || '<tr><td colspan="4" class="queue-topology-empty">No sampled DSQ operations for the current policy.</td></tr>'}</tbody>
+        </table>
+      </div>
+    </section>`;
+}
+
+function compactDsqHeatmapLabel(dsq) {
+  if (dsq.dsqId === null) {
+    return "Other";
+  }
+  if (dsq.kind.startsWith("Local CPU ")) {
+    return dsq.kind.replace("Local CPU ", "CPU ");
+  }
+  return dsq.label.length <= 10
+    ? dsq.label
+    : `${dsq.label.slice(0, 4)}…${dsq.label.slice(-4)}`;
+}
+
+function renderDsqTransferHeatmap(model) {
+  const headers = model.endpoints.map((dsq, column) => `
+    <th scope="col" data-transfer-column="${column}"
+      title="${escapeHtml(`${dsq.label} · ${dsq.kind}`)}">
+      <span>${escapeHtml(compactDsqHeatmapLabel(dsq))}</span>
+    </th>`).join("");
+  const rows = model.endpoints.map((source, row) => `
+    <tr>
+      <th scope="row" data-transfer-row="${row}"
+        title="${escapeHtml(`${source.label} · ${source.kind}`)}">
+        <code>${escapeHtml(compactDsqHeatmapLabel(source))}</code>
+        <small>${escapeHtml(source.kind)}</small>
+      </th>
+      ${model.matrix[row].map((cell, column) => {
+        const target = model.endpoints[column];
+        const value = formatTrafficMetric(cell, model.rateAvailable);
+        const tooltip = `${source.label} → ${target.label} · ${value}${model.rateAvailable ? " estimated" : ""} · ${formatCount(cell.samples)} sampled moves · ${formatPercentage(cell.share)} of transfers`;
+        const high = cell.intensity >= 0.68 ? " high" : "";
+        return `<td class="dsq-transfer-cell${high}" tabindex="0"
+          data-transfer-row="${row}" data-transfer-column="${column}"
+          style="--heat:${cell.intensity.toFixed(3)}"
+          aria-label="${escapeHtml(tooltip)}" title="${escapeHtml(tooltip)}">
+          <strong>${escapeHtml(value)}</strong>
+        </td>`;
+      }).join("")}
+    </tr>`).join("");
+  return `
+    <section class="dsq-heatmap-section" data-render-key="queue:dsq-transfer-heatmap">
+      <header class="dsq-heatmap-heading">
+        <div><h4>DSQ transfers</h4><p>${formatCount(model.total.samples)} sampled moves across ${formatCount(model.totalEndpointCount)} queues${model.rateAvailable ? ` · estimated from ${model.sampleRate == null ? "mixed sample rates" : `1/${formatCount(model.sampleRate)} samples`}` : ""}</p></div>
+        ${renderTrafficScale(model.rateAvailable, model.maxRatePerSecond, model.maxSamples)}
+      </header>
+      ${model.endpoints.length === 0
+        ? '<p class="queue-topology-empty">No sampled DSQ-to-DSQ moves for the current policy.</p>'
+        : `<div class="dsq-heatmap-wrap">
+          <table class="dsq-transfer-heatmap" data-sort-key="queue:dsq-transfer-heatmap">
+            <thead><tr><th scope="col">Source ↓ / destination →</th>${headers}</tr></thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>`}
+    </section>`;
+}
+
+function clearDsqTransferHighlight(table) {
+  table.querySelectorAll(".is-related, .is-active").forEach((element) => {
+    element.classList.remove("is-related", "is-active");
+  });
+}
+
+function highlightDsqTransferCell(cell) {
+  const table = cell.closest(".dsq-transfer-heatmap");
+  if (!table) {
+    return;
+  }
+  clearDsqTransferHighlight(table);
+  const row = cell.dataset.transferRow;
+  const column = cell.dataset.transferColumn;
+  table.querySelectorAll(`[data-transfer-row="${row}"], [data-transfer-column="${column}"]`)
+    .forEach((element) => element.classList.add("is-related"));
+  cell.classList.add("is-active");
 }
 
 function renderDsqActivity(dsqs) {

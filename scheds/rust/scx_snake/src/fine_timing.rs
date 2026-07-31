@@ -358,6 +358,7 @@ pub fn stages(callback: FineTimingCallback) -> &'static [FineTimingStage] {
 pub struct FineTimingSession {
     pub session_id: u64,
     pub policy_generation: u64,
+    pub sample_rate: u32,
     pub started_at_ms: u64,
     pub stopped_at_ms: Option<u64>,
 }
@@ -373,6 +374,7 @@ impl FineTimingState {
         &mut self,
         callback: FineTimingCallback,
         policy_generation: u64,
+        sample_rate: u32,
         started_at_ms: u64,
     ) -> FineTimingSession {
         if let Some(session) = self
@@ -385,6 +387,7 @@ impl FineTimingState {
         let session = FineTimingSession {
             session_id: self.next_session_id,
             policy_generation,
+            sample_rate,
             started_at_ms,
             stopped_at_ms: None,
         };
@@ -515,8 +518,9 @@ mod tests {
     #[test]
     fn clear_discards_active_and_historical_sessions() {
         let mut state = FineTimingState::default();
-        let previous = state.start(FineTimingCallback::SelectCpu, 4, 100);
-        state.start(FineTimingCallback::Enqueue, 4, 200);
+        let previous = state.start(FineTimingCallback::SelectCpu, 4, 64, 100);
+        assert_eq!(previous.sample_rate, 64);
+        state.start(FineTimingCallback::Enqueue, 4, 64, 200);
         state.stop(FineTimingCallback::Enqueue, 300);
 
         let stopped_active_capture = state.clear();
@@ -529,7 +533,7 @@ mod tests {
         let config = state.bpf_config();
         assert_eq!(config.enabled_mask, 0);
         assert_eq!(config.session_ids, [0; 7]);
-        let next = state.start(FineTimingCallback::SelectCpu, 4, 400);
+        let next = state.start(FineTimingCallback::SelectCpu, 4, 64, 400);
         assert_ne!(next.session_id, previous.session_id);
     }
 }
