@@ -1967,18 +1967,27 @@ test("keyed render state restores disclosure, scrolling, and focus only for matc
     scrollTop: 42,
     scrollLeft: 17,
   });
+  const oldViewport = { scrollX: 11, scrollY: 480 };
   const snapshot = inspectionState.captureKeyedRenderState(
     [oldDetails, oldSummary, oldScroller],
     oldSummary,
+    oldViewport,
   );
 
   const newDetails = keyed("policy-slot:0:generation:7", { open: false });
   const newSummary = keyed("policy-slot:0:generation:7:summary");
   const newScroller = keyed("queue:7:cpu-routes:scroll");
   const changedGeneration = keyed("policy-slot:0:generation:8", { open: false });
+  const newViewport = {
+    restored: null,
+    scrollTo(left, top) {
+      this.restored = { left, top };
+    },
+  };
   inspectionState.restoreKeyedRenderState(
     [newDetails, newSummary, newScroller, changedGeneration],
     snapshot,
+    newViewport,
   );
 
   assert.equal(newDetails.open, true);
@@ -1986,6 +1995,7 @@ test("keyed render state restores disclosure, scrolling, and focus only for matc
   assert.equal(newScroller.scrollLeft, 17);
   assert.equal(newSummary.focusCalls, 1);
   assert.equal(changedGeneration.open, false);
+  assert.deepEqual(newViewport.restored, { left: 11, top: 480 });
 });
 
 test("keyed render state restores textarea selection after polling replacement", () => {

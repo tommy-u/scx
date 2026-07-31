@@ -3694,6 +3694,7 @@ function replaceKeyedHtml(container, html) {
   const snapshot = captureKeyedRenderState(
     container.querySelectorAll("[data-render-key]"),
     document.activeElement,
+    window,
   );
   container.innerHTML = html;
   decorateFeedbackTargets(container);
@@ -3701,6 +3702,7 @@ function replaceKeyedHtml(container, html) {
   restoreKeyedRenderState(
     container.querySelectorAll("[data-render-key]"),
     snapshot,
+    window,
   );
 }
 

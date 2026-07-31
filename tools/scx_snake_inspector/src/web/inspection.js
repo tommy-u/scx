@@ -1025,7 +1025,11 @@ export function freshnessModel({
   };
 }
 
-export function captureKeyedRenderState(nodes, activeElement = null) {
+export function captureKeyedRenderState(
+  nodes,
+  activeElement = null,
+  viewport = null,
+) {
   const entries = new Map();
   let focusedKey = null;
   for (const node of nodes || []) {
@@ -1047,10 +1051,14 @@ export function captureKeyedRenderState(nodes, activeElement = null) {
       focusedKey = key;
     }
   }
-  return { entries, focusedKey };
+  const viewportScroll = Number.isFinite(viewport?.scrollX)
+    && Number.isFinite(viewport?.scrollY)
+    ? { left: viewport.scrollX, top: viewport.scrollY }
+    : null;
+  return { entries, focusedKey, viewportScroll };
 }
 
-export function restoreKeyedRenderState(nodes, snapshot) {
+export function restoreKeyedRenderState(nodes, snapshot, viewport = null) {
   if (!snapshot?.entries) {
     return;
   }
@@ -1089,6 +1097,9 @@ export function restoreKeyedRenderState(nodes, snapshot) {
       focusEntry.selectionEnd,
       focusEntry.selectionDirection || "none",
     );
+  }
+  if (snapshot.viewportScroll && typeof viewport?.scrollTo === "function") {
+    viewport.scrollTo(snapshot.viewportScroll.left, snapshot.viewportScroll.top);
   }
 }
 
