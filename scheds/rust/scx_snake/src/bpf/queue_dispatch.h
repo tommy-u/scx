@@ -66,8 +66,6 @@ struct snake_queue_candidate {
 	u32 valid;
 };
 
-#define SNAKE_QUEUE_CANDIDATE_MOVED 2
-
 static __always_inline int
 queue_fairness_normal_candidate(struct snake_cpu_queue		   *cpuq,
 				struct snake_queue_candidate	   *candidate,
@@ -413,7 +411,6 @@ struct snake_remote_scan_loop_ctx {
 	u32 next_remote_queue;
 	s32 cpu;
 	s32 result;
-	u32 fast_move;
 };
 
 static long queue_dispatch_remote_scan_callback(
@@ -451,13 +448,7 @@ static long queue_dispatch_remote_scan_callback(
 	}
 	if (!nr_queued)
 		return 0;
-	if (loop_ctx->fast_move && nr_queued == 1) {
-		if (!dsq_move_to_local_untimed(dsq))
-			return 0;
-		loop_ctx->candidate.valid = SNAKE_QUEUE_CANDIDATE_MOVED;
-		return 1;
-	}
-
+	/* Keep validity binary; a moved sentinel exhausts Linux 7.1 states. */
 	bpf_rcu_read_lock();
 	p = dsq_peek_vtime(dsq, &loop_ctx->candidate.vtime);
 	if (p) {
@@ -477,22 +468,21 @@ static long queue_dispatch_remote_scan_callback(
 }
 
 static __always_inline int
-queue_dispatch_peek_remote(struct snake_cpu_queue *cpuq,
-				   struct snake_queue_cpu_state *state, s32 cpu,
-				   struct snake_queue_candidate *candidate,
-				   bool fast_move)
+queue_dispatch_peek_remote(struct snake_cpu_queue	*cpuq,
+			   struct snake_queue_cpu_state *state, s32 cpu,
+			   struct snake_queue_candidate *candidate)
 {
-	struct snake_queue_header *header = queue_config();
+	struct snake_queue_header	 *header = queue_config();
 	struct snake_remote_scan_loop_ctx loop_ctx;
-	u32 nr_queues, start;
-	long nr_loops;
+	u32				  nr_queues, start;
+	long				  nr_loops;
 
 	if (!candidate || !cpuq || !state || !header ||
 	    header->mode != SNAKE_QUEUE_MODE_GLOBAL || cpu < 0 ||
 	    cpu >= nr_cpu_ids || cpu >= SNAKE_MAX_CPUS)
 		return -EINVAL;
 	*candidate = (struct snake_queue_candidate){
-		.dsq = dsq_invalid(),
+		.dsq   = dsq_invalid(),
 		.class = SNAKE_QUEUE_CLASS_NORMAL,
 	};
 	nr_queues = header->nr_normal_queues;
@@ -505,13 +495,12 @@ queue_dispatch_peek_remote(struct snake_cpu_queue *cpuq,
 	if (start >= nr_queues)
 		start = 0;
 	loop_ctx = (struct snake_remote_scan_loop_ctx){
-		.candidate = *candidate,
-		.local_queue = cpuq->normal_queue_index,
-		.start = start,
-		.nr_queues = nr_queues,
+		.candidate	   = *candidate,
+		.local_queue	   = cpuq->normal_queue_index,
+		.start		   = start,
+		.nr_queues	   = nr_queues,
 		.next_remote_queue = start,
-		.cpu = cpu,
-		.fast_move = fast_move,
+		.cpu		   = cpu,
 	};
 	nr_loops = bpf_loop(SNAKE_MAX_NORMAL_QUEUES,
 			    queue_dispatch_remote_scan_callback, &loop_ctx, 0);
@@ -750,30 +739,21 @@ static __noinline s32 queue_dispatch_consume_min_vtime(
 	struct snake_ladder_ctx *ctx,
 	const struct snake_global_consume_args *args)
 {
-	u64 min_vtime = 0;
-	u64 cpu_vtime = 0, local_vtime = 0, remote_vtime = 0;
-	u32 preference, winner_source = SNAKE_QUEUE_INPUT_INVALID;
-	u32 nr_min = 0;
-	u32 remote_state =
-		args->remote_candidate ? args->remote_candidate->valid : 0;
+	u64  min_vtime = 0;
+	u64  cpu_vtime = 0, local_vtime = 0, remote_vtime = 0;
+	u32  preference, winner_source = SNAKE_QUEUE_INPUT_INVALID;
+	u32  nr_min    = 0;
 	bool cpu_valid = args->cpu_candidate && args->cpu_candidate->valid != 0;
 	bool local_valid = args->local_candidate &&
 			   args->local_candidate->valid != 0;
-	bool remote_valid = remote_state == 1;
-	bool found	  = false;
-
-	if (!cpu_valid && !local_valid && args->remote_candidate &&
-	    remote_state == SNAKE_QUEUE_CANDIDATE_MOVED) {
-		args->state->next_equal_source = SNAKE_QUEUE_INPUT_CPU;
-		stat_inc(ctx, SNAKE_STAT_DISPATCH_RUNG_SELECTED_BASE + 2);
-		stat_inc(ctx, SNAKE_STAT_VTIME_DISPATCHES);
-		return 1;
-	}
+	bool remote_valid = args->remote_candidate &&
+			    args->remote_candidate->valid != 0;
+	bool found = false;
 
 	if (cpu_valid) {
 		cpu_vtime = args->cpu_candidate->vtime;
 		min_vtime = cpu_vtime;
-		found = true;
+		found	  = true;
 	}
 	if (local_valid) {
 		local_vtime = args->local_candidate->vtime;
@@ -889,23 +869,17 @@ static __noinline s32 queue_global_dispatch_peek_rung(
 		if (rung->input != SNAKE_QUEUE_INPUT_LOCAL) {
 			ret = -EINVAL;
 		} else {
-			ret = queue_dispatch_peek_local(loop_ctx->cpuq,
-							&loop_ctx->local_candidate);
+			ret = queue_dispatch_peek_local(
+				loop_ctx->cpuq, &loop_ctx->local_candidate);
 			hit = loop_ctx->local_candidate.valid;
 		}
 	} else if (index == 2) {
-		bool fast_move;
-
 		if (rung->input != SNAKE_QUEUE_INPUT_REMOTE) {
 			ret = -EINVAL;
 		} else {
-			fast_move = !loop_ctx->cpu_candidate.valid &&
-				    !loop_ctx->local_candidate.valid &&
-				    (!loop_ctx->prev ||
-				     !(loop_ctx->prev->scx.flags & SCX_TASK_QUEUED));
 			ret = queue_dispatch_peek_remote(
 				loop_ctx->cpuq, loop_ctx->state, loop_ctx->cpu,
-				&loop_ctx->remote_candidate, fast_move);
+				&loop_ctx->remote_candidate);
 			hit = loop_ctx->remote_candidate.valid;
 		}
 	} else {
