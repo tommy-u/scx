@@ -411,8 +411,9 @@ fn bytes_of<T>(value: &T) -> &[u8] {
 
 #[derive(Debug, Default)]
 struct FineTimingAccumulator {
-    sessions: [Option<u64>; 3],
-    active: [bool; 3],
+    sessions:
+        [Option<u64>; bpf_intf::snake_fine_timing_callback_SNAKE_NR_FINE_TIMING_CALLBACKS as usize],
+    active: [bool; bpf_intf::snake_fine_timing_callback_SNAKE_NR_FINE_TIMING_CALLBACKS as usize],
     metrics: BTreeMap<(u64, u32), CallbackTimingMetrics>,
     dsq_metrics: BTreeMap<(u64, u64, u32, u32), CallbackTimingMetrics>,
 }
@@ -553,8 +554,10 @@ impl FineTimingAccumulator {
     }
 
     fn clear(&mut self) {
-        self.sessions = [None, None, None];
-        self.active = [false; 3];
+        self.sessions =
+            [None; bpf_intf::snake_fine_timing_callback_SNAKE_NR_FINE_TIMING_CALLBACKS as usize];
+        self.active =
+            [false; bpf_intf::snake_fine_timing_callback_SNAKE_NR_FINE_TIMING_CALLBACKS as usize];
         self.metrics.clear();
         self.dsq_metrics.clear();
     }
@@ -6116,6 +6119,30 @@ scope = "task_allowed"
                 .and_then(|session| session.stopped_at_ms),
             None
         );
+    }
+
+    #[test]
+    fn fine_timing_accumulator_tracks_every_callback_session() {
+        use crate::fine_timing::{stages, FineTimingCallback};
+
+        let mut accumulator = FineTimingAccumulator::default();
+        for callback in FineTimingCallback::ALL {
+            let session_id = callback.index() as u64 + 1;
+            accumulator.reset(callback, session_id);
+            accumulator.record(session_id, stages(callback)[0].id, 512);
+        }
+
+        for callback in FineTimingCallback::ALL {
+            let session_id = callback.index() as u64 + 1;
+            assert_eq!(
+                accumulator
+                    .metrics(session_id, stages(callback)[0].id)
+                    .buckets
+                    .iter()
+                    .sum::<u64>(),
+                1
+            );
+        }
     }
 
     #[test]
