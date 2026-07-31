@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Mitosis inspector</title>
+    <link rel="stylesheet" href="/assets/style.css">
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="topbar-product">
+        <div class="product-title">
+          <h1>Mitosis inspector</h1>
+          <p>Scheduler activity and runtime statistics</p>
+        </div>
+      </div>
+      <div class="status" id="status" role="status" aria-live="polite">
+        <span class="status-dot" aria-hidden="true"></span>
+        <span id="statusText">Connecting</span>
+      </div>
+    </header>
+
+    <div class="workspace-shell">
+      <aside class="workspace-sidebar">
+        <nav class="workspace-navigation" aria-label="Inspector workspaces">
+          <span class="navigation-group-label">Observe</span>
+          <a class="active" aria-current="page" href="/">Callbacks</a>
+          <a href="/stats">Stats</a>
+        </nav>
+      </aside>
+
+      <main id="app" tabindex="-1" aria-label="Mitosis callback inspector">
+        <header class="view-heading">
+          <div>
+            <h2>Callback counters</h2>
+            <p>Primary scheduler callbacks</p>
+          </div>
+        </header>
+
+        <section class="summary" aria-label="Host environment">
+          <dl>
+            <div><dt>Host</dt><dd id="hostname">--</dd></div>
+            <div><dt>Kernel</dt><dd id="kernelRelease">--</dd></div>
+            <div><dt>CPUs</dt><dd id="cpuCount">--</dd></div>
+            <div><dt>Scheduler</dt><dd id="scheduler">scx_mitosis</dd></div>
+            <div><dt>Inspector uptime</dt><dd id="uptime">0s</dd></div>
+            <div><dt>Last refresh</dt><dd id="refreshed">--</dd></div>
+          </dl>
+        </section>
+
+        <section class="counter-grid" id="counterGrid" aria-label="Callback counters">
+          <article class="counter-card" data-callback="select_cpu">
+            <h2>select_cpu</h2>
+            <strong class="count">0</strong>
+            <div><span class="rate">0</span><small> calls/s</small></div>
+            <p>Program <code class="program-id">--</code></p>
+          </article>
+          <article class="counter-card" data-callback="enqueue">
+            <h2>enqueue</h2>
+            <strong class="count">0</strong>
+            <div><span class="rate">0</span><small> calls/s</small></div>
+            <p>Program <code class="program-id">--</code></p>
+          </article>
+          <article class="counter-card" data-callback="dispatch">
+            <h2>dispatch</h2>
+            <strong class="count">0</strong>
+            <div><span class="rate">0</span><small> calls/s</small></div>
+            <p>Program <code class="program-id">--</code></p>
+          </article>
+          <article class="counter-card" data-callback="running">
+            <h2>running</h2>
+            <strong class="count">0</strong>
+            <div><span class="rate">0</span><small> calls/s</small></div>
+            <p>Program <code class="program-id">--</code></p>
+          </article>
+          <article class="counter-card" data-callback="stopping">
+            <h2>stopping</h2>
+            <strong class="count">0</strong>
+            <div><span class="rate">0</span><small> calls/s</small></div>
+            <p>Program <code class="program-id">--</code></p>
+          </article>
+        </section>
+
+        <section class="table-section" aria-labelledby="callbackTimingHeading">
+          <div class="table-section-heading">
+            <h2 id="callbackTimingHeading">Callback latency</h2>
+            <p>Sampling <strong id="callbackTimingSampleRate">--</strong></p>
+          </div>
+          <div class="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">Callback</th>
+                  <th scope="col">Samples</th>
+                  <th scope="col">Mean (ns)</th>
+                  <th scope="col">p50 approx. (ns)</th>
+                  <th scope="col">p95 approx. (ns)</th>
+                  <th scope="col">p99 approx. (ns)</th>
+                </tr>
+              </thead>
+              <tbody id="callbackTimingRows"></tbody>
+            </table>
+          </div>
+        </section>
+      </main>
+    </div>
+    <script src="/assets/app.js" defer></script>
+  </body>
+</html>
