@@ -3891,7 +3891,7 @@ scope = "task_allowed"
         assert!(dispatch.contains("!loop_ctx->cpu_candidate.valid &&"));
         assert!(dispatch.contains("!loop_ctx->local_candidate.valid &&"));
         assert!(dispatch.contains("!(loop_ctx->prev->scx.flags & SCX_TASK_QUEUED)"));
-        assert!(dispatch.contains("remote_candidate->valid == SNAKE_QUEUE_CANDIDATE_MOVED"));
+        assert!(dispatch.contains("remote_state == SNAKE_QUEUE_CANDIDATE_MOVED"));
         assert!(dsq.contains("dsq_peek_vtime("));
 
         assert!(compat.contains("LINUX_KERNEL_VERSION >= KERNEL_VERSION(7, 1, 0)"));
