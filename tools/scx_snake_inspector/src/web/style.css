@@ -102,6 +102,7 @@
 
 .testing-matrix-wrap {
   min-width: 0;
+  contain: layout;
   overflow-x: auto;
   border: 1px solid var(--border);
   background: var(--surface);

@@ -417,10 +417,11 @@ export function testingCampaignTabs(runs, selectedKey = null) {
     const total = cases.length;
     const passed = cases.filter((testCase) => testCase.status === "passed").length;
     const failed = cases.filter((testCase) => testCase.status === "failed").length;
+    const running = run?.status === "running";
     const complete = run?.status === "completed" && total > 0 && passed === total;
     const status = failed > 0
       ? "failed"
-      : (complete ? "passed" : (run?.status === "running" ? "running" : "pending"));
+      : (complete ? "passed" : (running ? "running" : "pending"));
     const presentation = TESTING_STATUS[status] || TESTING_STATUS.pending;
     const label = labelCounts.get(labels[index]) > 1
       ? `${labels[index]} · ${index + 1}`
@@ -431,7 +432,9 @@ export function testingCampaignTabs(runs, selectedKey = null) {
       status,
       symbol: status === "passed" || status === "failed" ? presentation.symbol : "",
       className: presentation.className,
-      summary: failed > 0 ? `${failed} failed` : `${passed} / ${total} passed`,
+      summary: failed > 0
+        ? `${running ? "Running \u00b7 " : ""}${failed} failed`
+        : `${running ? "Running \u00b7 " : ""}${passed} / ${total} passed`,
       passed,
       failed,
       total,
