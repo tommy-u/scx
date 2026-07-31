@@ -1393,6 +1393,7 @@ fn aggregate_raw_stats(
         eevdf_direct_runtime_ns: value(bpf_intf::snake_stat_SNAKE_STAT_EEVDF_DIRECT_RUNTIME_NS),
         eevdf_queued_runtime_ns: value(bpf_intf::snake_stat_SNAKE_STAT_EEVDF_QUEUED_RUNTIME_NS),
         eevdf_lag_clamps: value(bpf_intf::snake_stat_SNAKE_STAT_EEVDF_LAG_CLAMPS),
+        eevdf_run_lag_clamps: value(bpf_intf::snake_stat_SNAKE_STAT_EEVDF_RUN_LAG_CLAMPS),
         eevdf_accounting_errors: value(bpf_intf::snake_stat_SNAKE_STAT_EEVDF_ACCOUNTING_ERRORS),
         cpus,
         cells: BTreeMap::new(),

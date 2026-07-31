@@ -293,10 +293,45 @@ static __always_inline void fairness_eevdf_running(struct snake_ladder_ctx *ctx,
 {
 	struct snake_task_runtime *runtime =
 		fairness_eevdf_prepare_task(ctx, p);
+	struct snake_eevdf_domain *domain;
+	u64			   lag_limit, minimum, remaining;
+	bool			   clamped = false;
 
 	if (!runtime)
 		return;
 	queue_timing_complete_pending(runtime);
+	/*
+	 * The global clock can outrun the service available through a task's
+	 * affinity mask. Do not let an unfulfillable affinity entitlement carry
+	 * more than one physical request of catch-up work into this dispatch.
+	 */
+	if (p->nr_cpus_allowed < nr_cpu_ids) {
+		domain = fairness_eevdf_domain();
+		if (!domain) {
+			fairness_accounting_error(ctx);
+			return;
+		}
+		remaining = runtime->request_remaining_ns;
+		if (!remaining)
+			remaining = SNAKE_EEVDF_SLICE_NS;
+		lag_limit = fairness_scale_inverse(SNAKE_EEVDF_SLICE_NS,
+						   runtime->active_weight);
+		bpf_spin_lock(&domain->lock);
+		minimum = domain->virtual_time - lag_limit;
+		if (time_before(runtime->vruntime, minimum)) {
+			runtime->vruntime = minimum;
+			runtime->deadline =
+				minimum +
+				fairness_scale_inverse(remaining,
+						       runtime->active_weight);
+			clamped = true;
+		}
+		bpf_spin_unlock(&domain->lock);
+		if (clamped) {
+			stat_inc(ctx, SNAKE_STAT_EEVDF_LAG_CLAMPS);
+			stat_inc(ctx, SNAKE_STAT_EEVDF_RUN_LAG_CLAMPS);
+		}
+	}
 	fairness_runtime_begin(runtime, p);
 }
 
