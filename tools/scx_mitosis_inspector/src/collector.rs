@@ -18,8 +18,9 @@ use serde::Serialize;
 
 use crate::bpf_skel::{BpfSkel, BpfSkelBuilder};
 use crate::{
-    build_callback_timing_rows, build_counters, program_name_matches, CallbackCounter,
-    CallbackTimingCounters, CallbackTimingRow, CALLBACK_NAMES, CALLBACK_TIMING_BUCKETS,
+    build_callback_timing_rows, build_counters, build_timing_metric_row, program_name_matches,
+    CallbackCounter, CallbackTimingCounters, CallbackTimingRow, TimingMetricRow, CALLBACK_NAMES,
+    CALLBACK_TIMING_BUCKETS,
 };
 
 const TARGET_NAMES: [&str; 5] = [
@@ -42,7 +43,9 @@ pub struct Snapshot {
     pub uptime_seconds: u64,
     pub counters: Vec<CallbackCounter>,
     pub callback_timing_sample_rate: u32,
+    pub event_timing_sample_rate: u32,
     pub callback_timings: Vec<CallbackTimingRow>,
+    pub scheduler_timings: Vec<TimingMetricRow>,
 }
 
 fn find_targets() -> Result<[TargetProgram; 5]> {
@@ -118,7 +121,11 @@ fn set_targets(
     Ok(())
 }
 
-fn attach_programs(skel: &BpfSkel<'_>, callback_timing_sample_rate: u32) -> Result<Vec<Link>> {
+fn attach_programs(
+    skel: &BpfSkel<'_>,
+    callback_timing_sample_rate: u32,
+    event_timing_sample_rate: u32,
+) -> Result<Vec<Link>> {
     let mut links = vec![
         skel.progs.observe_select_cpu.attach_trace()?,
         skel.progs.observe_enqueue.attach_trace()?,
@@ -133,6 +140,13 @@ fn attach_programs(skel: &BpfSkel<'_>, callback_timing_sample_rate: u32) -> Resu
             skel.progs.observe_dispatch_exit.attach_trace()?,
             skel.progs.observe_running_exit.attach_trace()?,
             skel.progs.observe_stopping_exit.attach_trace()?,
+        ]);
+    }
+    if event_timing_sample_rate > 0 {
+        links.extend([
+            skel.progs.on_sched_wakeup.attach()?,
+            skel.progs.on_sched_wakeup_new.attach()?,
+            skel.progs.on_sched_switch.attach()?,
         ]);
     }
     Ok(links)
@@ -162,9 +176,6 @@ fn read_counts(skel: &BpfSkel<'_>) -> Result<[u64; 5]> {
 }
 
 fn read_callback_timings(skel: &BpfSkel<'_>) -> Result<Vec<CallbackTimingCounters>> {
-    const U64_BYTES: usize = std::mem::size_of::<u64>();
-    const VALUE_BYTES: usize = (CALLBACK_TIMING_BUCKETS + 1) * U64_BYTES;
-
     (0..CALLBACK_NAMES.len())
         .map(|index| {
             let key = (index as u32).to_ne_bytes();
@@ -175,26 +186,43 @@ fn read_callback_timings(skel: &BpfSkel<'_>) -> Result<Vec<CallbackTimingCounter
                 .with_context(|| {
                     format!("callback timing entry {} missing", CALLBACK_NAMES[index])
                 })?;
-            values
-                .into_iter()
-                .try_fold(CallbackTimingCounters::default(), |mut total, value| {
-                    if value.len() < VALUE_BYTES {
-                        bail!("short callback timing value for {}", CALLBACK_NAMES[index]);
-                    }
-                    total.total_ns = total
-                        .total_ns
-                        .saturating_add(u64::from_ne_bytes(value[..U64_BYTES].try_into()?));
-                    for (bucket, bytes) in value[U64_BYTES..VALUE_BYTES]
-                        .chunks_exact(U64_BYTES)
-                        .enumerate()
-                    {
-                        total.buckets[bucket] = total.buckets[bucket]
-                            .saturating_add(u64::from_ne_bytes(bytes.try_into()?));
-                    }
-                    Ok(total)
-                })
+            aggregate_timing(values, CALLBACK_NAMES[index])
         })
         .collect()
+}
+
+fn read_wakeup_latency(skel: &BpfSkel<'_>) -> Result<CallbackTimingCounters> {
+    let key = 0_u32.to_ne_bytes();
+    let values = skel
+        .maps
+        .wakeup_latency
+        .lookup_percpu(&key, MapFlags::ANY)?
+        .context("wakeup latency entry missing")?;
+    aggregate_timing(values, "wakeup_to_running")
+}
+
+fn aggregate_timing(values: Vec<Vec<u8>>, name: &str) -> Result<CallbackTimingCounters> {
+    const U64_BYTES: usize = std::mem::size_of::<u64>();
+    const VALUE_BYTES: usize = (CALLBACK_TIMING_BUCKETS + 1) * U64_BYTES;
+
+    values
+        .into_iter()
+        .try_fold(CallbackTimingCounters::default(), |mut total, value| {
+            if value.len() < VALUE_BYTES {
+                bail!("short timing value for {name}");
+            }
+            total.total_ns = total
+                .total_ns
+                .saturating_add(u64::from_ne_bytes(value[..U64_BYTES].try_into()?));
+            for (bucket, bytes) in value[U64_BYTES..VALUE_BYTES]
+                .chunks_exact(U64_BYTES)
+                .enumerate()
+            {
+                total.buckets[bucket] =
+                    total.buckets[bucket].saturating_add(u64::from_ne_bytes(bytes.try_into()?));
+            }
+            Ok(total)
+        })
 }
 
 pub fn run(
@@ -202,6 +230,7 @@ pub fn run(
     shutdown: Arc<AtomicBool>,
     ready: Sender<Result<()>>,
     callback_timing_sample_rate: u32,
+    event_timing_sample_rate: u32,
 ) -> Result<()> {
     let targets = match find_targets() {
         Ok(targets) => targets,
@@ -218,21 +247,23 @@ pub fn run(
         .open(&mut open_object)
         .context("opening callback collector BPF object")?;
     set_targets(&mut open_skel, &targets).context("setting callback attach targets")?;
-    open_skel
+    let rodata = open_skel
         .maps
         .rodata_data
         .as_mut()
-        .context("callback collector rodata is unavailable")?
-        .callback_timing_sample_rate = callback_timing_sample_rate;
+        .context("callback collector rodata is unavailable")?;
+    rodata.callback_timing_sample_rate = callback_timing_sample_rate;
+    rodata.event_timing_sample_rate = event_timing_sample_rate;
     let skel = open_skel
         .load()
         .context("loading callback collector BPF object")?;
-    let _links = attach_programs(&skel, callback_timing_sample_rate)
+    let _links = attach_programs(&skel, callback_timing_sample_rate, event_timing_sample_rate)
         .context("attaching callback observer programs")?;
 
     let started = Instant::now();
     let mut previous = read_counts(&skel)?;
     let callback_timings = read_callback_timings(&skel)?;
+    let wakeup_latency = read_wakeup_latency(&skel)?;
     let mut previous_at = Instant::now();
     {
         let mut snapshot = state.write().expect("snapshot lock poisoned");
@@ -242,7 +273,12 @@ pub fn run(
             uptime_seconds: 0,
             counters: build_counters(previous, previous, Duration::ZERO),
             callback_timing_sample_rate,
+            event_timing_sample_rate,
             callback_timings: build_callback_timing_rows(&callback_timings),
+            scheduler_timings: vec![build_timing_metric_row(
+                "wakeup_to_running",
+                &wakeup_latency,
+            )],
         };
     }
     ready
@@ -254,6 +290,7 @@ pub fn run(
         let now = Instant::now();
         let current = read_counts(&skel)?;
         let callback_timings = read_callback_timings(&skel)?;
+        let wakeup_latency = read_wakeup_latency(&skel)?;
         let counters = build_counters(current, previous, now.duration_since(previous_at));
         previous = current;
         previous_at = now;
@@ -261,6 +298,10 @@ pub fn run(
         snapshot.uptime_seconds = started.elapsed().as_secs();
         snapshot.counters = counters;
         snapshot.callback_timings = build_callback_timing_rows(&callback_timings);
+        snapshot.scheduler_timings = vec![build_timing_metric_row(
+            "wakeup_to_running",
+            &wakeup_latency,
+        )];
     }
     Ok(())
 }

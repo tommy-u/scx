@@ -102,6 +102,28 @@
             </table>
           </div>
         </section>
+
+        <section class="table-section" aria-labelledby="schedulerTimingHeading">
+          <div class="table-section-heading">
+            <h2 id="schedulerTimingHeading">Scheduler latency</h2>
+            <p>Sampling <strong id="eventTimingSampleRate">--</strong></p>
+          </div>
+          <div class="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">Metric</th>
+                  <th scope="col">Samples</th>
+                  <th scope="col">Mean (ns)</th>
+                  <th scope="col">p50 approx. (ns)</th>
+                  <th scope="col">p95 approx. (ns)</th>
+                  <th scope="col">p99 approx. (ns)</th>
+                </tr>
+              </thead>
+              <tbody id="schedulerTimingRows"></tbody>
+            </table>
+          </div>
+        </section>
       </main>
     </div>
     <script src="/assets/app.js" defer></script>

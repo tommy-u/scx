@@ -7,7 +7,7 @@ use scx_mitosis_inspector::api::{router, ApiContext};
 use scx_mitosis_inspector::collector::Snapshot;
 use scx_mitosis_inspector::host_context::{HostContextView, HostIdentityView};
 use scx_mitosis_inspector::stats::StatsSnapshot;
-use scx_mitosis_inspector::{CallbackCounter, CallbackTimingRow};
+use scx_mitosis_inspector::{CallbackCounter, CallbackTimingRow, TimingMetricRow};
 use serde_json::json;
 use tower::ServiceExt;
 
@@ -22,12 +22,21 @@ fn snapshot() -> Snapshot {
             rate_per_second: 7.0,
         }],
         callback_timing_sample_rate: 1024,
+        event_timing_sample_rate: 64,
         callback_timings: vec![CallbackTimingRow {
             callback: "select_cpu",
             samples: 18,
             mean_ns: Some(211),
             p50_ns: Some(127),
             p95_ns: None,
+            p99_ns: None,
+        }],
+        scheduler_timings: vec![TimingMetricRow {
+            metric: "wakeup_to_running",
+            samples: 25,
+            mean_ns: Some(12_400),
+            p50_ns: Some(8_191),
+            p95_ns: Some(32_767),
             p99_ns: None,
         }],
     }
@@ -115,8 +124,11 @@ async fn counters_endpoint_returns_the_current_snapshot() {
     assert_eq!(value["counters"][0]["count"], 42);
     assert_eq!(value["counters"][0]["rate_per_second"], 7.0);
     assert_eq!(value["callback_timing_sample_rate"], 1024);
+    assert_eq!(value["event_timing_sample_rate"], 64);
     assert_eq!(value["callback_timings"][0]["samples"], 18);
     assert_eq!(value["callback_timings"][0]["mean_ns"], 211);
+    assert_eq!(value["scheduler_timings"][0]["metric"], "wakeup_to_running");
+    assert_eq!(value["scheduler_timings"][0]["samples"], 25);
 }
 
 #[tokio::test]
@@ -137,6 +149,8 @@ async fn index_is_the_one_page_inspector() {
     assert!(html.contains("id=\"cpuCount\""));
     assert!(html.contains("id=\"callbackTimingSampleRate\""));
     assert!(html.contains("id=\"callbackTimingRows\""));
+    assert!(html.contains("id=\"schedulerTimingRows\""));
+    assert!(html.contains("id=\"eventTimingSampleRate\""));
     assert!(html.contains("/assets/app.js"));
 }
 

@@ -4,22 +4,18 @@ const statusText = document.querySelector("#statusText");
 const number = new Intl.NumberFormat("en-US");
 const rate = new Intl.NumberFormat("en-US", { maximumFractionDigits: 1 });
 const callbackTimingRows = document.querySelector("#callbackTimingRows");
+const schedulerTimingRows = document.querySelector("#schedulerTimingRows");
 
 function timingValue(value) {
   return value == null ? "--" : number.format(value);
 }
 
-function renderCallbackTimings(snapshot) {
-  const sampleRate = snapshot.callback_timing_sample_rate;
-  document.querySelector("#callbackTimingSampleRate").textContent =
-    sampleRate === 0 ? "disabled" : `1 / ${number.format(sampleRate)}`;
-
-  const rows = snapshot.callback_timings.map((timing) => {
+function timingRow(label, timing) {
     const row = document.createElement("tr");
-    const callback = document.createElement("th");
-    callback.scope = "row";
-    callback.textContent = timing.callback;
-    row.append(callback);
+    const heading = document.createElement("th");
+    heading.scope = "row";
+    heading.textContent = label;
+    row.append(heading);
     [timing.samples, timing.mean_ns, timing.p50_ns, timing.p95_ns, timing.p99_ns]
       .forEach((value) => {
         const cell = document.createElement("td");
@@ -27,8 +23,24 @@ function renderCallbackTimings(snapshot) {
         row.append(cell);
       });
     return row;
-  });
+}
+
+function sampleRateLabel(sampleRate) {
+  return sampleRate === 0 ? "disabled" : `1 / ${number.format(sampleRate)}`;
+}
+
+function renderTimings(snapshot) {
+  document.querySelector("#callbackTimingSampleRate").textContent =
+    sampleRateLabel(snapshot.callback_timing_sample_rate);
+  document.querySelector("#eventTimingSampleRate").textContent =
+    sampleRateLabel(snapshot.event_timing_sample_rate);
+
+  const rows = snapshot.callback_timings.map((timing) =>
+    timingRow(timing.callback, timing));
   callbackTimingRows.replaceChildren(...rows);
+  const schedulerRows = snapshot.scheduler_timings.map((timing) =>
+    timingRow(timing.metric.replaceAll("_", " "), timing));
+  schedulerTimingRows.replaceChildren(...schedulerRows);
 }
 
 function renderHostContext(context) {
@@ -41,7 +53,7 @@ function render(snapshot) {
   document.querySelector("#scheduler").textContent = snapshot.scheduler;
   document.querySelector("#uptime").textContent = `${snapshot.uptime_seconds}s`;
   document.querySelector("#refreshed").textContent = new Date().toLocaleTimeString();
-  renderCallbackTimings(snapshot);
+  renderTimings(snapshot);
 
   const counters = new Map(snapshot.counters.map((counter) => [counter.name, counter]));
   cards.forEach((card, index) => {

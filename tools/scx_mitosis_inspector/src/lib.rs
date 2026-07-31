@@ -13,9 +13,10 @@ pub mod model;
 pub mod stats;
 
 pub use model::{
-    build_callback_timing_rows, build_counters, parse_callback_timing_sample_rate,
-    summarize_callback_timing, CallbackCounter, CallbackTimingCounters, CallbackTimingRow,
-    CallbackTimingSummary, CALLBACK_NAMES, CALLBACK_TIMING_BUCKETS,
+    build_callback_timing_rows, build_counters, build_timing_metric_row,
+    parse_callback_timing_sample_rate, summarize_callback_timing, CallbackCounter,
+    CallbackTimingCounters, CallbackTimingRow, CallbackTimingSummary, TimingMetricRow,
+    CALLBACK_NAMES, CALLBACK_TIMING_BUCKETS,
 };
 
 pub fn program_name_matches(loaded: &str, expected: &str) -> bool {

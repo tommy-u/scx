@@ -51,6 +51,16 @@ pub struct CallbackTimingRow {
     pub p99_ns: Option<u64>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct TimingMetricRow {
+    pub metric: &'static str,
+    pub samples: u64,
+    pub mean_ns: Option<u64>,
+    pub p50_ns: Option<u64>,
+    pub p95_ns: Option<u64>,
+    pub p99_ns: Option<u64>,
+}
+
 pub fn build_counters(
     current: [u64; 5],
     previous: [u64; 5],
@@ -101,6 +111,21 @@ pub fn summarize_callback_timing(timing: &CallbackTimingCounters) -> CallbackTim
         p50_ns: percentile_upper_bound(&timing.buckets, samples, 50, 1),
         p95_ns: percentile_upper_bound(&timing.buckets, samples, 95, 20),
         p99_ns: percentile_upper_bound(&timing.buckets, samples, 99, 100),
+    }
+}
+
+pub fn build_timing_metric_row(
+    metric: &'static str,
+    timing: &CallbackTimingCounters,
+) -> TimingMetricRow {
+    let summary = summarize_callback_timing(timing);
+    TimingMetricRow {
+        metric,
+        samples: summary.samples,
+        mean_ns: summary.mean_ns,
+        p50_ns: summary.p50_ns,
+        p95_ns: summary.p95_ns,
+        p99_ns: summary.p99_ns,
     }
 }
 
