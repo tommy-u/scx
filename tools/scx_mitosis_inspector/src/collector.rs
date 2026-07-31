@@ -18,9 +18,9 @@ use serde::Serialize;
 
 use crate::bpf_skel::{BpfSkel, BpfSkelBuilder};
 use crate::{
-    build_callback_timing_rows, build_counters, build_timing_metric_row, program_name_matches,
-    CallbackCounter, CallbackTimingCounters, CallbackTimingRow, MigrationRow, TimingMetricRow,
-    CALLBACK_NAMES, CALLBACK_TIMING_BUCKETS,
+    build_callback_timing_rows, build_counters, build_cpu_runtime_rows, build_timing_metric_row,
+    program_name_matches, CallbackCounter, CallbackTimingCounters, CallbackTimingRow,
+    CpuRuntimeRow, MigrationRow, TimingMetricRow, CALLBACK_NAMES, CALLBACK_TIMING_BUCKETS,
 };
 
 const TARGET_NAMES: [&str; 5] = [
@@ -47,6 +47,7 @@ pub struct Snapshot {
     pub callback_timings: Vec<CallbackTimingRow>,
     pub scheduler_timings: Vec<TimingMetricRow>,
     pub migrations: Vec<MigrationRow>,
+    pub cpu_runtime: Vec<CpuRuntimeRow>,
 }
 
 fn find_targets() -> Result<[TargetProgram; 5]> {
@@ -266,8 +267,23 @@ fn read_migrations(skel: &BpfSkel<'_>) -> Result<Vec<MigrationRow>> {
         });
     }
     rows.sort_unstable_by_key(|row| std::cmp::Reverse(row.count));
-    rows.truncate(32);
     Ok(rows)
+}
+
+fn read_cpu_runtime(skel: &BpfSkel<'_>) -> Result<Vec<u64>> {
+    let key = 0_u32.to_ne_bytes();
+    let values = skel
+        .maps
+        .cpu_runtime
+        .lookup_percpu(&key, MapFlags::ANY)?
+        .context("CPU runtime entry missing")?;
+    values
+        .into_iter()
+        .map(|value| {
+            let bytes = value.get(8..16).context("short CPU runtime value")?;
+            Ok(u64::from_ne_bytes(bytes.try_into()?))
+        })
+        .collect()
 }
 
 pub fn run(
@@ -312,6 +328,7 @@ pub fn run(
     let cpu_slice_duration = read_cpu_slice_duration(&skel)?;
     let blocked_duration = read_blocked_duration(&skel)?;
     let migrations = read_migrations(&skel)?;
+    let mut previous_cpu_runtime = read_cpu_runtime(&skel)?;
     let mut previous_at = Instant::now();
     {
         let mut snapshot = state.write().expect("snapshot lock poisoned");
@@ -329,6 +346,11 @@ pub fn run(
                 build_timing_metric_row("blocked_off_cpu", &blocked_duration),
             ],
             migrations,
+            cpu_runtime: build_cpu_runtime_rows(
+                &previous_cpu_runtime,
+                &previous_cpu_runtime,
+                Duration::ZERO,
+            ),
         };
     }
     ready
@@ -344,9 +366,10 @@ pub fn run(
         let cpu_slice_duration = read_cpu_slice_duration(&skel)?;
         let blocked_duration = read_blocked_duration(&skel)?;
         let migrations = read_migrations(&skel)?;
-        let counters = build_counters(current, previous, now.duration_since(previous_at));
+        let current_cpu_runtime = read_cpu_runtime(&skel)?;
+        let elapsed = now.duration_since(previous_at);
+        let counters = build_counters(current, previous, elapsed);
         previous = current;
-        previous_at = now;
         let mut snapshot = state.write().expect("snapshot lock poisoned");
         snapshot.uptime_seconds = started.elapsed().as_secs();
         snapshot.counters = counters;
@@ -357,6 +380,10 @@ pub fn run(
             build_timing_metric_row("blocked_off_cpu", &blocked_duration),
         ];
         snapshot.migrations = migrations;
+        snapshot.cpu_runtime =
+            build_cpu_runtime_rows(&current_cpu_runtime, &previous_cpu_runtime, elapsed);
+        previous_cpu_runtime = current_cpu_runtime;
+        previous_at = now;
     }
     Ok(())
 }

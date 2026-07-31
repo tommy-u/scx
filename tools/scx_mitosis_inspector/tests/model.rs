@@ -1,8 +1,8 @@
 use std::time::Duration;
 
 use scx_mitosis_inspector::{
-    build_counters, parse_callback_timing_sample_rate, program_name_matches,
-    summarize_callback_timing, CallbackCounter, CallbackTimingCounters,
+    build_counters, build_cpu_runtime_rows, parse_callback_timing_sample_rate,
+    program_name_matches, summarize_callback_timing, CallbackCounter, CallbackTimingCounters,
 };
 
 fn timing(total_ns: u64, buckets: &[(usize, u64)]) -> CallbackTimingCounters {
@@ -97,4 +97,11 @@ fn callback_timing_sample_rate_is_zero_or_a_bounded_power_of_two() {
     }
     assert!(parse_callback_timing_sample_rate("3").is_err());
     assert!(parse_callback_timing_sample_rate("8192").is_err());
+}
+
+#[test]
+fn cpu_runtime_uses_the_observation_interval() {
+    let rows = build_cpu_runtime_rows(&[1_000_000_000], &[0], Duration::from_secs(1));
+
+    assert_eq!(rows[0].utilization_pct, 100.0);
 }

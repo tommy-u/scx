@@ -250,6 +250,91 @@ code { color: #404b5e; }
   font-size: 12px;
 }
 
+.breakdown-grid {
+  display: grid;
+  grid-template-columns: minmax(300px, 0.8fr) minmax(420px, 1.2fr);
+  gap: 14px;
+  align-items: start;
+}
+
+.segmented {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  display: flex;
+}
+
+.segmented label { position: relative; }
+
+.segmented input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.segmented span {
+  min-height: 30px;
+  padding: 6px 10px;
+  display: block;
+  color: #637083;
+  background: #ffffff;
+  border: 1px solid #ccd4dd;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.segmented label:first-child span { border-radius: 4px 0 0 4px; }
+.segmented label:last-child span { border-radius: 0 4px 4px 0; }
+.segmented label + label span { border-left: 0; }
+
+.segmented input:checked + span {
+  color: #176b55;
+  background: #e7f3ee;
+  box-shadow: inset 0 -2px #27a37a;
+}
+
+.segmented input:focus-visible + span {
+  outline: 2px solid #176b55;
+  outline-offset: 2px;
+}
+
+.heatmap-viewport {
+  position: relative;
+  width: 100%;
+  min-height: 360px;
+  max-height: 720px;
+  overflow: auto;
+  background: #ffffff;
+  border: 1px solid #d4dbe3;
+}
+
+#migrationHeatmapCanvas {
+  display: block;
+  min-width: 100%;
+}
+
+.heatmap-tooltip {
+  position: absolute;
+  z-index: 2;
+  max-width: min(360px, calc(100% - 16px));
+  padding: 8px 10px;
+  color: #ffffff;
+  background: #172033;
+  border-radius: 4px;
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: pre-line;
+  pointer-events: none;
+}
+
+.hidden { display: none !important; }
+
+.table-subheading {
+  margin: 18px 0 8px;
+  font-size: 13px;
+}
+
 .table-scroll {
   overflow-x: auto;
   border: 1px solid #d4dbe3;
@@ -293,6 +378,7 @@ tbody tr:last-child td { border-bottom: 0; }
 
 @media (max-width: 900px) {
   .counter-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .breakdown-grid { grid-template-columns: 1fr; }
 }
 
 @media (max-width: 720px) {
@@ -323,4 +409,6 @@ tbody tr:last-child td { border-bottom: 0; }
   .summary dl { grid-template-columns: 1fr; gap: 12px; }
   .counter-grid { grid-template-columns: 1fr; }
   .counter-card { min-height: 160px; }
+  .table-section-heading { align-items: flex-start; flex-direction: column; }
+  .heatmap-viewport { min-height: 300px; }
 }
