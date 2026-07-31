@@ -9,7 +9,8 @@ use std::{fs, os::unix::fs::PermissionsExt};
 use scx_snake_inspector::policies::{discover_policy_files, PolicyCatalog, PolicyChoice};
 use scx_snake_inspector::testing::{
     build_matrix, discover_testing_catalog, failure_signature, CaseOutcome, CaseStatus, Fairness,
-    MatrixConfig, RunStatus, TestRun, TestingController, Workload, WorkloadCommand,
+    MatrixConfig, RunStatus, TestEnvironment, TestRun, TestingController, Workload,
+    WorkloadCommand,
 };
 
 fn policy(id: &str, queue_policy: bool) -> PolicyChoice {
@@ -176,6 +177,57 @@ fn aggregate_view_imports_live_results_from_every_shard() {
             .count(),
         2
     );
+}
+
+#[test]
+fn aggregate_view_imports_one_snapshot_per_kernel_campaign() {
+    let catalog = PolicyCatalog {
+        policies: vec![policy("basic.toml", false)],
+        invalid: Vec::new(),
+    };
+    let root = tempfile::tempdir().unwrap();
+    let mut campaigns = Vec::new();
+
+    for kernel in ["6.13-test", "6.16-test"] {
+        let campaign_id = format!("campaign-{kernel}");
+        let campaign = root.path().join(&campaign_id);
+        let shard_dir = campaign.join("shard-0");
+        fs::create_dir_all(&shard_dir).unwrap();
+        let mut run = TestRun::new(build_matrix(&catalog, MatrixConfig::new(60, 0, 1).unwrap()));
+        run.campaign_id = Some(campaign_id);
+        run.environment = Some(TestEnvironment {
+            kernel_release: kernel.into(),
+            snake_version: "scx_snake test".into(),
+            snake_fingerprint: "fnv1a64:test".into(),
+            virtualization: "kvm".into(),
+            cpu_count: 8,
+            memory_bytes: 4 * 1024 * 1024 * 1024,
+            boot_command: format!("vng --run /boot/vmlinuz-{kernel}"),
+        });
+        fs::write(
+            shard_dir.join("run.json"),
+            serde_json::to_vec_pretty(&run).unwrap(),
+        )
+        .unwrap();
+        campaigns.push(campaign);
+    }
+
+    let controller = TestingController::new(MatrixConfig::new(60, 0, 1).unwrap())
+        .with_catalog(catalog)
+        .with_import_dirs(&campaigns);
+    let snapshots = controller.snapshots_available(None).unwrap();
+    let first = controller.snapshot_available(None).unwrap();
+
+    assert_eq!(snapshots.len(), 2);
+    assert_eq!(
+        snapshots
+            .iter()
+            .map(|run| run.environment.as_ref().unwrap().kernel_release.as_str())
+            .collect::<Vec<_>>(),
+        vec!["6.13-test", "6.16-test"]
+    );
+    assert!(snapshots.iter().all(|run| run.matrix.aggregate));
+    assert_eq!(first.environment.unwrap().kernel_release, "6.13-test");
 }
 
 #[test]

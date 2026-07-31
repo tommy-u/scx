@@ -146,6 +146,7 @@ pub fn router(context: ApiContext) -> Router {
         .route("/api/scheduler/start", post(start_scheduler))
         .route("/api/scheduler/restart", post(restart_scheduler))
         .route("/api/scheduler/stop", post(stop_scheduler))
+        .route("/api/testing/campaigns", get(testing_campaigns))
         .route("/api/testing/matrix", get(testing_matrix))
         .route("/api/testing/run", post(start_testing))
         .route("/api/testing/stop", post(stop_testing))
@@ -158,6 +159,25 @@ pub fn router(context: ApiContext) -> Router {
             require_allowed_host,
         ))
         .with_state(context)
+}
+
+#[derive(Serialize)]
+struct TestingCampaigns {
+    runs: Vec<TestRun>,
+}
+
+async fn testing_campaigns(
+    State(context): State<ApiContext>,
+) -> Result<Json<TestingCampaigns>, ApiError> {
+    let testing = context
+        .testing
+        .as_ref()
+        .ok_or_else(|| ApiError::unavailable("VM testing is not configured"))?;
+    let catalog = context.dashboard.policy_catalog();
+    testing
+        .snapshots_available(catalog.catalog.as_ref())
+        .map(|runs| Json(TestingCampaigns { runs }))
+        .map_err(|error| ApiError::unavailable(format!("reading testing campaigns: {error:#}")))
 }
 
 async fn testing_matrix(State(context): State<ApiContext>) -> Result<Json<TestRun>, ApiError> {

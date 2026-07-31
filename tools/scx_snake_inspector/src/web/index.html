@@ -892,9 +892,11 @@
               <p>Fairness and policy by workload</p>
             </div>
           </div>
-          <div class="testing-matrix-wrap">
+          <div class="testing-kernel-tabs" id="testingKernelTabs" role="tablist" aria-label="Kernel test results"></div>
+          <div class="testing-matrix-wrap" id="testingKernelPanel" role="tabpanel">
             <table class="testing-matrix" id="testingMatrix" data-sort-key="testing:matrix"></table>
           </div>
+          <div class="testing-tooltip hidden" id="testingTooltip" role="tooltip" aria-hidden="true"></div>
           <aside class="testing-detail" id="testingDetail" aria-live="polite">
             Select a result to inspect its runtime and failure details.
           </aside>

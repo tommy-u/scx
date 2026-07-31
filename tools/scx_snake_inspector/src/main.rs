@@ -46,8 +46,8 @@ async fn main() -> Result<()> {
         )?;
         let catalog = discover_testing_catalog(&args.snake_bin, &args.policy_dir)?;
         let controller = TestingController::new(matrix).with_catalog(catalog);
-        Some(if let Some(import_dir) = &args.testing_import_dir {
-            controller.with_import_dir(import_dir)
+        Some(if !args.testing_import_dir.is_empty() {
+            controller.with_import_dirs(&args.testing_import_dir)
         } else {
             controller.with_execution(TestingExecutionConfig::system(
                 &args.snake_bin,

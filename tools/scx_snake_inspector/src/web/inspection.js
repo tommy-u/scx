@@ -220,6 +220,10 @@ function testingMemoryLabel(bytes) {
   return `${(bytes / (1024 ** 3)).toFixed(1)} GiB RAM`;
 }
 
+function testingDisplayText(value) {
+  return String(value || "").replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "");
+}
+
 function testingCaseTooltip({
   fairness,
   policyName,
@@ -227,6 +231,7 @@ function testingCaseTooltip({
   status,
   statusLabel,
   elapsedMs,
+  failure,
   shard,
   shardCount,
   environment,
@@ -237,6 +242,7 @@ function testingCaseTooltip({
     `Runtime: ${testingRuntimeLabel(status, elapsedMs)}`,
     `Shard: ${shard + 1} of ${shardCount}`,
   ];
+  if (failure) lines.push(`Failure: ${testingDisplayText(failure)}`);
   if (environment) {
     const vm = [
       environment.virtualization || "VM",
@@ -245,10 +251,56 @@ function testingCaseTooltip({
     ].filter(Boolean);
     if (vm.length) lines.push(`VM: ${vm.join(" · ")}`);
     if (environment.kernel_release) lines.push(`Kernel: ${environment.kernel_release}`);
-    if (environment.snake_version) lines.push(`Snake: ${environment.snake_version}`);
+    const snake = [environment.snake_version, environment.snake_fingerprint].filter(Boolean);
+    if (snake.length) lines.push(`Snake: ${snake.join(" · ")}`);
     if (environment.boot_command) lines.push(`Boot: ${environment.boot_command}`);
   }
   return lines.join("\n");
+}
+
+function testingGroupResult(rows) {
+  const counts = {
+    total: 0,
+    passed: 0,
+    failed: 0,
+    running: 0,
+    pending: 0,
+    stopped: 0,
+    unassigned: 0,
+  };
+  for (const testCase of rows.flatMap((row) => row.cases)) {
+    counts.total += 1;
+    if (testCase.status === "unassigned") {
+      counts.unassigned += 1;
+      continue;
+    }
+    if (testCase.status === "passed") counts.passed += 1;
+    else if (testCase.status === "failed") counts.failed += 1;
+    else if (testCase.status === "running") counts.running += 1;
+    else if (testCase.status === "pending") counts.pending += 1;
+    else if (testCase.status === "aborted") counts.stopped += 1;
+  }
+
+  let status = "pending";
+  if (counts.failed > 0) status = "failed";
+  else if (counts.running > 0) status = "running";
+  else if (counts.pending > 0 || counts.unassigned > 0) status = "pending";
+  else if (counts.total > 0 && counts.passed === counts.total) status = "passed";
+  else if (counts.stopped > 0) status = "aborted";
+
+  const presentation = TESTING_STATUS[status] || TESTING_STATUS.pending;
+  let label = `${counts.passed} / ${counts.total} passed`;
+  if (status === "failed") label = `${counts.failed} failed`;
+  else if (status === "running") label = `${counts.running} running · ${label}`;
+  else if (status === "aborted") label = `${counts.stopped} stopped`;
+
+  return {
+    status,
+    label,
+    symbol: presentation.symbol,
+    className: presentation.className,
+    ...counts,
+  };
 }
 
 export function testingMatrixModel(run) {
@@ -268,10 +320,8 @@ export function testingMatrixModel(run) {
     id,
     label: TESTING_WORKLOAD_LABELS[id] || id,
   }));
-  const groups = (matrix.groups || []).map((group) => ({
-    fairness: group.fairness,
-    label: String(group.fairness || "unknown").toUpperCase(),
-    rows: (group.rows || []).map((row) => ({
+  const groups = (matrix.groups || []).map((group) => {
+    const rows = (group.rows || []).map((row) => ({
       policyId: row.policy_id,
       policyName: row.policy_name || row.policy_id,
       cases: (row.cases || []).map((testCase) => {
@@ -305,14 +355,21 @@ export function testingMatrixModel(run) {
             status,
             statusLabel: presentation.label,
             elapsedMs: Number(testCase.elapsed_ms || 0),
+            failure: testCase.failure || null,
             shard,
             shardCount: Number(matrix.shard_count || 1),
             environment: environments.get(shard),
           }),
         };
       }),
-    })),
-  }));
+    }));
+    return {
+      fairness: group.fairness,
+      label: String(group.fairness || "unknown").toUpperCase(),
+      rows,
+      result: testingGroupResult(rows),
+    };
+  });
   const status = String(run?.status || "idle");
   return {
     status,
@@ -327,6 +384,65 @@ export function testingMatrixModel(run) {
     workloads,
     groups,
     summary,
+  };
+}
+
+export function testingCampaignTabs(runs, selectedKey = null) {
+  const campaigns = Array.isArray(runs) ? runs : [];
+  const baseLabels = campaigns.map((run, index) => (
+    run?.environment?.kernel_release
+      || run?.shard_environments?.[0]?.environment?.kernel_release
+      || run?.campaign_id
+      || `Campaign ${index + 1}`
+  ));
+  const baseCounts = new Map();
+  for (const label of baseLabels) {
+    baseCounts.set(label, (baseCounts.get(label) || 0) + 1);
+  }
+  const labels = baseLabels.map((label, index) => (
+    baseCounts.get(label) > 1
+      ? `${label} · ${campaigns[index]?.campaign_id || `Campaign ${index + 1}`}`
+      : label
+  ));
+  const labelCounts = new Map();
+  for (const label of labels) {
+    labelCounts.set(label, (labelCounts.get(label) || 0) + 1);
+  }
+
+  const tabs = campaigns.map((run, index) => {
+    const matrix = testingMatrixModel(run);
+    const cases = matrix.groups
+      .flatMap((group) => group.rows)
+      .flatMap((row) => row.cases);
+    const total = cases.length;
+    const passed = cases.filter((testCase) => testCase.status === "passed").length;
+    const failed = cases.filter((testCase) => testCase.status === "failed").length;
+    const complete = run?.status === "completed" && total > 0 && passed === total;
+    const status = failed > 0
+      ? "failed"
+      : (complete ? "passed" : (run?.status === "running" ? "running" : "pending"));
+    const presentation = TESTING_STATUS[status] || TESTING_STATUS.pending;
+    const label = labelCounts.get(labels[index]) > 1
+      ? `${labels[index]} · ${index + 1}`
+      : labels[index];
+    return {
+      key: `campaign:${index}`,
+      label,
+      status,
+      symbol: status === "passed" || status === "failed" ? presentation.symbol : "",
+      className: presentation.className,
+      summary: failed > 0 ? `${failed} failed` : `${passed} / ${total} passed`,
+      passed,
+      failed,
+      total,
+      run,
+    };
+  });
+  const selected = tabs.find((tab) => tab.key === selectedKey) || tabs[0] || null;
+  return {
+    tabs,
+    selectedKey: selected?.key || null,
+    selectedRun: selected?.run || null,
   };
 }
 

@@ -29,6 +29,77 @@
   gap: 14px;
 }
 
+.testing-kernel-tabs {
+  min-width: 0;
+  display: flex;
+  align-items: stretch;
+  overflow-x: auto;
+  border-bottom: 1px solid var(--border);
+}
+
+.testing-kernel-tab {
+  min-width: 190px;
+  min-height: 48px;
+  padding: 7px 12px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 20px;
+  grid-template-rows: auto auto;
+  column-gap: 10px;
+  border: 0;
+  border-bottom: 3px solid transparent;
+  color: var(--muted);
+  background: transparent;
+  font: inherit;
+  letter-spacing: 0;
+  text-align: left;
+  cursor: pointer;
+}
+
+.testing-kernel-tab:hover {
+  background: var(--surface-muted);
+}
+
+.testing-kernel-tab[aria-selected="true"] {
+  border-bottom-color: var(--accent);
+  color: var(--ink);
+  background: var(--surface);
+}
+
+.testing-kernel-tab:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.testing-kernel-label {
+  overflow-wrap: anywhere;
+  font-size: 0.8rem;
+  font-weight: 700;
+}
+
+.testing-kernel-summary {
+  color: var(--muted);
+  font-size: 0.7rem;
+}
+
+.testing-kernel-outcome {
+  width: 20px;
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  align-self: center;
+  font-size: 1.05rem;
+  font-weight: 700;
+  line-height: 1;
+  text-align: center;
+}
+
+.testing-kernel-outcome.passed {
+  color: var(--active);
+}
+
+.testing-kernel-outcome.failed {
+  color: var(--danger);
+}
+
 .testing-matrix-wrap {
   min-width: 0;
   overflow-x: auto;
@@ -65,10 +136,76 @@
 
 .testing-matrix .testing-fairness-row th {
   height: 34px;
+  padding: 0;
   color: var(--ink);
   background: var(--surface-muted);
   font-size: 0.75rem;
   text-transform: uppercase;
+}
+
+.testing-fairness-toggle {
+  width: 100%;
+  min-height: 34px;
+  padding: 6px 10px;
+  display: grid;
+  grid-template-columns: 16px auto 1fr auto;
+  align-items: center;
+  gap: 8px;
+  border: 0;
+  color: inherit;
+  background: transparent;
+  font: inherit;
+  text-align: left;
+  text-transform: inherit;
+  cursor: pointer;
+}
+
+.testing-fairness-toggle:hover,
+.testing-fairness-toggle:focus-visible {
+  background: #e3e8eb;
+}
+
+.testing-fairness-toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.testing-fairness-chevron {
+  font-size: 1.1rem;
+  line-height: 1;
+  transform: rotate(0deg);
+  transition: transform 120ms ease;
+}
+
+.testing-fairness-toggle[aria-expanded="true"] .testing-fairness-chevron {
+  transform: rotate(90deg);
+}
+
+.testing-fairness-summary {
+  justify-self: end;
+  color: var(--muted);
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: none;
+}
+
+.testing-fairness-outcome {
+  width: 18px;
+  font-size: 1rem;
+  line-height: 1;
+  text-align: center;
+}
+
+.testing-fairness-outcome.passed {
+  color: var(--active);
+}
+
+.testing-fairness-outcome.failed {
+  color: var(--danger);
+}
+
+.testing-policy-row[hidden] {
+  display: none;
 }
 
 .testing-result {
@@ -122,6 +259,24 @@
 .testing-result-symbol {
   font-size: 1.1rem;
   line-height: 1;
+}
+
+.testing-tooltip {
+  position: fixed;
+  z-index: 20;
+  width: max-content;
+  max-width: min(520px, calc(100vw - 16px));
+  padding: 9px 11px;
+  color: #f5f7f8;
+  background: #17212a;
+  border: 1px solid #52606c;
+  border-radius: 4px;
+  box-shadow: 0 4px 12px rgb(12 18 24 / 20%);
+  font-size: 0.72rem;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  pointer-events: none;
 }
 
 .testing-detail {

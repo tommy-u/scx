@@ -20,7 +20,7 @@ use super::{
     TestingExecutionConfig, WorkloadCommand,
 };
 
-const ATTACH_TIMEOUT: Duration = Duration::from_secs(10);
+const ATTACH_TIMEOUT: Duration = Duration::from_secs(30);
 const STOP_TIMEOUT: Duration = Duration::from_secs(8);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
@@ -474,7 +474,14 @@ fn scheduler_exit_message(phase: &str, status: ExitStatus, scheduler_log: &Path)
 
 #[cfg(test)]
 mod tests {
-    use super::dmesg_delta;
+    use std::time::Duration;
+
+    use super::{dmesg_delta, ATTACH_TIMEOUT};
+
+    #[test]
+    fn attach_timeout_covers_slow_bpf_startup() {
+        assert!(ATTACH_TIMEOUT >= Duration::from_secs(30));
+    }
 
     #[test]
     fn dmesg_delta_handles_append_rollover_and_clear() {
