@@ -46,6 +46,7 @@ struct {
 struct task_observation {
 	u64 wakeup_at;
 	u64 running_at;
+	u64 blocked_at;
 };
 
 struct {
@@ -68,6 +69,13 @@ struct {
 	__type(key, u32);
 	__type(value, struct mitosis_callback_timing);
 } cpu_slice_duration SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, u32);
+	__type(value, struct mitosis_callback_timing);
+} blocked_duration SEC(".maps");
 
 static __always_inline void count_callback(enum callback_index callback)
 {
@@ -213,14 +221,27 @@ int BPF_PROG(observe_stopping_exit, struct task_struct *p, bool runnable)
 
 static __always_inline int record_wakeup(struct task_struct *p)
 {
+	struct mitosis_callback_timing *timing;
 	struct task_observation *observation;
+	u32 key = 0;
+	u64 now;
 
-	if (!p || !should_sample(READ_ONCE(event_timing_sample_rate)))
+	if (!p)
 		return 0;
-	observation = bpf_task_storage_get(&task_observations, p, 0,
-					   BPF_LOCAL_STORAGE_GET_F_CREATE);
+	now = bpf_ktime_get_ns();
+	observation = bpf_task_storage_get(&task_observations, p, 0, 0);
+	if (observation && observation->blocked_at) {
+		timing = bpf_map_lookup_elem(&blocked_duration, &key);
+		record_elapsed(timing, now - observation->blocked_at);
+		observation->blocked_at = 0;
+	}
+	if (!should_sample(READ_ONCE(event_timing_sample_rate)))
+		return 0;
+	if (!observation)
+		observation = bpf_task_storage_get(
+			&task_observations, p, 0, BPF_LOCAL_STORAGE_GET_F_CREATE);
 	if (observation)
-		observation->wakeup_at = bpf_ktime_get_ns();
+		observation->wakeup_at = now;
 	return 0;
 }
 
@@ -254,6 +275,15 @@ int BPF_PROG(on_sched_switch, bool preempt, struct task_struct *prev,
 			timing = bpf_map_lookup_elem(&cpu_slice_duration, &key);
 			record_elapsed(timing, now - observation->running_at);
 			observation->running_at = 0;
+		}
+		if (prev_state != 0 &&
+		    should_sample(READ_ONCE(event_timing_sample_rate))) {
+			if (!observation)
+				observation = bpf_task_storage_get(
+					&task_observations, prev, 0,
+					BPF_LOCAL_STORAGE_GET_F_CREATE);
+			if (observation)
+				observation->blocked_at = now;
 		}
 	}
 	observation = bpf_task_storage_get(&task_observations, next, 0, 0);
