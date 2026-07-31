@@ -66,6 +66,7 @@ async fn main() -> Result<()> {
             CALLBACK_NAMES.len()
         ]),
         scheduler_timings: Vec::new(),
+        migrations: Vec::new(),
     }));
     let (ready_tx, ready_rx) = mpsc::channel();
     let collector_state = state.clone();

@@ -5,6 +5,7 @@ const number = new Intl.NumberFormat("en-US");
 const rate = new Intl.NumberFormat("en-US", { maximumFractionDigits: 1 });
 const callbackTimingRows = document.querySelector("#callbackTimingRows");
 const schedulerTimingRows = document.querySelector("#schedulerTimingRows");
+const migrationRows = document.querySelector("#migrationRows");
 
 function timingValue(value) {
   return value == null ? "--" : number.format(value);
@@ -43,6 +44,19 @@ function renderTimings(snapshot) {
   schedulerTimingRows.replaceChildren(...schedulerRows);
 }
 
+function renderMigrations(migrations) {
+  const rows = migrations.map((migration) => {
+    const row = document.createElement("tr");
+    [migration.from_cpu, migration.to_cpu, migration.count].forEach((value) => {
+      const cell = document.createElement("td");
+      cell.textContent = number.format(value);
+      row.append(cell);
+    });
+    return row;
+  });
+  migrationRows.replaceChildren(...rows);
+}
+
 function renderHostContext(context) {
   document.querySelector("#hostname").textContent = context.identity.hostname;
   document.querySelector("#kernelRelease").textContent = context.identity.kernel_release;
@@ -54,6 +68,7 @@ function render(snapshot) {
   document.querySelector("#uptime").textContent = `${snapshot.uptime_seconds}s`;
   document.querySelector("#refreshed").textContent = new Date().toLocaleTimeString();
   renderTimings(snapshot);
+  renderMigrations(snapshot.migrations);
 
   const counters = new Map(snapshot.counters.map((counter) => [counter.name, counter]));
   cards.forEach((card, index) => {
