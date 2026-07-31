@@ -11,7 +11,7 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 
 use axum::body::Body;
-use axum::http::{Request, StatusCode};
+use axum::http::{header, Request, StatusCode};
 use http_body_util::BodyExt;
 use scx_snake_inspector::api::{router, ApiContext, CSRF_HEADER};
 use scx_snake_inspector::collector::CollectorCommand;
@@ -2328,6 +2328,49 @@ async fn root_page_embeds_session_configuration_and_local_assets() {
         script.headers()["content-type"],
         "text/javascript; charset=utf-8"
     );
+}
+
+#[tokio::test]
+async fn web_shell_disables_browser_caching() {
+    let (tx, _rx) = mpsc::channel();
+    let root = tempfile::tempdir().unwrap();
+    let app = router(ApiContext::new(
+        dashboard(),
+        tx,
+        "secret",
+        root.path().to_path_buf(),
+    ));
+
+    for uri in [
+        "/",
+        "/assets/app.js",
+        "/assets/heatmap.js",
+        "/assets/inspection.js",
+        "/assets/style.css",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(uri)
+                    .header("host", "127.0.0.1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "unexpected status for {uri}"
+        );
+        assert_eq!(
+            response.headers().get(header::CACHE_CONTROL).unwrap(),
+            "no-store",
+            "unexpected cache policy for {uri}"
+        );
+    }
 }
 
 #[tokio::test]

@@ -38,6 +38,7 @@ const APP_JS: &str = include_str!("web/app.js");
 const HEATMAP_JS: &str = include_str!("web/heatmap.js");
 const INSPECTION_JS: &str = include_str!("web/inspection.js");
 const STYLE_CSS: &str = include_str!("web/style.css");
+const WEB_CACHE_CONTROL: &str = "no-store";
 
 #[derive(Clone)]
 pub struct ApiContext {
@@ -290,45 +291,60 @@ fn is_loopback_host(host: &str) -> bool {
         .is_some_and(|address| address.is_loopback())
 }
 
-async fn index(State(context): State<ApiContext>) -> Html<String> {
-    Html(
-        INDEX_HTML
-            .replace("__SESSION_TOKEN__", &context.token)
-            .replace(
-                "__INITIAL_WINDOW_MS__",
-                &context.initial_window_ms.to_string(),
-            )
-            .replace(
-                "__MAX_WINDOW_MS__",
-                &context.dashboard.max_window_ms().to_string(),
-            ),
+async fn index(State(context): State<ApiContext>) -> impl IntoResponse {
+    (
+        [(header::CACHE_CONTROL, WEB_CACHE_CONTROL)],
+        Html(
+            INDEX_HTML
+                .replace("__SESSION_TOKEN__", &context.token)
+                .replace(
+                    "__INITIAL_WINDOW_MS__",
+                    &context.initial_window_ms.to_string(),
+                )
+                .replace(
+                    "__MAX_WINDOW_MS__",
+                    &context.dashboard.max_window_ms().to_string(),
+                ),
+        ),
     )
 }
 
 async fn app_script() -> impl IntoResponse {
     (
-        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        [
+            (header::CONTENT_TYPE, "text/javascript; charset=utf-8"),
+            (header::CACHE_CONTROL, WEB_CACHE_CONTROL),
+        ],
         APP_JS,
     )
 }
 
 async fn heatmap_script() -> impl IntoResponse {
     (
-        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        [
+            (header::CONTENT_TYPE, "text/javascript; charset=utf-8"),
+            (header::CACHE_CONTROL, WEB_CACHE_CONTROL),
+        ],
         HEATMAP_JS,
     )
 }
 
 async fn inspection_script() -> impl IntoResponse {
     (
-        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        [
+            (header::CONTENT_TYPE, "text/javascript; charset=utf-8"),
+            (header::CACHE_CONTROL, WEB_CACHE_CONTROL),
+        ],
         INSPECTION_JS,
     )
 }
 
 async fn stylesheet() -> impl IntoResponse {
     (
-        [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
+        [
+            (header::CONTENT_TYPE, "text/css; charset=utf-8"),
+            (header::CACHE_CONTROL, WEB_CACHE_CONTROL),
+        ],
         STYLE_CSS,
     )
 }
