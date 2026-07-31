@@ -3861,6 +3861,45 @@ scope = "task_allowed"
     }
 
     #[test]
+    fn global_remote_scan_uses_the_safe_single_peek_fast_path() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let dispatch = fs::read_to_string(root.join("src/bpf/queue_dispatch.h")).unwrap();
+        let dsq = fs::read_to_string(root.join("src/bpf/dsq.h")).unwrap();
+        let compat = fs::read_to_string(root.join("../../include/scx/compat.bpf.h")).unwrap();
+        let remote_scan = dispatch
+            .split_once("queue_dispatch_remote_scan_callback(")
+            .unwrap()
+            .1
+            .split_once("queue_dispatch_peek_remote(")
+            .unwrap()
+            .0;
+
+        assert_text_order(
+            remote_scan,
+            &[
+                "dsq_nr_queued(dsq)",
+                "if (loop_ctx->fast_move && nr_queued == 1)",
+                "dsq_move_to_local_untimed(dsq)",
+                "dsq_peek_vtime(dsq, &loop_ctx->candidate.vtime)",
+                "bpf_task_from_pid(p->pid)",
+            ],
+        );
+        assert_eq!(remote_scan.matches("dsq_peek_vtime(").count(), 1);
+        assert!(!remote_scan.contains("dsq_vtime_head("));
+        assert!(remote_scan.contains("SNAKE_QUEUE_CANDIDATE_MOVED"));
+        assert!(dispatch.contains("!loop_ctx->cpu_candidate.valid &&"));
+        assert!(dispatch.contains("!loop_ctx->local_candidate.valid &&"));
+        assert!(dispatch.contains("!(loop_ctx->prev->scx.flags & SCX_TASK_QUEUED)"));
+        assert!(dispatch.contains("remote_candidate->valid == SNAKE_QUEUE_CANDIDATE_MOVED"));
+        assert!(dsq.contains("dsq_peek_vtime("));
+
+        assert!(compat.contains("LINUX_KERNEL_VERSION >= KERNEL_VERSION(7, 1, 0)"));
+        assert!(compat.contains("bpf_iter_scx_dsq_new(&it, dsq_id, 0)"));
+        assert!(compat.contains("bpf_iter_scx_dsq_next(&it)"));
+        assert!(compat.contains("bpf_iter_scx_dsq_destroy(&it)"));
+    }
+
+    #[test]
     fn queue_rungs_have_independent_outcome_and_move_miss_counter_ranges() {
         let intf =
             fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bpf/intf.h"))
@@ -4392,7 +4431,7 @@ scope = "task_allowed"
         assert!(owners[0].1.contains("dsq_vtime_head("));
         let helper = owners[0]
             .1
-            .split_once("dsq_vtime_head(")
+            .split_once("dsq_peek_vtime(")
             .and_then(|(_, body)| body.split_once("dsq_create("))
             .map(|(body, _)| body)
             .unwrap();
@@ -4400,10 +4439,13 @@ scope = "task_allowed"
             helper,
             &[
                 "dsq_peek(dsq)",
-                "if (!p)",
-                "return false",
+                "if (!p || !vtime)",
+                "return NULL",
                 "READ_ONCE(p->scx.dsq_vtime)",
-                "return true",
+                "return p",
+                "dsq_nr_queued(dsq)",
+                "return false",
+                "dsq_peek_vtime(dsq, vtime)",
             ],
         );
         for (_, source) in &sources {
