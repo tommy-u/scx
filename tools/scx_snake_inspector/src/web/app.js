@@ -59,7 +59,6 @@ import {
   schedulerDebugModel,
   schedulerLifecycleRequest,
   schedulerUptimeLabel,
-  schedulerSettingModels,
   statsResetDisabled,
   stableSortTableRows,
   syncCallbackSampleRateControl,
@@ -209,7 +208,6 @@ const elements = {
   schedulerControlView: document.querySelector("#controlView"),
   schedulerExitDumpEnabled: document.querySelector("#schedulerExitDumpEnabled"),
   schedulerExitDumpLen: document.querySelector("#schedulerExitDumpLen"),
-  schedulerSettingsRows: document.querySelector("#schedulerSettingsRows"),
   schedulerVerbose: document.querySelector("#schedulerVerbose"),
   statsResetNotice: document.querySelector("#statsResetNotice"),
   startScheduler: document.querySelector("#startScheduler"),
@@ -1643,7 +1641,7 @@ function renderOverview() {
         <li><strong>${escapeHtml(callback.callback)}</strong><span>p99 ${escapeHtml(formatCallbackDuration(callback.p99Ns))} · ${formatCount(callback.samples)} samples</span></li>`).join("")}</ol></div>`
     : '<span class="overview-empty">No callback samples</span>';
   const rungRanking = model.tuning.rungs.ranked.length > 0
-    ? `<div><h4>Policy rungs · current generation</h4><ol class="overview-ranking">${model.tuning.rungs.ranked.map((rung) => `
+    ? `<div><h4>Policy ladder · current generation</h4><ol class="overview-ranking">${model.tuning.rungs.ranked.map((rung) => `
         <li><strong>Rung ${escapeHtml(rung.index)} · ${escapeHtml(rung.operation)}</strong><span>sampled p95 ${escapeHtml(formatCallbackDuration(rung.p95Ns))} · ${formatCount(rung.samples)} samples</span></li>`).join("")}</ol></div>`
     : '<span class="overview-empty">No sampled rung timing</span>';
   elements.overviewOverhead.innerHTML = `<div class="overview-overhead-groups">${callbackRanking}${rungRanking}</div>`;
@@ -2415,7 +2413,6 @@ function renderSchedulerControl() {
 
   elements.schedulerCurrentCommand.textContent = schedulerCurrentCommand(control);
   renderSchedulerCommandPreview();
-  renderSchedulerSettings(control);
 }
 
 function renderStatsResetControl() {
@@ -2493,19 +2490,6 @@ function formatLaunchDiffValue(value) {
     return value ? "enabled" : "disabled";
   }
   return String(value);
-}
-
-function renderSchedulerSettings(control) {
-  const settings = schedulerSettingModels(control?.settings || []);
-  replaceSortableTableBody(elements.schedulerSettingsRows, settings.length === 0
-    ? '<tr><td class="scheduler-settings-empty" colspan="4">No scheduler settings reported.</td></tr>'
-    : settings.map((setting) => `
-      <tr>
-        <th scope="row">${escapeHtml(setting.name)}</th>
-        <td><code>${escapeHtml(setting.effectiveValue)}</code><small>${setting.runtimeObserved ? "Observed from Snake" : "Derived from launch state"}</small></td>
-        <td class="${setting.differs ? "setting-differs" : ""}"><code>${escapeHtml(setting.overrideValue)}</code></td>
-        <td><span class="change-mode ${setting.changeMode}">${setting.changeLabel}</span></td>
-      </tr>`).join(""));
 }
 
 async function startScheduler() {

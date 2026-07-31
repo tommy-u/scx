@@ -53,7 +53,6 @@ test("workspace reorganization preserves every existing inspector surface", () =
     "queueTopology",
     "schedulerCurrentCommand",
     "schedulerCommandPreview",
-    "schedulerSettingsRows",
     "feedbackTranscript",
   ]) {
     assert.match(page, new RegExp(`id="${id}"`), `missing #${id}`);
@@ -876,7 +875,6 @@ test("every inspector table opts into one accessible sorting contract", () => {
   assert.equal(sortableTables.length, tables.length, "every table template must have a stable sort key");
   for (const key of [
     "callbacks:timing",
-    "configure:settings",
     "roadmap:mitosis-capabilities",
     "debugging:settings",
     "callbacks:fine:",

@@ -55,7 +55,7 @@
           </div>
           <div class="navigation-group">
             <span class="navigation-group-label">Inspect</span>
-            <a href="#/inspect/policy-slots" data-route="inspect/policy-slots">Policy rungs</a>
+            <a href="#/inspect/policy-slots" data-route="inspect/policy-slots">Policy ladders</a>
             <a href="#/inspect/queue-topology" data-route="inspect/queue-topology">Queue topology</a>
             <a href="#/inspect/cells" data-route="inspect/cells">Cells &amp; tasks</a>
           </div>
@@ -316,7 +316,7 @@
       <section class="view-panel hidden" id="policyView" data-view="inspect/policy-slots" aria-labelledby="policyTitle">
         <header class="view-heading">
           <div>
-            <h2 id="policyTitle">Policy rungs</h2>
+            <h2 id="policyTitle">Policy ladders</h2>
             <p>Current execution state compared with the last policy retained for safe replacement</p>
           </div>
           <span class="view-freshness" id="policyFreshness">Waiting for Snake</span>
@@ -484,17 +484,6 @@
           </div>
             </section>
 
-            <section class="scheduler-settings-section" aria-labelledby="schedulerSettingsTitle" data-feedback-key="Control:Change-behavior">
-          <header class="section-heading" data-feedback-anchor>
-            <h3 id="schedulerSettingsTitle">Change behavior</h3>
-          </header>
-          <div class="scheduler-settings-table-wrap">
-            <table data-sort-key="configure:settings">
-              <thead><tr><th scope="col" data-sort-column="0" data-sort-type="text">Setting</th><th scope="col" data-sort-column="1" data-sort-type="text">Effective now</th><th scope="col" data-sort-column="2" data-sort-type="text">Launch override</th><th scope="col" data-sort-column="3" data-sort-type="text">Application</th></tr></thead>
-              <tbody id="schedulerSettingsRows"></tbody>
-            </table>
-          </div>
-            </section>
           </div>
         </div>
       </section>
@@ -605,7 +594,7 @@
             <div class="project-diagram-scroll">
               <svg class="project-diagram project-workflow-diagram" data-diagram-key="operator-workflow" role="group" aria-labelledby="operatorWorkflowTitle operatorWorkflowDesc" viewBox="0 0 1180 360">
                 <title id="operatorWorkflowTitle">Recommended operator workflow</title>
-                <desc id="operatorWorkflowDesc">Begin in Overview, branch to placement, callback, queue, or cell evidence, inspect policy rungs, review configuration, and finish by copying a debugging snapshot when escalation is needed.</desc>
+                <desc id="operatorWorkflowDesc">Begin in Overview, branch to placement, callback, queue, or cell evidence, inspect policy ladders, review configuration, and finish by copying a debugging snapshot when escalation is needed.</desc>
                 <defs>
                   <marker id="workflowArrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
                     <path d="M 0 0 L 10 5 L 0 10 z"></path>
@@ -632,14 +621,14 @@
                 <a href="#/observe/callbacks" tabindex="0" focusable="true" aria-label="Inspect callback performance"><g class="project-diagram-node project-diagram-linked"><rect x="250" y="118" width="190" height="70" rx="8"></rect><text x="345" y="150" text-anchor="middle">Callback performance</text><text class="project-diagram-node-detail" x="345" y="171" text-anchor="middle">Scheduler overhead</text></g></a>
                 <a href="#/inspect/queue-topology" tabindex="0" focusable="true" aria-label="Inspect queue topology"><g class="project-diagram-node project-diagram-linked"><rect x="250" y="198" width="190" height="70" rx="8"></rect><text x="345" y="230" text-anchor="middle">Queue topology</text><text class="project-diagram-node-detail" x="345" y="251" text-anchor="middle">Backlog and routing</text></g></a>
                 <a href="#/inspect/cells" tabindex="0" focusable="true" aria-label="Inspect cells and tasks"><g class="project-diagram-node project-diagram-linked"><rect x="250" y="278" width="190" height="70" rx="8"></rect><text x="345" y="310" text-anchor="middle">Cells &amp; tasks</text><text class="project-diagram-node-detail" x="345" y="331" text-anchor="middle">Ownership and identity</text></g></a>
-                <a href="#/inspect/policy-slots" tabindex="0" focusable="true" aria-label="Inspect policy rungs"><g class="project-diagram-node project-diagram-linked"><rect x="530" y="68" width="190" height="80" rx="8"></rect><text x="625" y="102" text-anchor="middle">Policy rungs</text><text class="project-diagram-node-detail" x="625" y="125" text-anchor="middle">Explain the decision</text></g></a>
+                <a href="#/inspect/policy-slots" tabindex="0" focusable="true" aria-label="Inspect policy ladders"><g class="project-diagram-node project-diagram-linked"><rect x="530" y="68" width="190" height="80" rx="8"></rect><text x="625" y="102" text-anchor="middle">Policy ladders</text><text class="project-diagram-node-detail" x="625" y="125" text-anchor="middle">Explain the decision</text></g></a>
                 <a href="#/configure" tabindex="0" focusable="true" aria-label="Review scheduler and policy controls"><g class="project-diagram-node project-diagram-linked"><rect x="790" y="68" width="190" height="80" rx="8"></rect><text x="885" y="102" text-anchor="middle">Scheduler &amp; policies</text><text class="project-diagram-node-detail" x="885" y="125" text-anchor="middle">Review before change</text></g></a>
                 <a href="#/debugging/scheduler" tabindex="0" focusable="true" aria-label="Copy a debugging snapshot"><g class="project-diagram-node project-diagram-linked"><rect x="1030" y="68" width="130" height="80" rx="8"></rect><text x="1095" y="102" text-anchor="middle">Debugging</text><text class="project-diagram-node-detail" x="1095" y="125" text-anchor="middle">Escalate</text></g></a>
               </svg>
             </div>
             <ol class="project-diagram-equivalent" data-diagram-equivalent="operator-workflow">
               <li>Begin in <a href="#/overview">Overview</a> and identify whether the dominant signal is placement, callback cost, queueing, or cell ownership.</li>
-              <li>Open the matching detailed workspace, then use <a href="#/inspect/policy-slots">Policy rungs</a> to explain the decision path.</li>
+              <li>Open the matching detailed workspace, then use <a href="#/inspect/policy-slots">Policy ladders</a> to explain the decision path.</li>
               <li>Use <a href="#/configure">Scheduler &amp; policies</a> only after the evidence is understood.</li>
               <li>Capture <a href="#/debugging/scheduler">Debugging</a> state before escalation or restart.</li>
             </ol>
@@ -1033,7 +1022,7 @@
           </div>
           <div class="navigation-group">
             <span class="navigation-group-label">Inspect</span>
-            <a href="#/inspect/policy-slots" data-route="inspect/policy-slots">Policy rungs</a>
+            <a href="#/inspect/policy-slots" data-route="inspect/policy-slots">Policy ladders</a>
             <a href="#/inspect/queue-topology" data-route="inspect/queue-topology">Queue topology</a>
             <a href="#/inspect/cells" data-route="inspect/cells">Cells &amp; tasks</a>
           </div>

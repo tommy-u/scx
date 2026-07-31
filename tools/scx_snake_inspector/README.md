@@ -13,7 +13,7 @@ The embedded interface is organized by purpose rather than a fixed view count:
   and independent fine-grained captures.
 - **Configure** contains **Scheduler & policies**, which catalogs validated
   policies, previews launch impact, and controls start, stop, and restart.
-- **Inspect** contains **Policy rungs**, **Queue topology**, and **Cells & tasks**
+- **Inspect** contains **Policy ladders**, **Queue topology**, and **Cells & tasks**
   for installed BPF state, resolved routing, resource domains, task mappings,
   and bounded workload-cell assignment.
 - **Project** contains **Operations**, a concise data-flow, operating-boundary,
@@ -72,7 +72,7 @@ local destination.
 An aligned strip above the matrix shows per-CPU utilization reported by
 Snake's stats socket. The strip always covers all Snake tasks; TGID and cgroup
 selectors apply only to the migration matrix. Window, CPU order, color scale,
-and zoom apply to both **Placement** visualizations. **Policy rungs** and
+and zoom apply to both **Placement** visualizations. **Policy ladders** and
 **Cells & tasks** require a Snake build that exports the versioned `inspect`
 stats target; **Placement** remains available with older compatible schedulers.
 **Callback performance** reports an unsupported state when the active Snake

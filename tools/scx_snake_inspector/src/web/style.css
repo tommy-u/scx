@@ -2716,8 +2716,7 @@ button:focus-visible {
   border-color: #9bbbd5;
 }
 
-.scheduler-launch-section,
-.scheduler-settings-section {
+.scheduler-launch-section {
   padding: 20px clamp(16px, 3vw, 40px) 24px;
   background: var(--surface);
   border-bottom: 1px solid var(--border);
@@ -2899,39 +2898,6 @@ button:focus-visible {
   margin-top: 12px;
 }
 
-.scheduler-settings-table-wrap {
-  overflow: auto;
-  border: 1px solid var(--border);
-  border-radius: 4px;
-}
-
-.scheduler-settings-table-wrap table {
-  width: 100%;
-  min-width: 560px;
-  border-collapse: collapse;
-  table-layout: fixed;
-}
-
-.scheduler-settings-table-wrap th,
-.scheduler-settings-table-wrap td {
-  padding: 9px 12px;
-  border-bottom: 1px solid var(--border);
-  font-size: 0.73rem;
-  text-align: left;
-  overflow-wrap: anywhere;
-}
-
-.scheduler-settings-table-wrap thead th {
-  color: var(--muted);
-  background: var(--surface-muted);
-  font-size: 0.65rem;
-  font-weight: 700;
-}
-
-.scheduler-settings-table-wrap tbody tr:last-child > * {
-  border-bottom: 0;
-}
-
 .change-mode {
   display: inline-block;
   padding: 3px 6px;
@@ -2963,11 +2929,6 @@ button:focus-visible {
   color: #8a2431;
   background: #fbeaec;
   border-color: #d9a0a7;
-}
-
-.scheduler-settings-empty {
-  color: var(--muted);
-  text-align: center !important;
 }
 
 .empty-state {
@@ -3377,8 +3338,7 @@ button:focus-visible {
     max-height: none;
   }
 
-  .scheduler-launch-section,
-  .scheduler-settings-section {
+  .scheduler-launch-section {
     padding: 14px 12px 18px;
   }
 
@@ -4201,8 +4161,7 @@ body {
   flex: 0 0 auto;
 }
 
-.configure-detail .scheduler-launch-section,
-.configure-detail .scheduler-settings-section {
+.configure-detail .scheduler-launch-section {
   padding-right: clamp(16px, 2.5vw, 32px);
   padding-left: clamp(16px, 2.5vw, 32px);
 }

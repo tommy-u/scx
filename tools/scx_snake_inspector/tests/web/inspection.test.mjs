@@ -32,7 +32,6 @@ import {
   schedulerLaunchRequest,
   schedulerLifecycleRequest,
   schedulerUptimeLabel,
-  schedulerSettingModels,
   statsResetDisabled,
   rungLadderPercentages,
   rungPercentages,
@@ -540,63 +539,6 @@ test("lifecycle requests preserve callback launch overrides without materializin
   );
 });
 
-test("scheduler settings separate effective runtime values from launch overrides", () => {
-  assert.deepEqual(
-    schedulerSettingModels([
-      {
-        name: "callback_timing_sample_rate",
-        effective: 128,
-        launch_override: 64,
-        runtime_observed: true,
-        change_mode: "dynamic",
-      },
-      {
-        name: "fairness",
-        effective: "vtime",
-        launch_override: null,
-        runtime_observed: true,
-        change_mode: "reload",
-      },
-      {
-        name: "stats_reset",
-        effective: "On demand",
-        launch_override: null,
-        runtime_observed: false,
-        change_mode: "dynamic",
-      },
-    ]),
-    [
-      {
-        name: "Callback sample rate",
-        effectiveValue: "1 / 128",
-        overrideValue: "1 / 64",
-        runtimeObserved: true,
-        differs: true,
-        changeMode: "dynamic",
-        changeLabel: "Dynamic",
-      },
-      {
-        name: "Fairness",
-        effectiveValue: "VTIME",
-        overrideValue: "Omitted; Snake default applies",
-        runtimeObserved: true,
-        differs: false,
-        changeMode: "reload",
-        changeLabel: "Reload required",
-      },
-      {
-        name: "Stats reset",
-        effectiveValue: "On demand",
-        overrideValue: "—",
-        runtimeObserved: false,
-        differs: false,
-        changeMode: "dynamic",
-        changeLabel: "Dynamic",
-      },
-    ],
-  );
-});
-
 test("scheduler control settings expose authoritative Snake defaults", () => {
   const source = readFileSync(
     new URL("../../src/api.rs", import.meta.url),
@@ -695,7 +637,7 @@ test("scheduler control surfaces external ownership and managed launch exits", (
   );
 });
 
-test("configure workspace exposes policy selection, launch controls, and settings", () => {
+test("configure workspace exposes policy and launch controls without a duplicate settings table", () => {
   const page = readFileSync(
     new URL("../../src/web/index.html", import.meta.url),
     "utf8",
@@ -711,7 +653,6 @@ test("configure workspace exposes policy selection, launch controls, and setting
     'id="startScheduler"',
     'id="restartScheduler"',
     'id="stopScheduler"',
-    'id="schedulerSettingsRows"',
   ]) {
     assert.match(page, new RegExp(control), `missing ${control}`);
   }
@@ -720,8 +661,18 @@ test("configure workspace exposes policy selection, launch controls, and setting
   assert.doesNotMatch(page, /id="schedulerFairnessEnabled"|id="schedulerFairness"/);
   assert.doesNotMatch(page, /id="schedulerSampleRateEnabled"|id="schedulerSampleRate"/);
   assert.doesNotMatch(page, /Override fairness|Override callback sampling/);
-  assert.match(page, /Effective now/);
-  assert.match(page, /Launch override/);
+  assert.doesNotMatch(page, /id="schedulerSettingsRows"|Control:Change-behavior/);
+});
+
+test("policy inspection is named Policy ladders while retaining rung terminology", () => {
+  const page = readFileSync(
+    new URL("../../src/web/index.html", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(page, /<h2 id="policyTitle">Policy ladders<\/h2>/);
+  assert.match(page, />Policy ladders<\/a>/);
+  assert.doesNotMatch(page, /Policy rungs/i);
 });
 
 test("global statistics reset is exposed by callback performance, not Configure", () => {
@@ -2191,7 +2142,6 @@ test("every planned feedback target has a stable semantic key", () => {
     "Cells:Cell-detail",
     "Control:Launch-configuration",
     "Control:Command-preview",
-    "Control:Change-behavior",
   ]) {
     assert.match(source, new RegExp(key), `missing feedback target ${key}`);
   }
@@ -2435,7 +2385,7 @@ test("Control feedback buttons use reserved right-aligned anchors", () => {
   );
 
   assert.match(page, /id="schedulerCurrentCommand"/);
-  assert.ok((page.match(/data-feedback-anchor/g) || []).length >= 3);
+  assert.ok((page.match(/data-feedback-anchor/g) || []).length >= 2);
   assert.match(script, /matches\("\[data-feedback-anchor\]"\)/);
   assert.match(stylesheet, /\.feedback-heading\s*\{[^}]*justify-content:\s*space-between/s);
   assert.match(stylesheet, /\.scheduler-feedback-anchor\.feedback-heading\s*\{[^}]*justify-content:\s*flex-end/s);

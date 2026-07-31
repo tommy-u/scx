@@ -2291,32 +2291,6 @@ function debugValuesEqual(left, right) {
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
-export function schedulerSettingModels(settings) {
-  return (settings || []).map((setting) => {
-    const changeMode = setting.change_mode === "dynamic" ? "dynamic" : "reload";
-    const effective = setting.effective ?? setting.value ?? null;
-    const launchOverride = setting.launch_override ?? null;
-    const overrideValue = setting.name === "stats_reset"
-      ? "—"
-      : launchOverride == null
-        ? "Omitted; Snake default applies"
-        : formatSchedulerSettingValue(setting.name, launchOverride);
-    return {
-      name: schedulerSettingName(setting.name),
-      effectiveValue: effective == null
-        ? "Not observed"
-        : formatSchedulerSettingValue(setting.name, effective),
-      overrideValue,
-      runtimeObserved: Boolean(setting.runtime_observed),
-      differs: effective != null
-        && launchOverride != null
-        && String(effective) !== String(launchOverride),
-      changeMode,
-      changeLabel: changeMode === "dynamic" ? "Dynamic" : "Reload required",
-    };
-  });
-}
-
 function formatSchedulerSettingValue(name, value) {
   if (name === "fairness") {
     return String(value).toUpperCase();
