@@ -303,6 +303,9 @@ fn encode_ladder(
                 _ => bail!("unsupported compiled enqueue rung {}", rung.describe()),
             }
         }
+        if queues.direct_dispatch {
+            enqueue_rungs[0].flags = policy::QUEUE_RUNG_FLAG_DIRECT_DISPATCH;
+        }
         for (destination, rung) in dispatch_rungs.iter_mut().zip(&queues.dispatch) {
             match (rung.action, rung.source, rung.operation) {
                 (QueueDispatchAction::Consume, Some(QueueDispatchSource::Cell), None) => {
@@ -4820,7 +4823,7 @@ scope = "task_allowed"
         let policy = policy::compile_policy(policy_source()).expect("policy should compile");
         let encoded = encode_ladder(&policy, 42).expect("ladder should encode");
 
-        assert_eq!(bpf_intf::SNAKE_ABI_VERSION, 21);
+        assert_eq!(bpf_intf::SNAKE_ABI_VERSION, 22);
         assert_eq!(size_of::<bpf_intf::snake_callback_timing>(), 520);
         assert_eq!(offset_of!(bpf_intf::snake_callback_timing, total_ns), 0);
         assert_eq!(offset_of!(bpf_intf::snake_callback_timing, buckets), 8);
@@ -5105,6 +5108,43 @@ scope = "task_allowed"
         assert_eq!(encoded.dispatch_rungs[3].data, 0x0003_0201);
         assert!(encoded.enqueue_rungs.iter().all(|rung| rung.reserved == 0));
         assert!(encoded.dispatch_rungs.iter().all(|rung| rung.reserved == 0));
+    }
+
+    #[test]
+    fn encodes_and_executes_opt_in_llc_direct_dispatch() {
+        let policy = policy::compile_policy(
+            r#"
+[queues]
+layout = "llc"
+direct_dispatch = true
+
+[[rung]]
+operation = "pick_idle"
+scope = "task_allowed"
+"#,
+        )
+        .expect("direct-dispatch LLC policy should compile");
+        let encoded = encode_ladder(&policy, 10).unwrap();
+        assert_eq!(encoded.enqueue_rungs[0].flags, 1);
+
+        let bpf_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bpf");
+        let main = fs::read_to_string(bpf_dir.join("main.bpf.c")).unwrap();
+        let queue_ladder = fs::read_to_string(bpf_dir.join("queue_ladder.h")).unwrap();
+        let select = main
+            .split_once("BPF_STRUCT_OPS(snake_select_cpu")
+            .and_then(|(_, body)| body.split_once("BPF_STRUCT_OPS(snake_enqueue"))
+            .map(|(body, _)| body)
+            .unwrap();
+
+        assert!(queue_ladder.contains("queue_direct_dispatch_enabled("));
+        assert_text_order(
+            select,
+            &[
+                "queue_direct_dispatch_enabled(&ladder_ctx)",
+                "queue_fairness_select_cpu(",
+                "dsq_insert_local(",
+            ],
+        );
     }
 
     #[test]

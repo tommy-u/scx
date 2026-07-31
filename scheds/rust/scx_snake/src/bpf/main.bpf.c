@@ -150,6 +150,9 @@ s32 BPF_STRUCT_OPS(snake_select_cpu, struct task_struct *p, s32 prev_cpu,
 					 SNAKE_STAT_DIRECT_DISPATCHES);
 				goto out_success;
 			}
+			if (queue_direct_dispatch_enabled(&ladder_ctx) &&
+			    !(dispatch_flags & SCX_ENQ_PREEMPT))
+				goto direct_dispatch;
 			fine_stage_started_at =
 				fine_timing_select_start(callback_started_at);
 			ret = queue_fairness_select_cpu(&ladder_ctx, p, cpu);
@@ -165,6 +168,7 @@ s32 BPF_STRUCT_OPS(snake_select_cpu, struct task_struct *p, s32 prev_cpu,
 			}
 			goto out_success;
 		}
+	direct_dispatch:
 		if (fairness_is_ordered() &&
 		    (dispatch_flags & SCX_ENQ_PREEMPT)) {
 			fine_stage_started_at =

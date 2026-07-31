@@ -116,6 +116,7 @@ pub struct QueueRungInspectionView {
 #[derive(Clone, Debug, Serialize)]
 pub struct QueuePolicyInspectionView {
     pub layout: String,
+    pub direct_dispatch: bool,
     pub enqueue: Vec<QueueRungInspectionView>,
     pub dispatch: Vec<QueueRungInspectionView>,
 }
@@ -562,6 +563,7 @@ fn queue_policy_view(
             QueueLayout::Llc => "llc",
         }
         .into(),
+        direct_dispatch: queues.direct_dispatch,
         enqueue: queues
             .enqueue
             .iter()

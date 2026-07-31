@@ -8,7 +8,7 @@ typedef unsigned int	   u32;
 typedef unsigned long long u64;
 #endif
 
-#define SNAKE_ABI_VERSION 21
+#define SNAKE_ABI_VERSION 22
 #define SNAKE_MAX_RUNGS 8
 #define SNAKE_MAX_QUEUE_RUNGS 8
 #define SNAKE_LADDER_SLOTS 2
@@ -30,6 +30,7 @@ typedef unsigned long long u64;
 #define SNAKE_RUNG_F_INTERSECT_TASK_ALLOWED (1U << 0)
 #define SNAKE_RUNG_F_PICK_IDLE_CORE (1U << 1)
 #define SNAKE_RUNG_F_PICK_RANDOM (1U << 2)
+#define SNAKE_QUEUE_RUNG_F_DIRECT_DISPATCH (1U << 0)
 #define SNAKE_EEVDF_SLICE_NS 5000000ULL
 #define SNAKE_EEVDF_PROMOTE_BATCH 64
 #define SNAKE_EEVDF_ELIGIBLE_DSQ 0

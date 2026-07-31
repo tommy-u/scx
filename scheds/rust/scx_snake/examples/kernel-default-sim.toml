@@ -4,6 +4,7 @@ fallback = "previous_cpu"
 # normal queues and a rotating remote source for each CPU.
 [queues]
 layout = "llc"
+direct_dispatch = true
 enqueue = [
   { action = "try_insert", target = "local" },
   { action = "insert", target = "cpu" },

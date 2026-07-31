@@ -14,6 +14,7 @@ pub const MAX_QUEUE_RUNGS: usize = 8;
 pub const RUNG_FLAG_INTERSECT_TASK_ALLOWED: u32 = 1;
 pub const RUNG_FLAG_PICK_IDLE_CORE: u32 = 1 << 1;
 pub const RUNG_FLAG_PICK_RANDOM: u32 = 1 << 2;
+pub const QUEUE_RUNG_FLAG_DIRECT_DISPATCH: u32 = 1;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u32)]
@@ -81,6 +82,7 @@ pub enum QueueLayout {
 pub struct QueuePolicy {
     pub layout: QueueLayout,
     pub cell0_cpu_weight: u32,
+    pub direct_dispatch: bool,
     pub enqueue: Vec<QueueEnqueueRung>,
     pub dispatch: Vec<QueueDispatchRung>,
 }
@@ -172,9 +174,14 @@ impl CompiledPolicy {
                 format!(" cell0_cpu_weight={}", queues.cell0_cpu_weight)
             };
             output.push_str(&format!(
-                "queues: layout={}{} enqueue={} dispatch={}\n",
+                "queues: layout={}{}{} enqueue={} dispatch={}\n",
                 queues.layout.as_str(),
                 cell_weight,
+                if queues.direct_dispatch {
+                    " direct_dispatch=true"
+                } else {
+                    ""
+                },
                 queues
                     .enqueue
                     .iter()
@@ -418,6 +425,8 @@ struct SemanticCell {
 struct SemanticQueuePolicy {
     layout: String,
     cell0_cpu_weight: Option<u32>,
+    #[serde(default)]
+    direct_dispatch: bool,
     enqueue: Option<Vec<SemanticQueueEnqueueRung>>,
     dispatch: Option<Vec<SemanticQueueDispatchRung>>,
 }
@@ -609,6 +618,11 @@ fn compile_queue_policy(
             "queue layout `llc` does not support cell0_cpu_weight".into(),
         ));
     }
+    if queues.direct_dispatch && layout != QueueLayout::Llc {
+        return Err(PolicyError(
+            "direct dispatch requires queue layout `llc`".into(),
+        ));
+    }
     if layout != QueueLayout::Llc && declared_cells >= MAX_QUEUE_CELLS {
         return Err(PolicyError(format!(
             "queue policies support at most {} declared cells plus synthetic cell 0",
@@ -632,6 +646,7 @@ fn compile_queue_policy(
     Ok(Some(QueuePolicy {
         layout,
         cell0_cpu_weight,
+        direct_dispatch: queues.direct_dispatch,
         enqueue,
         dispatch,
     }))
@@ -1781,6 +1796,45 @@ scope = "task_allowed"
         assert!(policy.dump().contains(
             "enqueue=try_insert(local),insert(cpu) dispatch=peek(cpu),peek(local),peek(remote),consume(min_vtime;fallback=cpu,local,remote)"
         ));
+        assert!(!policy.dump().contains("direct_dispatch=true"));
+    }
+
+    #[test]
+    fn llc_queue_policy_can_enable_direct_dispatch() {
+        let policy = compile_policy(
+            r#"
+[queues]
+layout = "llc"
+direct_dispatch = true
+
+[[rung]]
+operation = "pick_idle"
+scope = "task_allowed"
+"#,
+        )
+        .expect("global LLC queue policy should support direct dispatch");
+
+        assert!(policy.dump().contains("direct_dispatch=true"));
+
+        let error = error_for(
+            r#"
+[queues]
+layout = "cell"
+direct_dispatch = true
+
+[[cell]]
+id = 7
+cpus = "0-3"
+
+[[rung]]
+operation = "pick_idle"
+scope = "task_cell"
+"#,
+        );
+        assert!(
+            error.contains("direct dispatch requires queue layout `llc`"),
+            "{error}"
+        );
     }
 
     #[test]
