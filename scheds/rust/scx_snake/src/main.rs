@@ -4440,6 +4440,28 @@ scope = "task_allowed"
     }
 
     #[test]
+    fn vm_matrix_snapshots_inputs_and_scales_deadlines() {
+        let tests = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests");
+        let local = fs::read_to_string(tests.join("vm_matrix_local.sh")).unwrap();
+        let shard = fs::read_to_string(tests.join("vm_matrix_shard.sh")).unwrap();
+
+        assert!(local.contains("inputs_dir=${campaign_dir}/inputs"));
+        assert!(local.contains("snapshot_snake=${inputs_dir}/scx_snake"));
+        assert!(local.contains("snapshot_inspector=${inputs_dir}/scx_snake_inspector"));
+        assert!(local.contains("snapshot_policies=${inputs_dir}/policies"));
+        assert!(local.contains("chmod -R a-w \"${inputs_dir}\""));
+        assert!(local.contains("max_cases_per_shard="));
+        assert!(local.contains("case_budget_secs="));
+        assert!(!local.contains("SNAKE_TESTING_VM_TIMEOUT_SECS:-2700"));
+
+        assert!(shard.contains("policy_dir=${6:-"));
+        assert!(shard.contains("assigned_cases=$(jq -er '.matrix.assigned_cases'"));
+        assert!(shard.contains("duration_secs=$(jq -er '.matrix.duration_secs'"));
+        assert!(shard.contains("case_budget_secs=$((duration_secs + 45))"));
+        assert!(!shard.contains("SECONDS + 2100"));
+    }
+
+    #[test]
     fn bpf_dsq_head_peek_has_one_shared_implementation() {
         let bpf_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bpf");
         let sources = bpf_sources(&bpf_dir);

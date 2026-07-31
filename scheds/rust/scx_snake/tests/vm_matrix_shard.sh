@@ -10,6 +10,7 @@ snake_bin=${2:-${repo}/target/release/scx_snake}
 shard_index=${3:-0}
 shard_count=${4:-8}
 artifact_dir=${5:-${repo}/artifacts/snake-testing/shard-${shard_index}}
+policy_dir=${6:-${repo}/scheds/rust/scx_snake/examples}
 listen=${SNAKE_TESTING_LISTEN:-127.0.0.1:8788}
 base_url=http://${listen}
 inspector_pid=
@@ -43,6 +44,7 @@ fi
 (( shard_index < shard_count )) || fail "shard index must be less than shard count"
 [[ -x ${inspector_bin} ]] || fail "inspector binary is not executable: ${inspector_bin}"
 [[ -x ${snake_bin} ]] || fail "Snake binary is not executable: ${snake_bin}"
+[[ -d ${policy_dir} ]] || fail "policy directory does not exist: ${policy_dir}"
 command -v curl >/dev/null || fail "curl is required"
 command -v jq >/dev/null || fail "jq is required"
 
@@ -50,7 +52,7 @@ mkdir -p "${artifact_dir}"
 "${inspector_bin}" \
     --listen "${listen}" \
     --snake-bin "${snake_bin}" \
-    --policy-dir "${repo}/scheds/rust/scx_snake/examples" \
+    --policy-dir "${policy_dir}" \
     --enable-testing \
     --testing-isolated \
     --testing-duration 60s \
@@ -72,6 +74,13 @@ token=$(curl --fail --silent "${base_url}/" -H "host: ${listen}" |
     sed -n 's/.*name="snake-session-token" content="\([^"]*\)".*/\1/p')
 [[ -n ${token} ]] || fail "could not read the inspector session token"
 
+assigned_cases=$(jq -er '.matrix.assigned_cases' "${artifact_dir}/initial.json")
+duration_secs=$(jq -er '.matrix.duration_secs' "${artifact_dir}/initial.json")
+[[ ${assigned_cases} =~ ^[0-9]+$ ]] || fail "invalid assigned case count: ${assigned_cases}"
+[[ ${duration_secs} =~ ^[1-9][0-9]*$ ]] || fail "invalid case duration: ${duration_secs}"
+case_budget_secs=$((duration_secs + 45))
+shard_timeout_secs=$((assigned_cases * case_budget_secs + 60))
+
 curl --fail --silent --show-error \
     -X POST "${base_url}/api/testing/run" \
     -H "host: ${listen}" \
@@ -79,7 +88,7 @@ curl --fail --silent --show-error \
     -H "x-snake-token: ${token}" \
     -d '{}' >"${artifact_dir}/started.json"
 
-deadline=$((SECONDS + 2100))
+deadline=$((SECONDS + shard_timeout_secs))
 while :; do
     kill -0 "${inspector_pid}" 2>/dev/null || fail "inspector exited during the test run"
     curl --fail --silent "${base_url}/api/testing/matrix" \
@@ -98,7 +107,8 @@ while :; do
             fail "unexpected testing status: ${status}"
             ;;
     esac
-    (( SECONDS < deadline )) || fail "testing shard exceeded 35 minutes"
+    (( SECONDS < deadline )) ||
+        fail "testing shard exceeded ${shard_timeout_secs}-second budget"
     sleep 1
 done
 
