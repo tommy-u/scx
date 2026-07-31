@@ -211,6 +211,16 @@ fn read_cpu_slice_duration(skel: &BpfSkel<'_>) -> Result<CallbackTimingCounters>
     aggregate_timing(values, "on_cpu_slice")
 }
 
+fn read_blocked_duration(skel: &BpfSkel<'_>) -> Result<CallbackTimingCounters> {
+    let key = 0_u32.to_ne_bytes();
+    let values = skel
+        .maps
+        .blocked_duration
+        .lookup_percpu(&key, MapFlags::ANY)?
+        .context("blocked duration entry missing")?;
+    aggregate_timing(values, "blocked_off_cpu")
+}
+
 fn aggregate_timing(values: Vec<Vec<u8>>, name: &str) -> Result<CallbackTimingCounters> {
     const U64_BYTES: usize = std::mem::size_of::<u64>();
     const VALUE_BYTES: usize = (CALLBACK_TIMING_BUCKETS + 1) * U64_BYTES;
@@ -275,6 +285,7 @@ pub fn run(
     let callback_timings = read_callback_timings(&skel)?;
     let wakeup_latency = read_wakeup_latency(&skel)?;
     let cpu_slice_duration = read_cpu_slice_duration(&skel)?;
+    let blocked_duration = read_blocked_duration(&skel)?;
     let mut previous_at = Instant::now();
     {
         let mut snapshot = state.write().expect("snapshot lock poisoned");
@@ -289,6 +300,7 @@ pub fn run(
             scheduler_timings: vec![
                 build_timing_metric_row("wakeup_to_running", &wakeup_latency),
                 build_timing_metric_row("on_cpu_slice", &cpu_slice_duration),
+                build_timing_metric_row("blocked_off_cpu", &blocked_duration),
             ],
         };
     }
@@ -303,6 +315,7 @@ pub fn run(
         let callback_timings = read_callback_timings(&skel)?;
         let wakeup_latency = read_wakeup_latency(&skel)?;
         let cpu_slice_duration = read_cpu_slice_duration(&skel)?;
+        let blocked_duration = read_blocked_duration(&skel)?;
         let counters = build_counters(current, previous, now.duration_since(previous_at));
         previous = current;
         previous_at = now;
@@ -313,6 +326,7 @@ pub fn run(
         snapshot.scheduler_timings = vec![
             build_timing_metric_row("wakeup_to_running", &wakeup_latency),
             build_timing_metric_row("on_cpu_slice", &cpu_slice_duration),
+            build_timing_metric_row("blocked_off_cpu", &blocked_duration),
         ];
     }
     Ok(())
