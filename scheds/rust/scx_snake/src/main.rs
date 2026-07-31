@@ -3866,7 +3866,7 @@ scope = "task_allowed"
     }
 
     #[test]
-    fn global_remote_scan_uses_the_safe_single_peek_fast_path() {
+    fn global_remote_scan_keeps_one_verifier_safe_candidate_state() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let dispatch = fs::read_to_string(root.join("src/bpf/queue_dispatch.h")).unwrap();
         let dsq = fs::read_to_string(root.join("src/bpf/dsq.h")).unwrap();
@@ -3883,19 +3883,15 @@ scope = "task_allowed"
             remote_scan,
             &[
                 "dsq_nr_queued(dsq)",
-                "if (loop_ctx->fast_move && nr_queued == 1)",
-                "dsq_move_to_local_untimed(dsq)",
+                "if (!nr_queued)",
                 "dsq_peek_vtime(dsq, &loop_ctx->candidate.vtime)",
                 "bpf_task_from_pid(p->pid)",
             ],
         );
         assert_eq!(remote_scan.matches("dsq_peek_vtime(").count(), 1);
         assert!(!remote_scan.contains("dsq_vtime_head("));
-        assert!(remote_scan.contains("SNAKE_QUEUE_CANDIDATE_MOVED"));
-        assert!(dispatch.contains("!loop_ctx->cpu_candidate.valid &&"));
-        assert!(dispatch.contains("!loop_ctx->local_candidate.valid &&"));
-        assert!(dispatch.contains("!(loop_ctx->prev->scx.flags & SCX_TASK_QUEUED)"));
-        assert!(dispatch.contains("remote_state == SNAKE_QUEUE_CANDIDATE_MOVED"));
+        assert!(!remote_scan.contains("fast_move"));
+        assert!(!dispatch.contains("SNAKE_QUEUE_CANDIDATE_MOVED"));
         assert!(dsq.contains("dsq_peek_vtime("));
 
         assert!(compat.contains("LINUX_KERNEL_VERSION >= KERNEL_VERSION(7, 1, 0)"));
