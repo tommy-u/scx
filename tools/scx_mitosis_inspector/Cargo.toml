@@ -1,0 +1,25 @@
+[package]
+name = "scx_mitosis_inspector"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0-only"
+description = "Standalone callback and scheduler stats inspector for scx_mitosis"
+
+[workspace]
+
+[dependencies]
+anyhow = "1"
+axum = "0.8"
+clap = { version = "4", features = ["derive"] }
+libbpf-rs = "=0.26.2"
+scx_stats = { path = "../../rust/scx_stats", version = "1.1.1" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+
+[dev-dependencies]
+http-body-util = "0.1"
+tower = { version = "0.5", features = ["util"] }
+
+[build-dependencies]
+scx_cargo = { path = "../../rust/scx_cargo", version = "1.1.1" }

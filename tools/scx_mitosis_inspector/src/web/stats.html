@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Mitosis stats</title>
+    <link rel="stylesheet" href="/assets/style.css">
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="topbar-product">
+        <div class="product-title">
+          <h1>Mitosis inspector</h1>
+          <p>Scheduler activity and runtime statistics</p>
+        </div>
+      </div>
+      <div class="status" id="status" role="status" aria-live="polite">
+        <span class="status-dot" aria-hidden="true"></span>
+        <span id="statusText">Connecting</span>
+      </div>
+    </header>
+
+    <div class="workspace-shell">
+      <aside class="workspace-sidebar">
+        <nav class="workspace-navigation" aria-label="Inspector workspaces">
+          <span class="navigation-group-label">Observe</span>
+          <a href="/">Callbacks</a>
+          <a class="active" aria-current="page" href="/stats">Stats</a>
+        </nav>
+      </aside>
+
+      <main class="stats-main" id="app" tabindex="-1" aria-label="Mitosis scheduler stats">
+        <header class="view-heading">
+          <div>
+            <h2>Mitosis stats</h2>
+            <p>Scheduler-provided metrics</p>
+          </div>
+        </header>
+
+        <section class="summary" aria-label="Stats summary">
+          <dl>
+            <div><dt>Source</dt><dd>Mitosis stats server</dd></div>
+            <div><dt>Cells</dt><dd id="cellCount">--</dd></div>
+            <div><dt>Last refresh</dt><dd id="refreshed">--</dd></div>
+          </dl>
+        </section>
+
+        <section class="table-section" aria-labelledby="globalStatsHeading">
+          <h2 id="globalStatsHeading">Global metrics</h2>
+          <div class="table-scroll">
+            <table>
+              <thead><tr><th scope="col">Metric</th><th scope="col">Value</th></tr></thead>
+              <tbody id="globalStatsBody"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="table-section" aria-labelledby="cellStatsHeading">
+          <h2 id="cellStatsHeading">Cell metrics</h2>
+          <div class="table-scroll">
+            <table id="cellStatsTable">
+              <thead id="cellStatsHead"></thead>
+              <tbody id="cellStatsBody"></tbody>
+            </table>
+          </div>
+        </section>
+      </main>
+    </div>
+    <script src="/assets/stats.js" defer></script>
+  </body>
+</html>
