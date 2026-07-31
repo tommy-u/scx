@@ -155,7 +155,7 @@ static __always_inline bool dsq_move(struct bpf_iter_scx_dsq *iterator,
 	return moved;
 }
 
-static __always_inline bool
+static __noinline bool
 dsq_move_vtime(struct bpf_iter_scx_dsq *iterator, struct task_struct *p,
 	       dsq_id_t source, dsq_id_t target, u64 enq_flags,
 	       const struct snake_fine_timing_ctx *fine)
