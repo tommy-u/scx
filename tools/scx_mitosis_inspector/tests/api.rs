@@ -7,7 +7,7 @@ use scx_mitosis_inspector::api::{router, ApiContext};
 use scx_mitosis_inspector::collector::Snapshot;
 use scx_mitosis_inspector::host_context::{HostContextView, HostIdentityView};
 use scx_mitosis_inspector::stats::StatsSnapshot;
-use scx_mitosis_inspector::{CallbackCounter, CallbackTimingRow, TimingMetricRow};
+use scx_mitosis_inspector::{CallbackCounter, CallbackTimingRow, MigrationRow, TimingMetricRow};
 use serde_json::json;
 use tower::ServiceExt;
 
@@ -38,6 +38,11 @@ fn snapshot() -> Snapshot {
             p50_ns: Some(8_191),
             p95_ns: Some(32_767),
             p99_ns: None,
+        }],
+        migrations: vec![MigrationRow {
+            from_cpu: 2,
+            to_cpu: 7,
+            count: 19,
         }],
     }
 }
@@ -129,6 +134,8 @@ async fn counters_endpoint_returns_the_current_snapshot() {
     assert_eq!(value["callback_timings"][0]["mean_ns"], 211);
     assert_eq!(value["scheduler_timings"][0]["metric"], "wakeup_to_running");
     assert_eq!(value["scheduler_timings"][0]["samples"], 25);
+    assert_eq!(value["migrations"][0]["from_cpu"], 2);
+    assert_eq!(value["migrations"][0]["to_cpu"], 7);
 }
 
 #[tokio::test]
@@ -151,6 +158,7 @@ async fn index_is_the_one_page_inspector() {
     assert!(html.contains("id=\"callbackTimingRows\""));
     assert!(html.contains("id=\"schedulerTimingRows\""));
     assert!(html.contains("id=\"eventTimingSampleRate\""));
+    assert!(html.contains("id=\"migrationRows\""));
     assert!(html.contains("/assets/app.js"));
 }
 

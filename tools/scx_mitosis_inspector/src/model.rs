@@ -61,6 +61,13 @@ pub struct TimingMetricRow {
     pub p99_ns: Option<u64>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub struct MigrationRow {
+    pub from_cpu: u32,
+    pub to_cpu: u32,
+    pub count: u64,
+}
+
 pub fn build_counters(
     current: [u64; 5],
     previous: [u64; 5],
