@@ -371,45 +371,39 @@ static __noinline s32 walk_policy_rung(struct snake_ladder_ctx *ctx,
 	return -ENOENT;
 }
 
-struct snake_ladder_walk_loop_ctx {
-	struct snake_ladder_ctx	      ladder_ctx;
-	struct task_struct	     *p;
-	struct snake_ladder_walk_args walk_args;
-	s32			      result;
-};
-
-static long
-walk_policy_ladder_callback(u32 i, struct snake_ladder_walk_loop_ctx *loop_ctx)
-{
-	if (i >= SNAKE_MAX_RUNGS || i >= loop_ctx->ladder_ctx.ladder->nr_rungs)
-		return 1;
-	loop_ctx->result = walk_policy_rung(&loop_ctx->ladder_ctx, loop_ctx->p,
-					    i, &loop_ctx->walk_args);
-	return loop_ctx->result != -ENOENT;
-}
-
 /* Evaluate the configured rungs in order until one returns a valid hint. */
 static __noinline s32
 walk_policy_ladder(struct snake_ladder_ctx *ctx, struct task_struct *p,
 		   struct snake_ladder_walk_args *walk_args)
 {
-	struct snake_ladder_walk_loop_ctx loop_ctx = {
-		.ladder_ctx = *ctx,
-		.p	    = p,
-		.walk_args  = *walk_args,
-		.result	    = -ENOENT,
-	};
-	long nr_loops;
+	s32 result;
 
-	nr_loops   = bpf_loop(SNAKE_MAX_RUNGS, walk_policy_ladder_callback,
-			      &loop_ctx, 0);
-	*walk_args = loop_ctx.walk_args;
-	if (nr_loops < 0) {
-		stat_inc(ctx, SNAKE_STAT_INVALID_ERRORS);
-		scx_bpf_error("snake policy ladder loop failed: %ld", nr_loops);
-		return nr_loops;
-	}
-	return loop_ctx.result;
+	/* Linux 7.1 retains bpf_loop() backedge states across this large opcode
+	 * switch. Fixed calls keep the walk below the verifier complexity limit. */
+	if (!ctx->ladder->nr_rungs)
+		return -ENOENT;
+	result = walk_policy_rung(ctx, p, 0, walk_args);
+	if (result != -ENOENT || ctx->ladder->nr_rungs <= 1)
+		return result;
+	result = walk_policy_rung(ctx, p, 1, walk_args);
+	if (result != -ENOENT || ctx->ladder->nr_rungs <= 2)
+		return result;
+	result = walk_policy_rung(ctx, p, 2, walk_args);
+	if (result != -ENOENT || ctx->ladder->nr_rungs <= 3)
+		return result;
+	result = walk_policy_rung(ctx, p, 3, walk_args);
+	if (result != -ENOENT || ctx->ladder->nr_rungs <= 4)
+		return result;
+	result = walk_policy_rung(ctx, p, 4, walk_args);
+	if (result != -ENOENT || ctx->ladder->nr_rungs <= 5)
+		return result;
+	result = walk_policy_rung(ctx, p, 5, walk_args);
+	if (result != -ENOENT || ctx->ladder->nr_rungs <= 6)
+		return result;
+	result = walk_policy_rung(ctx, p, 6, walk_args);
+	if (result != -ENOENT || ctx->ladder->nr_rungs <= 7)
+		return result;
+	return walk_policy_rung(ctx, p, 7, walk_args);
 }
 
 #endif /* __SCX_SNAKE_LADDER_H */
