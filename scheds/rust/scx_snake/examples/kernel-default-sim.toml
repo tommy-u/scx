@@ -21,6 +21,10 @@ operation = "sync_wake_affine"
 scope = "task_allowed"
 
 [[rung]]
+operation = "claim_idle_core"
+scope = "previous_cpu"
+
+[[rung]]
 operation = "pick_idle_core"
 scope = "previous_llc"
 

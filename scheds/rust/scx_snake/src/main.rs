@@ -1154,6 +1154,7 @@ fn operation_label(rung: &CompiledRung) -> &'static str {
     }
     if rung.flags & policy::RUNG_FLAG_PICK_IDLE_CORE != 0 {
         return match rung.opcode {
+            Opcode::ClaimIdle => "claim_idle_core",
             Opcode::PickRandomIdle => "pick_random_idle_core",
             _ => "pick_idle_core",
         };
@@ -4823,7 +4824,7 @@ scope = "task_allowed"
         let policy = policy::compile_policy(policy_source()).expect("policy should compile");
         let encoded = encode_ladder(&policy, 42).expect("ladder should encode");
 
-        assert_eq!(bpf_intf::SNAKE_ABI_VERSION, 22);
+        assert_eq!(bpf_intf::SNAKE_ABI_VERSION, 23);
         assert_eq!(size_of::<bpf_intf::snake_callback_timing>(), 520);
         assert_eq!(offset_of!(bpf_intf::snake_callback_timing, total_ns), 0);
         assert_eq!(offset_of!(bpf_intf::snake_callback_timing, buckets), 8);
@@ -4942,7 +4943,7 @@ scope = "task_allowed"
         assert_field_type::<bpf_intf::snake_queue_timing_event, u32>(|value| {
             &value.depth_after_dispatch
         });
-        assert_eq!(size_of::<bpf_intf::snake_compiled_ladder>(), 608);
+        assert_eq!(size_of::<bpf_intf::snake_compiled_ladder>(), 632);
         assert_eq!(offset_of!(bpf_intf::snake_compiled_ladder, generation), 0);
         assert_eq!(
             offset_of!(bpf_intf::snake_compiled_ladder, policy_abi_version),
@@ -4960,19 +4961,19 @@ scope = "task_allowed"
         assert_eq!(offset_of!(bpf_intf::snake_compiled_ladder, rungs), 24);
         assert_eq!(
             offset_of!(bpf_intf::snake_compiled_ladder, nr_enqueue_rungs),
-            216
+            240
         );
         assert_eq!(
             offset_of!(bpf_intf::snake_compiled_ladder, nr_dispatch_rungs),
-            220
+            244
         );
         assert_eq!(
             offset_of!(bpf_intf::snake_compiled_ladder, enqueue_rungs),
-            224
+            248
         );
         assert_eq!(
             offset_of!(bpf_intf::snake_compiled_ladder, dispatch_rungs),
-            416
+            440
         );
         assert_eq!(encoded.generation, 42);
         assert_eq!(encoded.policy_abi_version, bpf_intf::SNAKE_ABI_VERSION);
@@ -5408,6 +5409,45 @@ scope = "previous_llc"
         assert_eq!(
             encoded.flags,
             bpf_intf::SNAKE_RUNG_F_INTERSECT_TASK_ALLOWED | bpf_intf::SNAKE_RUNG_F_PICK_IDLE_CORE
+        );
+    }
+
+    #[test]
+    fn rust_previous_whole_core_claim_matches_the_bpf_abi() {
+        let compiled = policy::compile_policy(
+            r#"
+[[rung]]
+operation = "claim_idle_core"
+scope = "previous_cpu"
+"#,
+        )
+        .expect("policy should compile");
+        let encoded = encode_rung(compiled.rungs[0]);
+
+        assert_eq!(encoded.opcode, bpf_intf::snake_opcode_SNAKE_OP_CLAIM_IDLE);
+        assert_eq!(
+            encoded.input,
+            bpf_intf::snake_input_source_SNAKE_INPUT_CPU_PREV
+        );
+        assert_eq!(encoded.flags, bpf_intf::SNAKE_RUNG_F_PICK_IDLE_CORE);
+        assert_eq!(operation_label(&compiled.rungs[0]), "claim_idle_core");
+
+        let ladder =
+            fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bpf/ladder.h"))
+                .unwrap();
+        let claim = ladder
+            .split_once("case SNAKE_OP_CLAIM_IDLE:")
+            .and_then(|(_, body)| body.split_once("case SNAKE_OP_PICK_IDLE:"))
+            .map(|(body, _)| body)
+            .unwrap();
+        assert_text_order(
+            claim,
+            &[
+                "scx_bpf_get_idle_smtmask()",
+                "bpf_cpumask_test_cpu(prev_cpu, idle)",
+                "scx_bpf_put_idle_cpumask(idle)",
+                "scx_bpf_test_and_clear_cpu_idle(prev_cpu)",
+            ],
         );
     }
 

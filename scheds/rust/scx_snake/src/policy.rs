@@ -6,7 +6,7 @@ use std::path::{Component, Path};
 
 use serde::Deserialize;
 
-pub const MAX_RUNGS: usize = 8;
+pub const MAX_RUNGS: usize = 9;
 pub const MAX_MASK_TABLES: usize = 4;
 pub const MAX_CELL_IDS: u32 = 1024;
 pub const MAX_QUEUE_CELLS: usize = 32;
@@ -1297,13 +1297,19 @@ fn compile_rung(
     }
 
     match rung.operation.as_str() {
-        "claim_idle" if rung.scope == "previous_cpu" => Ok(CompiledRung {
-            opcode: Opcode::ClaimIdle,
-            input: InputSource::CpuPrev,
-            flags: 0,
-            data: 0,
-        }),
-        "claim_idle" => Err(PolicyError(format!(
+        operation @ ("claim_idle" | "claim_idle_core") if rung.scope == "previous_cpu" => {
+            Ok(CompiledRung {
+                opcode: Opcode::ClaimIdle,
+                input: InputSource::CpuPrev,
+                flags: if operation == "claim_idle_core" {
+                    RUNG_FLAG_PICK_IDLE_CORE
+                } else {
+                    0
+                },
+                data: 0,
+            })
+        }
+        "claim_idle" | "claim_idle_core" => Err(PolicyError(format!(
             "rung {index}: operation `{}` is incompatible with scope `{}`",
             rung.operation, rung.scope
         ))),
@@ -2584,6 +2590,28 @@ scope = "task_cell"
     }
 
     #[test]
+    fn lowers_previous_whole_idle_core_to_a_claim() {
+        let policy = compile_policy(
+            r#"
+[[rung]]
+operation = "claim_idle_core"
+scope = "previous_cpu"
+"#,
+        )
+        .expect("previous whole-idle-core claim should compile");
+
+        assert_eq!(
+            policy.rungs,
+            vec![CompiledRung {
+                opcode: Opcode::ClaimIdle,
+                input: InputSource::CpuPrev,
+                flags: RUNG_FLAG_PICK_IDLE_CORE,
+                data: 0,
+            }]
+        );
+    }
+
+    #[test]
     fn lowers_sync_wake_affine_with_reused_llc_and_node_tables() {
         let policy = compile_policy(SYNC_WAKE_POLICY).expect("policy should compile");
 
@@ -2606,7 +2634,7 @@ scope = "task_cell"
     }
 
     #[test]
-    fn golden_kernel_default_simulation_uses_eight_rungs_and_two_tables() {
+    fn golden_kernel_default_simulation_uses_nine_rungs_and_two_tables() {
         let policy =
             compile_policy(KERNEL_DEFAULT_SIM_POLICY).expect("simulation policy should compile");
 
@@ -2645,6 +2673,12 @@ scope = "task_cell"
                     input: InputSource::MaskTaskAllowed,
                     flags: 0,
                     data: 1_u64 << 32,
+                },
+                CompiledRung {
+                    opcode: Opcode::ClaimIdle,
+                    input: InputSource::CpuPrev,
+                    flags: RUNG_FLAG_PICK_IDLE_CORE,
+                    data: 0,
                 },
                 CompiledRung {
                     opcode: Opcode::PickIdleMaskTable,

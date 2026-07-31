@@ -63,7 +63,9 @@ static __always_inline bool rung_is_valid(const struct snake_rung *rung,
 	if (rung->reserved)
 		return false;
 
-	return (rung->opcode == SNAKE_OP_CLAIM_IDLE && !rung->flags &&
+	return (rung->opcode == SNAKE_OP_CLAIM_IDLE &&
+		(rung->flags == 0 ||
+		 rung->flags == SNAKE_RUNG_F_PICK_IDLE_CORE) &&
 		rung->input == SNAKE_INPUT_CPU_PREV && !rung->data) ||
 	       (rung->opcode == SNAKE_OP_PICK_IDLE &&
 		(rung->flags == 0 ||
@@ -131,13 +133,27 @@ static __noinline s32 execute_rung(const struct snake_ladder_ctx *ctx,
 	u32 *queue_cell_index = args->queue_cell_index;
 
 	switch (rung->opcode) {
-	case SNAKE_OP_CLAIM_IDLE:
+	case SNAKE_OP_CLAIM_IDLE: {
+		const struct cpumask *idle;
+		bool whole_core_idle;
+
 		/* Affinity is checked before the destructive idle claim. */
-		if (prev_cpu >= 0 && prev_cpu < nr_cpu_ids &&
-		    bpf_cpumask_test_cpu(prev_cpu, p->cpus_ptr) &&
-		    scx_bpf_test_and_clear_cpu_idle(prev_cpu))
+		if (prev_cpu < 0 || prev_cpu >= nr_cpu_ids ||
+		    !bpf_cpumask_test_cpu(prev_cpu, p->cpus_ptr))
+			break;
+		if (rung->flags & SNAKE_RUNG_F_PICK_IDLE_CORE) {
+			idle = scx_bpf_get_idle_smtmask();
+			if (!idle)
+				return -EINVAL;
+			whole_core_idle = bpf_cpumask_test_cpu(prev_cpu, idle);
+			scx_bpf_put_idle_cpumask(idle);
+			if (!whole_core_idle)
+				break;
+		}
+		if (scx_bpf_test_and_clear_cpu_idle(prev_cpu))
 			return prev_cpu;
 		break;
+	}
 	case SNAKE_OP_PICK_IDLE:
 		prev_cpu = scx_bpf_pick_idle_cpu(
 			p->cpus_ptr, rung->flags & SNAKE_RUNG_F_PICK_IDLE_CORE ?

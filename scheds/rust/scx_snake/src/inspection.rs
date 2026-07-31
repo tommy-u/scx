@@ -911,7 +911,7 @@ fn valid_rung(rung: CompiledRung, nr_mask_tables: usize) -> bool {
         || rung.flags == RUNG_FLAG_PICK_RANDOM
         || rung.flags == RUNG_FLAG_PICK_RANDOM | RUNG_FLAG_PICK_IDLE_CORE;
     (rung.opcode == Opcode::ClaimIdle
-        && rung.flags == 0
+        && matches!(rung.flags, 0 | RUNG_FLAG_PICK_IDLE_CORE)
         && rung.input == InputSource::CpuPrev
         && rung.data == 0)
         || (rung.opcode == Opcode::PickIdle
@@ -958,10 +958,10 @@ fn operation_name(rung: &CompiledRung) -> &'static str {
         };
     }
     if rung.flags & RUNG_FLAG_PICK_IDLE_CORE != 0 {
-        return if rung.opcode == Opcode::PickRandomIdle {
-            "pick_random_idle_core"
-        } else {
-            "pick_idle_core"
+        return match rung.opcode {
+            Opcode::ClaimIdle => "claim_idle_core",
+            Opcode::PickRandomIdle => "pick_random_idle_core",
+            _ => "pick_idle_core",
         };
     }
     match rung.opcode {
