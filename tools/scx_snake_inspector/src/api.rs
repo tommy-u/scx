@@ -51,6 +51,7 @@ pub struct ApiContext {
     testing: Option<TestingController>,
     lifecycle: Arc<tokio::sync::Mutex<()>>,
     shutdown: Option<tokio::sync::watch::Receiver<bool>>,
+    allowed_hosts: Arc<Vec<String>>,
 }
 
 impl ApiContext {
@@ -71,6 +72,7 @@ impl ApiContext {
             testing: None,
             lifecycle: Arc::new(tokio::sync::Mutex::new(())),
             shutdown: None,
+            allowed_hosts: Arc::new(Vec::new()),
         }
     }
 
@@ -96,6 +98,11 @@ impl ApiContext {
 
     pub fn with_shutdown(mut self, shutdown: tokio::sync::watch::Receiver<bool>) -> Self {
         self.shutdown = Some(shutdown);
+        self
+    }
+
+    pub fn with_allowed_host(mut self, host: impl Into<String>) -> Self {
+        Arc::make_mut(&mut self.allowed_hosts).push(host.into());
         self
     }
 }
@@ -146,7 +153,10 @@ pub fn router(context: ApiContext) -> Router {
         .route("/api/events", get(events))
         .route("/api/scope", post(set_scope))
         .route("/api/cells/assignment", post(set_workload_cell))
-        .layer(middleware::from_fn(require_loopback_host))
+        .layer(middleware::from_fn_with_state(
+            context.clone(),
+            require_allowed_host,
+        ))
         .with_state(context)
 }
 
@@ -204,16 +214,41 @@ async fn stop_testing(
         .map_err(|error| ApiError::bad_request(format!("stopping testing matrix: {error:#}")))
 }
 
-async fn require_loopback_host(request: Request, next: Next) -> Response {
+async fn require_allowed_host(
+    State(context): State<ApiContext>,
+    request: Request,
+    next: Next,
+) -> Response {
     let allowed = request
         .headers()
         .get(header::HOST)
         .and_then(|host| host.to_str().ok())
-        .is_some_and(is_loopback_host);
+        .is_some_and(|host| is_allowed_host(host, &context.allowed_hosts));
     if !allowed {
+        eprintln!(
+            "rejected Host header: {}",
+            request
+                .headers()
+                .get(header::HOST)
+                .and_then(|host| host.to_str().ok())
+                .unwrap_or("<missing or invalid>"),
+        );
         return StatusCode::MISDIRECTED_REQUEST.into_response();
     }
     next.run(request).await
+}
+
+fn is_allowed_host(host: &str, allowed_hosts: &[String]) -> bool {
+    if is_loopback_host(host) {
+        return true;
+    }
+    let name = host
+        .rsplit_once(':')
+        .filter(|(_, port)| port.parse::<u16>().is_ok())
+        .map_or(host, |(name, _)| name);
+    allowed_hosts
+        .iter()
+        .any(|allowed| name.eq_ignore_ascii_case(allowed))
 }
 
 fn is_loopback_host(host: &str) -> bool {
@@ -773,6 +808,7 @@ fn scheduler_control_response(context: &ApiContext) -> Result<SchedulerControl, 
                             .map(|candidate| candidate.source.as_str())
                     })
                 })
+                .or(Some(policy.source.as_str()))
                 .is_some_and(policy_source_uses_queues);
             let supported_fairness = if validated.is_some_and(|candidate| candidate.queue_policy)
                 || source_uses_queues

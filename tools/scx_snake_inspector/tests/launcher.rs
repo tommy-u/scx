@@ -314,7 +314,8 @@ while :; do sleep 1; done
 
 #[test]
 fn status_reaps_a_child_that_exits_on_its_own() {
-    let (_root, launcher, _) = fixture("#!/bin/sh\nsleep 0.05\nexit 7\n");
+    let (_root, launcher, _) =
+        fixture("#!/bin/sh\nsleep 0.05\necho 'queues require --fairness vtime' >&2\nexit 7\n");
     launcher
         .start(LaunchRequest {
             policy_id: "basic.toml".into(),
@@ -331,6 +332,11 @@ fn status_reaps_a_child_that_exits_on_its_own() {
     let status = launcher.status().unwrap();
     assert!(!status.managed);
     assert!(status.last_exit.as_deref().unwrap().contains('7'));
+    assert!(status
+        .last_exit
+        .as_deref()
+        .unwrap()
+        .contains("queues require --fairness vtime"));
 }
 
 #[test]

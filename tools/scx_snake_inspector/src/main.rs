@@ -30,7 +30,8 @@ async fn main() -> Result<()> {
     let max_window_ms = args.max_window_ms().map_err(anyhow::Error::msg)?;
 
     let topology = TopologyView::discover()?;
-    let host_context = HostContextService::system(hostname_from_environment(), topology.cpus.len());
+    let hostname = hostname_from_environment();
+    let host_context = HostContextService::system(hostname.clone(), topology.cpus.len());
     if !args.testing_isolated {
         host_context.spawn_refresh_tasks();
     }
@@ -97,6 +98,11 @@ async fn main() -> Result<()> {
     .with_shutdown(shutdown_rx);
     if let Some(testing) = &testing {
         context = context.with_testing(testing.clone());
+    }
+    if args.listen.ip().is_unspecified() {
+        for host in secure_web_app_allowed_hosts(&hostname) {
+            context = context.with_allowed_host(host);
+        }
     }
     let listener = TcpListener::bind(args.listen)
         .await
@@ -188,6 +194,22 @@ fn hostname_from_environment() -> String {
         .unwrap_or_else(|| "localhost".into())
 }
 
+fn secure_web_app_hostname(hostname: &str) -> String {
+    if hostname.ends_with(".fbinfra.net") {
+        return hostname.into();
+    }
+    let hostname = hostname.strip_suffix(".facebook.com").unwrap_or(hostname);
+    format!("{hostname}.fbinfra.net")
+}
+
+fn secure_web_app_allowed_hosts(hostname: &str) -> [String; 3] {
+    [
+        secure_web_app_hostname(hostname),
+        hostname.into(),
+        "www.edge.x2p.facebook.net".into(),
+    ]
+}
+
 fn ssh_destination(sudo_user: Option<&str>, user: Option<&str>, hostname: Option<&str>) -> String {
     let user = sudo_user
         .filter(|user| !user.is_empty())
@@ -238,6 +260,18 @@ mod tests {
         assert_eq!(
             ssh_destination(Some("alice"), Some("root"), Some("compute.example.com")),
             "alice@compute.example.com"
+        );
+    }
+
+    #[test]
+    fn secure_web_app_hosts_include_the_x2p_bridge_identity() {
+        assert_eq!(
+            secure_web_app_allowed_hosts("devbig008.atn3.facebook.com"),
+            [
+                "devbig008.atn3.fbinfra.net",
+                "devbig008.atn3.facebook.com",
+                "www.edge.x2p.facebook.net",
+            ],
         );
     }
 }

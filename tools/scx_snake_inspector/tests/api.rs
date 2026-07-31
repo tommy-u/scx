@@ -485,7 +485,12 @@ async fn stats_reset_requires_token_and_sends_collector_command() {
 
 #[tokio::test]
 async fn scheduler_control_lists_policies_while_stopped_and_manages_an_owned_child() {
-    let (_root, launcher) = launcher_fixture();
+    let (root, launcher) = launcher_fixture();
+    fs::write(
+        root.path().join("policies/queue.toml"),
+        "[queues]\nlayout = \"llc\"\n",
+    )
+    .unwrap();
     let (tx, _rx) = mpsc::channel();
     let cgroup_root = tempfile::tempdir().unwrap();
     let context = ApiContext::new(dashboard(), tx, "secret", cgroup_root.path().to_path_buf())
@@ -516,6 +521,13 @@ async fn scheduler_control_lists_policies_while_stopped_and_manages_an_owned_chi
     assert_eq!(body["launch"]["preserved_args"], json!([]));
     assert_eq!(body["policies"][0]["id"], "basic.toml");
     assert_eq!(body["policies"][0]["change_mode"], "reload");
+    let queue = body["policies"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|policy| policy["id"] == "queue.toml")
+        .unwrap();
+    assert_eq!(queue["supported_fairness"], json!(["vtime"]));
     assert_eq!(body["settings"][0]["name"], "fairness");
     assert_eq!(body["settings"][0]["default_value"], "fifo");
     assert_eq!(body["settings"][1]["default_value"], 64);
@@ -1064,7 +1076,9 @@ async fn scheduler_restart_rejects_unsupported_fairness_without_stopping_snake()
 
 #[tokio::test]
 async fn scheduler_control_reports_the_last_managed_exit() {
-    let (_root, launcher) = launcher_fixture_with_script("#!/bin/sh\nexit 7\n");
+    let (_root, launcher) = launcher_fixture_with_script(
+        "#!/bin/sh\necho 'queues require --fairness vtime' >&2\nexit 7\n",
+    );
     let (tx, _rx) = mpsc::channel();
     let cgroup_root = tempfile::tempdir().unwrap();
     let context = ApiContext::new(dashboard(), tx, "secret", cgroup_root.path().to_path_buf())
@@ -1106,7 +1120,10 @@ async fn scheduler_control_reports_the_last_managed_exit() {
     }
 
     assert_eq!(body["managed"], false);
-    assert_eq!(body["last_exit"], "exit code 7");
+    assert_eq!(
+        body["last_exit"],
+        "exit code 7: queues require --fairness vtime"
+    );
 }
 
 #[tokio::test]
@@ -2320,6 +2337,68 @@ async fn router_rejects_non_loopback_host_headers() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::MISDIRECTED_REQUEST);
+}
+
+#[tokio::test]
+async fn router_accepts_only_the_configured_secure_web_app_host() {
+    let (tx, _rx) = mpsc::channel();
+    let root = tempfile::tempdir().unwrap();
+    let context = ApiContext::new(dashboard(), tx, "secret", root.path().to_path_buf())
+        .with_allowed_host("devbig008.atn3.fbinfra.net")
+        .with_allowed_host("devbig008.atn3.facebook.com")
+        .with_allowed_host("www.edge.x2p.facebook.net");
+    let app = router(context);
+
+    let accepted = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/")
+                .header("host", "devbig008.atn3.fbinfra.net:44102")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(accepted.status(), StatusCode::OK);
+
+    let translated = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/")
+                .header("host", "devbig008.atn3.facebook.com:44102")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(translated.status(), StatusCode::OK);
+
+    let bridged = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/")
+                .header("host", "www.edge.x2p.facebook.net")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(bridged.status(), StatusCode::OK);
+
+    let rejected = app
+        .oneshot(
+            Request::builder()
+                .uri("/")
+                .header("host", "other.atn3.fbinfra.net:44102")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(rejected.status(), StatusCode::MISDIRECTED_REQUEST);
 }
 
 #[derive(Default)]

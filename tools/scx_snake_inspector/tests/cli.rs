@@ -6,7 +6,7 @@
 use std::time::Duration;
 
 use clap::Parser;
-use scx_snake_inspector::cli::{parse_duration, parse_loopback_address, Args};
+use scx_snake_inspector::cli::{parse_duration, parse_listen_address, Args};
 
 #[test]
 fn durations_accept_milliseconds_seconds_minutes_and_hours() {
@@ -20,11 +20,15 @@ fn durations_accept_milliseconds_seconds_minutes_and_hours() {
 }
 
 #[test]
-fn listen_address_must_be_loopback() {
-    assert!(parse_loopback_address("127.0.0.1:8787").is_ok());
-    assert!(parse_loopback_address("[::1]:8787").is_ok());
-    assert!(parse_loopback_address("0.0.0.0:8787").is_err());
-    assert!(parse_loopback_address("192.168.1.5:8787").is_err());
+fn listen_address_accepts_only_loopback_or_secure_web_app_ports() {
+    assert!(parse_listen_address("127.0.0.1:8787").is_ok());
+    assert!(parse_listen_address("[::1]:8787").is_ok());
+    assert!(parse_listen_address("0.0.0.0:44102").is_ok());
+    assert!(parse_listen_address("[::]:44102").is_ok());
+    assert!(parse_listen_address("0.0.0.0:8787").is_err());
+    assert!(parse_listen_address("0.0.0.0:44202").is_err());
+    assert!(parse_listen_address("192.168.1.5:44102").is_err());
+    assert!(parse_listen_address("192.168.1.5:8787").is_err());
 }
 
 #[test]

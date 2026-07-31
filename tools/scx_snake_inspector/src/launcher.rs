@@ -4,6 +4,8 @@
 // GNU General Public License version 2.
 
 use std::fs;
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
@@ -21,6 +23,7 @@ use crate::policies::discover_policy_files;
 const DEFAULT_OPS_PATH: &str = "/sys/kernel/sched_ext/root/ops";
 const DELETED_EXECUTABLE_SUFFIX: &[u8] = b" (deleted)";
 const STOP_TIMEOUT: Duration = Duration::from_secs(8);
+const MAX_EXIT_OUTPUT_BYTES: u64 = 16 * 1024;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -79,6 +82,7 @@ impl From<&LaunchRequest> for LaunchOptions {
 pub struct LaunchPolicy {
     pub id: String,
     pub name: String,
+    pub source: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -103,6 +107,7 @@ pub struct SnakeLauncher {
 
 struct OwnedChild {
     child: Child,
+    output: File,
     current_command: Vec<String>,
     request: LaunchRequest,
     executable: PathBuf,
@@ -174,6 +179,7 @@ impl SnakeLauncher {
             .map(|policy| LaunchPolicy {
                 id: policy.id,
                 name: policy.name,
+                source: policy.source,
             })
             .collect())
     }
@@ -231,7 +237,11 @@ impl Supervisor {
             None => None,
         };
         if let Some(status) = status {
-            self.last_exit = Some(format_exit(status));
+            let owned = self
+                .child
+                .as_mut()
+                .expect("exited child must still be owned");
+            self.last_exit = Some(format_exit_with_output(status, &mut owned.output));
             self.child = None;
         }
         Ok(())
@@ -359,11 +369,18 @@ impl Supervisor {
             .chain(args.iter().cloned())
             .collect();
         let mut command = Command::new(&executable);
+        let output = tempfile::tempfile().context("creating Snake launch output buffer")?;
+        let stdout = output
+            .try_clone()
+            .context("cloning Snake launch output buffer")?;
+        let stderr = output
+            .try_clone()
+            .context("cloning Snake launch output buffer")?;
         command
             .args(args)
             .stdin(Stdio::null())
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit());
+            .stdout(Stdio::from(stdout))
+            .stderr(Stdio::from(stderr));
         unsafe {
             command.pre_exec(|| {
                 if libc::setsid() == -1 {
@@ -378,6 +395,7 @@ impl Supervisor {
         self.last_exit = None;
         self.child = Some(OwnedChild {
             child,
+            output,
             current_command,
             request,
             executable,
@@ -458,7 +476,7 @@ impl Supervisor {
             loop {
                 match owned.child.try_wait() {
                     Ok(Some(status)) => {
-                        self.last_exit = Some(format_exit(status));
+                        self.last_exit = Some(format_exit_with_output(status, &mut owned.output));
                         break;
                     }
                     Ok(None) if Instant::now() < deadline => {
@@ -468,7 +486,11 @@ impl Supervisor {
                         unsafe {
                             libc::kill(-pid, libc::SIGKILL);
                         }
-                        self.last_exit = owned.child.wait().ok().map(format_exit);
+                        self.last_exit = owned
+                            .child
+                            .wait()
+                            .ok()
+                            .map(|status| format_exit_with_output(status, &mut owned.output));
                         break;
                     }
                     Err(error) => {
@@ -747,4 +769,55 @@ fn format_exit(status: ExitStatus) -> String {
     status
         .code()
         .map_or_else(|| status.to_string(), |code| format!("exit code {code}"))
+}
+
+fn format_exit_with_output(status: ExitStatus, output: &mut File) -> String {
+    let exit = format_exit(status);
+    let length = output
+        .metadata()
+        .map(|metadata| metadata.len())
+        .unwrap_or(0);
+    let start = length.saturating_sub(MAX_EXIT_OUTPUT_BYTES);
+    if output.seek(SeekFrom::Start(start)).is_err() {
+        return exit;
+    }
+    let mut bytes = Vec::with_capacity((length - start) as usize);
+    if output.read_to_end(&mut bytes).is_err() {
+        return exit;
+    }
+    let output = clean_process_output(&bytes);
+    if output.is_empty() {
+        exit
+    } else {
+        format!("{exit}: {output}")
+    }
+}
+
+fn clean_process_output(bytes: &[u8]) -> String {
+    let mut cleaned = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == 0x1b && bytes.get(index + 1) == Some(&b'[') {
+            index += 2;
+            while index < bytes.len() {
+                let byte = bytes[index];
+                index += 1;
+                if (0x40..=0x7e).contains(&byte) {
+                    break;
+                }
+            }
+            continue;
+        }
+        let byte = bytes[index];
+        index += 1;
+        if byte == b'\n' || byte == b'\t' || !byte.is_ascii_control() {
+            cleaned.push(byte);
+        }
+    }
+    String::from_utf8_lossy(&cleaned)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
 }

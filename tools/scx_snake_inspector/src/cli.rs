@@ -20,8 +20,8 @@ pub struct Args {
     #[arg(long, default_value = "5m", value_parser = parse_duration)]
     pub max_window: Duration,
 
-    /// Loopback address for the local dashboard.
-    #[arg(long, default_value = "127.0.0.1:8787", value_parser = parse_loopback_address)]
+    /// Loopback address, or a wildcard address on HTTP Secure Web Apps ports 44100-44109.
+    #[arg(long, default_value = "127.0.0.1:8787", value_parser = parse_listen_address)]
     pub listen: SocketAddr,
 
     /// Directory containing selectable Snake TOML policies.
@@ -112,14 +112,19 @@ pub fn parse_duration(value: &str) -> Result<Duration, String> {
     Ok(Duration::from_millis(milliseconds))
 }
 
-pub fn parse_loopback_address(value: &str) -> Result<SocketAddr, String> {
+pub fn parse_listen_address(value: &str) -> Result<SocketAddr, String> {
     let address = value
         .parse::<SocketAddr>()
         .map_err(|error| format!("invalid listen address: {error}"))?;
-    if !address.ip().is_loopback() {
-        return Err("listen address must be loopback".into());
+    if address.ip().is_loopback()
+        || (address.ip().is_unspecified() && (44_100..=44_109).contains(&address.port()))
+    {
+        return Ok(address);
     }
-    Ok(address)
+    Err(
+        "listen address must be loopback, or wildcard on Secure Web Apps HTTP ports 44100-44109"
+            .into(),
+    )
 }
 
 fn duration_ms(duration: Duration) -> Result<u64, String> {
