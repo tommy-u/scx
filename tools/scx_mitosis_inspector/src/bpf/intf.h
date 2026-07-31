@@ -9,4 +9,9 @@ struct mitosis_callback_timing {
 	u64 buckets[MITOSIS_CALLBACK_TIMING_BUCKETS];
 };
 
+struct mitosis_cpu_pair {
+	u32 from_cpu;
+	u32 to_cpu;
+};
+
 #endif /* __SCX_MITOSIS_INSPECTOR_INTF_H */

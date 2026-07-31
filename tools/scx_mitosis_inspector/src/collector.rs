@@ -19,8 +19,8 @@ use serde::Serialize;
 use crate::bpf_skel::{BpfSkel, BpfSkelBuilder};
 use crate::{
     build_callback_timing_rows, build_counters, build_timing_metric_row, program_name_matches,
-    CallbackCounter, CallbackTimingCounters, CallbackTimingRow, TimingMetricRow, CALLBACK_NAMES,
-    CALLBACK_TIMING_BUCKETS,
+    CallbackCounter, CallbackTimingCounters, CallbackTimingRow, MigrationRow, TimingMetricRow,
+    CALLBACK_NAMES, CALLBACK_TIMING_BUCKETS,
 };
 
 const TARGET_NAMES: [&str; 5] = [
@@ -46,6 +46,7 @@ pub struct Snapshot {
     pub event_timing_sample_rate: u32,
     pub callback_timings: Vec<CallbackTimingRow>,
     pub scheduler_timings: Vec<TimingMetricRow>,
+    pub migrations: Vec<MigrationRow>,
 }
 
 fn find_targets() -> Result<[TargetProgram; 5]> {
@@ -132,6 +133,7 @@ fn attach_programs(
         skel.progs.observe_dispatch.attach_trace()?,
         skel.progs.observe_running.attach_trace()?,
         skel.progs.observe_stopping.attach_trace()?,
+        skel.progs.on_sched_migrate_task.attach()?,
     ];
     if callback_timing_sample_rate > 0 {
         links.extend([
@@ -245,6 +247,29 @@ fn aggregate_timing(values: Vec<Vec<u8>>, name: &str) -> Result<CallbackTimingCo
         })
 }
 
+fn read_migrations(skel: &BpfSkel<'_>) -> Result<Vec<MigrationRow>> {
+    let mut rows = Vec::new();
+    for key in skel.maps.migration_counts.keys() {
+        if key.len() != 8 {
+            bail!("invalid migration key size {}", key.len());
+        }
+        let Some(value) = skel.maps.migration_counts.lookup(&key, MapFlags::ANY)? else {
+            continue;
+        };
+        if value.len() < 8 {
+            bail!("short migration counter value");
+        }
+        rows.push(MigrationRow {
+            from_cpu: u32::from_ne_bytes(key[..4].try_into()?),
+            to_cpu: u32::from_ne_bytes(key[4..8].try_into()?),
+            count: u64::from_ne_bytes(value[..8].try_into()?),
+        });
+    }
+    rows.sort_unstable_by_key(|row| std::cmp::Reverse(row.count));
+    rows.truncate(32);
+    Ok(rows)
+}
+
 pub fn run(
     state: Arc<RwLock<Snapshot>>,
     shutdown: Arc<AtomicBool>,
@@ -286,6 +311,7 @@ pub fn run(
     let wakeup_latency = read_wakeup_latency(&skel)?;
     let cpu_slice_duration = read_cpu_slice_duration(&skel)?;
     let blocked_duration = read_blocked_duration(&skel)?;
+    let migrations = read_migrations(&skel)?;
     let mut previous_at = Instant::now();
     {
         let mut snapshot = state.write().expect("snapshot lock poisoned");
@@ -302,6 +328,7 @@ pub fn run(
                 build_timing_metric_row("on_cpu_slice", &cpu_slice_duration),
                 build_timing_metric_row("blocked_off_cpu", &blocked_duration),
             ],
+            migrations,
         };
     }
     ready
@@ -316,6 +343,7 @@ pub fn run(
         let wakeup_latency = read_wakeup_latency(&skel)?;
         let cpu_slice_duration = read_cpu_slice_duration(&skel)?;
         let blocked_duration = read_blocked_duration(&skel)?;
+        let migrations = read_migrations(&skel)?;
         let counters = build_counters(current, previous, now.duration_since(previous_at));
         previous = current;
         previous_at = now;
@@ -328,6 +356,7 @@ pub fn run(
             build_timing_metric_row("on_cpu_slice", &cpu_slice_duration),
             build_timing_metric_row("blocked_off_cpu", &blocked_duration),
         ];
+        snapshot.migrations = migrations;
     }
     Ok(())
 }

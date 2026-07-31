@@ -77,6 +77,13 @@ struct {
 	__type(value, struct mitosis_callback_timing);
 } blocked_duration SEC(".maps");
 
+struct {
+	__uint(type, BPF_MAP_TYPE_LRU_HASH);
+	__uint(max_entries, 4096);
+	__type(key, struct mitosis_cpu_pair);
+	__type(value, u64);
+} migration_counts SEC(".maps");
+
 static __always_inline void count_callback(enum callback_index callback)
 {
 	u32  key = callback;
@@ -300,5 +307,25 @@ int BPF_PROG(on_sched_switch, bool preempt, struct task_struct *prev,
 		if (observation)
 			observation->running_at = now;
 	}
+	return 0;
+}
+
+SEC("tp_btf/sched_migrate_task")
+int BPF_PROG(on_sched_migrate_task, struct task_struct *p, int dest_cpu)
+{
+	struct mitosis_cpu_pair pair = {
+		.from_cpu = bpf_get_smp_processor_id(),
+		.to_cpu = dest_cpu,
+	};
+	u64 initial = 1, *count;
+
+	if (pair.from_cpu == pair.to_cpu)
+		return 0;
+	count = bpf_map_lookup_elem(&migration_counts, &pair);
+	if (count) {
+		__sync_fetch_and_add(count, 1);
+		return 0;
+	}
+	bpf_map_update_elem(&migration_counts, &pair, &initial, BPF_NOEXIST);
 	return 0;
 }
