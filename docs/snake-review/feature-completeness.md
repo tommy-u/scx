@@ -103,7 +103,7 @@ general resource elasticity**.
 | Operation/scope lowering and mask interning | 95% | High | Fixed opcode vocabulary |
 | Independent BPF validation | 94% | High | Documentation and protocol fixtures can still drift |
 | Atomic double-buffered policy replacement | 90% | High | Queue and membership state are immutable |
-| Offline compiled-policy dump | 95% | High | No machine-readable standalone validation contract |
+| Offline policy validation and compiled-policy dump | 98% | High | JSON validation summarizes rather than serializing the full lowered ladder |
 | Live candidate validation | 94% | High | Validation still returns human-oriented errors |
 | LLC/NUMA/core topology discovery | 90% | High | Static snapshot and no distance model |
 | Sparse CPU IDs | 80% | Medium | Maximum CPU ID must remain below 1,024 |
@@ -113,11 +113,11 @@ general resource elasticity**.
 Atomic slot publication is implemented in
 [runtime_policy.rs](../../scheds/rust/scx_snake/src/runtime_policy.rs#L112-L167) and
 [main.h](../../scheds/rust/scx_snake/src/bpf/main.h#L170-L212). Current
-`intf.h` declares ABI 23 while `POLICY_LOWERING.md` still describes ABI 21 and an
-eight-rung limit, a
-concrete sign that documentation is not part of an enforced contract.
+`intf.h` and `POLICY_LOWERING.md` now agree on ABI 23, nine placement rungs, and
+eight enqueue/dispatch rungs. The versioned `--validate-policy` JSON record exposes
+those limits to automation without loading BPF.
 
-Category estimate: **93% policy engine**, **76% topology support**.
+Category estimate: **95% policy engine**, **76% topology support**.
 
 ## Task identity and cgroups
 
@@ -221,7 +221,7 @@ remove the release blockers or substitute for performance curves and soak time.
 | Placement | 92% |
 | Fairness | 74% |
 | Queue features | 82% |
-| Policy engine | 93% |
+| Policy engine | 95% |
 | Topology | 76% |
 | Task identity/cgroups within declared static scope | 68% |
 | Mitosis-style dynamic identity and lifecycle | 22% |

@@ -709,7 +709,7 @@ test("project roadmap exposes the dated review scores without drifting from the 
     ["production-readiness", [35, "Snake production readiness", reviewIndex]],
     ["mitosis-parity", [55, "Overall end-to-end Mitosis behavior parity", reviewIndex]],
     ["rollout-validation", [40, "Overall production validation readiness", validationReview]],
-    ["policy-engine", [93, "Policy engine", featureReview]],
+    ["policy-engine", [95, "Policy engine", featureReview]],
     ["placement", [92, "Placement", featureReview]],
     ["observability", [92, "Observability", featureReview]],
     ["lifecycle", [88, "Lifecycle", featureReview]],
@@ -738,7 +738,7 @@ test("project roadmap exposes the dated review scores without drifting from the 
 
 test("roadmap completion bars expose their numeric meaning to assistive technology", () => {
   for (const [key, value] of [
-    ["policy-engine", 93],
+    ["policy-engine", 95],
     ["placement", 92],
     ["observability", 92],
     ["lifecycle", 88],
