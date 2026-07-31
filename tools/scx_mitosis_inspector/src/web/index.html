@@ -125,8 +125,55 @@
           </div>
         </section>
 
+        <section class="table-section" aria-labelledby="cpuUtilizationHeading">
+          <div class="table-section-heading">
+            <h2 id="cpuUtilizationHeading">CPU utilization</h2>
+            <p>Whole host <strong id="overallCpuUtilization">--</strong></p>
+          </div>
+          <div class="breakdown-grid">
+            <div class="table-scroll">
+              <table>
+                <thead>
+                  <tr>
+                    <th scope="col">LLC</th>
+                    <th scope="col">Node</th>
+                    <th scope="col">CPUs</th>
+                    <th scope="col">Utilization</th>
+                  </tr>
+                </thead>
+                <tbody id="llcUtilizationRows"></tbody>
+              </table>
+            </div>
+            <div class="table-scroll">
+              <table>
+                <thead>
+                  <tr>
+                    <th scope="col">CPU</th>
+                    <th scope="col">Core</th>
+                    <th scope="col">LLC</th>
+                    <th scope="col">Node</th>
+                    <th scope="col">Utilization</th>
+                  </tr>
+                </thead>
+                <tbody id="cpuUtilizationRows"></tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+
         <section class="table-section" aria-labelledby="migrationHeading">
-          <h2 id="migrationHeading">CPU migrations</h2>
+          <div class="table-section-heading">
+            <h2 id="migrationHeading">CPU migration matrix</h2>
+            <fieldset class="segmented" aria-label="CPU order">
+              <label><input type="radio" name="migrationOrder" value="topology" checked><span>Topology</span></label>
+              <label><input type="radio" name="migrationOrder" value="numeric"><span>Numeric</span></label>
+            </fieldset>
+          </div>
+          <div class="heatmap-viewport" id="migrationHeatmapViewport">
+            <canvas id="migrationHeatmapCanvas" width="800" height="800" role="img" aria-label="CPU migration heatmap"></canvas>
+            <div class="heatmap-tooltip hidden" id="migrationHeatmapTooltip" role="tooltip"></div>
+          </div>
+          <h3 class="table-subheading">Busiest pairs</h3>
           <div class="table-scroll">
             <table>
               <thead>
@@ -142,6 +189,7 @@
         </section>
       </main>
     </div>
+    <script src="/assets/heatmap.js" defer></script>
     <script src="/assets/app.js" defer></script>
   </body>
 </html>

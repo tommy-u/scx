@@ -18,6 +18,7 @@ use crate::stats::StatsSnapshot;
 const INDEX_HTML: &str = include_str!("web/index.html");
 const STATS_HTML: &str = include_str!("web/stats.html");
 const APP_JS: &str = include_str!("web/app.js");
+const HEATMAP_JS: &str = include_str!("web/heatmap.js");
 const STATS_JS: &str = include_str!("web/stats.js");
 const STYLE_CSS: &str = include_str!("web/style.css");
 const WEB_CACHE_CONTROL: &str = "no-store";
@@ -48,6 +49,7 @@ pub fn router(context: ApiContext) -> Router {
         .route("/", get(index))
         .route("/stats", get(stats_page))
         .route("/assets/app.js", get(app_script))
+        .route("/assets/heatmap.js", get(heatmap_script))
         .route("/assets/stats.js", get(stats_script))
         .route("/assets/style.css", get(stylesheet))
         .route("/api/counters", get(counters))
@@ -66,6 +68,10 @@ async fn stats_page() -> Html<&'static str> {
 
 async fn app_script() -> (HeaderMap, &'static str) {
     content("application/javascript; charset=utf-8", APP_JS)
+}
+
+async fn heatmap_script() -> (HeaderMap, &'static str) {
+    content("application/javascript; charset=utf-8", HEATMAP_JS)
 }
 
 async fn stats_script() -> (HeaderMap, &'static str) {

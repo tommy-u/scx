@@ -7,7 +7,10 @@ use scx_mitosis_inspector::api::{router, ApiContext};
 use scx_mitosis_inspector::collector::Snapshot;
 use scx_mitosis_inspector::host_context::{HostContextView, HostIdentityView};
 use scx_mitosis_inspector::stats::StatsSnapshot;
-use scx_mitosis_inspector::{CallbackCounter, CallbackTimingRow, MigrationRow, TimingMetricRow};
+use scx_mitosis_inspector::topology::{CpuInfo, TopologyView};
+use scx_mitosis_inspector::{
+    CallbackCounter, CallbackTimingRow, CpuRuntimeRow, MigrationRow, TimingMetricRow,
+};
 use serde_json::json;
 use tower::ServiceExt;
 
@@ -43,6 +46,11 @@ fn snapshot() -> Snapshot {
             from_cpu: 2,
             to_cpu: 7,
             count: 19,
+        }],
+        cpu_runtime: vec![CpuRuntimeRow {
+            cpu: 0,
+            runtime_ns: 1234,
+            utilization_pct: 72.5,
         }],
     }
 }
@@ -106,6 +114,14 @@ fn app() -> axum::Router {
                 kernel_release: "6.12.0-scx".into(),
                 cpu_count: 16,
             },
+            topology: TopologyView::from_cpus(vec![CpuInfo {
+                cpu: 0,
+                node: 0,
+                package: 0,
+                llc: 0,
+                core: 0,
+            }])
+            .unwrap(),
         },
     ))
 }
@@ -180,6 +196,7 @@ async fn host_context_endpoint_returns_target_environment() {
     assert_eq!(value["identity"]["hostname"], "mitosis-vm");
     assert_eq!(value["identity"]["kernel_release"], "6.12.0-scx");
     assert_eq!(value["identity"]["cpu_count"], 16);
+    assert_eq!(value["topology"]["cpus"][0]["llc"], 0);
 }
 
 #[tokio::test]
