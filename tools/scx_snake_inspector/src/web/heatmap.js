@@ -233,6 +233,20 @@ export function topologyGroups(topology, order, level) {
   return groups;
 }
 
+export function llcAnnotations(topology, order) {
+  if (!Array.isArray(order) || order.length === 0) {
+    return [];
+  }
+  return topologyGroups(topology, order, "llc")
+    .filter((group) => group.end > group.start && group.value != null)
+    .map((group) => ({
+      start: group.start,
+      end: group.end,
+      llc: group.value,
+      label: `LLC ${group.value}`,
+    }));
+}
+
 export function parseTgids(input) {
   const tokens = input.trim().split(/[\s,]+/).filter(Boolean);
   if (tokens.length === 0) {

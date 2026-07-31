@@ -189,6 +189,31 @@ test("topologyGroups reports contiguous LLC spans", () => {
   ]);
 });
 
+test("LLC annotations label every contiguous span in the selected CPU order", () => {
+  assert.equal(typeof heatmapModule.llcAnnotations, "function");
+  if (typeof heatmapModule.llcAnnotations !== "function") {
+    return;
+  }
+
+  assert.deepEqual(
+    heatmapModule.llcAnnotations(topology, topology.topology_order),
+    [
+      { start: 0, end: 2, llc: 0, label: "LLC 0" },
+      { start: 2, end: 3, llc: 1, label: "LLC 1" },
+      { start: 3, end: 4, llc: 2, label: "LLC 2" },
+    ],
+  );
+  assert.deepEqual(
+    heatmapModule.llcAnnotations(topology, topology.numeric_order),
+    [
+      { start: 0, end: 1, llc: 2, label: "LLC 2" },
+      { start: 1, end: 3, llc: 0, label: "LLC 0" },
+      { start: 3, end: 4, llc: 1, label: "LLC 1" },
+    ],
+  );
+  assert.deepEqual(heatmapModule.llcAnnotations({ cpus: [] }, []), []);
+});
+
 test("parseTgids accepts separators and returns sorted unique IDs", () => {
   assert.deepEqual(parseTgids("42, 7  42\n19"), [7, 19, 42]);
   assert.throws(() => parseTgids(""));

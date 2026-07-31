@@ -10,6 +10,7 @@ import {
   buildMatrix,
   heatmapLayout,
   infernoColor,
+  llcAnnotations,
   migrationLocality,
   normalizeCount,
   normalizeUtilization,
@@ -1177,6 +1178,7 @@ function renderHeatmap() {
   drawAxes(context, matrix.order, margins, matrixSize, cellSize);
   drawCpuUsage(context, usage, margins, matrixSize, cellSize, usageTop, usageHeight);
   drawLlcUsage(context, llcUsage, margins, cellSize, llcTop, llcHeight);
+  drawLlcAnnotations(context, matrix.order, margins, cellSize);
   state.geometry = {
     cellSize,
     llcHeight,
@@ -1191,7 +1193,7 @@ function renderHeatmap() {
   };
   elements.canvas.setAttribute(
     "aria-label",
-    `CPU migration heatmap with ${numberFormat.format(matrix.total)} transitions, all-Snake utilization across ${cpuCount} CPUs, and capacity-normalized utilization across ${llcUsage.groups.length} LLCs`,
+    `CPU migration heatmap with ${numberFormat.format(matrix.total)} transitions, LLC annotations, all-Snake utilization across ${cpuCount} CPUs, and capacity-normalized utilization across ${llcUsage.groups.length} LLCs`,
   );
 }
 
@@ -1356,6 +1358,39 @@ function drawBoundaries(context, matrix, margins, matrixSize, cellSize) {
     context.lineTo(margins.left + offset, margins.top + matrixSize);
     context.moveTo(margins.left, margins.top + offset);
     context.lineTo(margins.left + matrixSize, margins.top + offset);
+    context.stroke();
+  }
+}
+
+function drawLlcAnnotations(context, order, margins, cellSize) {
+  const annotations = llcAnnotations(state.topology, order);
+  context.fillStyle = "#43515d";
+  context.strokeStyle = "#98a8b5";
+  context.lineWidth = 1;
+  context.font = "600 9px ui-sans-serif, system-ui, sans-serif";
+  context.textAlign = "center";
+  context.textBaseline = "middle";
+
+  for (const annotation of annotations) {
+    const start = annotation.start * cellSize;
+    const span = (annotation.end - annotation.start) * cellSize;
+    const center = start + span / 2;
+    const labelWidth = Math.max(1, span - 4);
+
+    context.fillText(annotation.label, margins.left + center, 7, labelWidth);
+    context.beginPath();
+    context.moveTo(margins.left + start, 16);
+    context.lineTo(margins.left + start + span, 16);
+    context.stroke();
+
+    context.save();
+    context.translate(27, margins.top + center);
+    context.rotate(-Math.PI / 2);
+    context.fillText(annotation.label, 0, 0, labelWidth);
+    context.restore();
+    context.beginPath();
+    context.moveTo(38, margins.top + start);
+    context.lineTo(38, margins.top + start + span);
     context.stroke();
   }
 }
