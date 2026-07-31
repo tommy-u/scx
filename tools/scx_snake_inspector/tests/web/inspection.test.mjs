@@ -9,7 +9,6 @@ import test from "node:test";
 import * as inspectionState from "../../src/web/inspection.js";
 
 import {
-  callbackDurationClass,
   callbackSampleRateOptions,
   compactCpuList,
   decorateCells,
@@ -1274,10 +1273,28 @@ test("callback sampling offers disabled and bounded power-of-two rates", () => {
   assert.equal(options.length, 14);
 });
 
-test("callback durations over one thousand nanoseconds are warnings", () => {
-  assert.equal(callbackDurationClass(null), "");
-  assert.equal(callbackDurationClass(1_000), "");
-  assert.equal(callbackDurationClass(1_001), "callback-duration-warning");
+test("nanosecond duration severity uses orange and red review thresholds", () => {
+  assert.equal(typeof inspectionState.nanosecondDurationClass, "function");
+  if (typeof inspectionState.nanosecondDurationClass !== "function") {
+    return;
+  }
+
+  assert.equal(inspectionState.nanosecondDurationClass(null), "");
+  assert.equal(inspectionState.nanosecondDurationClass(Number.NaN), "");
+  assert.equal(inspectionState.nanosecondDurationClass(1_000), "");
+  assert.equal(inspectionState.nanosecondDurationClass(1_001), "duration-warning");
+  assert.equal(inspectionState.nanosecondDurationClass(10_000), "duration-warning");
+  assert.equal(inspectionState.nanosecondDurationClass(10_001), "duration-critical");
+});
+
+test("duration severity styles distinguish warning and critical values", () => {
+  const stylesheet = readFileSync(
+    new URL("../../src/web/style.css", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(stylesheet, /\.duration-warning\s*\{[^}]*color:\s*#805000;/s);
+  assert.match(stylesheet, /\.duration-critical\s*\{[^}]*color:\s*var\(--danger\);/s);
 });
 
 test("fine timing controls preserve independent collecting and historical states", () => {

@@ -1163,11 +1163,15 @@ export function formatCallbackDuration(value) {
   return `${callbackDurationFormat.format(Math.round(Number(value)))} ns`;
 }
 
-export function callbackDurationClass(value) {
+export function nanosecondDurationClass(value) {
   const nanoseconds = Number(value);
-  return Number.isFinite(nanoseconds) && nanoseconds > 1_000
-    ? "callback-duration-warning"
-    : "";
+  if (!Number.isFinite(nanoseconds)) {
+    return "";
+  }
+  if (nanoseconds > 10_000) {
+    return "duration-critical";
+  }
+  return nanoseconds > 1_000 ? "duration-warning" : "";
 }
 
 const FINE_TIMING_CALLBACKS = [

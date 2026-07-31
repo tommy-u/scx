@@ -17,7 +17,6 @@ import {
   topologyBoundaries,
 } from "/assets/heatmap.js";
 import {
-  callbackDurationClass,
   callbackSampleRateOptions,
   captureKeyedRenderState,
   cellQueueFacts,
@@ -47,6 +46,7 @@ import {
   queueTimingModel,
   queueTopologyModel,
   mergeQueueTimingTopology,
+  nanosecondDurationClass,
   overviewModel,
   parseInspectorRoute,
   runtimeContextModel,
@@ -2698,10 +2698,10 @@ function renderCallbackTiming() {
       <tr>
         <th scope="row"><code>${escapeHtml(row.callback)}</code></th>
         <td>${formatCount(row.samples)}</td>
-        <td class="${callbackDurationClass(row.mean_ns)}">${escapeHtml(formatCallbackDuration(row.mean_ns))}</td>
-        <td class="${callbackDurationClass(row.p50_ns)}">${escapeHtml(formatCallbackDuration(row.p50_ns))}</td>
-        <td class="${callbackDurationClass(row.p95_ns)}">${escapeHtml(formatCallbackDuration(row.p95_ns))}</td>
-        <td class="${callbackDurationClass(row.p99_ns)}">${escapeHtml(formatCallbackDuration(row.p99_ns))}</td>
+        <td class="${nanosecondDurationClass(row.mean_ns)}">${escapeHtml(formatCallbackDuration(row.mean_ns))}</td>
+        <td class="${nanosecondDurationClass(row.p50_ns)}">${escapeHtml(formatCallbackDuration(row.p50_ns))}</td>
+        <td class="${nanosecondDurationClass(row.p95_ns)}">${escapeHtml(formatCallbackDuration(row.p95_ns))}</td>
+        <td class="${nanosecondDurationClass(row.p99_ns)}">${escapeHtml(formatCallbackDuration(row.p99_ns))}</td>
       </tr>`).join(""));
   renderFineTiming();
 }
@@ -2779,7 +2779,7 @@ function renderFineTiming() {
 }
 
 function fineTimingDurationCell(value) {
-  return `<td class="${callbackDurationClass(value)}">${escapeHtml(formatCallbackDuration(value))}</td>`;
+  return `<td class="${nanosecondDurationClass(value)}">${escapeHtml(formatCallbackDuration(value))}</td>`;
 }
 
 function renderPolicySlots() {
@@ -2984,8 +2984,8 @@ function renderDsqOperationTimingCells(timing, available = true) {
   }
   return `
     <td>${formatCount(timing.samples)}</td>
-    <td class="${callbackDurationClass(timing.meanNs)}">${escapeHtml(formatCallbackDuration(timing.meanNs))}</td>
-    <td class="${callbackDurationClass(timing.p99Ns)}">${escapeHtml(formatCallbackDuration(timing.p99Ns))}</td>`;
+    <td class="${nanosecondDurationClass(timing.meanNs)}">${escapeHtml(formatCallbackDuration(timing.meanNs))}</td>
+    <td class="${nanosecondDurationClass(timing.p99Ns)}">${escapeHtml(formatCallbackDuration(timing.p99Ns))}</td>`;
 }
 
 function renderQueueCaptureHeader(timing) {
@@ -3024,10 +3024,10 @@ function renderQueueTimingCells(timing, available = true) {
   }
   return `
     <td>${formatCount(timing.residence.samples)}</td>
-    <td>${escapeHtml(formatCallbackDuration(timing.residence.meanNs))}</td>
-    <td>${escapeHtml(formatCallbackDuration(timing.residence.p50Ns))}</td>
-    <td>${escapeHtml(formatCallbackDuration(timing.residence.p95Ns))}</td>
-    <td>${escapeHtml(formatCallbackDuration(timing.residence.p99Ns))}</td>
+    <td class="${nanosecondDurationClass(timing.residence.meanNs)}">${escapeHtml(formatCallbackDuration(timing.residence.meanNs))}</td>
+    <td class="${nanosecondDurationClass(timing.residence.p50Ns)}">${escapeHtml(formatCallbackDuration(timing.residence.p50Ns))}</td>
+    <td class="${nanosecondDurationClass(timing.residence.p95Ns)}">${escapeHtml(formatCallbackDuration(timing.residence.p95Ns))}</td>
+    <td class="${nanosecondDurationClass(timing.residence.p99Ns)}">${escapeHtml(formatCallbackDuration(timing.residence.p99Ns))}</td>
     <td>${formatNullableCount(timing.depth.latest)}</td>
     <td>${formatNullableCount(timing.depth.p95)}</td>
     <td>${formatNullableCount(timing.depth.max)}</td>`;
@@ -3490,7 +3490,7 @@ function renderRungTiming(rawTiming) {
     : formatCallbackDuration(timing.p95Ns);
   return `
     <dl class="rung-timing">
-      <div><dt>Sampled p95</dt><dd>${escapeHtml(value)}<small>${formatCount(timing.samples)} samples</small></dd></div>
+      <div><dt>Sampled p95</dt><dd class="${nanosecondDurationClass(timing.p95Ns)}">${escapeHtml(value)}<small>${formatCount(timing.samples)} samples</small></dd></div>
     </dl>`;
 }
 

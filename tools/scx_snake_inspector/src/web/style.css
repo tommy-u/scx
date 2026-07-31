@@ -804,9 +804,17 @@ button:focus-visible {
   width: 13px;
   height: 13px;
   flex: 0 0 auto;
+  border-radius: 2px;
+}
+
+.duration-legend-warning {
   background: #fff3da;
   border: 1px solid #dbbb78;
-  border-radius: 2px;
+}
+
+.duration-legend-critical {
+  background: #fcebea;
+  border: 1px solid #d9a0a7;
 }
 
 .callback-table-wrap {
@@ -862,9 +870,15 @@ button:focus-visible {
   font-size: 0.74rem;
 }
 
-.callback-table-wrap td.callback-duration-warning {
+.duration-warning {
   color: #805000;
   background: #fff3da;
+  font-weight: 720;
+}
+
+.duration-critical {
+  color: var(--danger);
+  background: #fcebea;
   font-weight: 720;
 }
 
@@ -1051,12 +1065,6 @@ button:focus-visible {
 
 .fine-timing-table-wrap code {
   font-size: 0.7rem;
-}
-
-.fine-timing-table-wrap td.callback-duration-warning {
-  color: #805000;
-  background: #fff3da;
-  font-weight: 720;
 }
 
 .fine-timing-table-wrap .callback-empty {
