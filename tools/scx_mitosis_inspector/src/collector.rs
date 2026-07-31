@@ -201,6 +201,16 @@ fn read_wakeup_latency(skel: &BpfSkel<'_>) -> Result<CallbackTimingCounters> {
     aggregate_timing(values, "wakeup_to_running")
 }
 
+fn read_cpu_slice_duration(skel: &BpfSkel<'_>) -> Result<CallbackTimingCounters> {
+    let key = 0_u32.to_ne_bytes();
+    let values = skel
+        .maps
+        .cpu_slice_duration
+        .lookup_percpu(&key, MapFlags::ANY)?
+        .context("CPU slice duration entry missing")?;
+    aggregate_timing(values, "on_cpu_slice")
+}
+
 fn aggregate_timing(values: Vec<Vec<u8>>, name: &str) -> Result<CallbackTimingCounters> {
     const U64_BYTES: usize = std::mem::size_of::<u64>();
     const VALUE_BYTES: usize = (CALLBACK_TIMING_BUCKETS + 1) * U64_BYTES;
@@ -264,6 +274,7 @@ pub fn run(
     let mut previous = read_counts(&skel)?;
     let callback_timings = read_callback_timings(&skel)?;
     let wakeup_latency = read_wakeup_latency(&skel)?;
+    let cpu_slice_duration = read_cpu_slice_duration(&skel)?;
     let mut previous_at = Instant::now();
     {
         let mut snapshot = state.write().expect("snapshot lock poisoned");
@@ -275,10 +286,10 @@ pub fn run(
             callback_timing_sample_rate,
             event_timing_sample_rate,
             callback_timings: build_callback_timing_rows(&callback_timings),
-            scheduler_timings: vec![build_timing_metric_row(
-                "wakeup_to_running",
-                &wakeup_latency,
-            )],
+            scheduler_timings: vec![
+                build_timing_metric_row("wakeup_to_running", &wakeup_latency),
+                build_timing_metric_row("on_cpu_slice", &cpu_slice_duration),
+            ],
         };
     }
     ready
@@ -291,6 +302,7 @@ pub fn run(
         let current = read_counts(&skel)?;
         let callback_timings = read_callback_timings(&skel)?;
         let wakeup_latency = read_wakeup_latency(&skel)?;
+        let cpu_slice_duration = read_cpu_slice_duration(&skel)?;
         let counters = build_counters(current, previous, now.duration_since(previous_at));
         previous = current;
         previous_at = now;
@@ -298,10 +310,10 @@ pub fn run(
         snapshot.uptime_seconds = started.elapsed().as_secs();
         snapshot.counters = counters;
         snapshot.callback_timings = build_callback_timing_rows(&callback_timings);
-        snapshot.scheduler_timings = vec![build_timing_metric_row(
-            "wakeup_to_running",
-            &wakeup_latency,
-        )];
+        snapshot.scheduler_timings = vec![
+            build_timing_metric_row("wakeup_to_running", &wakeup_latency),
+            build_timing_metric_row("on_cpu_slice", &cpu_slice_duration),
+        ];
     }
     Ok(())
 }

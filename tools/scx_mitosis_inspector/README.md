@@ -32,6 +32,7 @@ latency capture. Non-zero rates must be powers of two through 4096.
 
 Wakeup-to-running latency is collected from sched tracepoints and uses
 `--event-timing-sample-rate`, which defaults to one in 64 events.
+The same sampled sched-switch stream reports on-CPU slice duration.
 
 For the 16-vCPU development guest, expose the guest port with QEMU user-mode
 networking and run `run-in-vm.sh` as the guest command. The script owns the
