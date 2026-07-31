@@ -9,9 +9,7 @@ inspector_bin=${1:-${repo}/tools/scx_snake_inspector/target/release/scx_snake_in
 snake_bin=${2:-${repo}/target/release/scx_snake}
 campaign_dir=${3:-/tmp/scx-snake-testing/campaign-$(date +%Y%m%d-%H%M%S)}
 source_policy_dir=${SNAKE_TESTING_POLICY_DIR:-${repo}/scheds/rust/scx_snake/examples}
-shard_count=${SNAKE_TESTING_SHARDS:-8}
-guest_cpus=${SNAKE_TESTING_GUEST_CPUS:-8}
-guest_memory=${SNAKE_TESTING_GUEST_MEMORY:-4G}
+testing_profile=${SNAKE_TESTING_PROFILE:-default}
 vm_timeout_secs=${SNAKE_TESTING_VM_TIMEOUT_SECS:-}
 case_budget_secs=${SNAKE_TESTING_CASE_BUDGET_SECS:-105}
 vng=${VNG:-vng}
@@ -21,6 +19,26 @@ fail() {
     echo "Snake local VM matrix: $*" >&2
     exit 1
 }
+
+case ${testing_profile} in
+    default)
+        profile_shards=8
+        profile_guest_cpus=8
+        profile_guest_memory=4G
+        ;;
+    single-cpu)
+        profile_shards=128
+        profile_guest_cpus=1
+        profile_guest_memory=1G
+        ;;
+    *)
+        fail "unknown SNAKE_TESTING_PROFILE: ${testing_profile}"
+        ;;
+esac
+
+shard_count=${SNAKE_TESTING_SHARDS:-${profile_shards}}
+guest_cpus=${SNAKE_TESTING_GUEST_CPUS:-${profile_guest_cpus}}
+guest_memory=${SNAKE_TESTING_GUEST_MEMORY:-${profile_guest_memory}}
 
 cleanup() {
     local pid
@@ -46,7 +64,6 @@ command -v timeout >/dev/null || fail "timeout is required"
 [[ ${case_budget_secs} =~ ^[1-9][0-9]*$ ]] || fail "SNAKE_TESTING_CASE_BUDGET_SECS must be positive"
 [[ -z ${vm_timeout_secs} || ${vm_timeout_secs} =~ ^[1-9][0-9]*$ ]] ||
     fail "SNAKE_TESTING_VM_TIMEOUT_SECS must be positive"
-(( guest_cpus >= 2 )) || fail "each guest requires at least two CPUs"
 [[ -x ${inspector_bin} ]] || fail "inspector binary is not executable: ${inspector_bin}"
 [[ -x ${snake_bin} ]] || fail "Snake binary is not executable: ${snake_bin}"
 [[ -d ${source_policy_dir} ]] || fail "policy directory does not exist: ${source_policy_dir}"
@@ -86,6 +103,7 @@ if [[ -z ${vm_timeout_secs} ]]; then
 fi
 
 echo "Campaign: ${campaign_dir}"
+echo "Profile: ${testing_profile} (${shard_count} shards, ${guest_cpus} CPUs, ${guest_memory} memory each)"
 echo "Aggregate UI command:"
 printf '  %q --listen 127.0.0.1:8788 --snake-bin %q --policy-dir %q --enable-testing --testing-isolated --testing-duration 60s --testing-shard-count %q --testing-import-dir %q\n' \
     "${inspector_bin}" "${snake_bin}" "${policy_dir}" \
@@ -154,17 +172,19 @@ done
 pids=()
 
 passed=0
+skipped=0
 failed=0
 completed=0
 for ((shard = 0; shard < shard_count; shard++)); do
     result=${campaign_dir}/shard-${shard}/run.json
     [[ -f ${result} ]] || continue
     passed=$((passed + $(jq '[.matrix.groups[].rows[].cases[] | select(.assigned and .status == "passed")] | length' "${result}")))
+    skipped=$((skipped + $(jq '[.matrix.groups[].rows[].cases[] | select(.assigned and .status == "skipped")] | length' "${result}")))
     failed=$((failed + $(jq '[.matrix.groups[].rows[].cases[] | select(.assigned and (.status == "failed" or .status == "aborted"))] | length' "${result}")))
     [[ $(jq -r '.status' "${result}") == completed ]] && completed=$((completed + 1))
 done
 
-echo "Matrix complete: ${passed} passed, ${failed} failed, ${completed}/${shard_count} shards completed"
+echo "Matrix complete: ${passed} passed, ${skipped} skipped, ${failed} failed, ${completed}/${shard_count} shards completed"
 (( failed_vms == 0 )) || fail "${failed_vms} VM shards exited unsuccessfully"
 (( failed == 0 )) || fail "${failed} scheduler/workload cases failed"
 (( completed == shard_count )) || fail "only ${completed}/${shard_count} shards completed"

@@ -38,7 +38,6 @@ if command -v systemd-detect-virt >/dev/null; then
 else
     grep -qw hypervisor /proc/cpuinfo || fail "refusing to run outside a VM"
 fi
-(( $(nproc) >= 2 )) || fail "requires at least two guest CPUs"
 [[ ${shard_count} =~ ^[1-9][0-9]*$ ]] || fail "shard count must be positive"
 [[ ${shard_index} =~ ^[0-9]+$ ]] || fail "shard index must be non-negative"
 (( shard_index < shard_count )) || fail "shard index must be less than shard count"
@@ -117,7 +116,10 @@ failed=$(jq '[.matrix.groups[].rows[].cases[] | select(.assigned and .status == 
     "${artifact_dir}/result.json")
 passed=$(jq '[.matrix.groups[].rows[].cases[] | select(.assigned and .status == "passed")] | length' \
     "${artifact_dir}/result.json")
+skipped=$(jq '[.matrix.groups[].rows[].cases[] | select(.assigned and .status == "skipped")] | length' \
+    "${artifact_dir}/result.json")
 assigned=$(jq '.matrix.assigned_cases' "${artifact_dir}/result.json")
-echo "Shard ${shard_index}/${shard_count}: ${passed}/${assigned} passed, ${failed} failed"
+echo "Shard ${shard_index}/${shard_count}: ${passed} passed, ${skipped} skipped, ${failed} failed"
 (( failed == 0 )) || fail "${failed} scheduler/workload cases failed"
-(( passed == assigned )) || fail "only ${passed} of ${assigned} assigned cases completed"
+(( passed + skipped == assigned )) ||
+    fail "only $((passed + skipped)) of ${assigned} assigned cases completed"

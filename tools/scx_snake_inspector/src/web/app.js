@@ -228,6 +228,7 @@ const elements = {
   testingMatrix: document.querySelector("#testingMatrix"),
   testingNotice: document.querySelector("#testingNotice"),
   testingPassed: document.querySelector("#testingPassed"),
+  testingSkipped: document.querySelector("#testingSkipped"),
   testingPending: document.querySelector("#testingPending"),
   testingRunning: document.querySelector("#testingRunning"),
   testingShard: document.querySelector("#testingShard"),
@@ -2694,6 +2695,7 @@ function renderTesting() {
   const running = model.status === "running";
   elements.testingStatus.textContent = `${model.statusLabel} · ${model.durationSecs}s per case`;
   elements.testingPassed.textContent = numberFormat.format(model.summary.passed);
+  elements.testingSkipped.textContent = numberFormat.format(model.summary.skipped);
   elements.testingFailed.textContent = numberFormat.format(model.summary.failed);
   elements.testingRunning.textContent = numberFormat.format(model.summary.running);
   elements.testingPending.textContent = numberFormat.format(model.summary.pending);

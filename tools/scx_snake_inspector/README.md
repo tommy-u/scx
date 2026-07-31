@@ -194,7 +194,10 @@ scheds/rust/scx_snake/tests/vm_matrix_local.sh
 ```
 
 The launcher prints the matching aggregate UI command and the campaign path.
-Override guest allocation with `SNAKE_TESTING_SHARDS`,
+Use `SNAKE_TESTING_PROFILE=single-cpu` for 128 one-vCPU guests with 1 GiB of
+memory each. The full matrix still runs, including mixed affinity; in a
+one-vCPU guest its narrow and wide workers necessarily share the same CPU.
+Override profile allocation with `SNAKE_TESTING_SHARDS`,
 `SNAKE_TESTING_GUEST_CPUS`, and `SNAKE_TESTING_GUEST_MEMORY`. By default, each
 VM timeout is derived from its maximum assigned cases using a 105-second budget
 per case plus a three-minute margin. Override the budget with

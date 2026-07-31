@@ -491,12 +491,15 @@ fn workload_commands_cover_cpu_wakeup_affinity_and_process_churn() {
             "--aggressive",
         ]
     );
-    assert_eq!(
-        WorkloadCommand::for_workload(Workload::MixedAffinity, 1)
-            .unwrap_err()
-            .to_string(),
-        "mixed-affinity workload requires at least two CPUs"
-    );
+}
+
+#[test]
+fn mixed_affinity_workload_runs_in_a_single_cpu_guest() {
+    let mixed = WorkloadCommand::for_workload(Workload::MixedAffinity, 1).unwrap();
+
+    assert_eq!(mixed.program, "bash");
+    assert!(mixed.args.join(" ").contains("taskset -c 0"));
+    assert!(mixed.args.join(" ").contains("stress-ng --cpu 1"));
 }
 
 #[test]
@@ -528,7 +531,7 @@ fn assigned_jobs_preserve_the_visible_fairness_policy_and_workload_identity() {
 }
 
 #[test]
-fn testing_catalog_validates_policies_without_attaching_snake() {
+fn testing_catalog_keeps_rejected_policies_in_the_matrix() {
     let root = tempfile::tempdir().unwrap();
     let snake = root.path().join("scx_snake");
     fs::write(
@@ -553,11 +556,29 @@ fn testing_catalog_validates_policies_without_attaching_snake() {
             .iter()
             .map(|policy| (policy.id.as_str(), policy.queue_policy))
             .collect::<Vec<_>>(),
-        vec![("basic.toml", false), ("cell.toml", true)]
+        vec![
+            ("basic.toml", false),
+            ("cell.toml", true),
+            ("invalid.toml", false),
+        ]
     );
     assert_eq!(catalog.invalid.len(), 1);
     assert_eq!(catalog.invalid[0].id, "invalid.toml");
     assert!(catalog.invalid[0].error.contains("rejected"));
+    let matrix = build_matrix(&catalog, MatrixConfig::new(60, 0, 1).unwrap());
+    assert_eq!(matrix.total_cases, 28);
+    let skipped = matrix
+        .groups
+        .iter()
+        .flat_map(|group| &group.rows)
+        .flat_map(|row| &row.cases)
+        .filter(|case| serde_json::to_value(case.status).unwrap() == "skipped")
+        .collect::<Vec<_>>();
+    assert_eq!(skipped.len(), 12);
+    assert!(skipped
+        .iter()
+        .all(|case| case.failure.as_deref().is_some_and(|reason| reason.contains("rejected"))));
+    assert_eq!(TestRun::new(matrix).assigned_jobs().len(), 16);
 }
 
 #[test]

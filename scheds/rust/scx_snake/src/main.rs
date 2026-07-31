@@ -4521,12 +4521,15 @@ scope = "task_allowed"
         assert!(local.contains("chmod -R a-w \"${inputs_dir}\""));
         assert!(local.contains("max_cases_per_shard="));
         assert!(local.contains("case_budget_secs="));
+        assert!(local.contains(".status == \"skipped\""));
         assert!(!local.contains("SNAKE_TESTING_VM_TIMEOUT_SECS:-2700"));
 
         assert!(shard.contains("policy_dir=${6:-"));
         assert!(shard.contains("assigned_cases=$(jq -er '.matrix.assigned_cases'"));
         assert!(shard.contains("duration_secs=$(jq -er '.matrix.duration_secs'"));
         assert!(shard.contains("case_budget_secs=$((duration_secs + 45))"));
+        assert!(shard.contains(".status == \"skipped\""));
+        assert!(shard.contains("passed + skipped == assigned"));
         assert!(!shard.contains("SECONDS + 2100"));
     }
 

@@ -205,6 +205,7 @@ const TESTING_STATUS = {
   pending: { label: "Pending", symbol: "", className: "pending" },
   running: { label: "Running", symbol: "", className: "running" },
   passed: { label: "Passed", symbol: "✓", className: "passed" },
+  skipped: { label: "Skipped", symbol: "~", className: "skipped" },
   failed: { label: "Failed", symbol: "×", className: "failed" },
   aborted: { label: "Stopped", symbol: "", className: "aborted" },
 };
@@ -242,7 +243,9 @@ function testingCaseTooltip({
     `Runtime: ${testingRuntimeLabel(status, elapsedMs)}`,
     `Shard: ${shard + 1} of ${shardCount}`,
   ];
-  if (failure) lines.push(`Failure: ${testingDisplayText(failure)}`);
+  if (failure) {
+    lines.push(`${status === "skipped" ? "Reason" : "Failure"}: ${testingDisplayText(failure)}`);
+  }
   if (environment) {
     const vm = [
       environment.virtualization || "VM",
@@ -262,6 +265,7 @@ function testingGroupResult(rows) {
   const counts = {
     total: 0,
     passed: 0,
+    skipped: 0,
     failed: 0,
     running: 0,
     pending: 0,
@@ -275,6 +279,7 @@ function testingGroupResult(rows) {
       continue;
     }
     if (testCase.status === "passed") counts.passed += 1;
+    else if (testCase.status === "skipped") counts.skipped += 1;
     else if (testCase.status === "failed") counts.failed += 1;
     else if (testCase.status === "running") counts.running += 1;
     else if (testCase.status === "pending") counts.pending += 1;
@@ -285,14 +290,17 @@ function testingGroupResult(rows) {
   if (counts.failed > 0) status = "failed";
   else if (counts.running > 0) status = "running";
   else if (counts.pending > 0 || counts.unassigned > 0) status = "pending";
-  else if (counts.total > 0 && counts.passed === counts.total) status = "passed";
   else if (counts.stopped > 0) status = "aborted";
+  else if (counts.total > 0 && counts.passed + counts.skipped === counts.total) status = "passed";
 
   const presentation = TESTING_STATUS[status] || TESTING_STATUS.pending;
   let label = `${counts.passed} / ${counts.total} passed`;
   if (status === "failed") label = `${counts.failed} failed`;
   else if (status === "running") label = `${counts.running} running · ${label}`;
   else if (status === "aborted") label = `${counts.stopped} stopped`;
+  else if (status === "passed" && counts.skipped > 0) {
+    label = `${counts.passed} passed · ${counts.skipped} skipped`;
+  }
 
   return {
     status,
@@ -315,7 +323,7 @@ export function testingMatrixModel(run) {
   if (!aggregate && run?.environment && !environments.has(Number(matrix.shard_index || 0))) {
     environments.set(Number(matrix.shard_index || 0), run.environment);
   }
-  const summary = { passed: 0, failed: 0, running: 0, pending: 0 };
+  const summary = { passed: 0, failed: 0, skipped: 0, running: 0, pending: 0 };
   const workloads = (matrix.workloads || []).map((id) => ({
     id,
     label: TESTING_WORKLOAD_LABELS[id] || id,
@@ -333,6 +341,7 @@ export function testingMatrixModel(run) {
           : { label: "Other shard", symbol: "", className: "unassigned" };
         if (assigned) {
           if (status === "passed") summary.passed += 1;
+          else if (status === "skipped") summary.skipped += 1;
           else if (status === "failed") summary.failed += 1;
           else if (status === "running") summary.running += 1;
           else if (status === "pending") summary.pending += 1;
@@ -416,9 +425,12 @@ export function testingCampaignTabs(runs, selectedKey = null) {
       .flatMap((row) => row.cases);
     const total = cases.length;
     const passed = cases.filter((testCase) => testCase.status === "passed").length;
+    const skipped = cases.filter((testCase) => testCase.status === "skipped").length;
     const failed = cases.filter((testCase) => testCase.status === "failed").length;
     const running = run?.status === "running";
-    const complete = run?.status === "completed" && total > 0 && passed === total;
+    const complete = run?.status === "completed"
+      && total > 0
+      && passed + skipped === total;
     const status = failed > 0
       ? "failed"
       : (complete ? "passed" : (running ? "running" : "pending"));
@@ -434,8 +446,11 @@ export function testingCampaignTabs(runs, selectedKey = null) {
       className: presentation.className,
       summary: failed > 0
         ? `${running ? "Running \u00b7 " : ""}${failed} failed`
-        : `${running ? "Running \u00b7 " : ""}${passed} / ${total} passed`,
+        : (skipped > 0
+          ? `${running ? "Running \u00b7 " : ""}${passed} passed \u00b7 ${skipped} skipped`
+          : `${running ? "Running \u00b7 " : ""}${passed} / ${total} passed`),
       passed,
+      skipped,
       failed,
       total,
       run,

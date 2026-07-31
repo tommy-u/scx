@@ -241,6 +241,12 @@
   font-weight: 700;
 }
 
+.testing-result.skipped {
+  color: var(--waiting);
+  background: #fff5e5;
+  font-weight: 700;
+}
+
 .testing-result.aborted {
   color: var(--muted);
   background: var(--surface-muted);
@@ -712,6 +718,10 @@ button:focus-visible {
   display: grid;
   grid-template-columns: repeat(4, minmax(100px, 150px));
   gap: 0;
+}
+
+.testing-summary dl {
+  grid-template-columns: repeat(5, minmax(84px, 130px));
 }
 
 .summary-band dl > div {
@@ -3609,6 +3619,10 @@ button:focus-visible {
   .summary-band dl {
     grid-template-columns: repeat(2, minmax(0, 1fr));
     row-gap: 12px;
+  }
+
+  .testing-summary dl {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .summary-band dl > div,

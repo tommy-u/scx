@@ -24,6 +24,10 @@ pub fn discover_testing_catalog(snake_bin: &Path, policy_dir: &Path) -> Result<P
     let mut catalog = PolicyCatalog::default();
     for file in files {
         let path = policy_dir.join(&file.id);
+        let queue_policy = file
+            .source
+            .lines()
+            .any(|line| line.trim().starts_with("[queues"));
         let output = Command::new(snake_bin)
             .args([
                 "--policy",
@@ -33,10 +37,6 @@ pub fn discover_testing_catalog(snake_bin: &Path, policy_dir: &Path) -> Result<P
             .output()
             .with_context(|| format!("validating testing policy {}", file.id))?;
         if output.status.success() {
-            let queue_policy = file
-                .source
-                .lines()
-                .any(|line| line.trim().starts_with("[queues"));
             catalog.policies.push(PolicyChoice {
                 id: file.id,
                 name: file.name,
@@ -49,6 +49,16 @@ pub fn discover_testing_catalog(snake_bin: &Path, policy_dir: &Path) -> Result<P
             });
         } else {
             let error = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+            catalog.policies.push(PolicyChoice {
+                id: file.id.clone(),
+                name: file.name.clone(),
+                source: file.source.clone(),
+                rung_count: 0,
+                mask_table_count: 0,
+                cell_count: 0,
+                queue_policy,
+                summary: "Rejected during VM validation; retained for failure testing".into(),
+            });
             catalog.invalid.push(InvalidPolicy {
                 id: file.id,
                 name: file.name,
@@ -137,20 +147,15 @@ impl WorkloadCommand {
                 "pipe".into(),
                 "--aggressive".into(),
             ]),
-            Workload::MixedAffinity => {
-                if cpus < 2 {
-                    bail!("mixed-affinity workload requires at least two CPUs");
-                }
-                Self {
-                    program: "bash".into(),
-                    args: vec![
-                        "-c".into(),
-                        format!(
-                            "taskset -c 0 stress-ng --cpu {cpus} --cpu-method loop --aggressive & narrow=$!; stress-ng --cpu {cpus} --cpu-method loop --aggressive & wide=$!; wait \"$narrow\" \"$wide\""
-                        ),
-                    ],
-                }
-            }
+            Workload::MixedAffinity => Self {
+                program: "bash".into(),
+                args: vec![
+                    "-c".into(),
+                    format!(
+                        "taskset -c 0 stress-ng --cpu {cpus} --cpu-method loop --aggressive & narrow=$!; stress-ng --cpu {cpus} --cpu-method loop --aggressive & wide=$!; wait \"$narrow\" \"$wide\""
+                    ),
+                ],
+            },
             Workload::ForkYield => Self::stress_ng([
                 "--fork".into(),
                 (cpus / 2).max(1).to_string(),
@@ -215,6 +220,7 @@ pub enum CaseStatus {
     Pending,
     Running,
     Passed,
+    Skipped,
     Failed,
     Aborted,
 }
@@ -259,6 +265,11 @@ pub struct TestMatrix {
 pub fn build_matrix(catalog: &PolicyCatalog, config: MatrixConfig) -> TestMatrix {
     let mut policies = catalog.policies.iter().collect::<Vec<_>>();
     policies.sort_by(|left, right| left.id.cmp(&right.id));
+    let skipped_policies = catalog
+        .invalid
+        .iter()
+        .map(|policy| (policy.id.as_str(), policy.error.as_str()))
+        .collect::<HashMap<_, _>>();
     let catalog_fingerprint = policy_catalog_fingerprint(&policies);
     let mut ordinal = 0;
     let groups = Fairness::ALL
@@ -270,6 +281,7 @@ pub fn build_matrix(catalog: &PolicyCatalog, config: MatrixConfig) -> TestMatrix
                 .copied()
                 .filter(|policy| compatible(policy, fairness))
                 .map(|policy| {
+                    let skip_reason = skipped_policies.get(policy.id.as_str()).copied();
                     let cases = Workload::ALL
                         .into_iter()
                         .map(|workload| {
@@ -285,9 +297,13 @@ pub fn build_matrix(catalog: &PolicyCatalog, config: MatrixConfig) -> TestMatrix
                                 workload,
                                 shard,
                                 assigned: shard == config.shard_index,
-                                status: CaseStatus::Pending,
+                                status: if skip_reason.is_some() {
+                                    CaseStatus::Skipped
+                                } else {
+                                    CaseStatus::Pending
+                                },
                                 elapsed_ms: 0,
-                                failure: None,
+                                failure: skip_reason.map(str::to_owned),
                             }
                         })
                         .collect();
@@ -918,7 +934,7 @@ impl TestRun {
                 group.rows.iter().flat_map(move |row| {
                     row.cases
                         .iter()
-                        .filter(|case| case.assigned)
+                        .filter(|case| case.assigned && case.status == CaseStatus::Pending)
                         .map(move |case| CaseJob {
                             id: case.id.clone(),
                             fairness: group.fairness,

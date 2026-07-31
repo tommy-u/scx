@@ -38,6 +38,7 @@ test("testing is a canonical inspector workspace", () => {
     "testingKernelTabs",
     "testingMatrix",
     "testingDetail",
+    "testingSkipped",
     "runTesting",
     "stopTesting",
   ]) {
@@ -128,6 +129,7 @@ test("testing model keeps fairness as the major row and workloads as columns", (
     total: 2,
     passed: 1,
     failed: 1,
+    skipped: 0,
     running: 0,
     pending: 0,
     stopped: 0,
@@ -136,6 +138,7 @@ test("testing model keeps fairness as the major row and workloads as columns", (
   assert.deepEqual(model.summary, {
     passed: 1,
     failed: 1,
+    skipped: 0,
     running: 0,
     pending: 0,
   });
@@ -169,6 +172,7 @@ test("testing UI loads live results and exposes authenticated controls", () => {
   assert.match(styles, /\.testing-matrix/);
   assert.match(styles, /\.testing-result\.passed/);
   assert.match(styles, /\.testing-result\.failed/);
+  assert.match(styles, /\.testing-result\.skipped/);
   assert.match(styles, /\.testing-tooltip\s*\{/);
   assert.match(styles, /\.testing-fairness-toggle\s*\{/);
   assert.match(styles, /\.testing-kernel-tabs\s*\{/);
@@ -210,6 +214,7 @@ test("fairness result passes only when every case passes", () => {
     total: 2,
     passed: 2,
     failed: 0,
+    skipped: 0,
     running: 0,
     pending: 0,
     stopped: 0,
@@ -390,6 +395,7 @@ test("local fairness result stays pending while other shards are unreported", ()
     total: 2,
     passed: 1,
     failed: 0,
+    skipped: 0,
     running: 0,
     pending: 0,
     stopped: 0,
@@ -459,7 +465,54 @@ test("stopped cases are neutral and are not counted as pending failures", () => 
   assert.deepEqual(model.summary, {
     passed: 0,
     failed: 0,
+    skipped: 0,
     running: 0,
     pending: 0,
   });
+});
+
+test("skipped cases use a yellow tilde without counting as failures", () => {
+  const run = {
+    campaign_id: "single-cpu",
+    environment: { kernel_release: "6.16-test" },
+    status: "completed",
+    matrix: {
+      aggregate: true,
+      workloads: ["cpu_saturation"],
+      groups: [{
+        fairness: "vtime",
+        rows: [{
+          policy_id: "cell-queues.toml",
+          cases: [{
+            id: "vtime/cell-queues.toml/cpu_saturation",
+            workload: "cpu_saturation",
+            status: "skipped",
+            failure: "cell 1 references unavailable CPU 1",
+          }],
+        }],
+      }],
+    },
+  };
+
+  const model = testingMatrixModel(run);
+  const skipped = model.groups[0].rows[0].cases[0];
+  const [tab] = testingCampaignTabs([run]).tabs;
+
+  assert.equal(skipped.label, "Skipped");
+  assert.equal(skipped.symbol, "~");
+  assert.equal(skipped.className, "skipped");
+  assert.match(skipped.tooltip, /Reason: cell 1 references unavailable CPU 1/);
+  assert.deepEqual(model.summary, {
+    passed: 0,
+    failed: 0,
+    skipped: 1,
+    running: 0,
+    pending: 0,
+  });
+  assert.equal(model.groups[0].result.status, "passed");
+  assert.equal(model.groups[0].result.symbol, "✓");
+  assert.equal(model.groups[0].result.label, "0 passed · 1 skipped");
+  assert.equal(tab.status, "passed");
+  assert.equal(tab.symbol, "✓");
+  assert.equal(tab.summary, "0 passed · 1 skipped");
 });
