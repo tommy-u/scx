@@ -16,9 +16,13 @@ snake_log=${tmpdir}/snake.ndjson
 wide_log=${tmpdir}/wide.log
 pinned_log=${tmpdir}/pinned.log
 fairness_log=${tmpdir}/fairness.log
+pre_attach_log=${tmpdir}/pre-attach.ndjson
+pre_attach_stress_log=${tmpdir}/pre-attach-stress.log
 snake_pid=
 wide_pid=
 pinned_pid=
+pre_attach_stress_pid=
+pre_attach_pids=()
 dmesg_lines=0
 verbose_args=()
 
@@ -47,11 +51,19 @@ stop_pid() {
 }
 
 cleanup() {
-    kill "${wide_pid}" "${pinned_pid}" 2>/dev/null || true
     kill -INT "${snake_pid}" 2>/dev/null || true
+    kill "${wide_pid}" "${pinned_pid}" "${pre_attach_stress_pid}" \
+        2>/dev/null || true
+    if ((${#pre_attach_pids[@]})); then
+        kill -KILL "${pre_attach_pids[@]}" 2>/dev/null || true
+    fi
     stop_pid "${wide_pid}"
     stop_pid "${pinned_pid}"
+    stop_pid "${pre_attach_stress_pid}"
     stop_pid "${snake_pid}" INT
+    if ((${#pre_attach_pids[@]})); then
+        wait "${pre_attach_pids[@]}" 2>/dev/null || true
+    fi
     rm -rf "${tmpdir}"
 }
 trap cleanup EXIT INT TERM
@@ -60,6 +72,8 @@ fail() {
     echo "vtime LLC queue test: $*" >&2
     dmesg | tail -n +$((dmesg_lines + 1)) >&2 || true
     cat "${topology_dump}" >&2 2>/dev/null || true
+    tail -n 200 "${pre_attach_log}" >&2 2>/dev/null || true
+    tail -n 80 "${pre_attach_stress_log}" >&2 2>/dev/null || true
     tail -n 200 "${snake_log}" >&2 2>/dev/null || true
     tail -n 40 "${wide_log}" >&2 2>/dev/null || true
     tail -n 40 "${pinned_log}" >&2 2>/dev/null || true
@@ -70,6 +84,27 @@ fail() {
 scheduler_enabled() {
     [[ $(cat /sys/kernel/sched_ext/state 2>/dev/null || true) == enabled ]] &&
         kill -0 "${snake_pid}" 2>/dev/null
+}
+
+sleepers_blocked() {
+    local pid state
+
+    for pid in "${pre_attach_pids[@]}"; do
+        state=$(awk '{print $3}' "/proc/${pid}/stat" 2>/dev/null || true)
+        [[ ${state} == S ]] || return 1
+    done
+}
+
+sleepers_done() {
+    local pid
+
+    for pid in "${pre_attach_pids[@]}"; do
+        pid_done "${pid}" || return 1
+    done
+}
+
+stats_record_count() {
+    grep -c '^{' "${pre_attach_log}" 2>/dev/null || true
 }
 
 ((EUID == 0)) || fail "must run as root inside a VM"
@@ -92,6 +127,7 @@ wide_workers=$((cpus * 4))
 [[ $(cat /sys/kernel/sched_ext/state 2>/dev/null || true) == disabled ]] ||
     fail "sched_ext must be disabled before the test"
 command -v python3 >/dev/null || fail "python3 is required"
+command -v pgrep >/dev/null || fail "pgrep is required"
 command -v stress-ng >/dev/null || fail "stress-ng is required"
 command -v taskset >/dev/null || fail "taskset is required"
 command -v timeout >/dev/null || fail "timeout is required"
@@ -157,13 +193,112 @@ read -r pinned_cpu normal_queue_count <<<"${topology_values}"
 [[ ${pinned_cpu} =~ ^[0-9]+$ ]] || fail "invalid pinned CPU from topology"
 [[ ${normal_queue_count} =~ ^[0-9]+$ ]] || fail "invalid LLC queue count from topology"
 
-"${snake_bin}" --policy "${policy}" --fairness vtime --stats 0.25 \
-    --stats-format json "${verbose_args[@]}" >"${snake_log}" 2>&1 &
+pre_attach_tasks=$((cpus * 4))
+((pre_attach_tasks < 32)) && pre_attach_tasks=32
+((pre_attach_tasks > 128)) && pre_attach_tasks=128
+for _ in $(seq 1 "${pre_attach_tasks}"); do
+    sleep 300 &
+    pre_attach_pids+=("$!")
+done
+for _ in $(seq 1 200); do
+    sleepers_blocked && break
+    sleep 0.05
+done
+sleepers_blocked || fail "pre-attach tasks did not enter interruptible sleep"
+
+"${snake_bin}" --policy "${policy}" --fairness vtime --stats 0.1 \
+    --stats-format json "${verbose_args[@]}" >"${pre_attach_log}" 2>&1 &
 snake_pid=$!
 startup_deadline=$((SECONDS + startup_timeout))
 while ! scheduler_enabled; do
     pid_done "${snake_pid}" && fail "scheduler exited while attaching"
     ((SECONDS < startup_deadline)) || fail "scheduler did not attach"
+    sleep 0.05
+done
+stats_deadline=$((SECONDS + 10))
+while (( $(stats_record_count) == 0 )); do
+    scheduler_enabled || fail "scheduler exited before stats became available"
+    ((SECONDS < stats_deadline)) || fail "pre-attach stats did not become available"
+    sleep 0.05
+done
+records_before_stress=$(stats_record_count)
+
+stress-ng --cpu "${cpus}" --cpu-method loop --timeout 15s \
+    >"${pre_attach_stress_log}" 2>&1 &
+pre_attach_stress_pid=$!
+stress_workers=0
+for _ in $(seq 1 200); do
+    stress_workers=$(pgrep -P "${pre_attach_stress_pid}" -c stress-ng-cpu \
+        2>/dev/null || true)
+    ((stress_workers >= cpus)) && break
+    sleep 0.05
+done
+((stress_workers >= cpus)) || fail "pre-attach stress workers did not start"
+stats_deadline=$((SECONDS + 10))
+while (( $(stats_record_count) <= records_before_stress )); do
+    scheduler_enabled || fail "scheduler exited while saturating CPUs"
+    ((SECONDS < stats_deadline)) || fail "stress activity was not sampled"
+    sleep 0.05
+done
+records_before_signal=$(stats_record_count)
+
+# Saturation forces each signal wake through the ladder exhaustion fallback.
+kill -TERM "${pre_attach_pids[@]}"
+signal_deadline=$((SECONDS + 10))
+while ! sleepers_done; do
+    scheduler_enabled || fail "scheduler exited during pre-attach sleeper termination"
+    ((SECONDS < signal_deadline)) || fail "pre-attach sleepers did not exit"
+    sleep 0.05
+done
+wait "${pre_attach_pids[@]}" 2>/dev/null || true
+pre_attach_pids=()
+scheduler_enabled || fail "scheduler exited during pre-attach sleeper termination"
+stats_deadline=$((SECONDS + 10))
+while (( $(stats_record_count) <= records_before_signal )); do
+    scheduler_enabled || fail "scheduler exited before reporting signal wakeups"
+    ((SECONDS < stats_deadline)) || fail "signal wakeups were not sampled"
+    sleep 0.05
+done
+sleep 0.2
+python3 - "${pre_attach_log}" "${records_before_signal}" \
+    "${pre_attach_tasks}" <<'PY' || fail "pre-attach fallback validation failed"
+import json
+import sys
+
+records = []
+with open(sys.argv[1], encoding="utf-8") as stream:
+    for line in stream:
+        try:
+            records.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+post_signal = records[int(sys.argv[2]):]
+expected_tasks = int(sys.argv[3])
+if not post_signal:
+    raise SystemExit("missing post-signal scheduler statistics")
+if sum(record.get("select_calls", 0) for record in post_signal) < expected_tasks:
+    raise SystemExit("signal wakeups did not reach select_cpu")
+if sum(record.get("ladder_exhaustions", 0) for record in post_signal) == 0:
+    raise SystemExit("signal wakeups did not exercise ladder exhaustion")
+if sum(record.get("invalid_errors", 0) for record in post_signal) != 0:
+    raise SystemExit("pre-attach signal wakeups reported invalid errors")
+if sum(record.get("vtime_accounting_errors", 0) for record in post_signal) != 0:
+    raise SystemExit("pre-attach signal wakeups reported VTIME accounting errors")
+PY
+stop_pid "${pre_attach_stress_pid}"
+pre_attach_stress_pid=
+stop_pid "${snake_pid}" INT
+snake_pid=
+[[ $(cat /sys/kernel/sched_ext/state 2>/dev/null || true) == disabled ]] ||
+    fail "pre-attach regression phase left sched_ext enabled"
+
+"${snake_bin}" --policy "${policy}" --fairness vtime --stats 0.25 \
+    --stats-format json "${verbose_args[@]}" >"${snake_log}" 2>&1 &
+snake_pid=$!
+startup_deadline=$((SECONDS + startup_timeout))
+while ! scheduler_enabled; do
+    pid_done "${snake_pid}" && fail "scheduler exited while reattaching"
+    ((SECONDS < startup_deadline)) || fail "scheduler did not reattach"
     sleep 0.05
 done
 

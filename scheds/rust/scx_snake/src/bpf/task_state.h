@@ -69,6 +69,11 @@ task_state_get_or_create(struct task_struct *p)
 				    BPF_LOCAL_STORAGE_GET_F_CREATE);
 }
 
+static __always_inline int task_state_init(struct task_struct *p)
+{
+	return task_state_get_or_create(p) ? 0 : -ENOMEM;
+}
+
 static __always_inline struct snake_task_cell *
 task_annotation(struct task_struct *p)
 {

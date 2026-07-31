@@ -3183,6 +3183,42 @@ scope = "task_allowed"
     }
 
     #[test]
+    fn vtime_initializes_task_state_before_wakeup_routing() {
+        let bpf_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bpf");
+        let mode = fs::read_to_string(bpf_dir.join("scheduler_mode.h")).unwrap();
+        let state = fs::read_to_string(bpf_dir.join("task_state.h")).unwrap();
+        let vtime = fs::read_to_string(bpf_dir.join("fairness_vtime.h")).unwrap();
+        let queue_vtime = fs::read_to_string(bpf_dir.join("queue_vtime.h")).unwrap();
+
+        assert!(state.contains("task_state_init(struct task_struct *p)"));
+        assert_text_order(
+            &mode,
+            &[
+                "scheduler_mode_init_task(",
+                "queue_cell_mode_enabled()",
+                "task_state_init_queue_mask(p)",
+                "fairness_is_vtime()",
+                "task_state_init(p)",
+                "return 0;",
+            ],
+        );
+        let prepare = vtime
+            .split_once("fairness_vtime_prepare_task(")
+            .and_then(|(_, body)| body.split_once("fairness_vtime_prepare_runnable("))
+            .map(|(body, _)| body)
+            .unwrap();
+        assert!(prepare.contains("fairness_task(ctx, p, false)"));
+        assert!(!prepare.contains("fairness_task(ctx, p, true)"));
+        let queue_prepare = queue_vtime
+            .split_once("queue_fairness_prepare_task_for_cell(")
+            .and_then(|(_, body)| body.split_once("queue_fairness_prepare_task("))
+            .map(|(body, _)| body)
+            .unwrap();
+        assert!(queue_prepare.contains("fairness_task(ctx, p, false)"));
+        assert!(!queue_prepare.contains("fairness_task(ctx, p, true)"));
+    }
+
+    #[test]
     fn bpf_queue_state_and_initialization_have_distinct_owners() {
         let bpf_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bpf");
         let state = fs::read_to_string(bpf_dir.join("queue_state.h"))
@@ -3963,10 +3999,6 @@ scope = "task_allowed"
                 "release_timed_callback(",
             ],
         );
-        assert!(
-            mode.contains("return queue_cell_mode_enabled() ? task_state_init_queue_mask(p) : 0;")
-        );
-
         let select = main
             .split_once("BPF_STRUCT_OPS(snake_select_cpu")
             .and_then(|(_, body)| body.split_once("BPF_STRUCT_OPS(snake_enqueue"))

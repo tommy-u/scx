@@ -101,7 +101,7 @@ fairness_vtime_prepare_task(struct snake_ladder_ctx *ctx, struct task_struct *p)
 	struct snake_vtime_domain *domain;
 	u64			   virtual_time;
 
-	runtime = fairness_task(ctx, p, true);
+	runtime = fairness_task(ctx, p, false);
 	if (!runtime || runtime->initialized)
 		return runtime;
 	domain = fairness_vtime_domain();

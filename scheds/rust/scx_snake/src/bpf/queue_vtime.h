@@ -75,7 +75,7 @@ queue_fairness_prepare_task_for_cell(struct snake_ladder_ctx *ctx,
 	u64			   old_now, new_now, stage_started_at;
 
 	stage_started_at = fine_timing_start(fine);
-	runtime		 = fairness_task(ctx, p, true);
+	runtime		 = fairness_task(ctx, p, false);
 	fine_timing_finish(fine, SNAKE_FINE_TIMING_ENQUEUE_PREPARE_TASK_STORAGE,
 			   stage_started_at);
 	if (!runtime)

@@ -145,7 +145,11 @@ scheduler_mode_set_weight(struct snake_ladder_ctx *ctx, struct task_struct *p,
 
 static __always_inline int scheduler_mode_init_task(struct task_struct *p)
 {
-	return queue_cell_mode_enabled() ? task_state_init_queue_mask(p) : 0;
+	if (queue_cell_mode_enabled())
+		return task_state_init_queue_mask(p);
+	if (fairness_is_vtime())
+		return task_state_init(p);
+	return 0;
 }
 
 #endif /* __SCX_SNAKE_SCHEDULER_MODE_H */
