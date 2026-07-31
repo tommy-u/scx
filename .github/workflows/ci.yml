@@ -39,6 +39,8 @@ jobs:
       - uses: ./.github/actions/install-deps-action
       - name: Format Rust
         run: cargo fmt --check
+      - name: Format Snake inspector
+        run: cargo fmt --manifest-path tools/scx_snake_inspector/Cargo.toml -- --check
       - name: Format C
         run: |
           find tools/scxtop scheds/rust/scx_chaos scheds/rust/scx_mitosis \
@@ -51,6 +53,8 @@ jobs:
             xargs -I{} cargo clippy --profile ci --no-deps --locked -p {} -- -Dwarnings
       - name: Check
         run: cargo check --profile ci --locked
+      - name: Check Snake inspector
+        run: cargo check --profile ci --locked --manifest-path tools/scx_snake_inspector/Cargo.toml
       - name: Check vmlinux sync
         run: |
           tmpdir=$(mktemp -d)
@@ -205,6 +209,10 @@ jobs:
           tool: cargo-nextest
       - name: Unit tests
         run: cargo nextest run --cargo-profile ci --workspace --locked --no-fail-fast --status-level fail --success-output never
+      - name: Snake inspector tests
+        run: |
+          cargo test --profile ci --locked --manifest-path tools/scx_snake_inspector/Cargo.toml
+          node --test tools/scx_snake_inspector/tests/web/*.test.mjs
 
   test:
     if: always() && (github.repository == 'sched-ext/scx' || github.event_name != 'schedule')
@@ -383,6 +391,22 @@ jobs:
               results[snake_eevdf_affinity]="PASS"
               passed="${passed} snake_eevdf_affinity"
             fi
+            for workload in mixed_affinity fork_yield; do
+              echo "=== Testing snake EEVDF ${workload} progress ==="
+              scheds/rust/scx_snake/tests/eevdf_stall_workload.sh \
+                target/ci/scx_snake \
+                scheds/rust/scx_snake/examples/basic.toml \
+                "${workload}"
+              snake_rc=$?
+              result="snake_eevdf_${workload}"
+              if [ $snake_rc -ne 0 ]; then
+                results[$result]="FAIL"
+                failed="${failed} ${result}"
+              else
+                results[$result]="PASS"
+                passed="${passed} ${result}"
+              fi
+            done
             for sched in cake pandemonium; do
               echo "=== Testing ${sched} ==="
               stress-ng -t 31 --aggressive -M -c $(nproc) -f $(nproc) \
@@ -412,7 +436,9 @@ jobs:
             {
               echo "| Scheduler | Result |"
               echo "|-----------|--------|"
-              for sched in arena_selftests snake_eevdf_affinity cake pandemonium; do
+              for sched in arena_selftests snake_eevdf_affinity \
+                snake_eevdf_mixed_affinity snake_eevdf_fork_yield \
+                cake pandemonium; do
                 if [ "${results[$sched]}" = "PASS" ]; then
                   echo "| ${sched} | ✅ |"
                 else
