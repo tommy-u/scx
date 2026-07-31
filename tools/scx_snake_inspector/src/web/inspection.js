@@ -1525,6 +1525,271 @@ export function dsqActivityModels(operationDsqs, queueTimingDsqs) {
   });
 }
 
+function emptyTrafficMetric() {
+  return { samples: 0, ratePerSecond: null, intensity: 0 };
+}
+
+function addTrafficMetric(metric, samples, rateMultiplier) {
+  const count = Math.max(0, finiteValue(samples) ?? 0);
+  metric.samples += count;
+  if (rateMultiplier !== null) {
+    metric.ratePerSecond = (metric.ratePerSecond ?? 0) + count * rateMultiplier;
+  }
+}
+
+function mergeTrafficMetric(target, source) {
+  target.samples += source.samples;
+  if (source.ratePerSecond !== null) {
+    target.ratePerSecond = (target.ratePerSecond ?? 0) + source.ratePerSecond;
+  }
+}
+
+function captureRateMultiplier(capture, sampleRate, nowMs) {
+  const startedAt = finiteValue(capture?.started_at_ms);
+  const stoppedAt = finiteValue(capture?.stopped_at_ms);
+  const end = stoppedAt ?? finiteValue(nowMs);
+  if (sampleRate <= 0 || startedAt === null || end === null || end <= startedAt) {
+    return null;
+  }
+  return sampleRate * 1_000 / (end - startedAt);
+}
+
+function trafficScore(metric) {
+  return metric.ratePerSecond ?? metric.samples;
+}
+
+function trafficIntensity(metric, maxRatePerSecond, maxSamples) {
+  const value = maxRatePerSecond > 0 && metric.ratePerSecond !== null
+    ? metric.ratePerSecond
+    : metric.samples;
+  const max = maxRatePerSecond > 0 && metric.ratePerSecond !== null
+    ? maxRatePerSecond
+    : maxSamples;
+  return value > 0 && max > 0 ? Math.log1p(value) / Math.log1p(max) : 0;
+}
+
+function compareDsqKeys(left, right) {
+  try {
+    const leftId = BigInt(left);
+    const rightId = BigInt(right);
+    return leftId < rightId ? -1 : leftId > rightId ? 1 : 0;
+  } catch {
+    return String(left).localeCompare(String(right));
+  }
+}
+
+function trafficGenerationMatches(payload, capture) {
+  const currentGeneration = finiteValue(payload?.context?.policy_generation);
+  const captureGeneration = finiteValue(capture?.policy_generation);
+  return currentGeneration === null
+    || captureGeneration === null
+    || currentGeneration === captureGeneration;
+}
+
+export function dsqActivityHeatmapModel(
+  payload,
+  queueTimingDsqs = [],
+  { limit = 12, nowMs = Date.now() } = {},
+) {
+  const queueTiming = new Map((queueTimingDsqs || []).map((timing) => [
+    timing?.dsqKey ?? canonicalDsqKey(timing?.dsqId),
+    timing,
+  ]));
+  const rows = new Map();
+  const sampleRate = Math.max(0, finiteValue(payload?.sample_rate) ?? 0);
+  const createRow = (dsqId) => {
+    const timing = queueTiming.get(dsqId);
+    return {
+      dsqId,
+      label: formatDsqId(dsqId),
+      kind: dsqKind(dsqId),
+      queueClass: timing?.queueClass || "unknown",
+      insert: emptyTrafficMetric(),
+      remove: emptyTrafficMetric(),
+      failed: emptyTrafficMetric(),
+      total: emptyTrafficMetric(),
+      residence: timing?.residence || null,
+      depth: timing?.depth || null,
+      otherCount: 0,
+    };
+  };
+
+  for (const capture of payload?.captures || []) {
+    if (!trafficGenerationMatches(payload, capture)) {
+      continue;
+    }
+    const rateMultiplier = captureRateMultiplier(capture, sampleRate, nowMs);
+    for (const operation of capture?.dsq_operations || []) {
+      const dsqId = canonicalDsqKey(operation?.dsq_id);
+      if (dsqId === null) {
+        continue;
+      }
+      const samples = Math.max(0, finiteValue(operation?.samples) ?? 0);
+      if (samples === 0) {
+        continue;
+      }
+      const row = rows.get(dsqId) || createRow(dsqId);
+      rows.set(dsqId, row);
+      if (operation.operation === "insert" && operation.outcome === "success") {
+        addTrafficMetric(row.insert, samples, rateMultiplier);
+        addTrafficMetric(row.total, samples, rateMultiplier);
+      } else if (operation.operation === "remove" && operation.outcome === "success") {
+        addTrafficMetric(row.remove, samples, rateMultiplier);
+        addTrafficMetric(row.total, samples, rateMultiplier);
+      } else if (operation.outcome === "miss" || operation.outcome === "error") {
+        addTrafficMetric(row.failed, samples, rateMultiplier);
+      }
+    }
+  }
+
+  const ranked = [...rows.values()].sort((left, right) => (
+    trafficScore(right.total) - trafficScore(left.total)
+    || trafficScore(right.failed) - trafficScore(left.failed)
+    || compareDsqKeys(left.dsqId, right.dsqId)
+  ));
+  const safeLimit = Math.max(1, Math.trunc(finiteValue(limit) ?? 12));
+  const visible = ranked.slice(0, safeLimit);
+  const remainder = ranked.slice(safeLimit);
+  if (remainder.length > 0) {
+    const other = createRow(null);
+    other.label = "Other";
+    other.kind = `${remainder.length} lower-traffic DSQs`;
+    other.queueClass = "mixed";
+    other.otherCount = remainder.length;
+    for (const row of remainder) {
+      for (const key of ["insert", "remove", "failed", "total"]) {
+        mergeTrafficMetric(other[key], row[key]);
+      }
+    }
+    visible.push(other);
+  }
+
+  const metrics = visible.flatMap((row) => [row.insert, row.remove, row.failed]);
+  const maxRatePerSecond = Math.max(
+    0,
+    ...metrics.map((metric) => metric.ratePerSecond ?? 0),
+  );
+  const maxSamples = Math.max(0, ...metrics.map((metric) => metric.samples));
+  for (const row of visible) {
+    for (const key of ["insert", "remove", "failed"]) {
+      row[key].intensity = trafficIntensity(row[key], maxRatePerSecond, maxSamples);
+    }
+  }
+  return {
+    rows: visible,
+    totalDsqCount: ranked.length,
+    sampleRate,
+    rateAvailable: maxRatePerSecond > 0,
+    maxRatePerSecond,
+    maxSamples,
+  };
+}
+
+export function dsqTransferHeatmapModel(
+  payload,
+  { limit = 12, nowMs = Date.now() } = {},
+) {
+  const sampleRate = Math.max(0, finiteValue(payload?.sample_rate) ?? 0);
+  const pairs = new Map();
+  const endpointTotals = new Map();
+  const total = emptyTrafficMetric();
+  for (const capture of payload?.captures || []) {
+    if (!trafficGenerationMatches(payload, capture)) {
+      continue;
+    }
+    const rateMultiplier = captureRateMultiplier(capture, sampleRate, nowMs);
+    for (const transfer of capture?.dsq_transfers || []) {
+      const sourceDsqId = canonicalDsqKey(transfer?.source_dsq_id);
+      const targetDsqId = canonicalDsqKey(transfer?.target_dsq_id);
+      const samples = Math.max(0, finiteValue(transfer?.samples) ?? 0);
+      if (sourceDsqId === null || targetDsqId === null || samples === 0) {
+        continue;
+      }
+      const key = `${sourceDsqId}>${targetDsqId}`;
+      const pair = pairs.get(key) || {
+        sourceDsqId,
+        targetDsqId,
+        ...emptyTrafficMetric(),
+      };
+      addTrafficMetric(pair, samples, rateMultiplier);
+      pairs.set(key, pair);
+      addTrafficMetric(total, samples, rateMultiplier);
+      for (const dsqId of [sourceDsqId, targetDsqId]) {
+        const endpoint = endpointTotals.get(dsqId) || emptyTrafficMetric();
+        addTrafficMetric(endpoint, samples, rateMultiplier);
+        endpointTotals.set(dsqId, endpoint);
+      }
+    }
+  }
+
+  const safeLimit = Math.max(1, Math.trunc(finiteValue(limit) ?? 12));
+  const ranked = [...endpointTotals.entries()].sort((left, right) => (
+    trafficScore(right[1]) - trafficScore(left[1])
+    || compareDsqKeys(left[0], right[0])
+  ));
+  const significant = ranked.slice(0, safeLimit);
+  const significantIds = new Set(significant.map(([dsqId]) => dsqId));
+  const hasOther = ranked.length > significant.length;
+  const endpoints = significant.map(([dsqId, metric]) => ({
+    dsqId,
+    label: formatDsqId(dsqId),
+    kind: dsqKind(dsqId),
+    ...metric,
+  }));
+  if (hasOther) {
+    const other = emptyTrafficMetric();
+    for (const [, metric] of ranked.slice(safeLimit)) {
+      mergeTrafficMetric(other, metric);
+    }
+    endpoints.push({
+      dsqId: null,
+      label: "Other",
+      kind: `${ranked.length - significant.length} lower-traffic DSQs`,
+      ...other,
+    });
+  }
+
+  const indexFor = new Map(significant.map(([dsqId], index) => [dsqId, index]));
+  const otherIndex = hasOther ? endpoints.length - 1 : null;
+  const matrix = endpoints.map(() => endpoints.map(() => ({
+    ...emptyTrafficMetric(),
+    share: 0,
+  })));
+  for (const pair of pairs.values()) {
+    const row = significantIds.has(pair.sourceDsqId)
+      ? indexFor.get(pair.sourceDsqId)
+      : otherIndex;
+    const column = significantIds.has(pair.targetDsqId)
+      ? indexFor.get(pair.targetDsqId)
+      : otherIndex;
+    if (row === null || column === null || row === undefined || column === undefined) {
+      continue;
+    }
+    mergeTrafficMetric(matrix[row][column], pair);
+  }
+  const cells = matrix.flat();
+  const maxRatePerSecond = Math.max(
+    0,
+    ...cells.map((cell) => cell.ratePerSecond ?? 0),
+  );
+  const maxSamples = Math.max(0, ...cells.map((cell) => cell.samples));
+  const totalValue = total.ratePerSecond ?? total.samples;
+  for (const cell of cells) {
+    cell.intensity = trafficIntensity(cell, maxRatePerSecond, maxSamples);
+    cell.share = totalValue > 0 ? trafficScore(cell) / totalValue : 0;
+  }
+  return {
+    endpoints,
+    matrix,
+    total,
+    totalEndpointCount: ranked.length,
+    sampleRate,
+    rateAvailable: maxRatePerSecond > 0,
+    maxRatePerSecond,
+    maxSamples,
+  };
+}
+
 function restartReasonLabel(reason) {
   const text = String(reason || "").trim();
   const lower = text.toLowerCase();

@@ -12,7 +12,9 @@ import {
   callbackSampleRateOptions,
   compactCpuList,
   decorateCells,
+  dsqActivityHeatmapModel,
   dsqActivityModels,
+  dsqTransferHeatmapModel,
   fieldReferenceGroups,
   fineTimingCaptureModels,
   fineTimingDsqModels,
@@ -1540,6 +1542,93 @@ test("DSQ activity retains rows seen by only one sampler", () => {
   assert.equal(activity[0].hasQueueTiming, true);
   assert.equal(activity[1].hasOperations, true);
   assert.equal(activity[1].hasQueueTiming, false);
+});
+
+test("DSQ activity heatmap estimates rates and ranks busiest queues", () => {
+  const model = dsqActivityHeatmapModel({
+    sample_rate: 10,
+    context: { policy_generation: 9 },
+    captures: [{
+      callback: "dispatch",
+      policy_generation: 9,
+      started_at_ms: 1_000,
+      stopped_at_ms: 3_000,
+      dsq_operations: [
+        { dsq_id: 1, operation: "insert", outcome: "success", samples: 4 },
+        { dsq_id: 1, operation: "remove", outcome: "success", samples: 2 },
+        { dsq_id: 1, operation: "remove", outcome: "miss", samples: 1 },
+        { dsq_id: 2, operation: "insert", outcome: "success", samples: 2 },
+      ],
+    }],
+  }, [{
+    dsqId: "1",
+    dsqKey: "1",
+    queueClass: "fairness",
+    residence: { samples: 20, p95Ns: 2_000 },
+    depth: { samples: 20, p95: 3 },
+  }], { nowMs: 4_000 });
+
+  assert.deepEqual(model.rows.map((row) => row.dsqId), ["1", "2"]);
+  assert.equal(model.rows[0].queueClass, "fairness");
+  assert.equal(model.rows[0].insert.ratePerSecond, 20);
+  assert.equal(model.rows[0].remove.ratePerSecond, 10);
+  assert.equal(model.rows[0].failed.ratePerSecond, 5);
+  assert.equal(model.rows[0].total.ratePerSecond, 30);
+  assert.equal(model.rows[0].residence.p95Ns, 2_000);
+  assert.equal(model.maxRatePerSecond, 20);
+});
+
+test("DSQ activity heatmap keeps top queues and aggregates the remainder", () => {
+  const dsq_operations = Array.from({ length: 5 }, (_, index) => ({
+    dsq_id: index + 1,
+    operation: "insert",
+    outcome: "success",
+    samples: index + 1,
+  }));
+  const model = dsqActivityHeatmapModel({
+    sample_rate: 1,
+    captures: [{
+      started_at_ms: 0,
+      stopped_at_ms: 1_000,
+      dsq_operations,
+    }],
+  }, [], { limit: 2, nowMs: 1_000 });
+
+  assert.deepEqual(model.rows.map((row) => row.dsqId), ["5", "4", null]);
+  assert.equal(model.rows[2].label, "Other");
+  assert.equal(model.rows[2].otherCount, 3);
+  assert.equal(model.rows[2].insert.samples, 6);
+});
+
+test("DSQ transfer heatmap preserves significant source-to-target flow", () => {
+  const model = dsqTransferHeatmapModel({
+    sample_rate: 10,
+    context: { policy_generation: 9 },
+    captures: [{
+      policy_generation: 9,
+      started_at_ms: 1_000,
+      stopped_at_ms: 3_000,
+      dsq_transfers: [
+        { source_dsq_id: 1, target_dsq_id: 2, samples: 4 },
+        { source_dsq_id: 1, target_dsq_id: 3, samples: 2 },
+        { source_dsq_id: 4, target_dsq_id: 2, samples: 1 },
+      ],
+    }, {
+      policy_generation: 8,
+      started_at_ms: 1_000,
+      stopped_at_ms: 3_000,
+      dsq_transfers: [{ source_dsq_id: 5, target_dsq_id: 6, samples: 100 }],
+    }],
+  }, { limit: 2, nowMs: 4_000 });
+
+  assert.deepEqual(model.endpoints.map((endpoint) => endpoint.dsqId), ["1", "2", null]);
+  assert.equal(model.total.samples, 7);
+  assert.equal(model.total.ratePerSecond, 35);
+  assert.equal(model.matrix[0][1].ratePerSecond, 20);
+  assert.equal(model.matrix[0][2].ratePerSecond, 10);
+  assert.equal(model.matrix[2][1].ratePerSecond, 5);
+  assert.equal(model.matrix[0][1].share, 4 / 7);
+  assert.equal(model.matrix[0][1].intensity, 1);
 });
 
 test("queue topology renders one unified DSQ activity table", () => {
