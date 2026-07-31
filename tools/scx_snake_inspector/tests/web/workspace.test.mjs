@@ -844,6 +844,7 @@ test("project pages use accessible static diagrams with canonical workspace link
 });
 
 test("feedback is a drawer with a visible draft count", () => {
+  const drawer = page.match(/<dialog[^>]+id="feedbackDrawer"[\s\S]*?<\/dialog>/)?.[0] || "";
   assert.match(page, /<dialog[^>]+id="feedbackDrawer"/);
   assert.match(page, /id="feedbackCount"/);
   assert.match(page, /data-feedback-count/);
@@ -853,7 +854,8 @@ test("feedback is a drawer with a visible draft count", () => {
   assert.match(script, /\.overview-section-heading/);
   assert.match(script, /policy-choice:\$\{escapeHtml\(selectedFairness\)\}:\$\{escapeHtml\(policy\.id\)\}:select/);
   assert.match(script, /warningSignature/);
-  assert.doesNotMatch(script, /role="tab"/);
+  assert.doesNotMatch(drawer, /role="tab"/);
+  assert.doesNotMatch(script, /data-feedback-tab/);
 });
 
 test("policy list clicks select a candidate without immediately mutating Snake", () => {

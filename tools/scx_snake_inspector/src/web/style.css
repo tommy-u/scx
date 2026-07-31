@@ -1177,7 +1177,49 @@ button:focus-visible {
   border-bottom: 1px solid var(--border);
 }
 
-.queue-topology-heading {
+.queue-topology-tabs {
+  min-height: 48px;
+  padding: 0 clamp(16px, 3vw, 40px);
+  display: flex;
+  align-items: stretch;
+  gap: 24px;
+  overflow-x: auto;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-muted);
+}
+
+.queue-topology-tab {
+  min-width: max-content;
+  padding: 0 2px;
+  border: 0;
+  border-bottom: 3px solid transparent;
+  border-radius: 0;
+  color: var(--muted);
+  background: transparent;
+  font-size: 0.75rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.queue-topology-tab:hover {
+  color: var(--ink);
+}
+
+.queue-topology-tab[aria-selected="true"] {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+.queue-tab-panel[hidden] {
+  display: none;
+}
+
+.queue-tab-panel:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.queue-tab-heading {
   min-height: 70px;
   padding: 14px clamp(16px, 3vw, 40px);
   display: flex;
@@ -1187,12 +1229,12 @@ button:focus-visible {
   border-bottom: 1px solid var(--border);
 }
 
-.queue-topology-heading h3 {
+.queue-tab-heading h3 {
   font-size: 0.92rem;
   font-weight: 750;
 }
 
-.queue-topology-heading p {
+.queue-tab-heading p {
   margin-top: 3px;
   color: var(--muted);
   font-size: 0.68rem;
@@ -1230,6 +1272,26 @@ button:focus-visible {
   border-bottom: 1px solid var(--border);
 }
 
+.queue-fairness-guide {
+  margin: 0;
+  padding: 10px clamp(16px, 3vw, 40px);
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  border-bottom: 1px solid var(--border);
+  background: #eef7f4;
+  font-size: 0.7rem;
+}
+
+.queue-fairness-guide strong {
+  flex: 0 0 auto;
+  color: var(--active);
+}
+
+.queue-fairness-guide span {
+  color: var(--muted);
+}
+
 .queue-topology-summary {
   margin: 0;
   padding: 12px clamp(16px, 3vw, 40px);
@@ -1253,20 +1315,22 @@ button:focus-visible {
   font-weight: 680;
 }
 
-.queue-topology-table-section,
-.queue-topology-details {
+.queue-topology-table-section {
   padding: 14px clamp(16px, 3vw, 40px);
   border-bottom: 1px solid var(--border);
 }
 
-.queue-topology-table-section h4,
-.queue-topology-details summary {
+.queue-topology-table-section h4 {
   font-size: 0.75rem;
   font-weight: 720;
 }
 
-.queue-topology-details summary {
-  cursor: pointer;
+.queue-table-help {
+  color: inherit;
+  text-decoration-line: underline;
+  text-decoration-style: dotted;
+  text-underline-offset: 3px;
+  cursor: help;
 }
 
 .queue-topology-table-wrap {
@@ -3258,7 +3322,7 @@ button:focus-visible {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .queue-topology-heading {
+  .queue-tab-heading {
     align-items: flex-start;
     flex-direction: column;
   }
@@ -3272,10 +3336,15 @@ button:focus-visible {
     text-align: left;
   }
 
-  .queue-topology-table-section,
-  .queue-topology-details {
+  .queue-topology-table-section {
     padding-right: 8px;
     padding-left: 8px;
+  }
+
+  .queue-fairness-guide {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 3px;
   }
 
   .slot-summary {

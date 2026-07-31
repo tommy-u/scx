@@ -1517,6 +1517,71 @@ test("queue topology renders one unified DSQ activity table", () => {
   assert.doesNotMatch(script, /Queue capture DSQs/);
 });
 
+test("queue topology tabs validate selection and support keyboard navigation", () => {
+  assert.equal(typeof inspectionState.queueTopologyTabModel, "function");
+  assert.equal(typeof inspectionState.nextQueueTopologyTab, "function");
+  if (
+    typeof inspectionState.queueTopologyTabModel !== "function"
+    || typeof inspectionState.nextQueueTopologyTab !== "function"
+  ) {
+    return;
+  }
+
+  assert.deepEqual(
+    inspectionState.queueTopologyTabModel("layout").map((tab) => [
+      tab.id,
+      tab.label,
+      tab.selected,
+    ]),
+    [
+      ["activity", "Activity", false],
+      ["layout", "Queue layout", true],
+      ["routes", "CPU routes", false],
+    ],
+  );
+  assert.equal(inspectionState.queueTopologyTabModel("unknown")[0].selected, true);
+  assert.equal(inspectionState.nextQueueTopologyTab("activity", "ArrowRight"), "layout");
+  assert.equal(inspectionState.nextQueueTopologyTab("activity", "ArrowLeft"), "routes");
+  assert.equal(inspectionState.nextQueueTopologyTab("layout", "Home"), "activity");
+  assert.equal(inspectionState.nextQueueTopologyTab("layout", "End"), "routes");
+  assert.equal(inspectionState.nextQueueTopologyTab("layout", "Enter"), "layout");
+});
+
+test("queue topology help explains DSQ identifiers and fairness applicability", () => {
+  assert.equal(typeof inspectionState.queueTopologyHelp, "function");
+  if (typeof inspectionState.queueTopologyHelp !== "function") {
+    return;
+  }
+
+  const help = inspectionState.queueTopologyHelp();
+  assert.match(help.dsq, /hexadecimal/i);
+  assert.match(help.kind, /FIFO.*FIFO global.*Local CPU/s);
+  assert.match(help.kind, /VTIME.*VTIME global.*VTIME CPU/s);
+  assert.match(help.kind, /EEVDF.*eligible.*future/s);
+  assert.match(help.kind, /Normal.*Affinity.*VTIME queue-enabled policies/s);
+  assert.match(help.class, /fairness.*FIFO, VTIME, or EEVDF/s);
+  assert.match(help.class, /normal.*affinity.*VTIME queue-enabled policies/s);
+  assert.match(help.applicability.FIFO, /FIFO global.*Local CPU/s);
+  assert.match(help.applicability.VTIME, /VTIME global.*VTIME CPU.*Local CPU/s);
+  assert.match(help.applicability.VTIME, /Normal.*Affinity/s);
+  assert.match(help.applicability.EEVDF, /eligible.*future.*Local CPU/s);
+});
+
+test("queue topology renders accessible tab panels and header explainers", () => {
+  const script = readFileSync(
+    new URL("../../src/web/app.js", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(script, /role="tablist"/);
+  assert.match(script, /role="tab"/);
+  assert.match(script, /role="tabpanel"/);
+  assert.match(script, /data-queue-tab=/);
+  assert.match(script, /queueTableHelp\("DSQ"/);
+  assert.match(script, /queueTableHelp\("Kind"/);
+  assert.match(script, /queueTableHelp\("Class"/);
+});
+
 test("callback page contains the fine timing panel host", () => {
   const page = readFileSync(
     new URL("../../src/web/index.html", import.meta.url),

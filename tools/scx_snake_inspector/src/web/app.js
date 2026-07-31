@@ -45,7 +45,10 @@ import {
   queueRungCallbackPercentages,
   queueRungMetricPercentages,
   queueTimingModel,
+  nextQueueTopologyTab,
+  queueTopologyHelp,
   queueTopologyModel,
+  queueTopologyTabModel,
   mergeQueueTimingTopology,
   nanosecondDurationClass,
   overviewModel,
@@ -306,6 +309,7 @@ const state = {
   queueTimingError: null,
   queueTimingLoading: false,
   queueTimingPending: false,
+  queueTopologyTab: "activity",
   schedulerControl: null,
   schedulerControlError: null,
   schedulerMutationError: null,
@@ -466,6 +470,24 @@ function bindControls() {
     if (control) {
       setQueueTiming(control.checked);
     }
+  });
+  elements.queueTopology.addEventListener("click", (event) => {
+    const tab = event.target.closest("[data-queue-tab]");
+    if (tab) {
+      selectQueueTopologyTab(tab.dataset.queueTab);
+    }
+  });
+  elements.queueTopology.addEventListener("keydown", (event) => {
+    const tab = event.target.closest("[data-queue-tab]");
+    if (!tab) {
+      return;
+    }
+    const nextTab = nextQueueTopologyTab(tab.dataset.queueTab, event.key);
+    if (nextTab === tab.dataset.queueTab && !["Home", "End"].includes(event.key)) {
+      return;
+    }
+    event.preventDefault();
+    selectQueueTopologyTab(nextTab, true);
   });
   document.querySelectorAll('input[name="cpuOrder"]').forEach((control) => {
     control.addEventListener("change", () => {
@@ -2854,6 +2876,57 @@ function renderPolicySlotComparison(slots) {
     </section>`;
 }
 
+function selectQueueTopologyTab(tabId, focus = false) {
+  const selected = queueTopologyTabModel(tabId).find((tab) => tab.selected).id;
+  state.queueTopologyTab = selected;
+  renderResolvedQueueTopology();
+  if (focus) {
+    requestAnimationFrame(() => {
+      elements.queueTopology
+        .querySelector(`[data-queue-tab="${selected}"]`)
+        ?.focus({ preventScroll: true });
+    });
+  }
+}
+
+function renderQueueTopologyTabs() {
+  const tabs = queueTopologyTabModel(state.queueTopologyTab);
+  state.queueTopologyTab = tabs.find((tab) => tab.selected).id;
+  return `
+    <div class="queue-topology-tabs" role="tablist" aria-label="Queue topology views">
+      ${tabs.map((tab) => `
+        <button
+          class="queue-topology-tab"
+          type="button"
+          id="queue-tab-${tab.id}"
+          role="tab"
+          aria-controls="queue-panel-${tab.id}"
+          aria-selected="${tab.selected}"
+          tabindex="${tab.selected ? "0" : "-1"}"
+          data-queue-tab="${tab.id}"
+          data-render-key="queue:tab:${tab.id}"
+        >${escapeHtml(tab.label)}</button>`).join("")}
+    </div>`;
+}
+
+function renderQueueTabPanel(id, content) {
+  const selected = state.queueTopologyTab === id;
+  return `
+    <section
+      class="queue-tab-panel"
+      id="queue-panel-${id}"
+      role="tabpanel"
+      aria-labelledby="queue-tab-${id}"
+      tabindex="0"
+      data-render-key="queue:panel:${id}"
+      ${selected ? "" : "hidden"}
+    >${content}</section>`;
+}
+
+function queueTableHelp(label, text) {
+  return `<abbr class="queue-table-help" title="${escapeHtml(text)}">${escapeHtml(label)}</abbr>`;
+}
+
 function renderResolvedQueueTopology() {
   const timing = queueTimingModel(
     state.queueTiming,
@@ -2874,6 +2947,9 @@ function renderResolvedQueueTopology() {
     .find((slot) => slot.state === "active")
     ?.generation ?? "unknown";
   elements.queueTopology.classList.remove("hidden");
+  const help = queueTopologyHelp();
+  const applicability = help.applicability[model.mode]
+    || "Queue families are unavailable until the active fairness policy is resolved.";
   const summary = `
     <dl class="queue-topology-summary">
       <div><dt>Fairness</dt><dd>${escapeHtml(model.mode)}</dd></div>
@@ -2896,18 +2972,6 @@ function renderResolvedQueueTopology() {
     fineTimingDsqModels(state.fineTiming),
     timing.dsqs,
   ));
-  if (!model.layout) {
-    replaceKeyedHtml(elements.queueTopology, `
-      <header class="queue-topology-heading">
-        <div><h3>Scheduler execution model</h3><p>Fairness and attachment-time queue topology</p></div>
-        ${captureHeader}
-      </header>
-      ${summary}
-      ${captureNotice}
-      ${dsqActivity}
-      <p class="queue-topology-empty">No resolved cell queue topology is installed.</p>`);
-    return;
-  }
   const cells = model.cells.map((cell) => `
     <tr>
       <th scope="row">${escapeHtml(cell.label)}</th>
@@ -2935,44 +2999,71 @@ function renderResolvedQueueTopology() {
       <td><code>${escapeHtml(route.affinityDsq)}</code></td>
       ${renderQueueTimingCells(route.affinityTiming)}
     </tr>`).join("");
-  const cellAllocation = model.cells.length === 0 ? "" : `
+  const cellAllocation = model.cells.length === 0
+    ? `<p class="queue-topology-empty">This layout has no cell allocation; queues use global or LLC ownership.</p>`
+    : `
     <section class="queue-topology-table-section">
       <h4>Cell allocation</h4>
       <div class="queue-topology-table-wrap" data-render-key="queue:${generation}:cell-allocation:scroll">
         <table data-sort-key="queue:cell-allocation"><thead><tr><th data-sort-column="0" data-sort-type="text">Cell</th><th data-sort-column="1" data-sort-type="number">Dense</th><th data-sort-column="2" data-sort-type="number">Weight</th><th data-sort-column="3" data-sort-type="text">Clock</th><th data-sort-column="4" data-sort-type="text">Primary CPUs</th><th data-sort-column="5" data-sort-type="text">Borrowable CPUs</th></tr></thead><tbody>${cells}</tbody></table>
       </div>
     </section>`;
-  replaceKeyedHtml(elements.queueTopology, `
-    <header class="queue-topology-heading">
-      <div><h3>Resolved queue topology</h3><p>Attachment-time CPU ownership, DSQs, and clock domains</p></div>
+  const normalQueues = !model.layout
+    ? '<p class="queue-topology-empty">No resolved queue layout is installed.</p>'
+    : model.normalQueues.length === 0
+      ? '<p class="queue-topology-empty">No Normal DSQs are present in this queue layout.</p>'
+      : `
+        <section class="queue-topology-table-section">
+          <h4>Normal DSQs (${formatCount(model.normalQueues.length)})</h4>
+          <div class="queue-topology-table-wrap" data-render-key="queue:${generation}:normal-dsqs:scroll">
+            <table class="queue-timing-table" data-sort-key="queue:normal-dsqs"><thead>
+              <tr><th rowspan="2" data-sort-column="0" data-sort-type="bigint">${queueTableHelp("DSQ", `${help.dsq} Normal DSQs are valid only for VTIME queue-enabled policies.`)}</th><th rowspan="2" data-sort-column="1" data-sort-type="text">Owner</th><th rowspan="2" data-sort-column="2" data-sort-type="number">LLC</th><th rowspan="2" data-sort-column="3" data-sort-type="text">Clock</th><th rowspan="2" data-sort-column="4" data-sort-type="text">Consumer CPUs</th><th colspan="5">Residence</th><th colspan="3">Operation-sampled depth</th></tr>
+              <tr><th data-sort-column="5" data-sort-type="number">Samples</th><th data-sort-column="6" data-sort-type="duration">Mean</th><th data-sort-column="7" data-sort-type="duration">p50</th><th aria-label="Residence p95" data-sort-column="8" data-sort-type="duration">p95</th><th aria-label="Residence p99" data-sort-column="9" data-sort-type="duration">p99</th><th data-sort-column="10" data-sort-type="number">Latest</th><th aria-label="Operation-sampled depth p95" data-sort-column="11" data-sort-type="number">p95</th><th data-sort-column="12" data-sort-type="number">Max</th></tr>
+            </thead><tbody>${queues}</tbody></table>
+          </div>
+        </section>`;
+  const cpuRoutes = model.cpuRoutes.length === 0
+    ? '<p class="queue-topology-empty">No per-CPU queue routes are resolved for this policy.</p>'
+    : `
+      <section class="queue-topology-table-section">
+        <h4>Per-CPU routing (${formatCount(model.cpuRoutes.length)} of ${formatCount(model.expectedCpuCount)} online CPUs)</h4>
+        <div class="queue-topology-table-wrap queue-route-table-wrap" data-render-key="queue:${generation}:cpu-routes:scroll">
+          <table class="queue-timing-table" data-sort-key="queue:cpu-routes"><thead>
+            <tr><th rowspan="2" data-sort-column="0" data-sort-type="number">CPU</th><th rowspan="2" data-sort-column="1" data-sort-type="text">Owner</th><th rowspan="2" data-sort-column="2" data-sort-type="number">LLC</th><th rowspan="2" data-sort-column="3" data-sort-type="bigint">${queueTableHelp("Normal DSQ", `${help.dsq} Normal DSQs are valid only for VTIME queue-enabled policies.`)}</th><th rowspan="2" data-sort-column="4" data-sort-type="bigint">${queueTableHelp("Affinity DSQ", `${help.dsq} Affinity DSQs are valid only for VTIME queue-enabled policies.`)}</th><th colspan="5">Affinity residence</th><th colspan="3">Operation-sampled depth</th></tr>
+            <tr><th data-sort-column="5" data-sort-type="number">Samples</th><th data-sort-column="6" data-sort-type="duration">Mean</th><th data-sort-column="7" data-sort-type="duration">p50</th><th aria-label="Residence p95" data-sort-column="8" data-sort-type="duration">p95</th><th aria-label="Residence p99" data-sort-column="9" data-sort-type="duration">p99</th><th data-sort-column="10" data-sort-type="number">Latest</th><th aria-label="Operation-sampled depth p95" data-sort-column="11" data-sort-type="number">p95</th><th data-sort-column="12" data-sort-type="number">Max</th></tr>
+          </thead><tbody>${routes}</tbody></table>
+        </div>
+      </section>`;
+  const activityPanel = `
+    <header class="queue-tab-heading">
+      <div><h3>Queue activity</h3><p>Sampled operations, residence time, and queue depth</p></div>
       ${captureHeader}
     </header>
-    ${summary}
     ${captureNotice}
+    <p class="queue-fairness-guide"><strong>${escapeHtml(model.mode)} fairness</strong><span>${escapeHtml(applicability)}</span></p>
+    ${dsqActivity}`;
+  const layoutPanel = `
+    <header class="queue-tab-heading">
+      <div><h3>Queue layout</h3><p>Queue ownership, clock domains, and consuming CPUs</p></div>
+    </header>
+    ${summary}
+    ${model.layout ? cellAllocation : ""}
+    ${normalQueues}`;
+  const routesPanel = `
+    <header class="queue-tab-heading">
+      <div><h3>CPU routes</h3><p>Resolved Normal and Affinity DSQ destinations for each CPU</p></div>
+    </header>
     ${routeWarning}
-    ${dsqActivity}
-    ${cellAllocation}
-    <details class="queue-topology-details" data-render-key="queue:${generation}:normal-dsqs">
-      <summary data-render-key="queue:${generation}:normal-dsqs:summary">Normal DSQs (${formatCount(model.normalQueues.length)})</summary>
-      <div class="queue-topology-table-wrap" data-render-key="queue:${generation}:normal-dsqs:scroll">
-        <table class="queue-timing-table" data-sort-key="queue:normal-dsqs"><thead>
-          <tr><th rowspan="2" data-sort-column="0" data-sort-type="bigint">DSQ</th><th rowspan="2" data-sort-column="1" data-sort-type="text">Owner</th><th rowspan="2" data-sort-column="2" data-sort-type="number">LLC</th><th rowspan="2" data-sort-column="3" data-sort-type="text">Clock</th><th rowspan="2" data-sort-column="4" data-sort-type="text">Consumer CPUs</th><th colspan="5">Residence</th><th colspan="3">Operation-sampled depth</th></tr>
-          <tr><th data-sort-column="5" data-sort-type="number">Samples</th><th data-sort-column="6" data-sort-type="duration">Mean</th><th data-sort-column="7" data-sort-type="duration">p50</th><th aria-label="Residence p95" data-sort-column="8" data-sort-type="duration">p95</th><th aria-label="Residence p99" data-sort-column="9" data-sort-type="duration">p99</th><th data-sort-column="10" data-sort-type="number">Latest</th><th aria-label="Operation-sampled depth p95" data-sort-column="11" data-sort-type="number">p95</th><th data-sort-column="12" data-sort-type="number">Max</th></tr>
-        </thead><tbody>${queues}</tbody></table>
-      </div>
-    </details>
-    <details class="queue-topology-details" data-render-key="queue:${generation}:cpu-routes">
-      <summary data-render-key="queue:${generation}:cpu-routes:summary">Per-CPU routing (${formatCount(model.cpuRoutes.length)} of ${formatCount(model.expectedCpuCount)} online CPUs)</summary>
-      <div class="queue-topology-table-wrap queue-route-table-wrap" data-render-key="queue:${generation}:cpu-routes:scroll">
-        <table class="queue-timing-table" data-sort-key="queue:cpu-routes"><thead>
-          <tr><th rowspan="2" data-sort-column="0" data-sort-type="number">CPU</th><th rowspan="2" data-sort-column="1" data-sort-type="text">Owner</th><th rowspan="2" data-sort-column="2" data-sort-type="number">LLC</th><th rowspan="2" data-sort-column="3" data-sort-type="bigint">Normal DSQ</th><th rowspan="2" data-sort-column="4" data-sort-type="bigint">Affinity DSQ</th><th colspan="5">Affinity residence</th><th colspan="3">Operation-sampled depth</th></tr>
-          <tr><th data-sort-column="5" data-sort-type="number">Samples</th><th data-sort-column="6" data-sort-type="duration">Mean</th><th data-sort-column="7" data-sort-type="duration">p50</th><th aria-label="Residence p95" data-sort-column="8" data-sort-type="duration">p95</th><th aria-label="Residence p99" data-sort-column="9" data-sort-type="duration">p99</th><th data-sort-column="10" data-sort-type="number">Latest</th><th aria-label="Operation-sampled depth p95" data-sort-column="11" data-sort-type="number">p95</th><th data-sort-column="12" data-sort-type="number">Max</th></tr>
-        </thead><tbody>${routes}</tbody></table>
-      </div>
-    </details>`);
+    ${cpuRoutes}`;
+  replaceKeyedHtml(elements.queueTopology, `
+    ${renderQueueTopologyTabs()}
+    ${renderQueueTabPanel("activity", activityPanel)}
+    ${renderQueueTabPanel("layout", layoutPanel)}
+    ${renderQueueTabPanel("routes", routesPanel)}`);
 }
 
 function renderDsqActivity(dsqs) {
+  const help = queueTopologyHelp();
   const rows = dsqs.map((dsq) => `
     <tr>
       <th scope="row"><code>${escapeHtml(dsq.label)}</code></th>
@@ -2986,15 +3077,15 @@ function renderDsqActivity(dsqs) {
     </tr>`).join("");
   const body = rows || '<tr><td colspan="21" class="callback-empty">No sampled DSQ activity.</td></tr>';
   return `
-    <details class="queue-topology-details" open data-render-key="queue:dsq-activity">
-      <summary data-render-key="queue:dsq-activity:summary">DSQ activity (${formatCount(dsqs.length)})</summary>
+    <section class="queue-topology-table-section" data-render-key="queue:dsq-activity">
+      <h4>DSQ activity (${formatCount(dsqs.length)})</h4>
       <div class="queue-topology-table-wrap" data-render-key="queue:dsq-activity:scroll">
         <table class="queue-timing-table" data-sort-key="queue:dsq-activity"><thead>
-          <tr><th rowspan="2" data-sort-column="0" data-sort-type="bigint">DSQ</th><th rowspan="2" data-sort-column="1" data-sort-type="text">Kind</th><th rowspan="2" data-sort-column="2" data-sort-type="text">Class</th><th colspan="3">Insert success</th><th rowspan="2" data-sort-column="6" data-sort-type="number">Insert errors</th><th colspan="3">Remove success</th><th colspan="3">Remove miss</th><th colspan="5">Residence</th><th colspan="3">Operation-sampled depth</th></tr>
+          <tr><th rowspan="2" data-sort-column="0" data-sort-type="bigint">${queueTableHelp("DSQ", help.dsq)}</th><th rowspan="2" data-sort-column="1" data-sort-type="text">${queueTableHelp("Kind", help.kind)}</th><th rowspan="2" data-sort-column="2" data-sort-type="text">${queueTableHelp("Class", help.class)}</th><th colspan="3">Insert success</th><th rowspan="2" data-sort-column="6" data-sort-type="number">Insert errors</th><th colspan="3">Remove success</th><th colspan="3">Remove miss</th><th colspan="5">Residence</th><th colspan="3">Operation-sampled depth</th></tr>
           <tr><th data-sort-column="3" data-sort-type="number">Samples</th><th data-sort-column="4" data-sort-type="duration">Mean</th><th data-sort-column="5" data-sort-type="duration">p99</th><th data-sort-column="7" data-sort-type="number">Samples</th><th data-sort-column="8" data-sort-type="duration">Mean</th><th data-sort-column="9" data-sort-type="duration">p99</th><th data-sort-column="10" data-sort-type="number">Samples</th><th data-sort-column="11" data-sort-type="duration">Mean</th><th data-sort-column="12" data-sort-type="duration">p99</th><th data-sort-column="13" data-sort-type="number">Samples</th><th data-sort-column="14" data-sort-type="duration">Mean</th><th data-sort-column="15" data-sort-type="duration">p50</th><th aria-label="Residence p95" data-sort-column="16" data-sort-type="duration">p95</th><th aria-label="Residence p99" data-sort-column="17" data-sort-type="duration">p99</th><th data-sort-column="18" data-sort-type="number">Latest</th><th aria-label="Operation-sampled depth p95" data-sort-column="19" data-sort-type="number">p95</th><th data-sort-column="20" data-sort-type="number">Max</th></tr>
         </thead><tbody>${body}</tbody></table>
       </div>
-    </details>`;
+    </section>`;
 }
 
 function renderDsqOperationTimingCells(timing, available = true) {

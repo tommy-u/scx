@@ -2440,6 +2440,53 @@ export function compactCpuList(cpus) {
   return ranges.join(", ");
 }
 
+const QUEUE_TOPOLOGY_TABS = [
+  { id: "activity", label: "Activity" },
+  { id: "layout", label: "Queue layout" },
+  { id: "routes", label: "CPU routes" },
+];
+
+export function queueTopologyTabModel(selected = "activity") {
+  const active = QUEUE_TOPOLOGY_TABS.some((tab) => tab.id === selected)
+    ? selected
+    : QUEUE_TOPOLOGY_TABS[0].id;
+  return QUEUE_TOPOLOGY_TABS.map((tab) => ({
+    ...tab,
+    selected: tab.id === active,
+  }));
+}
+
+export function nextQueueTopologyTab(selected, key) {
+  const tabs = queueTopologyTabModel(selected);
+  const index = tabs.findIndex((tab) => tab.selected);
+  if (key === "Home") {
+    return tabs[0].id;
+  }
+  if (key === "End") {
+    return tabs.at(-1).id;
+  }
+  if (key === "ArrowRight" || key === "ArrowDown") {
+    return tabs[(index + 1) % tabs.length].id;
+  }
+  if (key === "ArrowLeft" || key === "ArrowUp") {
+    return tabs[(index - 1 + tabs.length) % tabs.length].id;
+  }
+  return tabs[index].id;
+}
+
+export function queueTopologyHelp() {
+  return {
+    dsq: "Dispatch queue identifier shown in hexadecimal; Kind decodes the ID family.",
+    kind: "FIFO: FIFO global and Local CPU. VTIME: VTIME global, VTIME CPU, and Local CPU. EEVDF: eligible, future, and Local CPU. Normal and Affinity are valid only for VTIME queue-enabled policies.",
+    class: "fairness is valid for FIFO, VTIME, or EEVDF queues; normal and affinity are valid only for VTIME queue-enabled policies.",
+    applicability: {
+      FIFO: "Valid DSQs: FIFO global and Local CPU.",
+      VTIME: "Valid DSQs: VTIME global, VTIME CPU, and Local CPU. Queue-enabled policies may also use Normal and Affinity DSQs.",
+      EEVDF: "Valid DSQs: EEVDF eligible, EEVDF future, and Local CPU.",
+    },
+  };
+}
+
 export function queueTopologyModel(fairness, topology, onlineCpus = null) {
   const affinityQueueCount = Number(topology?.affinity_queue_count) || 0;
   const expectedCpuCount = topology && Array.isArray(onlineCpus)
