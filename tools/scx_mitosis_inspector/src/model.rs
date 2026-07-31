@@ -68,6 +68,38 @@ pub struct MigrationRow {
     pub count: u64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+pub struct CpuRuntimeRow {
+    pub cpu: u32,
+    pub runtime_ns: u64,
+    pub utilization_pct: f64,
+}
+
+pub fn build_cpu_runtime_rows(
+    current: &[u64],
+    previous: &[u64],
+    elapsed: Duration,
+) -> Vec<CpuRuntimeRow> {
+    let elapsed_ns = elapsed.as_nanos() as f64;
+    current
+        .iter()
+        .zip(previous)
+        .enumerate()
+        .map(|(cpu, (&runtime_ns, &previous_ns))| {
+            let delta = runtime_ns.saturating_sub(previous_ns);
+            CpuRuntimeRow {
+                cpu: cpu as u32,
+                runtime_ns,
+                utilization_pct: if elapsed_ns > 0.0 {
+                    (delta as f64 / elapsed_ns * 100.0).clamp(0.0, 100.0)
+                } else {
+                    0.0
+                },
+            }
+        })
+        .collect()
+}
+
 pub fn build_counters(
     current: [u64; 5],
     previous: [u64; 5],

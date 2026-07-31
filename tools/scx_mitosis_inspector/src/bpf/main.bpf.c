@@ -84,6 +84,13 @@ struct {
 	__type(value, u64);
 } migration_counts SEC(".maps");
 
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, u32);
+	__type(value, struct mitosis_cpu_runtime);
+} cpu_runtime SEC(".maps");
+
 static __always_inline void count_callback(enum callback_index callback)
 {
 	u32  key = callback;
@@ -269,6 +276,7 @@ int BPF_PROG(on_sched_switch, bool preempt, struct task_struct *prev,
 	     struct task_struct *next, u64 prev_state)
 {
 	struct mitosis_callback_timing *timing;
+	struct mitosis_cpu_runtime *runtime;
 	struct task_observation *observation;
 	u32 key = 0;
 	u64 now;
@@ -276,6 +284,12 @@ int BPF_PROG(on_sched_switch, bool preempt, struct task_struct *prev,
 	if (!next)
 		return 0;
 	now = bpf_ktime_get_ns();
+	runtime = bpf_map_lookup_elem(&cpu_runtime, &key);
+	if (runtime) {
+		if (runtime->last_switch_ns && prev && BPF_CORE_READ(prev, pid) != 0)
+			runtime->busy_ns += now - runtime->last_switch_ns;
+		runtime->last_switch_ns = now;
+	}
 	if (prev) {
 		observation = bpf_task_storage_get(&task_observations, prev, 0, 0);
 		if (observation && observation->running_at) {

@@ -11,11 +11,12 @@ pub mod collector;
 pub mod host_context;
 pub mod model;
 pub mod stats;
+pub mod topology;
 
 pub use model::{
-    build_callback_timing_rows, build_counters, build_timing_metric_row,
+    build_callback_timing_rows, build_counters, build_cpu_runtime_rows, build_timing_metric_row,
     parse_callback_timing_sample_rate, summarize_callback_timing, CallbackCounter,
-    CallbackTimingCounters, CallbackTimingRow, CallbackTimingSummary, MigrationRow,
+    CallbackTimingCounters, CallbackTimingRow, CallbackTimingSummary, CpuRuntimeRow, MigrationRow,
     TimingMetricRow, CALLBACK_NAMES, CALLBACK_TIMING_BUCKETS,
 };
 
