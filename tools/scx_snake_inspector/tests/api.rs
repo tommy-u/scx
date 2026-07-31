@@ -1923,7 +1923,7 @@ async fn testing_matrix_endpoint_groups_compatible_policies_by_fairness() {
     let context = ApiContext::new(dashboard, tx, "secret", root.path().to_path_buf())
         .with_testing(TestingController::new(MatrixConfig::new(60, 0, 8).unwrap()));
 
-    let response = router(context)
+    let response = router(context.clone())
         .oneshot(
             Request::builder()
                 .uri("/api/testing/matrix")
@@ -1957,6 +1957,22 @@ async fn testing_matrix_endpoint_groups_compatible_policies_by_fairness() {
             .len(),
         2
     );
+
+    let response = router(context)
+        .oneshot(
+            Request::builder()
+                .uri("/api/testing/campaigns")
+                .header("host", "127.0.0.1:8788")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let body: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(body["runs"].as_array().unwrap().len(), 1);
+    assert_eq!(body["runs"][0]["matrix"]["total_cases"], 16);
 }
 
 #[tokio::test]

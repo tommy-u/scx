@@ -382,7 +382,7 @@ pub struct TestingController {
     catalog: Option<PolicyCatalog>,
     run: Arc<Mutex<Option<TestRun>>>,
     execution: Option<TestingExecutionConfig>,
-    import_dir: Option<PathBuf>,
+    import_dirs: Vec<PathBuf>,
     stop_requested: Arc<AtomicBool>,
     worker_active: Arc<AtomicBool>,
 }
@@ -415,7 +415,7 @@ impl TestingController {
             catalog: None,
             run: Arc::new(Mutex::new(None)),
             execution: None,
-            import_dir: None,
+            import_dirs: Vec::new(),
             stop_requested: Arc::new(AtomicBool::new(false)),
             worker_active: Arc::new(AtomicBool::new(false)),
         }
@@ -432,7 +432,19 @@ impl TestingController {
     }
 
     pub fn with_import_dir(mut self, import_dir: impl AsRef<Path>) -> Self {
-        self.import_dir = Some(import_dir.as_ref().to_path_buf());
+        self.import_dirs = vec![import_dir.as_ref().to_path_buf()];
+        self
+    }
+
+    pub fn with_import_dirs<I, P>(mut self, import_dirs: I) -> Self
+    where
+        I: IntoIterator<Item = P>,
+        P: AsRef<Path>,
+    {
+        self.import_dirs = import_dirs
+            .into_iter()
+            .map(|path| path.as_ref().to_path_buf())
+            .collect();
         self
     }
 
@@ -441,20 +453,31 @@ impl TestingController {
     }
 
     pub fn snapshot_available(&self, catalog: Option<&PolicyCatalog>) -> Result<TestRun> {
+        self.snapshots_available(catalog)?
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("no testing campaigns are configured"))
+    }
+
+    pub fn snapshots_available(&self, catalog: Option<&PolicyCatalog>) -> Result<Vec<TestRun>> {
         let catalog =
             self.catalog.as_ref().or(catalog).ok_or_else(|| {
                 anyhow::anyhow!("validated testing policy catalog is unavailable")
             })?;
-        if let Some(import_dir) = &self.import_dir {
-            return aggregate_snapshot(catalog, self.config, import_dir);
+        if !self.import_dirs.is_empty() {
+            return self
+                .import_dirs
+                .iter()
+                .map(|import_dir| aggregate_snapshot(catalog, self.config, import_dir))
+                .collect();
         }
         let run = self
             .run
             .lock()
             .map_err(|_| anyhow::anyhow!("testing controller lock is poisoned"))?;
-        Ok(run
-            .clone()
-            .unwrap_or_else(|| TestRun::new(build_matrix(catalog, self.config))))
+        Ok(vec![run.clone().unwrap_or_else(|| {
+            TestRun::new(build_matrix(catalog, self.config))
+        })])
     }
 
     pub fn start(&self, catalog: &PolicyCatalog) -> Result<TestRun> {
@@ -462,7 +485,7 @@ impl TestingController {
     }
 
     pub fn start_available(&self, catalog: Option<&PolicyCatalog>) -> Result<TestRun> {
-        if self.import_dir.is_some() {
+        if !self.import_dirs.is_empty() {
             bail!("aggregate testing view is read-only");
         }
         if self.worker_active.load(Ordering::Acquire) {
@@ -517,7 +540,7 @@ impl TestingController {
     }
 
     pub fn stop(&self) -> Result<TestRun> {
-        if self.import_dir.is_some() {
+        if !self.import_dirs.is_empty() {
             bail!("aggregate testing view is read-only");
         }
         self.stop_requested.store(true, Ordering::Release);

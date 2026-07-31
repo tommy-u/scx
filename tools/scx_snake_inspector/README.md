@@ -162,6 +162,24 @@ tools/scx_snake_inspector/target/release/scx_snake_inspector \
   --testing-import-dir /tmp/scx-snake-testing/campaign-1
 ```
 
+Repeat `--testing-import-dir` to compare campaigns from different kernels in
+one view:
+
+```bash
+tools/scx_snake_inspector/target/release/scx_snake_inspector \
+  --listen 127.0.0.1:8788 \
+  --enable-testing \
+  --testing-isolated \
+  --testing-duration 60s \
+  --testing-shard-count 8 \
+  --testing-import-dir /tmp/scx-snake-testing/campaign-6.13 \
+  --testing-import-dir /tmp/scx-snake-testing/campaign-6.16
+```
+
+The Testing view adds one tab per imported kernel. A kernel tab receives a
+check only after every matrix case passes and an X as soon as any case fails.
+Repeated runs on the same kernel are disambiguated by campaign name.
+
 The aggregate view polls all eight live `run.json` files and leaves cases from
 missing shards pending. Run and Stop are disabled there because each guest
 owns its scheduler lifecycle. `--testing-isolated` disables the unrelated

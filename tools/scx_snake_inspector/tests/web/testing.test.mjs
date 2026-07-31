@@ -9,6 +9,7 @@ import test from "node:test";
 
 import {
   parseInspectorRoute,
+  testingCampaignTabs,
   testingMatrixModel,
 } from "../../src/web/inspection.js";
 
@@ -34,6 +35,7 @@ test("testing is a canonical inspector workspace", () => {
   assert.match(page, /id="testingView"[^>]+data-view="validate\/testing"/);
   for (const id of [
     "testingStatus",
+    "testingKernelTabs",
     "testingMatrix",
     "testingDetail",
     "runTesting",
@@ -54,6 +56,7 @@ test("testing model keeps fairness as the major row and workloads as columns", (
         memory_bytes: 4 * (1024 ** 3),
         kernel_release: "6.18.0-test",
         snake_version: "scx_snake 1.1.1",
+        snake_fingerprint: "fnv1a64:0123456789abcdef",
         boot_command: "vng --run --cpus 8 --memory 4G",
       },
     }],
@@ -86,7 +89,7 @@ test("testing model keeps fairness as the major row and workloads as columns", (
                   assigned: true,
                   status: "failed",
                   elapsed_ms: 31_000,
-                  failure: "kernel failure: runnable task stall pid=42",
+                  failure: "\u001b[31mkernel failure: runnable task stall pid=42\u001b[0m",
                 },
               ],
             },
@@ -108,9 +111,28 @@ test("testing model keeps fairness as the major row and workloads as columns", (
   assert.match(model.groups[0].rows[0].cases[0].tooltip, /Runtime: 60\.1s/);
   assert.match(model.groups[0].rows[0].cases[0].tooltip, /VM: kvm · 8 vCPUs · 4\.0 GiB RAM/);
   assert.match(model.groups[0].rows[0].cases[0].tooltip, /Kernel: 6\.18\.0-test/);
+  assert.match(model.groups[0].rows[0].cases[0].tooltip, /fnv1a64:0123456789abcdef/);
   assert.match(model.groups[0].rows[0].cases[0].tooltip, /Boot: vng --run --cpus 8/);
   assert.equal(model.groups[0].rows[0].cases[1].symbol, "×");
   assert.match(model.groups[0].rows[0].cases[1].failure, /runnable task stall/);
+  assert.match(
+    model.groups[0].rows[0].cases[1].tooltip,
+    /Failure: kernel failure: runnable task stall pid=42/,
+  );
+  assert.doesNotMatch(model.groups[0].rows[0].cases[1].tooltip, /\u001b/);
+  assert.deepEqual(model.groups[0].result, {
+    status: "failed",
+    label: "1 failed",
+    symbol: "×",
+    className: "failed",
+    total: 2,
+    passed: 1,
+    failed: 1,
+    running: 0,
+    pending: 0,
+    stopped: 0,
+    unassigned: 0,
+  });
   assert.deepEqual(model.summary, {
     passed: 1,
     failed: 1,
@@ -120,13 +142,213 @@ test("testing model keeps fairness as the major row and workloads as columns", (
 });
 
 test("testing UI loads live results and exposes authenticated controls", () => {
-  assert.match(script, /fetch\("\/api\/testing\/matrix"/);
+  assert.match(script, /fetch\("\/api\/testing\/campaigns"/);
   assert.match(script, /testingMutation\("\/api\/testing\/run"/);
   assert.match(script, /testingMutation\("\/api\/testing\/stop"/);
-  assert.match(script, /title="\$\{escapeHtml\(testCase\.tooltip\)\}"/);
+  assert.doesNotMatch(script, /title="\$\{escapeHtml\(testCase\.tooltip\)\}"/);
+  assert.match(page, /id="testingTooltip"[^>]*role="tooltip"/);
+  assert.match(script, /data-testing-tooltip=/);
+  assert.match(script, /class="visually-hidden"/);
+  assert.match(script, /testingMatrix\.addEventListener\("pointermove"/);
+  assert.match(script, /testingMatrix\.addEventListener\("pointerleave"/);
+  assert.match(script, /testingMatrix\.addEventListener\("focusin"/);
+  assert.match(script, /testingMatrix\.addEventListener\("focusout"/);
+  assert.match(script, /testingTooltip\.setAttribute\("aria-hidden", "false"\)/);
+  assert.match(script, /testingTooltip\.setAttribute\("aria-hidden", "true"\)/);
+  assert.match(script, /window\.addEventListener\("resize", \(\) => hideTestingTooltip\(\)\)/);
+  assert.match(script, /window\.addEventListener\("scroll", \(\) => hideTestingTooltip\(\), true\)/);
+  assert.match(script, /hoveredTestingCaseId/);
+  assert.match(script, /testingMatrixMarkup/);
+  assert.match(script, /hideTestingTooltip\("pointer"\)/);
+  assert.match(script, /data-testing-fairness-toggle=/);
+  assert.match(script, /data-testing-campaign=/);
+  assert.match(script, /collapsedTestingFairness/);
+  assert.match(script, /selectedTestingCampaignKey/);
+  assert.match(script, /aria-expanded=/);
+  assert.match(script, /aria-selected=/);
   assert.match(styles, /\.testing-matrix/);
   assert.match(styles, /\.testing-result\.passed/);
   assert.match(styles, /\.testing-result\.failed/);
+  assert.match(styles, /\.testing-tooltip\s*\{/);
+  assert.match(styles, /\.testing-fairness-toggle\s*\{/);
+  assert.match(styles, /\.testing-kernel-tabs\s*\{/);
+});
+
+test("fairness result passes only when every case passes", () => {
+  const model = testingMatrixModel({
+    status: "completed",
+    matrix: {
+      aggregate: true,
+      workloads: ["cpu_saturation", "waker_wakee"],
+      groups: [{
+        fairness: "fifo",
+        rows: [{
+          policy_id: "basic.toml",
+          cases: [
+            {
+              id: "fifo/basic.toml/cpu_saturation",
+              workload: "cpu_saturation",
+              status: "passed",
+            },
+            {
+              id: "fifo/basic.toml/waker_wakee",
+              workload: "waker_wakee",
+              status: "passed",
+            },
+          ],
+        }],
+      }],
+    },
+  });
+
+  assert.deepEqual(model.groups[0].result, {
+    status: "passed",
+    label: "2 / 2 passed",
+    symbol: "✓",
+    className: "passed",
+    total: 2,
+    passed: 2,
+    failed: 0,
+    running: 0,
+    pending: 0,
+    stopped: 0,
+    unassigned: 0,
+  });
+});
+
+test("kernel tabs show whole-campaign pass and failure outcomes", () => {
+  const campaign = (campaignId, kernel, status, caseStatuses) => ({
+    campaign_id: campaignId,
+    environment: { kernel_release: kernel },
+    status,
+    matrix: {
+      aggregate: true,
+      workloads: ["cpu_saturation", "mixed_affinity"],
+      groups: [{
+        fairness: "eevdf",
+        rows: [{
+          policy_id: "basic.toml",
+          cases: caseStatuses.map((caseStatus, index) => ({
+            id: `eevdf/basic.toml/${index ? "mixed_affinity" : "cpu_saturation"}`,
+            workload: index ? "mixed_affinity" : "cpu_saturation",
+            status: caseStatus,
+          })),
+        }],
+      }],
+    },
+  });
+  const runs = [
+    campaign("campaign-613", "6.13-test", "completed", ["passed", "passed"]),
+    campaign("campaign-616", "6.16-test", "completed", ["passed", "failed"]),
+    campaign("campaign-next", "6.17-test", "running", ["passed", "running"]),
+  ];
+
+  const model = testingCampaignTabs(runs, "campaign:1");
+
+  assert.equal(model.selectedKey, "campaign:1");
+  assert.equal(model.selectedRun, runs[1]);
+  assert.deepEqual(
+    model.tabs.map(({ key, label, status, symbol, passed, failed, total }) => ({
+      key,
+      label,
+      status,
+      symbol,
+      passed,
+      failed,
+      total,
+    })),
+    [
+      {
+        key: "campaign:0",
+        label: "6.13-test",
+        status: "passed",
+        symbol: "✓",
+        passed: 2,
+        failed: 0,
+        total: 2,
+      },
+      {
+        key: "campaign:1",
+        label: "6.16-test",
+        status: "failed",
+        symbol: "×",
+        passed: 1,
+        failed: 1,
+        total: 2,
+      },
+      {
+        key: "campaign:2",
+        label: "6.17-test",
+        status: "running",
+        symbol: "",
+        passed: 1,
+        failed: 0,
+        total: 2,
+      },
+    ],
+  );
+});
+
+test("duplicate kernel tab labels are disambiguated without changing selection keys", () => {
+  const runs = ["first-run", "second-run"].map((campaignId) => ({
+    campaign_id: campaignId,
+    environment: { kernel_release: "6.16-test" },
+    status: "idle",
+    matrix: { aggregate: true, workloads: [], groups: [] },
+  }));
+
+  const model = testingCampaignTabs(runs, "campaign:1");
+
+  assert.deepEqual(model.tabs.map((tab) => tab.key), ["campaign:0", "campaign:1"]);
+  assert.deepEqual(model.tabs.map((tab) => tab.label), [
+    "6.16-test · first-run",
+    "6.16-test · second-run",
+  ]);
+  assert.equal(model.selectedKey, "campaign:1");
+});
+
+test("local fairness result stays pending while other shards are unreported", () => {
+  const model = testingMatrixModel({
+    status: "completed",
+    matrix: {
+      aggregate: false,
+      workloads: ["cpu_saturation", "waker_wakee"],
+      groups: [{
+        fairness: "fifo",
+        rows: [{
+          policy_id: "basic.toml",
+          cases: [
+            {
+              id: "fifo/basic.toml/cpu_saturation",
+              workload: "cpu_saturation",
+              assigned: true,
+              status: "passed",
+            },
+            {
+              id: "fifo/basic.toml/waker_wakee",
+              workload: "waker_wakee",
+              assigned: false,
+              status: "pending",
+            },
+          ],
+        }],
+      }],
+    },
+  });
+
+  assert.deepEqual(model.groups[0].result, {
+    status: "pending",
+    label: "1 / 2 passed",
+    symbol: "",
+    className: "pending",
+    total: 2,
+    passed: 1,
+    failed: 0,
+    running: 0,
+    pending: 0,
+    stopped: 0,
+    unassigned: 1,
+  });
 });
 
 test("aggregate testing model includes results owned by remote shards", () => {

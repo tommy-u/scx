@@ -52,9 +52,9 @@ pub struct Args {
     #[arg(long, default_value = "/tmp/scx-snake-testing")]
     pub testing_artifact_dir: PathBuf,
 
-    /// Read-only campaign directory containing shard-N/run.json files.
+    /// Read-only campaign directory containing shard-N/run.json files; repeat to compare kernels.
     #[arg(long, requires = "enable_testing")]
-    pub testing_import_dir: Option<PathBuf>,
+    pub testing_import_dir: Vec<PathBuf>,
 
     /// Disable unrelated host integrations in dedicated test guests/viewers.
     #[arg(long, requires = "enable_testing")]

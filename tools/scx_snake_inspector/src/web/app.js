@@ -72,6 +72,7 @@ import {
   rungPercentages,
   rungTimingSummary,
   selectionRungHitFlow,
+  testingCampaignTabs,
   testingMatrixModel,
   vtimeDebugModel,
   workloadAssignmentRequest,
@@ -218,6 +219,8 @@ const elements = {
   stopScheduler: document.querySelector("#stopScheduler"),
   testingDetail: document.querySelector("#testingDetail"),
   testingFailed: document.querySelector("#testingFailed"),
+  testingKernelPanel: document.querySelector("#testingKernelPanel"),
+  testingKernelTabs: document.querySelector("#testingKernelTabs"),
   testingMatrix: document.querySelector("#testingMatrix"),
   testingNotice: document.querySelector("#testingNotice"),
   testingPassed: document.querySelector("#testingPassed"),
@@ -225,6 +228,7 @@ const elements = {
   testingRunning: document.querySelector("#testingRunning"),
   testingShard: document.querySelector("#testingShard"),
   testingStatus: document.querySelector("#testingStatus"),
+  testingTooltip: document.querySelector("#testingTooltip"),
   testingView: document.querySelector("#testingView"),
   runTesting: document.querySelector("#runTesting"),
   stopTesting: document.querySelector("#stopTesting"),
@@ -334,7 +338,15 @@ const state = {
   testingError: null,
   testingLoading: false,
   testingPendingMutation: false,
+  testingRuns: [],
+  collapsedTestingFairness: new Set(),
+  hoveredTestingCaseId: null,
+  testingMatrixMarkup: null,
+  testingKernelTabsMarkup: null,
+  testingTooltipMode: null,
+  testingTooltipPoint: null,
   selectedTestingCaseId: null,
+  selectedTestingCampaignKey: null,
   windowMs: initialWindowMs,
   zoom: 1,
 };
@@ -567,13 +579,70 @@ function bindControls() {
   elements.stopScheduler.addEventListener("click", stopScheduler);
   elements.runTesting.addEventListener("click", () => testingMutation("/api/testing/run"));
   elements.stopTesting.addEventListener("click", () => testingMutation("/api/testing/stop"));
+  elements.testingKernelTabs.addEventListener("click", (event) => {
+    const tab = event.target.closest("[data-testing-campaign]");
+    if (!tab) return;
+    const campaigns = testingCampaignTabs(state.testingRuns, tab.dataset.testingCampaign);
+    if (!campaigns.selectedRun) return;
+    state.selectedTestingCampaignKey = campaigns.selectedKey;
+    state.testing = campaigns.selectedRun;
+    state.selectedTestingCaseId = null;
+    hideTestingTooltip();
+    renderTesting();
+    [...elements.testingKernelTabs.querySelectorAll("[data-testing-campaign]")]
+      .find((candidate) => candidate.dataset.testingCampaign === campaigns.selectedKey)
+      ?.focus({ preventScroll: true });
+  });
+  elements.testingKernelTabs.addEventListener("keydown", (event) => {
+    const current = event.target.closest("[data-testing-campaign]");
+    if (!current) return;
+    const tabs = [...elements.testingKernelTabs.querySelectorAll("[data-testing-campaign]")];
+    const currentIndex = tabs.indexOf(current);
+    let nextIndex = currentIndex;
+    if (event.key === "ArrowLeft") nextIndex = (currentIndex - 1 + tabs.length) % tabs.length;
+    else if (event.key === "ArrowRight") nextIndex = (currentIndex + 1) % tabs.length;
+    else if (event.key === "Home") nextIndex = 0;
+    else if (event.key === "End") nextIndex = tabs.length - 1;
+    else return;
+    event.preventDefault();
+    tabs[nextIndex].click();
+  });
   elements.testingMatrix.addEventListener("click", (event) => {
+    const toggle = event.target.closest("[data-testing-fairness-toggle]");
+    if (toggle) {
+      const fairness = toggle.dataset.testingFairnessToggle;
+      if (state.collapsedTestingFairness.has(fairness)) {
+        state.collapsedTestingFairness.delete(fairness);
+      } else {
+        state.collapsedTestingFairness.add(fairness);
+      }
+      renderTesting();
+      [...elements.testingMatrix.querySelectorAll("[data-testing-fairness-toggle]")]
+        .find((candidate) => candidate.dataset.testingFairnessToggle === fairness)
+        ?.focus({ preventScroll: true });
+      return;
+    }
     const result = event.target.closest("[data-testing-case]");
     if (result) {
       state.selectedTestingCaseId = result.dataset.testingCase;
       renderTesting();
     }
   });
+  elements.testingMatrix.addEventListener("pointermove", showTestingPointerTooltip);
+  elements.testingMatrix.addEventListener("pointerleave", () => hideTestingTooltip("pointer"));
+  elements.testingMatrix.addEventListener("pointercancel", () => hideTestingTooltip("pointer"));
+  elements.testingMatrix.addEventListener("focusin", showTestingFocusTooltip);
+  elements.testingMatrix.addEventListener("focusout", (event) => {
+    if (!event.relatedTarget?.closest?.("[data-testing-case]")) {
+      hideTestingTooltip("focus");
+    }
+  });
+  elements.testingMatrix.parentElement.addEventListener(
+    "scroll",
+    () => hideTestingTooltip(),
+  );
+  window.addEventListener("resize", () => hideTestingTooltip());
+  window.addEventListener("scroll", () => hideTestingTooltip(), true);
   elements.resetAllStats.addEventListener("click", resetAllStats);
   elements.copyFeedback.addEventListener("click", copyFeedback);
   elements.clearFeedback.addEventListener("click", clearFeedback);
@@ -1554,6 +1623,9 @@ function renderRoute({ focusHeading = false } = {}) {
   const parsed = parseInspectorRoute(window.location.hash);
   state.route = parsed.route;
   hideCellBarTooltip();
+  if (state.route !== "validate/testing") {
+    hideTestingTooltip();
+  }
   for (const view of [
     elements.overviewView,
     elements.activityView,
@@ -2282,12 +2354,19 @@ async function loadTestingMatrix() {
   }
   state.testingLoading = true;
   try {
-    const response = await fetch("/api/testing/matrix", { cache: "no-store" });
+    const response = await fetch("/api/testing/campaigns", { cache: "no-store" });
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) {
       throw new Error(payload.error || `Testing matrix request failed (${response.status})`);
     }
-    state.testing = payload;
+    const runs = Array.isArray(payload.runs) ? payload.runs : [];
+    if (!runs.length) {
+      throw new Error("Testing API returned no campaigns");
+    }
+    const campaigns = testingCampaignTabs(runs, state.selectedTestingCampaignKey);
+    state.testingRuns = runs;
+    state.selectedTestingCampaignKey = campaigns.selectedKey;
+    state.testing = campaigns.selectedRun;
     state.testingError = null;
   } catch (error) {
     state.testingError = error.message;
@@ -2321,6 +2400,8 @@ async function testingMutation(endpoint) {
     if (!response.ok) {
       throw new Error(payload.error || `Testing request failed (${response.status})`);
     }
+    state.testingRuns = [payload];
+    state.selectedTestingCampaignKey = "campaign:0";
     state.testing = payload;
     state.testingError = null;
   } catch (error) {
@@ -2332,17 +2413,114 @@ async function testingMutation(endpoint) {
   }
 }
 
+function testingCaseById(model, id) {
+  if (!id) return null;
+  return model.groups
+    .flatMap((group) => group.rows)
+    .flatMap((row) => row.cases)
+    .find((testCase) => testCase.id === id) || null;
+}
+
+function testingCaseButton(id) {
+  return [...elements.testingMatrix.querySelectorAll("[data-testing-case]")]
+    .find((candidate) => candidate.dataset.testingCase === id) || null;
+}
+
+function positionTestingTooltip(clientX, clientY) {
+  const gap = 14;
+  const viewportPadding = 8;
+  const bounds = elements.testingTooltip.getBoundingClientRect();
+  let left = clientX + gap;
+  let top = clientY + gap;
+  if (left + bounds.width > window.innerWidth - viewportPadding) {
+    left = clientX - bounds.width - gap;
+  }
+  if (top + bounds.height > window.innerHeight - viewportPadding) {
+    top = clientY - bounds.height - gap;
+  }
+  elements.testingTooltip.style.left = `${Math.max(viewportPadding, left)}px`;
+  elements.testingTooltip.style.top = `${Math.max(viewportPadding, top)}px`;
+}
+
+function showTestingTooltip(text, point) {
+  elements.testingTooltip.textContent = text;
+  elements.testingTooltip.classList.remove("hidden");
+  elements.testingTooltip.setAttribute("aria-hidden", "false");
+  positionTestingTooltip(point.clientX, point.clientY);
+}
+
+function hideTestingTooltip(mode = null) {
+  if (mode && state.testingTooltipMode !== mode) return;
+  state.hoveredTestingCaseId = null;
+  state.testingTooltipMode = null;
+  state.testingTooltipPoint = null;
+  elements.testingTooltip.classList.add("hidden");
+  elements.testingTooltip.setAttribute("aria-hidden", "true");
+}
+
+function showTestingPointerTooltip(event) {
+  const result = event.target.closest("[data-testing-case]");
+  if (!result) {
+    hideTestingTooltip("pointer");
+    return;
+  }
+  state.hoveredTestingCaseId = result.dataset.testingCase;
+  state.testingTooltipMode = "pointer";
+  state.testingTooltipPoint = { clientX: event.clientX, clientY: event.clientY };
+  showTestingTooltip(result.dataset.testingTooltip, state.testingTooltipPoint);
+}
+
+function showTestingFocusTooltip(event) {
+  const result = event.target.closest("[data-testing-case]");
+  if (!result) return;
+  const bounds = result.getBoundingClientRect();
+  state.hoveredTestingCaseId = result.dataset.testingCase;
+  state.testingTooltipMode = "focus";
+  state.testingTooltipPoint = null;
+  showTestingTooltip(result.dataset.testingTooltip, {
+    clientX: bounds.left + Math.min(bounds.width, 24),
+    clientY: bounds.bottom,
+  });
+}
+
+function refreshTestingTooltip(model) {
+  const testCase = testingCaseById(model, state.hoveredTestingCaseId);
+  const button = testingCaseButton(state.hoveredTestingCaseId);
+  if (!testCase || !button || button.closest("tr")?.hidden) {
+    hideTestingTooltip();
+    return;
+  }
+  if (state.testingTooltipMode === "focus") {
+    const bounds = button.getBoundingClientRect();
+    showTestingTooltip(testCase.tooltip, {
+      clientX: bounds.left + Math.min(bounds.width, 24),
+      clientY: bounds.bottom,
+    });
+  } else if (state.testingTooltipPoint) {
+    showTestingTooltip(testCase.tooltip, state.testingTooltipPoint);
+  }
+}
+
 function renderTesting() {
   if (!state.testing) {
     elements.testingStatus.textContent = state.testingError || "Loading testing matrix";
     elements.runTesting.disabled = true;
     elements.stopTesting.disabled = true;
     elements.testingMatrix.innerHTML = "";
+    elements.testingKernelTabs.innerHTML = "";
+    state.testingMatrixMarkup = null;
+    state.testingKernelTabsMarkup = null;
     if (state.testingError) {
       showElementNotice(elements.testingNotice, state.testingError, true);
     }
     return;
   }
+  const campaigns = testingCampaignTabs(
+    state.testingRuns.length ? state.testingRuns : [state.testing],
+    state.selectedTestingCampaignKey,
+  );
+  state.selectedTestingCampaignKey = campaigns.selectedKey;
+  state.testing = campaigns.selectedRun;
   const model = testingMatrixModel(state.testing);
   if (state.testingError) {
     showElementNotice(elements.testingNotice, state.testingError, true);
@@ -2360,14 +2538,43 @@ function renderTesting() {
     : `Shard ${model.shardIndex + 1} of ${model.shardCount} · ${model.assignedCases} assigned of ${model.totalCases}`;
   elements.runTesting.disabled = model.aggregate || running || state.testingPendingMutation;
   elements.stopTesting.disabled = model.aggregate || !running || state.testingPendingMutation;
+  const kernelTabsMarkup = campaigns.tabs.map((tab, index) => {
+    const selected = tab.key === campaigns.selectedKey;
+    const outcome = tab.symbol
+      ? `<span class="testing-kernel-outcome ${escapeHtml(tab.className)}" aria-hidden="true">${tab.symbol}</span>`
+      : "";
+    return `<button class="testing-kernel-tab ${escapeHtml(tab.className)}" id="testing-kernel-tab-${index}" type="button" role="tab" data-testing-campaign="${escapeHtml(tab.key)}" aria-selected="${selected ? "true" : "false"}" aria-controls="testingKernelPanel" tabindex="${selected ? "0" : "-1"}" aria-label="${escapeHtml(`${tab.label}: ${tab.summary}`)}"><span class="testing-kernel-label">${escapeHtml(tab.label)}</span><span class="testing-kernel-summary">${escapeHtml(tab.summary)}</span>${outcome}</button>`;
+  }).join("");
+  if (kernelTabsMarkup !== state.testingKernelTabsMarkup) {
+    const focusedCampaign = document.activeElement?.dataset.testingCampaign || null;
+    elements.testingKernelTabs.innerHTML = kernelTabsMarkup;
+    state.testingKernelTabsMarkup = kernelTabsMarkup;
+    if (focusedCampaign) {
+      [...elements.testingKernelTabs.querySelectorAll("[data-testing-campaign]")]
+        .find((candidate) => candidate.dataset.testingCampaign === focusedCampaign)
+        ?.focus({ preventScroll: true });
+    }
+  }
+  const selectedTabIndex = campaigns.tabs.findIndex((tab) => tab.key === campaigns.selectedKey);
+  if (selectedTabIndex >= 0) {
+    elements.testingKernelPanel.setAttribute(
+      "aria-labelledby",
+      `testing-kernel-tab-${selectedTabIndex}`,
+    );
+  }
   const headings = model.workloads
     .map((workload) => `<th scope="col">${escapeHtml(workload.label)}</th>`)
     .join("");
   const rows = model.groups.map((group) => {
-    const groupRow = `<tr class="testing-fairness-row"><th colspan="${model.workloads.length + 1}" scope="rowgroup">${escapeHtml(group.label)}</th></tr>`;
-    const policyRows = group.rows.map((row) => {
+    const collapsed = state.collapsedTestingFairness.has(group.fairness);
+    const policyRowIds = group.rows.map((_, index) => `testing-${group.fairness}-policy-${index}`);
+    const outcome = group.result.symbol
+      ? `<span class="testing-fairness-outcome ${escapeHtml(group.result.className)}" aria-hidden="true">${group.result.symbol}</span>`
+      : "";
+    const groupRow = `<tr class="testing-fairness-row"><th colspan="${model.workloads.length + 1}" scope="rowgroup"><button class="testing-fairness-toggle" type="button" data-testing-fairness-toggle="${escapeHtml(group.fairness)}" aria-expanded="${collapsed ? "false" : "true"}" aria-controls="${policyRowIds.join(" ")}" aria-label="${escapeHtml(`${group.label} fairness: ${group.result.label}`)}"><span class="testing-fairness-chevron" aria-hidden="true">›</span><span class="testing-fairness-label">${escapeHtml(group.label)}</span><span class="testing-fairness-summary">${escapeHtml(group.result.label)}</span>${outcome}</button></th></tr>`;
+    const policyRows = group.rows.map((row, rowIndex) => {
       const byWorkload = new Map(row.cases.map((testCase) => [testCase.workload, testCase]));
-      const cells = model.workloads.map((workload) => {
+      const cells = model.workloads.map((workload, workloadIndex) => {
         const testCase = byWorkload.get(workload.id);
         if (!testCase) {
           return '<td><span class="testing-result unassigned">—</span></td>';
@@ -2375,25 +2582,36 @@ function renderTesting() {
         const content = testCase.symbol
           ? `<span class="testing-result-symbol" aria-hidden="true">${testCase.symbol}</span>`
           : escapeHtml(testCase.label);
-        return `<td><button class="testing-result ${escapeHtml(testCase.className)}" type="button" data-testing-case="${escapeHtml(testCase.id)}" aria-label="${escapeHtml(`${row.policyName}, ${workload.label}: ${testCase.label}`)}" title="${escapeHtml(testCase.tooltip)}"${testCase.assigned ? "" : " disabled"}>${content}</button></td>`;
+        const descriptionId = `testing-description-${group.fairness}-${rowIndex}-${workloadIndex}`;
+        return `<td><button class="testing-result ${escapeHtml(testCase.className)}" type="button" data-testing-case="${escapeHtml(testCase.id)}" data-testing-tooltip="${escapeHtml(testCase.tooltip)}" aria-describedby="${descriptionId}" aria-label="${escapeHtml(`${row.policyName}, ${workload.label}: ${testCase.label}`)}"${testCase.assigned ? "" : " disabled"}>${content}<span class="visually-hidden" id="${descriptionId}">${escapeHtml(testCase.tooltip)}</span></button></td>`;
       }).join("");
-      return `<tr><th scope="row">${escapeHtml(row.policyName)}</th>${cells}</tr>`;
+      return `<tr class="testing-policy-row" id="${policyRowIds[rowIndex]}"${collapsed ? " hidden" : ""}><th scope="row">${escapeHtml(row.policyName)}</th>${cells}</tr>`;
     }).join("");
-    return groupRow + policyRows;
+    return `<tbody data-testing-fairness-group="${escapeHtml(group.fairness)}">${groupRow}${policyRows}</tbody>`;
   }).join("");
-  elements.testingMatrix.innerHTML = `<thead><tr><th scope="col">Policy</th>${headings}</tr></thead><tbody>${rows}</tbody>`;
+  const matrixMarkup = `<thead><tr><th scope="col">Policy</th>${headings}</tr></thead>${rows}`;
+  if (matrixMarkup !== state.testingMatrixMarkup) {
+    const focusedTestingCaseId = document.activeElement?.dataset.testingCase || null;
+    const focusedTestingFairness = document.activeElement?.dataset.testingFairnessToggle || null;
+    elements.testingMatrix.innerHTML = matrixMarkup;
+    state.testingMatrixMarkup = matrixMarkup;
+    if (focusedTestingCaseId) {
+      testingCaseButton(focusedTestingCaseId)?.focus({ preventScroll: true });
+    } else if (focusedTestingFairness) {
+      [...elements.testingMatrix.querySelectorAll("[data-testing-fairness-toggle]")]
+        .find((candidate) => candidate.dataset.testingFairnessToggle === focusedTestingFairness)
+        ?.focus({ preventScroll: true });
+    }
+  }
+  refreshTestingTooltip(model);
 
   const selected = model.groups
     .flatMap((group) => group.rows)
     .flatMap((row) => row.cases.map((testCase) => ({ ...testCase, policyName: row.policyName })))
     .find((testCase) => testCase.id === state.selectedTestingCaseId);
   if (selected) {
-    const elapsed = selected.status === "running"
-      ? "In progress"
-      : (selected.elapsedMs ? `${(selected.elapsedMs / 1_000).toFixed(1)}s` : "Not started");
-    const workloadLabel = model.workloads.find((workload) => workload.id === selected.workload)?.label
-      || selected.workload;
-    elements.testingDetail.innerHTML = `<strong>${escapeHtml(selected.policyName)} · ${escapeHtml(workloadLabel)}</strong><br>Status: ${escapeHtml(selected.label)} · Runtime: ${escapeHtml(elapsed)}${selected.failure ? `<br>Failure: ${escapeHtml(selected.failure)}` : ""}`;
+    const [heading, ...detail] = selected.tooltip.split("\n");
+    elements.testingDetail.innerHTML = `<strong>${escapeHtml(heading)}</strong><br>${detail.map(escapeHtml).join("<br>")}`;
   } else {
     elements.testingDetail.textContent = "Select a result to inspect its runtime and failure details.";
   }

@@ -101,8 +101,29 @@ fn vm_testing_is_opt_in_and_enforces_one_minute_cases() {
     .unwrap();
     assert_eq!(
         aggregate.testing_import_dir,
-        Some(std::path::PathBuf::from("/tmp/snake-campaign"))
+        vec![std::path::PathBuf::from("/tmp/snake-campaign")]
     );
     assert!(aggregate.testing_isolated);
     assert!(aggregate.validate().is_ok());
+}
+
+#[test]
+fn aggregate_view_accepts_multiple_campaign_directories() {
+    let args = Args::try_parse_from([
+        "scx_snake_inspector",
+        "--enable-testing",
+        "--testing-import-dir",
+        "/tmp/snake-campaign-6.13",
+        "--testing-import-dir",
+        "/tmp/snake-campaign-6.16",
+    ])
+    .unwrap();
+
+    assert_eq!(
+        args.testing_import_dir,
+        vec![
+            std::path::PathBuf::from("/tmp/snake-campaign-6.13"),
+            std::path::PathBuf::from("/tmp/snake-campaign-6.16"),
+        ]
+    );
 }
