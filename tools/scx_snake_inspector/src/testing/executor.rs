@@ -261,6 +261,10 @@ fn execute_case_inner(
     let delta = dmesg_delta(&dmesg_before, &final_dmesg);
     fs::write(case_dir.join("dmesg-new.txt"), &delta)?;
     result?;
+    let scheduler_output = fs::read_to_string(&scheduler_log_path)?;
+    if let Some(error) = scheduler_stats_failure(&scheduler_output) {
+        bail!("scheduler error counters: {error}");
+    }
     if let Some(signature) = failure_signature(&delta) {
         bail!("kernel failure: {signature}");
     }
@@ -425,6 +429,32 @@ fn dmesg_delta(before: &str, after: &str) -> String {
     after[overlap..].join("\n")
 }
 
+fn scheduler_stats_failure(log: &str) -> Option<String> {
+    const COUNTERS: [&str; 3] = [
+        "invalid_errors",
+        "vtime_accounting_errors",
+        "eevdf_accounting_errors",
+    ];
+    let mut maxima = [0_u64; COUNTERS.len()];
+    for line in log.lines() {
+        let Ok(stats) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        for (index, counter) in COUNTERS.iter().enumerate() {
+            if let Some(value) = stats.get(counter).and_then(serde_json::Value::as_u64) {
+                maxima[index] = maxima[index].max(value);
+            }
+        }
+    }
+    let errors = COUNTERS
+        .into_iter()
+        .zip(maxima)
+        .filter(|(_, value)| *value > 0)
+        .map(|(counter, value)| format!("{counter}={value}"))
+        .collect::<Vec<_>>();
+    (!errors.is_empty()).then(|| errors.join(", "))
+}
+
 fn command_available(command: &str) -> bool {
     Command::new("sh")
         .args(["-c", "command -v \"$1\" >/dev/null", "sh", command])
@@ -476,7 +506,7 @@ fn scheduler_exit_message(phase: &str, status: ExitStatus, scheduler_log: &Path)
 mod tests {
     use std::time::Duration;
 
-    use super::{dmesg_delta, ATTACH_TIMEOUT};
+    use super::{dmesg_delta, scheduler_stats_failure, ATTACH_TIMEOUT};
 
     #[test]
     fn attach_timeout_covers_slow_bpf_startup() {
@@ -490,6 +520,20 @@ mod tests {
         assert_eq!(
             dmesg_delta("one\ntwo", "fresh\nmessages"),
             "fresh\nmessages"
+        );
+    }
+
+    #[test]
+    fn scheduler_stats_report_nonzero_error_counters() {
+        let clean = r#"not json
+{"invalid_errors":0,"vtime_accounting_errors":0,"eevdf_accounting_errors":0}"#;
+        assert_eq!(scheduler_stats_failure(clean), None);
+
+        let failed = r#"{"invalid_errors":1,"vtime_accounting_errors":0}
+{"invalid_errors":1,"vtime_accounting_errors":2,"eevdf_accounting_errors":0}"#;
+        assert_eq!(
+            scheduler_stats_failure(failed).as_deref(),
+            Some("invalid_errors=1, vtime_accounting_errors=2")
         );
     }
 }
