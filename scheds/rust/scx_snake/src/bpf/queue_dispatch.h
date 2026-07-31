@@ -754,15 +754,16 @@ static __noinline s32 queue_dispatch_consume_min_vtime(
 	u64 cpu_vtime = 0, local_vtime = 0, remote_vtime = 0;
 	u32 preference, winner_source = SNAKE_QUEUE_INPUT_INVALID;
 	u32 nr_min = 0;
+	u32 remote_state =
+		args->remote_candidate ? args->remote_candidate->valid : 0;
 	bool cpu_valid = args->cpu_candidate && args->cpu_candidate->valid != 0;
-	bool local_valid =
-		args->local_candidate && args->local_candidate->valid != 0;
-	bool remote_valid =
-		args->remote_candidate && args->remote_candidate->valid != 0;
-	bool found = false;
+	bool local_valid = args->local_candidate &&
+			   args->local_candidate->valid != 0;
+	bool remote_valid = remote_state == 1;
+	bool found	  = false;
 
 	if (!cpu_valid && !local_valid && args->remote_candidate &&
-	    args->remote_candidate->valid == SNAKE_QUEUE_CANDIDATE_MOVED) {
+	    remote_state == SNAKE_QUEUE_CANDIDATE_MOVED) {
 		args->state->next_equal_source = SNAKE_QUEUE_INPUT_CPU;
 		stat_inc(ctx, SNAKE_STAT_DISPATCH_RUNG_SELECTED_BASE + 2);
 		stat_inc(ctx, SNAKE_STAT_VTIME_DISPATCHES);
