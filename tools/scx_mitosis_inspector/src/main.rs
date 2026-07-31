@@ -15,6 +15,7 @@ use scx_mitosis_inspector::api::{router, ApiContext};
 use scx_mitosis_inspector::collector::{self, Snapshot};
 use scx_mitosis_inspector::host_context::HostContextView;
 use scx_mitosis_inspector::stats::{self, StatsSnapshot, DEFAULT_STATS_PATH};
+use scx_mitosis_inspector::system_stats::SystemStatsCollector;
 use scx_mitosis_inspector::{
     build_callback_timing_rows, build_counters, parse_callback_timing_sample_rate,
     CallbackTimingCounters, CALLBACK_NAMES,
@@ -97,11 +98,27 @@ async fn main() -> Result<()> {
         .spawn(move || stats::run(stats_collector_state, stats_shutdown, &stats_path))
         .context("starting Mitosis stats collector")?;
 
+    let mut system_collector = SystemStatsCollector::new();
+    let system_state = Arc::new(RwLock::new(system_collector.collect()));
+    let system_collector_state = system_state.clone();
+    let system_shutdown = shutdown.clone();
+    let system_collector = std::thread::Builder::new()
+        .name("mitosis-system-collector".into())
+        .spawn(move || {
+            while !system_shutdown.load(Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_secs(1));
+                *system_collector_state
+                    .write()
+                    .expect("system snapshot lock poisoned") = system_collector.collect();
+            }
+        })
+        .context("starting system stats collector")?;
+
     let listener = tokio::net::TcpListener::bind(opts.listen)
         .await
         .with_context(|| format!("binding inspector to {}", opts.listen))?;
     println!("Mitosis inspector listening on http://{}", opts.listen);
-    let context = ApiContext::new(state, stats_state, host_context);
+    let context = ApiContext::new(state, stats_state, system_state, host_context);
     let server = axum::serve(listener, router(context)).with_graceful_shutdown(async {
         let _ = tokio::signal::ctrl_c().await;
     });
@@ -115,7 +132,11 @@ async fn main() -> Result<()> {
     let stats_result = stats_collector
         .join()
         .map_err(|_| anyhow::anyhow!("Mitosis stats collector thread panicked"));
+    let system_result = system_collector
+        .join()
+        .map_err(|_| anyhow::anyhow!("system stats collector thread panicked"));
     collector_result?;
     stats_result?;
+    system_result?;
     result
 }
