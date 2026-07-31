@@ -135,11 +135,12 @@ sudo tools/scx_snake_inspector/target/release/scx_snake_inspector \
 
 Open `http://127.0.0.1:8788/#/validate/testing`, then choose **Run assigned
 shard**. A check means the scheduler and workload completed the full window
-without a kernel failure signature. An X means Snake exited or dmesg reported
-a runnable-task stall, sched_ext error/watchdog, BPF error, lockup, oops, or
-panic. Hover a case for its runtime, shard VM allocation, kernel and Snake
-build, and VM boot command. This first version does not grade fairness,
-throughput, or latency.
+without a kernel failure signature or nonzero scheduler error counter. An X
+means Snake exited, reported an invalid scheduler or fairness-accounting error,
+or dmesg reported a runnable-task stall, sched_ext error/watchdog, BPF error,
+lockup, oops, or panic. Hover a case for its runtime, shard VM allocation,
+kernel and Snake build, and VM boot command. This first version does not grade
+fairness, throughput, or latency.
 
 For a headless guest, use
 `scheds/rust/scx_snake/tests/vm_matrix_shard.sh`. The manual GitHub workflow
@@ -194,8 +195,10 @@ scheds/rust/scx_snake/tests/vm_matrix_local.sh
 
 The launcher prints the matching aggregate UI command and the campaign path.
 Override guest allocation with `SNAKE_TESTING_SHARDS`,
-`SNAKE_TESTING_GUEST_CPUS`, and `SNAKE_TESTING_GUEST_MEMORY`. Each VM has a
-45-minute host timeout by default; override it with
+`SNAKE_TESTING_GUEST_CPUS`, and `SNAKE_TESTING_GUEST_MEMORY`. By default, each
+VM timeout is derived from its maximum assigned cases using a 105-second budget
+per case plus a three-minute margin. Override the budget with
+`SNAKE_TESTING_CASE_BUDGET_SECS` or set the whole timeout with
 `SNAKE_TESTING_VM_TIMEOUT_SECS`. Campaign directories must be new or empty.
 
 The listen address is intentionally restricted to loopback. The page remains
