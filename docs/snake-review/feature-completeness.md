@@ -1,5 +1,9 @@
 # Feature completeness
 
+Roadmap refresh: 2026-07-31 at `97afd17f`. Percentages below were reassessed for
+areas changed since the original review; unchanged dynamic-control scores retain
+the original baseline.
+
 ## Method
 
 Each percentage is a rounded expert judgment, not a coverage metric or a value
@@ -28,13 +32,13 @@ or operational evidence is limited.
 
 | Feature | Complete | Confidence | Principal gap |
 | --- | ---: | --- | --- |
-| Declarative bounded placement ladder | 95% | High | Fixed eight-rung and four-mask-table ABI |
+| Declarative bounded placement ladder | 96% | High | Fixed nine-rung and four-mask-table ABI |
 | Previous/allowed idle placement and safe fallback | 96% | High | Static 1,024-CPU ceiling |
 | LLC, NUMA, and split-LLC scopes | 88% | High | No distance-ordered remote NUMA search |
-| Whole-idle-core selection | 90% | High | No capacity, energy, or heterogeneous-core policy |
+| Whole-idle-core selection | 94% | High | No capacity, energy, or heterogeneous-core policy |
 | Uniform random idle selection | 82% | High | Linear CPU scan in the hot path |
-| Kernel-default delegation | 88% | Medium | Terminal/control operation rather than composable internals |
-| Synchronous wake affinity | 82% | Medium | Deliberately partial kernel-default simulation |
+| Kernel-default delegation | 90% | Medium | Terminal/control operation rather than composable internals |
+| Synchronous wake affinity | 88% | Medium | Restricted-task topology gating still differs from the kernel |
 | Placement-only task cells | 88% | High | Per-thread identity, no inheritance or batch control |
 | Placement-only live rehome | 80% | Medium | Best effort until an eligible CPU is idle |
 
@@ -44,18 +48,18 @@ Evidence: policy compilation and validation
 [ladder.h](../../scheds/rust/scx_snake/src/bpf/ladder.h#L139-L243)), and documented
 scope limits ([README](../../scheds/rust/scx_snake/README.md#L434-L443)).
 
-Category estimate: **89%**.
+Category estimate: **92%**.
 
 ## Fairness
 
 | Feature | Complete | Confidence | Principal gap |
 | --- | ---: | --- | --- |
 | Explicit shared-DSQ FIFO | 93% | High | No weighted fairness or topology-aware stealing |
-| Global weighted VTIME | 78% | Medium | Experimental global lock and limited scale evidence |
+| Global weighted VTIME | 82% | Medium | Experimental locks and limited performance evidence |
 | Global EEVDF | 45% | High | Known nice-level weighted-share failure |
-| Queue-mode per-cell VTIME | 75% | Medium | Experimental; no hierarchical group fairness |
+| Queue-mode per-cell/LLC VTIME | 82% | Medium | Experimental; no hierarchical group fairness |
 | Weight, slice, and replenishment accounting | 78% | Medium | EEVDF validation remains incorrect |
-| Sleeper-credit and lag clamps | 85% | Medium | Wraparound/concurrency assumptions lack long soak evidence |
+| Sleeper-credit and lag clamps | 88% | Medium | Wraparound/concurrency assumptions lack long soak evidence |
 
 EEVDF's failure is explicit: the pinned nice-level demo produces approximately
 equal service rather than weighted shares
@@ -63,7 +67,7 @@ equal service rather than weighted shares
 their scale disclaimer are documented at
 [FAIRNESS.md](../../scheds/rust/scx_snake/docs/FAIRNESS.md#L379-L388).
 
-Category estimate: **71%**. Production use should treat EEVDF as unavailable until
+Category estimate: **74%**. Production use should treat EEVDF as unavailable until
 the share invariant is fixed and tested.
 
 ## Queueing and resource domains
@@ -71,12 +75,12 @@ the share invariant is fixed and tested.
 | Feature | Complete | Confidence | Principal gap |
 | --- | ---: | --- | --- |
 | Weighted disjoint primary CPU allocation | 84% | High | Static attachment-time capacity |
-| `cell` and populated `cell_llc` layouts | 88% | High | No topology mutation |
+| `cell`, `cell_llc`, and global `llc` layouts | 92% | High | No topology mutation |
 | Per-CPU affinity escape queues | 85% | Medium | One DSQ and descriptor per configured CPU |
 | Enqueue callback ladder | 90% | High | Only `cell` and terminal `affinity` targets |
-| Cyclic dispatch ladder | 87% | High | Only normal and affinity source classes |
+| Cyclic dispatch ladder | 90% | High | Only normal and affinity source classes |
 | `min_vtime` arbitration | 85% | Medium | Compares only normal and affinity heads |
-| Direct idle-CPU borrowing | 65% | High | Wake/select-time only |
+| Direct idle placement and dispatch | 88% | High | Applies to newly selected work, not queued backlog |
 | Queued cross-cell borrowing or stealing | 5% | High | Explicitly absent |
 | Live task rehome across clocks | 78% | Medium | One unavoidable old-normal-queue run |
 | Live queue-topology mutation | 5% | High | Restart required |
@@ -88,7 +92,7 @@ The decisive work-conservation limit is documented at
 topology is explicitly attachment-time state
 ([QUEUE_POLICY.md](../../scheds/rust/scx_snake/docs/QUEUE_POLICY.md#L223-L256)).
 
-Category estimate: **75% for implemented queue features**, but only **35–45% for
+Category estimate: **82% for implemented queue features**, but only **35–45% for
 general resource elasticity**.
 
 ## Policy engine and topology
@@ -97,11 +101,11 @@ general resource elasticity**.
 | --- | ---: | --- | --- |
 | Strict TOML parse and semantic validation | 95% | High | Experimental ABI remains a moving target |
 | Operation/scope lowering and mask interning | 95% | High | Fixed opcode vocabulary |
-| Independent BPF validation | 92% | High | Documentation ABI version has drifted |
+| Independent BPF validation | 94% | High | Documentation and protocol fixtures can still drift |
 | Atomic double-buffered policy replacement | 90% | High | Queue and membership state are immutable |
-| Offline compiled-policy dump | 92% | High | No machine-readable standalone validation contract |
-| Live candidate validation | 88% | High | Stopped inspector cannot fully validate launch candidates |
-| LLC/NUMA/core topology discovery | 88% | High | Static snapshot |
+| Offline compiled-policy dump | 95% | High | No machine-readable standalone validation contract |
+| Live candidate validation | 94% | High | Validation still returns human-oriented errors |
+| LLC/NUMA/core topology discovery | 90% | High | Static snapshot and no distance model |
 | Sparse CPU IDs | 80% | Medium | Maximum CPU ID must remain below 1,024 |
 | CPU hotplug | 10% | High | No online/offline callbacks or topology transaction |
 | NUMA distance/capacity/energy model | 15% | High | Not represented in the policy ABI |
@@ -109,10 +113,11 @@ general resource elasticity**.
 Atomic slot publication is implemented in
 [runtime_policy.rs](../../scheds/rust/scx_snake/src/runtime_policy.rs#L112-L167) and
 [main.h](../../scheds/rust/scx_snake/src/bpf/main.h#L170-L212). Current
-`intf.h` declares ABI 20 while `POLICY_LOWERING.md` still describes ABI 16, a
+`intf.h` declares ABI 23 while `POLICY_LOWERING.md` still describes ABI 21 and an
+eight-rung limit, a
 concrete sign that documentation is not part of an enforced contract.
 
-Category estimate: **91% policy engine**, **73% topology support**.
+Category estimate: **93% policy engine**, **76% topology support**.
 
 ## Task identity and cgroups
 
@@ -143,20 +148,19 @@ Snake's static allocator, resource counters, and queue primitives.
 | Global, rung, CPU, and cell counters | 94% | High | Mostly cumulative/per-CPU snapshots |
 | Sampled callback histograms | 90% | High | Base-2 percentile granularity |
 | Per-rung timing | 90% | Medium | Ring-buffer drop accounting is incomplete |
-| Fine callback stages, committed | 82% | High | FIFO enqueue/dispatch omitted at committed baseline |
+| Fine callback stages | 88% | High | High-rate capture remains expensive |
 | Queue residence and depth capture | 88% | High | Sampled, on-demand capture only |
 | Policy/topology/task inspection payload | 90% | High | Scheduler-specific, loosely typed consumer boundary |
-| Per-DSQ operation timing, current WIP | 60% | Medium | Uncommitted and increases event volume |
+| Per-DSQ operation timing | 88% | Medium | Detailed capture increases event volume |
 | Stats reset without policy reload | 90% | High | Reset semantics spread across several components |
-| Inspector committed baseline | 80% | Medium | Scaling, docs, browser E2E, protocol genericity |
-| Inspector with current WIP | 82–84% | Medium | Still not shipped or soak-tested |
+| Inspector current baseline | 87% | Medium | Scaling, browser E2E, and protocol genericity |
 
 The per-CPU counter and timing maps avoid global atomic contention
 ([main.h](../../scheds/rust/scx_snake/src/bpf/main.h#L103-L157)). The inspector's
 full API surface is visible at
 [api.rs](../../tools/scx_snake_inspector/src/api.rs#L86-L130).
 
-Category estimate: **87%**.
+Category estimate: **92%**.
 
 ## Inspector capabilities
 
@@ -168,25 +172,25 @@ production web application.
 | Local bootstrap and mutation security | 90% | High | Host-header/session-token model assumes trusted local user |
 | CPU topology | 95% | High | Static while running |
 | Scoped migration activity | 80% | Medium | CPU² collection/render scaling and silent cgroup-helper failure |
-| Per-CPU utilization | 90% | High | Depends on compatible Snake top stats |
+| Per-CPU/core/LLC utilization | 95% | High | Depends on compatible Snake top stats |
 | Cell resource telemetry | 85% | High | No SLO or anomaly model |
 | Coarse callback timing | 90% | High | Approximate histogram percentiles |
 | Fine callback timing, committed | 72–82% | Medium | Availability and DSQ detail gaps |
 | Queue timing | 82% | High | Sampled capture and duplicated transport parsing |
 | Policy introspection | 85% | High | Scheduler-specific schema |
-| Policy catalog/live activation | 75% | Medium | Stopped scheduler cannot validate fully |
-| Scheduler lifecycle | 85% | Medium | External attachment association is heuristic |
+| Policy catalog/live activation | 88% | Medium | Compatibility remains scheduler-specific |
+| Scheduler lifecycle | 92% | Medium | External attachment association is heuristic |
 | Cells and workload assignment | 78% | Medium | Snapshot-only bulk target and serial per-TID RPCs |
 | Overview, debugging, host context | 82% | Medium | Recent code, environment-specific dependencies |
-| Documentation | 50% | High | README materially contradicts current UI |
-| Test confidence | 78% | Medium | No real browser DOM smoke and no live-kernel inspector E2E |
+| Documentation | 82% | High | Review estimates and operational docs still require manual sync |
+| Test confidence | 88% | Medium | No real browser DOM smoke or scheduled multi-kernel VM gate |
 
 The UI currently has eight routes in
 [index.html](../../tools/scx_snake_inspector/src/web/index.html#L43-L63), while the
 README still says six views and makes other stale claims
 ([README](../../tools/scx_snake_inspector/README.md#L7-L36)).
 
-Overall committed inspector estimate: **80%**.
+Overall current inspector estimate: **87%**.
 
 ## Lifecycle, safety, and validation
 
@@ -194,41 +198,39 @@ Overall committed inspector estimate: **80%**.
 | --- | ---: | --- | --- |
 | Launch/update/dump/monitor CLI | 92% | High | Fairness and resource topology require restart |
 | Typed runtime control socket | 92% | High | One scheduler loop handles control and telemetry |
-| Restart and user-exit reporting | 85% | Medium | No persisted annotations or dynamic topology |
+| Restart and user-exit reporting | 92% | Medium | No persisted annotations or dynamic topology |
 | Affinity and ABI defense-in-depth | 94% | High | Hotplug lifecycle absent |
-| Unit and contract tests | 90% | High | Little property/fuzz validation |
-| VM integration suite | 82% | Medium | Privileged, manual, and large-host requirements |
-| EEVDF integration confidence | 45% | High | Excluded from combined gauntlet and shares fail |
-| Large-host scale evidence | 45% | Medium | Specific watchdog tests, not systematic performance curves |
+| Unit and contract tests | 94% | High | Little property/fuzz or real-browser validation |
+| VM integration suite | 90% | Medium | Privileged and manually dispatched across kernels |
+| EEVDF integration confidence | 55% | High | Progress regressions run, but weighted shares still fail |
+| Large-host scale evidence | 55% | Medium | Functional campaigns exist, not systematic performance curves |
 | Failure injection | 35% | Medium | Few partial configuration/ring pressure/control timeout campaigns |
 | General production readiness | 35% | High | Project explicitly disclaims production use |
 
-The committed scheduler baseline has 191 Rust tests and 12 VM shell scripts. The
-current uncommitted timing work adds two Rust tests. The VM gauntlet
-explicitly excludes EEVDF
-([FAIRNESS.md](../../scheds/rust/scx_snake/docs/FAIRNESS.md#L348-L355)). Test count
-is strong for a young experimental project, but the reviewed Snake history spans
-only six days (July 24–29), with most fairness, queue, timing, and inspector
-expansion concentrated in the final three. It has not had the time or breadth of
-operational exposure implied by a production-ready score.
+Inspector Rust and JavaScript tests now run in normal CI. The manual sharded VM
+workflow freezes its scheduler, inspector, and policy inputs; three local 140-case
+campaigns completed with zero failures across the recorded kernels. Those cases
+grade scheduler lifetime, progress, and error counters. They do not grade fairness
+ratios, throughput, latency, or placement balance, so the added breadth does not
+remove the release blockers or substitute for performance curves and soak time.
 
 ## Aggregate view
 
 | Category | Estimate |
 | --- | ---: |
-| Placement | 89% |
-| Fairness | 71% |
-| Queue features | 75% |
-| Policy engine | 91% |
-| Topology | 73% |
+| Placement | 92% |
+| Fairness | 74% |
+| Queue features | 82% |
+| Policy engine | 93% |
+| Topology | 76% |
 | Task identity/cgroups within declared static scope | 68% |
 | Mitosis-style dynamic identity and lifecycle | 22% |
-| Observability | 87% |
-| Lifecycle | 84% |
-| Validation/testing | 78% |
-| Inspector | 80% |
+| Observability | 92% |
+| Lifecycle | 88% |
+| Validation/testing | 84% |
+| Inspector | 87% |
 
-Taken together, Snake is approximately **80% complete as an experimental policy
+Taken together, Snake is approximately **85% complete as an experimental policy
 and observability platform**. That number should not obscure four release blockers:
 known EEVDF incorrectness, incomplete queued-work conservation, no hotplug/dynamic
 topology contract, and observer failures that can unwind the scheduler loop. Those

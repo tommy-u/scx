@@ -2,10 +2,12 @@
 
 Review date: 2026-07-29
 Committed baseline: `d8185bc3477e05425f56bd50ee5cef73cdd96c88`
+Roadmap update: 2026-07-31
+Roadmap baseline: `97afd17f8731a04e6d614f5370c76948e2775b74`
 Scope: `scx_snake`, `scx_snake_inspector`, `scx_mitosis`, and selected schedulers under `scheds/rust`
 
-This is a read-only design review. It makes no scheduler or inspector source-code
-changes. The files in this directory are the review deliverables.
+The original review was read-only and made no scheduler or inspector source-code
+changes. The roadmap section was refreshed against the later baseline above.
 
 ## Bottom line
 
@@ -20,12 +22,12 @@ The review's estimates are:
 
 | Dimension | Estimate | Interpretation |
 | --- | ---: | --- |
-| Snake experimental feature implementation | **80%** | Most declared mechanisms exist and have substantial tests. |
+| Snake experimental feature implementation | **85%** | Global LLC queues, direct dispatch, and stronger placement/diagnostic coverage have landed. |
 | Snake production readiness | **35%** | EEVDF correctness, work conservation, hotplug, scale evidence, and soak time are not adequate for production. |
 | Static scheduling-data-plane parity with Mitosis | **73%** | Snake has cells, cell/LLC DSQs, affinity escapes, VTIME, borrowing, and accounting. |
 | Overall end-to-end Mitosis behavior parity | **55% ±5%** | The defining dynamic cgroup/cell and CPU-resource control plane is mostly absent. |
 | Mitosis dynamic control/resource plane | **33%** | Snake has static allocation and polling membership, but not dynamic lifecycle, cpusets, rebalancing, or safe live reassignment. |
-| Inspector, committed baseline | **80%** | Broad and useful; scaling, protocol typing, browser smoke coverage, and documentation lag remain. |
+| Inspector, current baseline | **87%** | Durable control, VM campaigns, LLC/VTIME diagnostics, and asset freshness landed; scaling and browser smoke remain. |
 
 These are engineering estimates, not test-coverage percentages. The scoring rubric
 and feature-by-feature evidence are in [Feature completeness](feature-completeness.md).
@@ -48,16 +50,16 @@ and feature-by-feature evidence are in [Feature completeness](feature-completene
    move CPU ownership inside it.
 
 4. **Correctness gates come before Mitosis expansion.** EEVDF weighted shares are
-   known incorrect. Queue-mode borrowing cannot drain already queued work and can
-   hit the runnable-task watchdog. CPU hotplug is effectively unsupported. A
+   known incorrect. Direct dispatch improves newly selected work but does not drain
+   already queued cross-cell work. CPU hotplug is effectively unsupported. A
    diagnostic inspection error can currently unwind the scheduler loop, so observer
    isolation is also a release gate.
 
-5. **The best performance work is targeted and measurable.** Snake already has
-   callback, rung, fine-stage, and queue timing. Use it before changing BPF. The
-   clearest immediate wins are inspector-side: avoid CPU-pair full-map scans and
-   dense `N²` browser work, cache policy validation, and deserialize inspection
-   payloads once.
+5. **The best performance work is targeted and measurable.** Snake now exposes LLC
+   utilization, VTIME clamp/routing rates, and detailed queue timing. Use those to
+   compare the simulation with kernel default before adding more placement or steal
+   policy. Inspector CPU-pair scans and dense `N²` browser work remain clear scale
+   targets.
 
 6. **Refactor by ownership, not framework.** Split the largest files into existing
    domain concepts. Avoid a cross-scheduler framework until Snake and Mitosis have
@@ -74,12 +76,27 @@ priority labels. It is a dated planning snapshot, not a promise of delivery orde
 - **P2 — important follow-up:** valuable after the P0/P1 foundations are sound;
 - **P3 — evidence-gated research:** implement only when measurement justifies it.
 
+### Progress since the original review
+
+| Area | What landed | What remains unproven |
+| --- | --- | --- |
+| Global VTIME queues | LLC-sharded normal queues, bounded remote scans, preallocated task state, and optional direct dispatch | Throughput and tail-latency benefit versus kernel default |
+| Kernel-default simulation | Direct dispatch, previous whole-idle-core claim, and the ninth placement rung | Restricted-task topology gating and an explanation for residual LLC skew |
+| VTIME and placement diagnostics | LLC/core utilization, LLC heat-map annotations, credit-clamp counts/rates, routing/runtime mix, and queue timing | Alert thresholds and controlled before/after workload evidence |
+| Inspector operations | Durable remote control, reliable restart, visible launch errors, and cache-safe web assets | Real-browser smoke and large-host collection/render cost curves |
+| Validation | Inspector tests run in normal CI; a sharded VM workflow freezes inputs and compares kernels; three local 140-case campaigns completed with zero failures | The matrix checks failure/progress, not fairness ratios, throughput, latency, or placement balance |
+
+The four P0 release gates below remain open. The near-term P1 ordering changed:
+finish the kernel-simulation contract and collect LLC-balance evidence before
+expanding the dynamic Mitosis control plane or adding more stealing heuristics.
+
 ### High-level goals
 
 | Goal | Priority | Intended outcome |
 | --- | :---: | --- |
 | Correctness & forward progress | **P0** | Every exposed fairness and queue mode has tested service and progress invariants. |
 | Production readiness & safe operations | **P0** | Topology and diagnostic failures cannot silently strand work or detach Snake. |
+| Kernel-default simulation evidence | **P1** | The simulated ladder has explicit parity boundaries and measured placement behavior. |
 | Feature parity with Mitosis | **P1** | Managed cgroup cells, resource plans, and ownership changes are safe and observable. |
 | Inspector scalability & contracts | **P1** | Large hosts avoid quadratic work and scheduler/inspector boundaries are typed. |
 | Validation & rollout evidence | **P1** | Privileged, browser, failure, scale, canary, and rollback evidence supports readiness claims. |
@@ -93,13 +110,15 @@ priority labels. It is a dated planning snapshot, not a promise of delivery orde
 | `queued-work-progress` | Queued-work forward progress | **P0** | An underallocated cell cannot watchdog-stall while an eligible foreign CPU is idle. |
 | `hotplug-contract` | CPU hotplug and topology contract | **P0** | Online/offline changes are supported transactionally or rejected and detached safely. |
 | `observer-isolation` | Observer isolation | **P0** | Inspection, client, and ring-buffer failures cannot unwind the scheduler loop. |
+| `kernel-sim-parity` | Finish kernel-default simulation parity | **P1** | Restricted tasks skip topology rungs, one-node hosts avoid redundant NUMA search, and every remaining divergence is explicit. |
+| `llc-balance-evidence` | Measure LLC placement balance | **P1** | A fixed workload compares per-LLC utilization spread, migrations, throughput, and tail latency against kernel default. |
 | `cgroup-identity` | Cgroup-native managed identity | **P1** | Direct children and descendants retain stable logical identities across moves and slot reuse. |
 | `complete-config-bank` | Complete atomic configuration bank | **P1** | Callbacks observe an old or new policy/resource/identity tuple, never mixed generations. |
 | `cpuset-allocation` | Cpuset-aware allocation and cell-0 holdout | **P1** | Pure plans respect effective claims, preserve a consumer per queue, and report infeasibility. |
 | `queue-drain` | Queue draining and live owner publication | **P1** | CPU and cell retirement drains backlog and quarantines reusable slots before publication. |
 | `inspector-scaling` | Sparse, large-host inspector pipeline | **P1** | Collection and rendering scale with active CPU pairs instead of configured `CPUs²`. |
 | `typed-protocol` | Typed compatibility and inspection protocol | **P1** | Structured codes and shared DTOs replace error-string inference and repeated JSON parsing. |
-| `browser-vm-ci` | Browser, privileged VM, and failure CI | **P1** | Route/accessibility smoke, core scheduler contracts, and fault injection run automatically. |
+| `browser-vm-ci` | Complete browser, privileged VM, and failure CI | **P1** | Real-browser smoke, scheduled VM campaigns, and fault injection complement the existing model tests and manual sharded workflow. |
 | `demand-controller` | Demand EWMA and controlled rebalance | **P2** | Skew and reversal converge without burst oscillation or unnecessary ownership churn. |
 | `numa-distance-order` | NUMA-distance placement order | **P2** | A measured explicit policy improves remote placement without enlarging the default hot path. |
 | `pinned-latency` | Pinned-waiter latency control | **P3** | Benchmarks justify waiter-aware slice shrinking and prove fairness remains bounded. |
@@ -109,7 +128,8 @@ priority labels. It is a dated planning snapshot, not a promise of delivery orde
 
 ```mermaid
 flowchart LR
-    A[Correctness gates] --> B[Dynamic cgroup identity]
+    A[Correctness gates] --> K[Kernel simulation and LLC evidence]
+    K --> B[Dynamic cgroup identity]
     B --> C[Fixed dynamic-topology envelope]
     C --> D[Pure cpuset and cell-0 allocation plan]
     D --> E[Queue drain protocol then live owner publication]

@@ -150,6 +150,13 @@ be test inputs, not prose maintained independently.
 
 ## Existing validation inventory
 
+Roadmap update (2026-07-31): inspector Rust/JavaScript tests now run in normal CI,
+the repository has a manually dispatched sharded VM workflow with frozen inputs,
+and three local 140-case campaigns completed with zero failures across the recorded
+kernels. EEVDF mixed-affinity and fork/yield progress cases also run in CI. These
+are meaningful failure and forward-progress gains, but they do not measure weighted
+shares, throughput, latency, or LLC placement balance.
+
 Approximate source-level inventory at review time:
 
 | Surface | Count or coverage |
@@ -172,11 +179,10 @@ and kernel errors
 The main gaps are live BPF/model equivalence, failure injection, browser DOM smoke,
 multi-client scale, hotplug, and systematic performance curves.
 
-### Automation gaps
+### Remaining automation gaps
 
-The inspector declares its own Cargo workspace, is not a member of the root
-workspace, and its Rust and Node tests are not run by the repository's normal
-nextest job. Add one CI job using its documented commands:
+The inspector declares its own Cargo workspace and is not a member of the root
+workspace. Normal CI now runs its Rust and Node tests explicitly with:
 
 ```bash
 cargo test --manifest-path tools/scx_snake_inspector/Cargo.toml
@@ -189,8 +195,8 @@ contracts; they do not run a browser. Add a small headless suite for five workfl
 route navigation, disclosure/focus survival through polls, unapplied selector state,
 policy apply/restart behavior, and cell task expansion.
 
-The strong Snake VM gauntlet is mostly manual. Run a short FIFO/VTIME subset for
-relevant pull requests and the full gauntlet nightly. Mitosis CI currently starts an
+The sharded Snake VM matrix is still manually dispatched. Run a short FIFO/VTIME
+subset for relevant pull requests and schedule the full matrix nightly. Mitosis CI currently starts an
 empty managed parent but does not exercise lifecycle, cpuset changes, borrowing,
 draining, or rebalancing; parity work needs those tests as phase gates.
 
@@ -364,17 +370,18 @@ These scores measure validation and rollout readiness, not feature implementatio
 
 | Area | Complete |
 | --- | ---: |
-| Static Snake policy/unit validation | 85% |
-| FIFO/VTIME VM validation | 65% |
-| Automated CI coverage of the VM suite | 30% |
-| EEVDF validation | 30% |
-| Inspector API/model validation | 75% |
+| Static Snake policy/unit validation | 92% |
+| FIFO/VTIME VM validation | 82% |
+| Automated CI coverage of the VM suite | 55% |
+| EEVDF validation | 45% |
+| Inspector API/model validation | 88% |
 | Inspector real-browser validation | 20% |
 | Dynamic Mitosis-parity validation | 15% |
-| Performance regression coverage | 15% |
-| Production rollout/runbook readiness | 10% |
-| **Overall production validation readiness** | **approximately 25%** |
+| Performance regression coverage | 20% |
+| Production rollout/runbook readiness | 15% |
+| **Overall production validation readiness** | **approximately 40%** |
 
-The fastest material improvements are an inspector CI job, nightly use of the
-existing Snake gauntlet, and a fault-injected complete-configuration publication
-harness before dynamic cells are implemented.
+The fastest material improvements are scheduled use of the existing sharded VM
+matrix, one controlled kernel-default versus simulation workload with LLC-balance
+and performance output, real-browser smoke, and a fault-injected
+complete-configuration publication harness before dynamic cells are implemented.

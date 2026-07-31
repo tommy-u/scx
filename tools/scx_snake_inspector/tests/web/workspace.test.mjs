@@ -694,10 +694,10 @@ test("project navigation is available in both desktop and mobile explorers", () 
 });
 
 test("project roadmap exposes the dated review scores without drifting from the report", () => {
-  const reviewDate = reviewIndex.match(/^Review date: (.+)$/m)?.[1];
-  const baselineCommit = reviewIndex.match(/^Committed baseline: `([0-9a-f]+)`$/m)?.[1];
-  assert.ok(reviewDate, "review date missing from report");
-  assert.ok(baselineCommit, "baseline commit missing from report");
+  const reviewDate = reviewIndex.match(/^Roadmap update: (.+)$/m)?.[1];
+  const baselineCommit = reviewIndex.match(/^Roadmap baseline: `([0-9a-f]+)`$/m)?.[1];
+  assert.ok(reviewDate, "roadmap update missing from report");
+  assert.ok(baselineCommit, "roadmap baseline missing from report");
   assert.match(page, /data-view="project\/roadmap"/);
   assert.match(page, new RegExp(`data-assessment-date="${reviewDate}"`));
   assert.match(page, new RegExp(`data-assessment-commit="${baselineCommit}"`));
@@ -705,19 +705,19 @@ test("project roadmap exposes the dated review scores without drifting from the 
   assert.match(page, /docs\/snake-review\/README\.md/);
 
   const scores = new Map([
-    ["experimental-completeness", [80, "Snake experimental feature implementation", reviewIndex]],
+    ["experimental-completeness", [85, "Snake experimental feature implementation", reviewIndex]],
     ["production-readiness", [35, "Snake production readiness", reviewIndex]],
     ["mitosis-parity", [55, "Overall end-to-end Mitosis behavior parity", reviewIndex]],
-    ["rollout-validation", [25, "Overall production validation readiness", validationReview]],
-    ["policy-engine", [91, "Policy engine", featureReview]],
-    ["placement", [89, "Placement", featureReview]],
-    ["observability", [87, "Observability", featureReview]],
-    ["lifecycle", [84, "Lifecycle", featureReview]],
-    ["inspector", [80, "Inspector", featureReview]],
-    ["validation", [78, "Validation/testing", featureReview]],
-    ["queue-features", [75, "Queue features", featureReview]],
-    ["topology", [73, "Topology", featureReview]],
-    ["fairness", [71, "Fairness", featureReview]],
+    ["rollout-validation", [40, "Overall production validation readiness", validationReview]],
+    ["policy-engine", [93, "Policy engine", featureReview]],
+    ["placement", [92, "Placement", featureReview]],
+    ["observability", [92, "Observability", featureReview]],
+    ["lifecycle", [88, "Lifecycle", featureReview]],
+    ["inspector", [87, "Inspector", featureReview]],
+    ["validation", [84, "Validation/testing", featureReview]],
+    ["queue-features", [82, "Queue features", featureReview]],
+    ["topology", [76, "Topology", featureReview]],
+    ["fairness", [74, "Fairness", featureReview]],
     ["static-identity", [68, "Task identity/cgroups within declared static scope", featureReview]],
     ["dynamic-identity", [22, "Mitosis-style dynamic identity and lifecycle", featureReview]],
   ]);
@@ -738,15 +738,15 @@ test("project roadmap exposes the dated review scores without drifting from the 
 
 test("roadmap completion bars expose their numeric meaning to assistive technology", () => {
   for (const [key, value] of [
-    ["policy-engine", 91],
-    ["placement", 89],
-    ["observability", 87],
-    ["lifecycle", 84],
-    ["inspector", 80],
-    ["validation", 78],
-    ["queue-features", 75],
-    ["topology", 73],
-    ["fairness", 71],
+    ["policy-engine", 93],
+    ["placement", 92],
+    ["observability", 92],
+    ["lifecycle", 88],
+    ["inspector", 87],
+    ["validation", 84],
+    ["queue-features", 82],
+    ["topology", 76],
+    ["fairness", 74],
     ["static-identity", 68],
     ["dynamic-identity", 22],
   ]) {
@@ -794,6 +794,7 @@ test("project roadmap leads with prioritized goals before concrete features", ()
   for (const [goal, label, priority] of [
     ["correctness-forward-progress", "Correctness & forward progress", "P0"],
     ["production-readiness", "Production readiness & safe operations", "P0"],
+    ["kernel-parity-evidence", "Kernel-default simulation evidence", "P1"],
     ["mitosis-parity", "Feature parity with Mitosis", "P1"],
     ["inspector-scalability", "Inspector scalability & contracts", "P1"],
     ["validation-rollout", "Validation & rollout evidence", "P1"],
@@ -815,6 +816,8 @@ test("project roadmap leads with prioritized goals before concrete features", ()
     ["queued-work-progress", "P0"],
     ["hotplug-contract", "P0"],
     ["observer-isolation", "P0"],
+    ["kernel-sim-parity", "P1"],
+    ["llc-balance-evidence", "P1"],
     ["cgroup-identity", "P1"],
     ["complete-config-bank", "P1"],
     ["queue-drain", "P1"],
@@ -837,6 +840,16 @@ test("project roadmap leads with prioritized goals before concrete features", ()
       `${feature} priority drifted from report`,
     );
   }
+});
+
+test("roadmap distinguishes landed work from missing performance evidence", () => {
+  const progress = page.match(
+    /<section[^>]+id="roadmapProgress"[\s\S]*?<\/section>/,
+  )?.[0] || "";
+  assert.match(progress, /Global LLC VTIME queues/);
+  assert.match(progress, /previous whole-idle-core claim/i);
+  assert.match(progress, /Three frozen 140-case campaigns completed with zero failures/);
+  assert.match(progress, /not fairness, performance, or LLC balance/);
 });
 
 test("roadmap exposes stable release-blocker and ordered milestone keys", () => {
