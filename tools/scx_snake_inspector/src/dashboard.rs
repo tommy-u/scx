@@ -923,6 +923,9 @@ fn cell_stats_view(
     if topology.is_null() {
         return empty(CellStatsStatus::NotApplicable, None);
     }
+    if topology.get("layout").and_then(serde_json::Value::as_str) == Some("llc") {
+        return empty(CellStatsStatus::NotApplicable, None);
+    }
     if let Some(error) = &live.cpu_usage_error {
         return empty(CellStatsStatus::Unavailable, Some(error.clone()));
     }

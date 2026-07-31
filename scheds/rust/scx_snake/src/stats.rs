@@ -117,6 +117,57 @@ impl RungMetrics {
 
 #[stat_doc]
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize, Stats)]
+#[stat(_om_prefix = "queue_rung_", _om_label = "queue_rung_index")]
+pub struct QueueRungMetrics {
+    #[stat(desc = "Zero-based position in the queue callback ladder", _om_skip)]
+    pub index: u32,
+    #[stat(desc = "Userspace queue rung label", _om_skip)]
+    pub operation: String,
+    #[stat(desc = "Number of times BPF evaluated this queue rung")]
+    pub attempts: u64,
+    #[stat(desc = "Number of successful or candidate-producing evaluations")]
+    pub hits: u64,
+    #[stat(desc = "Number of inapplicable, empty, or exhausted evaluations")]
+    pub misses: u64,
+    #[stat(desc = "Number of invalid or failed queue rung evaluations")]
+    pub errors: u64,
+    #[stat(desc = "Number of times this peek candidate won arbitration")]
+    pub selected: u64,
+    #[stat(desc = "Number of selected candidates that missed during the atomic move")]
+    pub move_misses: u64,
+    #[stat(desc = "Number of bounded fallback consumption attempts")]
+    pub fallback_attempts: u64,
+    #[stat(desc = "Number of bounded fallback attempts that consumed work")]
+    pub fallback_hits: u64,
+    #[stat(desc = "Number of bounded fallback attempts that found no work")]
+    pub fallback_misses: u64,
+}
+
+impl QueueRungMetrics {
+    fn delta(&self, previous: Option<&Self>) -> Self {
+        let previous = previous.cloned().unwrap_or_default();
+        Self {
+            index: self.index,
+            operation: self.operation.clone(),
+            attempts: self.attempts.saturating_sub(previous.attempts),
+            hits: self.hits.saturating_sub(previous.hits),
+            misses: self.misses.saturating_sub(previous.misses),
+            errors: self.errors.saturating_sub(previous.errors),
+            selected: self.selected.saturating_sub(previous.selected),
+            move_misses: self.move_misses.saturating_sub(previous.move_misses),
+            fallback_attempts: self
+                .fallback_attempts
+                .saturating_sub(previous.fallback_attempts),
+            fallback_hits: self.fallback_hits.saturating_sub(previous.fallback_hits),
+            fallback_misses: self
+                .fallback_misses
+                .saturating_sub(previous.fallback_misses),
+        }
+    }
+}
+
+#[stat_doc]
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize, Stats)]
 #[stat(_om_prefix = "cpu_", _om_label = "cpu")]
 pub struct CpuMetrics {
     #[stat(desc = "Logical CPU ID", _om_skip)]
@@ -209,6 +260,8 @@ pub struct Metrics {
     pub fairness_mode: String,
     #[stat(desc = "Number of select_cpu callback invocations")]
     pub select_calls: u64,
+    #[stat(desc = "Number of dispatch callback invocations")]
+    pub dispatch_calls: u64,
     #[stat(desc = "Number of successful direct dispatches to selected idle CPUs")]
     pub direct_dispatches: u64,
     #[stat(desc = "Number of times all policy rungs missed")]
@@ -295,6 +348,10 @@ pub struct Metrics {
     pub cells: BTreeMap<u32, CellMetrics>,
     #[stat(desc = "Per-rung policy evaluation metrics")]
     pub rungs: BTreeMap<u32, RungMetrics>,
+    #[stat(desc = "Per-rung enqueue callback metrics")]
+    pub enqueue_rungs: BTreeMap<u32, QueueRungMetrics>,
+    #[stat(desc = "Per-rung dispatch callback metrics")]
+    pub dispatch_rungs: BTreeMap<u32, QueueRungMetrics>,
     #[stat(
         desc = "Sampled execution-time histograms for every policy rung",
         _om_skip
@@ -314,6 +371,7 @@ impl Metrics {
             policy_generation: self.policy_generation,
             fairness_mode: self.fairness_mode.clone(),
             select_calls: self.select_calls.saturating_sub(previous.select_calls),
+            dispatch_calls: self.dispatch_calls.saturating_sub(previous.dispatch_calls),
             direct_dispatches: self
                 .direct_dispatches
                 .saturating_sub(previous.direct_dispatches),
@@ -429,6 +487,16 @@ impl Metrics {
                 .iter()
                 .map(|(index, rung)| (*index, rung.delta(previous.rungs.get(index))))
                 .collect(),
+            enqueue_rungs: self
+                .enqueue_rungs
+                .iter()
+                .map(|(index, rung)| (*index, rung.delta(previous.enqueue_rungs.get(index))))
+                .collect(),
+            dispatch_rungs: self
+                .dispatch_rungs
+                .iter()
+                .map(|(index, rung)| (*index, rung.delta(previous.dispatch_rungs.get(index))))
+                .collect(),
             rung_timing: self
                 .rung_timing
                 .iter()
@@ -457,7 +525,7 @@ impl Metrics {
                 "scx_snake policy generation {} stats (fairness: {})\n",
                 "  select calls: {} | direct dispatches: {} | ladder exhausted: {}\n",
                 "  fallback previous CPU: {} | fallback any allowed CPU: {} | invalid/errors: {}\n",
-                "  callbacks enqueue: {} | running: {} | stopping: {} | quiescent: {}\n",
+                "  callbacks enqueue: {} | dispatch: {} | running: {} | stopping: {} | quiescent: {}\n",
                 "  membership runs no-cell: {} | invalid: {}\n",
                 "  FIFO shared enqueues/dispatches: {}/{}\n",
                 "  select latency ns total: {} | average: {} | cumulative max: {}\n",
@@ -477,6 +545,7 @@ impl Metrics {
             self.fallback_any,
             self.invalid_errors,
             self.enqueues,
+            self.dispatch_calls,
             self.running,
             self.stopping,
             self.quiescent,
@@ -525,6 +594,27 @@ impl Metrics {
                 rung.misses,
                 rung.errors,
             ));
+        }
+        for (ladder, rungs) in [
+            ("enqueue", &self.enqueue_rungs),
+            ("dispatch", &self.dispatch_rungs),
+        ] {
+            for rung in rungs.values() {
+                output.push_str(&format!(
+                    "    {ladder} rung {} {}: attempts {} | hits {} | misses {} | errors {} | selected {} | move_misses {} | fallback {}/{}/{}\n",
+                    rung.index,
+                    rung.operation,
+                    rung.attempts,
+                    rung.hits,
+                    rung.misses,
+                    rung.errors,
+                    rung.selected,
+                    rung.move_misses,
+                    rung.fallback_attempts,
+                    rung.fallback_hits,
+                    rung.fallback_misses,
+                ));
+            }
         }
         for cell in self.cells.values() {
             output.push_str(&format!(
@@ -742,6 +832,7 @@ pub fn server_data() -> StatsServerData<SchedulerRequest, SchedulerResponse> {
         .add_meta(CpuMetrics::meta())
         .add_meta(CellMetrics::meta())
         .add_meta(RungMetrics::meta())
+        .add_meta(QueueRungMetrics::meta())
         .add_meta(RungTimingMetrics::meta())
         .add_ops("top", StatsOps { open, close: None })
         .add_ops(

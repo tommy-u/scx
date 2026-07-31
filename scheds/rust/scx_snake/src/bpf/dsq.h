@@ -126,6 +126,11 @@ dsq_move_to_local(dsq_id_t source, s32 cpu,
 	return moved;
 }
 
+static __always_inline bool dsq_move_to_local_untimed(dsq_id_t source)
+{
+	return scx_bpf_dsq_move_to_local(source.raw, 0);
+}
+
 static __always_inline bool dsq_move(struct bpf_iter_scx_dsq *iterator,
 				     struct task_struct *p, dsq_id_t source,
 				     dsq_id_t target, u64 enq_flags,

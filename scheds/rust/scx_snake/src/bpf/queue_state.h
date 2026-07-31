@@ -4,16 +4,24 @@
 
 #include "bpf_common.h"
 
+const volatile u32 queue_mode = SNAKE_QUEUE_MODE_NONE;
+
 struct snake_queue_cpu_state {
 	u64 generation;
 	u32 next_dispatch_rung;
 	u32 next_equal_class;
+	u32 next_remote_queue;
+	u32 next_equal_source;
 	u32 initialized;
 };
 
 struct snake_queue_cell_masks {
 	struct bpf_cpumask __kptr *primary;
 	struct bpf_cpumask __kptr *borrowable;
+};
+
+struct snake_normal_queue_masks {
+	struct bpf_cpumask __kptr *consumers;
 };
 
 struct {
@@ -59,6 +67,13 @@ struct {
 } queue_cell_masks SEC(".maps");
 
 struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__type(key, u32);
+	__type(value, struct snake_normal_queue_masks);
+	__uint(max_entries, SNAKE_MAX_NORMAL_QUEUES);
+} normal_queue_masks SEC(".maps");
+
+struct {
 	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
 	__type(key, u32);
 	__type(value, struct snake_queue_cpu_state);
@@ -74,9 +89,17 @@ static __always_inline struct snake_queue_header *queue_config(void)
 
 static __always_inline bool queue_topology_enabled(void)
 {
-	struct snake_queue_header *header = queue_config();
+	return queue_mode != SNAKE_QUEUE_MODE_NONE;
+}
 
-	return header && READ_ONCE(header->layout) != SNAKE_QUEUE_LAYOUT_NONE;
+static __always_inline bool queue_global_mode_enabled(void)
+{
+	return queue_mode == SNAKE_QUEUE_MODE_GLOBAL;
+}
+
+static __always_inline bool queue_cell_mode_enabled(void)
+{
+	return queue_mode == SNAKE_QUEUE_MODE_CELL;
 }
 
 static __always_inline struct snake_queue_cell *queue_cell(u32 cell_index)
@@ -111,6 +134,16 @@ static __always_inline const struct cpumask *queue_cell_mask(u32 index,
 	if (kind == SNAKE_QUEUE_MASK_BORROWABLE)
 		return (const struct cpumask *)slot->borrowable;
 	return NULL;
+}
+
+static __always_inline const struct cpumask *queue_normal_consumers(u32 index)
+{
+	struct snake_normal_queue_masks *slot;
+
+	if (index >= SNAKE_MAX_NORMAL_QUEUES)
+		return NULL;
+	slot = bpf_map_lookup_elem(&normal_queue_masks, &index);
+	return slot ? (const struct cpumask *)slot->consumers : NULL;
 }
 
 #endif /* __SCX_SNAKE_QUEUE_STATE_H */

@@ -1685,6 +1685,23 @@ export function rungLadderPercentages(metrics, ladderMetrics) {
   };
 }
 
+export function queueRungMetricPercentages(metrics, metric, callbackCalls) {
+  const attempts = Math.max(0, Number(metrics?.attempts) || 0);
+  const callbacks = Math.max(0, Number(callbackCalls) || 0);
+  const count = Math.max(0, Number(metrics?.[metric]) || 0);
+  return {
+    rung: attempts === 0 ? 0 : count * 100 / attempts,
+    callback: callbacks === 0 ? 0 : count * 100 / callbacks,
+  };
+}
+
+export function queueRungCallbackPercentages(metrics, callbackCalls) {
+  return {
+    hit: queueRungMetricPercentages(metrics, "hits", callbackCalls).callback,
+    miss: queueRungMetricPercentages(metrics, "misses", callbackCalls).callback,
+  };
+}
+
 export function rungTimingSummary(timing) {
   const buckets = Array.isArray(timing?.buckets) ? timing.buckets : [];
   const samples = buckets.reduce(
@@ -1741,45 +1758,141 @@ export function queueRungFlow(kind, index, count) {
   throw new Error(`Unknown queue ladder kind: ${kind}`);
 }
 
-export function queueLadderSections(queues) {
+function queueRungAction(rung) {
+  if (rung?.action) {
+    return rung.action;
+  }
+  return String(rung?.operation || "").match(/^([a-z_]+)\(/)?.[1] || null;
+}
+
+function queueRungSource(rung) {
+  if (rung?.source) {
+    return rung.source;
+  }
+  return String(rung?.operation || "").match(/^[a-z_]+\(([^;)]+)/)?.[1] || null;
+}
+
+function dispatchFallbackSources(dispatch) {
+  const consume = dispatch.find((rung) => queueRungAction(rung) === "consume");
+  if (Array.isArray(consume?.fallback)) {
+    return new Set(consume.fallback);
+  }
+  const encoded = String(consume?.operation || "").match(/;fallback=([^)]*)/)?.[1];
+  return new Set(encoded ? encoded.split(",") : []);
+}
+
+export function queueLadderSections(queues, callbackMetrics = {}) {
   if (!queues) {
     return [];
   }
+  const enqueue = queues.enqueue || [];
   const dispatch = queues.dispatch || [];
+  const routedEnqueue = enqueue.some(
+    (rung) => ["try_insert", "insert"].includes(queueRungAction(rung)),
+  );
+  const candidateDispatch = dispatch.some(
+    (rung) => ["peek", "consume"].includes(queueRungAction(rung)),
+  );
+  const fallbackSources = dispatchFallbackSources(dispatch);
   const minVtime = dispatch.length === 1
     && dispatch[0].operation === "min_vtime(cell,affinity)";
   return [
     {
       kind: "enqueue",
       title: "Enqueue",
-      behavior: "First success",
-      terminal: "All targets failed → error",
-      rungs: (queues.enqueue || []).map((rung, index, all) => ({
-        ...rung,
-        role: "target",
-        flow: queueRungFlow("enqueue", index, all.length),
-      })),
+      callbackCalls: callbackMetrics.enqueues,
+      behavior: routedEnqueue ? "First applicable route" : "First success",
+      terminal: routedEnqueue ? "No route accepted → error" : "All targets failed → error",
+      rungs: enqueue.map((rung, index, all) => {
+        const action = queueRungAction(rung);
+        if (action === "try_insert") {
+          return {
+            ...rung,
+            role: "conditional route",
+            metricKeys: [],
+            flow: {
+              hit: "Queued → stop",
+              miss: index + 1 < all.length
+                ? `Inapplicable → rung ${index + 1}`
+                : "Inapplicable → error",
+            },
+          };
+        }
+        if (action === "insert") {
+          return {
+            ...rung,
+            role: "terminal route",
+            metricKeys: [],
+            flow: {
+              hit: "Queued → stop",
+              miss: "Insert failure → error",
+            },
+          };
+        }
+        return {
+          ...rung,
+          role: "target",
+          metricKeys: [],
+          flow: queueRungFlow("enqueue", index, all.length),
+        };
+      }),
     },
     {
       kind: "dispatch",
       title: "Dispatch",
-      cyclic: !minVtime,
-      behavior: minVtime
+      callbackCalls: callbackMetrics.dispatch_calls,
+      cyclic: !minVtime && !candidateDispatch,
+      behavior: candidateDispatch
+        ? "Peek candidates → minimum VTIME consume"
+        : minVtime
         ? "Lowest VTIME; alternating exact ties"
         : "Cyclic per-CPU cursor",
-      terminal: minVtime
+      terminal: candidateDispatch
+        ? "No candidate or fallback work → replenish previous task or idle"
+        : minVtime
         ? "Both sources empty → replenish previous task or idle"
         : "All sources empty → replenish previous task or idle",
-      rungs: dispatch.map((rung, index, all) => ({
-        ...rung,
-        role: minVtime ? "operation" : "source",
-        flow: minVtime
-          ? {
-              hit: "Earlier head → dispatch",
-              miss: "Both empty → replenish previous task or idle",
-            }
-          : queueRungFlow("dispatch", index, all.length),
-      })),
+      rungs: dispatch.map((rung, index, all) => {
+        const action = queueRungAction(rung);
+        if (action === "peek") {
+          const fallbackMetrics = fallbackSources.has(queueRungSource(rung))
+            ? ["fallback_attempts", "fallback_hits", "fallback_misses"]
+            : [];
+          return {
+            ...rung,
+            role: "candidate",
+            metricKeys: ["selected", ...fallbackMetrics],
+            flow: {
+              hit: "Candidate → accumulate",
+              miss: index + 1 < all.length
+                ? `Empty → rung ${index + 1}`
+                : "Empty → consume",
+            },
+          };
+        }
+        if (action === "consume") {
+          return {
+            ...rung,
+            role: "consume",
+            metricKeys: ["move_misses"],
+            flow: {
+              hit: "Winner → dispatch",
+              miss: "Move miss or empty → bounded fallback",
+            },
+          };
+        }
+        return {
+          ...rung,
+          role: minVtime ? "operation" : "source",
+          metricKeys: [],
+          flow: minVtime
+            ? {
+                hit: "Earlier head → dispatch",
+                miss: "Both empty → replenish previous task or idle",
+              }
+            : queueRungFlow("dispatch", index, all.length),
+        };
+      }),
     },
   ];
 }
@@ -2299,12 +2412,15 @@ export function queueTopologyModel(fairness, topology, onlineCpus = null) {
   model.normalQueues = (topology.normal_queues || []).map((queue) => ({
     ...queue,
     dsq: formatDsqId(queue.dsq_id),
+    ownerLabel: queue.cell_id == null ? "Global" : `Cell ${queue.cell_id}`,
+    clockLabel: topology.layout === "llc" ? "global" : `cell:${queue.clock_index}`,
   }));
   model.cpuRoutes = (topology.cpu_routes || [])
     .map((route) => ({
       ...route,
       normalDsq: formatDsqId(route.normal_dsq_id),
       affinityDsq: formatDsqId(route.affinity_dsq_id),
+      ownerLabel: route.owner_cell_id == null ? "Global" : `Cell ${route.owner_cell_id}`,
     }))
     .sort((left, right) => left.cpu - right.cpu);
   model.routesComplete = model.cpuRoutes.length === expectedCpuCount;

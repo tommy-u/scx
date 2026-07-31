@@ -308,7 +308,7 @@ with open(dump_path, encoding="utf-8") as stream:
 text = "\n".join(lines)
 
 header = re.search(
-    r"^queue topology: layout=(cell|cell_llc) cells=(\d+) "
+    r"^queue topology: layout=(cell|cell_llc) clocks=(\d+) cells=(\d+) "
     r"normal_queues=(\d+) affinity_queues=(\d+)$",
     text,
     re.MULTILINE,
@@ -316,11 +316,13 @@ header = re.search(
 if not header:
     raise SystemExit("queue topology header is missing")
 layout = header.group(1)
-cell_count, normal_count, affinity_count = map(int, header.groups()[1:])
+clock_count, cell_count, normal_count, affinity_count = map(int, header.groups()[1:])
 if layout != expected_layout:
     raise SystemExit(f"layout mismatch: {layout} != {expected_layout}")
 if cell_count != 32:
     raise SystemExit(f"expected 32 total cells, found {cell_count}")
+if clock_count != cell_count:
+    raise SystemExit(f"expected one clock per cell, found {clock_count} clocks")
 if affinity_count != cpu_count:
     raise SystemExit(
         f"expected one affinity queue per CPU ({cpu_count}), found {affinity_count}"
@@ -332,7 +334,7 @@ cell_pattern = re.compile(
     r"normal_queues=\[([^]]*)\]$"
 )
 queue_pattern = re.compile(
-    r"^\s*normal queue (\d+): cell_index=(\d+) clock_index=(\d+) "
+    r"^\s*normal queue (\d+): cell_index=Some\((\d+)\) clock_index=(\d+) "
     r"llc=(None|Some\((\d+)\)) consumers=\[([0-9,]*)\]$"
 )
 

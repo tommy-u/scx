@@ -13,8 +13,8 @@ The focused references are:
 
 - [Task Cell Annotations](docs/CELL_POLICY.md): pidfd updates, task storage, and
   annotation lifetime.
-- [Cell Queue Policy](docs/QUEUE_POLICY.md): cell allocation, DSQs, callback
-  ladders, borrowing, and live-update rules.
+- [Queue Policies](docs/QUEUE_POLICY.md): LLC sharding, cell allocation, DSQs,
+  callback ladders, borrowing, and live-update rules.
 - [Fairness](docs/FAIRNESS.md): FIFO, VTIME, EEVDF, clocks, and accounting.
 - [Policy Lowering and BPF Data Flow](docs/POLICY_LOWERING.md): compiler stages,
   ABI records, map ownership, and the userspace/BPF boundary.
@@ -54,10 +54,24 @@ implementation. To demonstrate that Snake can express practical scheduling
 behavior rather than only toy policies, this example recreates the key parts of
 that default as an explicit ladder: sync wake affinity, then wholly idle cores
 across increasingly broad topology scopes, then individual idle CPUs. Each
-stage also gets its own hit and miss counters:
+stage also gets its own hit and miss counters. The complete example additionally
+uses VTIME-only LLC queues so global ordered work does not contend on one DSQ:
 
 ```toml
 fallback = "previous_cpu"
+
+[queues]
+layout = "llc"
+enqueue = [
+  { action = "try_insert", target = "local" },
+  { action = "insert", target = "cpu" },
+]
+dispatch = [
+  { action = "peek", source = "cpu" },
+  { action = "peek", source = "local" },
+  { action = "peek", source = "remote" },
+  { action = "consume", operation = "min_vtime", fallback = ["cpu", "local", "remote"] },
+]
 
 [[rung]]
 operation = "sync_wake_affine"
@@ -137,8 +151,8 @@ sudo ./target/release/scx_snake --clear-thread-cell 4812
 See [Task Cell Annotations](docs/CELL_POLICY.md) for the control and scheduling
 data flow.
 
-Queue policies may also derive assignments from cgroup-v2 child trees entirely
-in userspace:
+Cell queue policies may also derive assignments from cgroup-v2 child trees
+entirely in userspace:
 
 ```toml
 [membership]
@@ -153,7 +167,15 @@ Only assigned child trees are scanned. Threads outside them use synthetic cell
 0 without a task-storage record. Manual thread assignments override managed
 membership. See [Userspace Cgroup Cell Membership](docs/CGROUP_MEMBERSHIP_PROPOSAL.md).
 
-### Cell queue policies
+### Queue policies
+
+The `llc` layout keeps one global VTIME clock while userspace creates one normal
+DSQ per discovered LLC and one affinity-safe DSQ per CPU. A wide task enters the
+normal queue associated with its selected CPU only when every consumer of that
+queue is allowed to run it; otherwise the terminal CPU target stores it in a
+per-CPU queue. Dispatch peeks the CPU, local, and one remote candidate found by
+a bounded rotating scan, then consumes the earliest VTIME candidate with one
+bounded fallback pass. There are no cells or synthetic cell 0 in this layout.
 
 Experimental VTIME policies may turn cell declarations into resource domains
 and custom DSQs:
@@ -186,9 +208,9 @@ owns its CPU. Snake never creates a cell-by-CPU DSQ matrix or per-CPU clocks.
 Queue enqueue and dispatch callbacks are themselves short TOML ladders. Cell
 CPU borrowing is an explicit placement rung that directly claims an idle CPU
 owned by another cell. It does not steal already queued work. See
-[Cell Queue Policy](docs/QUEUE_POLICY.md) for syntax, clocks, update rules, and
-resource accounting. The four queue examples under [`examples/`](examples/)
-require `--fairness vtime`.
+[Queue Policies](docs/QUEUE_POLICY.md) for syntax, clocks, update rules, and
+resource accounting. Every policy with `[queues]`, including
+`kernel-default-sim.toml`, requires `--fairness vtime`.
 
 Queue CPU weights assign real dequeue capacity. Borrowing helps tasks at wakeup
 but cannot drain work already waiting in an undersized cell's normal DSQ; such
@@ -233,12 +255,13 @@ uses one normal DSQ plus per-CPU affinity DSQs under one clock; EEVDF uses
 global future and eligible DSQs with an aggregate clock.
 
 With `[queues]`, an ordinary selection records a CPU hint and still flows
-through the configured enqueue ladder. The enqueue ladder chooses a cell
-normal DSQ or a per-CPU affinity escape DSQ. Dispatch can consume those sources
-cyclically or compare them with `operation = "min_vtime"`. A successful
-`task_cell_borrowable` rung is the exception: it verifies the foreign owner and
-directly dispatches to the idle CPU. All-rung exhaustion remains an
-affinity-safe enqueue hint in both modes.
+through the configured enqueue ladder. Cell layouts choose a normal cell DSQ or
+a per-CPU affinity escape and dispatch them cyclically or by `min_vtime`. The
+global `llc` layout instead tries its local normal DSQ, falls back to a CPU DSQ,
+and compares CPU, local, and one remotely scanned head. A successful
+`task_cell_borrowable` rung is the cell-layout exception: it verifies the
+foreign owner and directly dispatches to the idle CPU. All-rung exhaustion
+remains an affinity-safe enqueue hint in both modes.
 
 See [Policy Lowering and BPF Data Flow](docs/POLICY_LOWERING.md) for the complete
 TOML-to-opcode pipeline, runtime BPF inputs, map exchange, and update protocol.
@@ -252,7 +275,7 @@ cargo test -p scx_snake
 cargo build --release -p scx_snake
 
 sudo ./target/release/scx_snake \
-  --policy scheds/rust/scx_snake/examples/kernel-default-sim.toml \
+  --policy scheds/rust/scx_snake/examples/kernel-default.toml \
   --fairness fifo \
   --callback-timing-sample-rate 64 \
   --stats 1
@@ -264,6 +287,15 @@ requires a restart. EEVDF's affinity-constrained forward-progress test passes,
 but its nice-level weighted-share validation is not yet correct. See
 [Fairness in scx_snake](docs/FAIRNESS.md) for the clocks, queues, task
 accounting, placement interaction, and current limitations.
+
+Inside a disposable VM, launch the LLC-sharded sample with:
+
+```bash
+sudo ./target/release/scx_snake \
+  --policy scheds/rust/scx_snake/examples/kernel-default-sim.toml \
+  --fairness vtime \
+  --stats 1
+```
 
 Callback execution-time sampling defaults to one in every 64 invocations for
 `select_cpu`, `enqueue`, `dispatch`, `runnable`, `running`, `stopping`, and
@@ -282,10 +314,12 @@ stage; individual events are not retained. Select timing separates active
 ladder acquisition, the policy walk, its queue/direct/fallback outcome, and
 final accounting. Enqueue retains the total runnable-preparation measurement
 and breaks out task storage, cell-clock, and credit-clamp work. Dispatch groups
-remote normal-queue scans by queue fanout without adding work inside the scan
-loop, measures affinity DSQ insertion separately from the full affinity path,
-and measures the kernel move-to-local helper both in aggregate and by
-normal/affinity success/miss outcome using the same elapsed duration. All BPF
+legacy cell-layout remote scans by queue fanout, separates bounded global
+remote-source work and affinity insertion. Cell and nonqueue dispatch measure
+the kernel move-to-local helper both in aggregate and by normal/affinity
+success/miss outcome using the same elapsed duration. LLC-sharded dispatch uses
+rung outcome counters and timing without per-move DSQ timing so its bounded
+fallback remains within verifier limits. All other BPF
 DSQ operations use the typed constructors and shared wrappers in `bpf/dsq.h`.
 The mutation wrappers retain both source and destination IDs, allowing
 userspace to attribute removal timing to the source and insertion timing to the
@@ -406,14 +440,16 @@ last should remain zero. FIFO also reports shared-DSQ enqueues and explicit
 dispatches. VTIME reports ordered enqueues and dispatches, the
 per-CPU subset of each, direct/queued runtime, sleeper-credit clamps, and
 accounting errors. `min_vtime` dispatch also reports exact head ties resolved by
-per-CPU alternation. Queue mode additionally reports each cell's total, primary,
-borrowed, and lent runtime, normal and affinity enqueues and execution
-selections, and clock transitions, plus keep-running suppressions and
-unavoidable old-queue runs for pending live rehomes. Direct-borrow yield counts
+per-CPU alternation. Every queue ladder reports per-rung attempts, hits, misses,
+and errors; dispatch also reports selected candidates, selected atomic move
+misses, and bounded fallback results. Cell layouts additionally report each
+cell's total, primary, borrowed, and lent runtime, normal and affinity enqueues
+and execution selections, and clock transitions, plus keep-running suppressions
+and unavoidable old-queue runs for pending live rehomes. Direct-borrow yield counts
 confirm that foreign CPUs are reconsidered after one slice. EEVDF also reports
 its two queue insertion counts, promotions, forced advances, direct/queued
 runtime, lag clamps, and accounting errors.
-Queue mode also publishes `membership_no_cell_runs` and
+Cell queue mode also publishes `membership_no_cell_runs` and
 `membership_invalid_runs`; the latter must remain zero.
 
 The inspection stats target also publishes cumulative sampled callback
@@ -445,8 +481,9 @@ stress-ng --pipe 4 --futex 4 --timeout 30s --metrics-brief
 Topology is resolved before a policy is attached or updated. The kernel-default
 simulation does not implement distance-ordered remote NUMA search. FIFO
 explicitly drains one shared DSQ but has no topology-aware enqueue or stealing
-policy. Global VTIME and EEVDF
-remain global-clock experiments; only VTIME with `[queues]` provides per-cell
-clocks and configurable cell or cell/LLC storage. Queue mode supports at most
-31 declared cells plus synthetic cell 0, does not steal queued work across
-cells, and cannot change its DSQ topology live. The ABI remains experimental.
+policy. Global VTIME and EEVDF remain global-clock experiments. VTIME with
+`layout = "llc"` shards storage by LLC without creating cells or new fairness
+domains; its remote rung returns one candidate from a bounded rotating scan.
+Cell layouts support at most 31 declared cells plus synthetic cell 0 and do not
+steal queued work across cells. No queue layout can change its DSQ topology
+live. The ABI remains experimental.

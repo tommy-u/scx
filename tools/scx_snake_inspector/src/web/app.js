@@ -41,6 +41,8 @@ import {
   policyReviewSelection,
   policySlotComparison,
   queueLadderSections,
+  queueRungCallbackPercentages,
+  queueRungMetricPercentages,
   queueTimingModel,
   queueTopologyModel,
   mergeQueueTimingTopology,
@@ -2747,21 +2749,28 @@ function renderResolvedQueueTopology() {
   const queues = model.normalQueues.map((queue) => `
     <tr>
       <th scope="row"><code>${escapeHtml(queue.dsq)}</code></th>
-      <td>Cell ${formatCount(queue.cell_id)} <small>index ${formatCount(queue.cell_index)}</small></td>
+      <td>${escapeHtml(queue.ownerLabel)}${queue.cell_index == null ? "" : ` <small>index ${formatCount(queue.cell_index)}</small>`}</td>
       <td>${queue.llc_id == null ? "All" : formatCount(queue.llc_id)}</td>
-      <td><code>cell:${formatCount(queue.clock_index)}</code></td>
+      <td><code>${escapeHtml(queue.clockLabel)}</code></td>
       <td class="cpu-mask">${escapeHtml(compactCpuList(queue.consumer_cpus))}</td>
       ${renderQueueTimingCells(queue.timing)}
     </tr>`).join("");
   const routes = model.cpuRoutes.map((route) => `
     <tr>
       <th scope="row">${formatCount(route.cpu)}</th>
-      <td>Cell ${formatCount(route.owner_cell_id)} <small>index ${formatCount(route.owner_cell_index)}</small></td>
+      <td>${escapeHtml(route.ownerLabel)}${route.owner_cell_index == null ? "" : ` <small>index ${formatCount(route.owner_cell_index)}</small>`}</td>
       <td>${formatCount(route.llc_id)}</td>
       <td><code>${escapeHtml(route.normalDsq)}</code></td>
       <td><code>${escapeHtml(route.affinityDsq)}</code></td>
       ${renderQueueTimingCells(route.affinityTiming)}
     </tr>`).join("");
+  const cellAllocation = model.cells.length === 0 ? "" : `
+    <section class="queue-topology-table-section">
+      <h4>Cell allocation</h4>
+      <div class="queue-topology-table-wrap" data-render-key="queue:${generation}:cell-allocation:scroll">
+        <table data-sort-key="queue:cell-allocation"><thead><tr><th data-sort-column="0" data-sort-type="text">Cell</th><th data-sort-column="1" data-sort-type="number">Dense</th><th data-sort-column="2" data-sort-type="number">Weight</th><th data-sort-column="3" data-sort-type="text">Clock</th><th data-sort-column="4" data-sort-type="text">Primary CPUs</th><th data-sort-column="5" data-sort-type="text">Borrowable CPUs</th></tr></thead><tbody>${cells}</tbody></table>
+      </div>
+    </section>`;
   replaceKeyedHtml(elements.queueTopology, `
     <header class="queue-topology-heading">
       <div><h3>Resolved queue topology</h3><p>Attachment-time CPU ownership, DSQs, and clock domains</p></div>
@@ -2771,17 +2780,12 @@ function renderResolvedQueueTopology() {
     ${captureNotice}
     ${routeWarning}
     ${dsqActivity}
-    <section class="queue-topology-table-section">
-      <h4>Cell allocation</h4>
-      <div class="queue-topology-table-wrap" data-render-key="queue:${generation}:cell-allocation:scroll">
-        <table data-sort-key="queue:cell-allocation"><thead><tr><th data-sort-column="0" data-sort-type="text">Cell</th><th data-sort-column="1" data-sort-type="number">Dense</th><th data-sort-column="2" data-sort-type="number">Weight</th><th data-sort-column="3" data-sort-type="text">Clock</th><th data-sort-column="4" data-sort-type="text">Primary CPUs</th><th data-sort-column="5" data-sort-type="text">Borrowable CPUs</th></tr></thead><tbody>${cells}</tbody></table>
-      </div>
-    </section>
+    ${cellAllocation}
     <details class="queue-topology-details" data-render-key="queue:${generation}:normal-dsqs">
       <summary data-render-key="queue:${generation}:normal-dsqs:summary">Normal DSQs (${formatCount(model.normalQueues.length)})</summary>
       <div class="queue-topology-table-wrap" data-render-key="queue:${generation}:normal-dsqs:scroll">
         <table class="queue-timing-table" data-sort-key="queue:normal-dsqs"><thead>
-          <tr><th rowspan="2" data-sort-column="0" data-sort-type="bigint">DSQ</th><th rowspan="2" data-sort-column="1" data-sort-type="text">Cell</th><th rowspan="2" data-sort-column="2" data-sort-type="number">LLC</th><th rowspan="2" data-sort-column="3" data-sort-type="text">Clock</th><th rowspan="2" data-sort-column="4" data-sort-type="text">Consumer CPUs</th><th colspan="5">Residence</th><th colspan="3">Operation-sampled depth</th></tr>
+          <tr><th rowspan="2" data-sort-column="0" data-sort-type="bigint">DSQ</th><th rowspan="2" data-sort-column="1" data-sort-type="text">Owner</th><th rowspan="2" data-sort-column="2" data-sort-type="number">LLC</th><th rowspan="2" data-sort-column="3" data-sort-type="text">Clock</th><th rowspan="2" data-sort-column="4" data-sort-type="text">Consumer CPUs</th><th colspan="5">Residence</th><th colspan="3">Operation-sampled depth</th></tr>
           <tr><th data-sort-column="5" data-sort-type="number">Samples</th><th data-sort-column="6" data-sort-type="duration">Mean</th><th data-sort-column="7" data-sort-type="duration">p50</th><th aria-label="Residence p95" data-sort-column="8" data-sort-type="duration">p95</th><th aria-label="Residence p99" data-sort-column="9" data-sort-type="duration">p99</th><th data-sort-column="10" data-sort-type="number">Latest</th><th aria-label="Operation-sampled depth p95" data-sort-column="11" data-sort-type="number">p95</th><th data-sort-column="12" data-sort-type="number">Max</th></tr>
         </thead><tbody>${queues}</tbody></table>
       </div>
@@ -2913,7 +2917,7 @@ function renderSlot(slot) {
       slot.policy.queues,
     ))
     .join("");
-  const queueLadders = renderQueuePolicy(slot.policy.queues);
+  const queueLadders = renderQueuePolicy(slot.policy.queues, metrics);
   const maskTables = slot.policy.mask_tables.length > 0
     ? slot.policy.mask_tables.map((table) => `
         <li><code>${escapeHtml(String(table.id))}</code> ${escapeHtml(table.name)}
@@ -2965,7 +2969,7 @@ function renderSlot(slot) {
     </section>`;
 }
 
-function renderQueuePolicy(queues) {
+function renderQueuePolicy(queues, callbackMetrics) {
   if (!queues) {
     return `
       <section class="queue-policy-empty">
@@ -2973,7 +2977,9 @@ function renderQueuePolicy(queues) {
         <span>Not configured for this policy</span>
       </section>`;
   }
-  const sections = queueLadderSections(queues).map(renderQueueLadder).join("");
+  const sections = queueLadderSections(queues, callbackMetrics)
+    .map(renderQueueLadder)
+    .join("");
   return `
     <section class="queue-policy-block">
       <header class="queue-policy-heading">
@@ -2997,8 +3003,10 @@ function renderQueueLadder(section) {
             <h4>${escapeHtml(rung.operation)}</h4>
             <p>${escapeHtml(rung.role)}</p>
           </div>
+          ${renderQueueRungMetrics(rung, section.callbackCalls)}
           ${renderRungTiming(rung.timing)}
         </header>
+        ${renderQueueRungOutcomes(rung, section.callbackCalls)}
         <div class="rung-flow">
           <span class="hit-flow">${escapeHtml(rung.flow.hit)}</span>
           <span>${escapeHtml(rung.flow.miss)}</span>
@@ -3015,6 +3023,39 @@ function renderQueueLadder(section) {
       <div class="ladder-rail queue-ladder-rail">${rungs}</div>
       <p class="queue-ladder-terminal">${escapeHtml(section.terminal)}</p>
     </section>`;
+}
+
+function renderQueueRungMetrics(rung, callbackCalls) {
+  const metrics = rung.metrics || {};
+  const percentages = rungPercentages(metrics);
+  const callbackRates = queueRungCallbackPercentages(metrics, callbackCalls);
+  return `
+    <dl class="rung-metrics queue-rung-metrics">
+      <div><dt>Attempts</dt><dd>${formatCount(metrics.attempts)}</dd></div>
+      <div><dt>Hits</dt><dd>${formatCount(metrics.hits)}<small>${formatPercentage(percentages.hit)} of rung attempts</small><small>${formatPercentage(callbackRates.hit)} of callback calls</small></dd></div>
+      <div><dt>Misses</dt><dd>${formatCount(metrics.misses)}<small>${formatPercentage(percentages.miss)} of rung attempts</small><small>${formatPercentage(callbackRates.miss)} of callback calls</small></dd></div>
+      <div><dt>Errors</dt><dd>${formatCount(metrics.errors)}</dd></div>
+    </dl>`;
+}
+
+function renderQueueRungOutcomes(rung, callbackCalls) {
+  const labels = {
+    selected: "Selected",
+    move_misses: "Move misses",
+    fallback_attempts: "Fallback attempts",
+    fallback_hits: "Fallback hits",
+    fallback_misses: "Fallback misses",
+  };
+  const metrics = rung.metrics || {};
+  const outcomes = (rung.metricKeys || []).map((metric) => {
+    const percentages = queueRungMetricPercentages(metrics, metric, callbackCalls);
+    return `
+      <div>
+        <dt>${labels[metric]}</dt>
+        <dd>${formatCount(metrics[metric])}<small>${formatPercentage(percentages.rung)} of rung attempts</small><small>${formatPercentage(percentages.callback)} of callback calls</small></dd>
+      </div>`;
+  }).join("");
+  return outcomes ? `<dl class="queue-rung-outcomes">${outcomes}</dl>` : "";
 }
 
 function renderPolicyLibrary() {

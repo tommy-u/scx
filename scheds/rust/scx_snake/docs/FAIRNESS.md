@@ -126,11 +126,33 @@ This policy deliberately has no EEVDF eligibility, virtual requests, deadlines,
 or future queue. It is the smaller weighted-fairness control used both directly
 and as the ordering mechanism inside cell queue policies.
 
+## Global-clock VTIME with LLC queues
+
+`layout = "llc"` keeps the global VTIME service model above but replaces its one
+normal DSQ with one normal DSQ per userspace-discovered LLC. It creates no cells
+or synthetic cell 0, and all normal and per-CPU queues share the same global
+clock. LLC shards reduce contention and favor local consumption without adding
+fairness domains or entitlements.
+
+The enqueue ladder first tries the normal queue associated with its selected CPU.
+That insert is safe only when every consumer of the queue is contained in the
+task's current allowed mask. Narrow work instead uses the terminal per-CPU
+escape queue. Queue depth does not redirect enqueues, so the storage decision is
+stable and affinity driven.
+
+Each dispatch peeks its CPU queue, local normal queue, and one remote candidate,
+then selects the minimum VTIME head. A bounded rotating scan advances past
+local, empty, and head-incompatible remote queues until it finds that candidate
+or exhausts the configured queues. The selected atomic move can still miss if
+the head changes. Dispatch then tries CPU, local, and the sampled remote queue
+once each in configured fallback order. The bounded fallback avoids retry loops
+while ensuring a stale peek does not hide immediately available local work.
+
 ## VTIME with cell queues
 
-A policy with `[queues]` replaces the global VTIME queue topology. It still
-uses the same weight-scaled physical slices and bounded-service accounting, but
-separates normal cell work from affinity-constrained escape work.
+A cell queue policy replaces the global VTIME clock topology. It still uses the
+same weight-scaled physical slices and bounded-service accounting, but separates
+normal cell work from affinity-constrained escape work.
 
 ### Normal queues and cell clocks
 
@@ -310,10 +332,13 @@ the measured seconds per case. The demo checks:
 
 `--stats 1` also exports the active mode, eligible/future enqueues, promotions,
 forced clock advances, ordered dispatches, strict sync queues, direct and queued
-runtime, lag clamps, and accounting errors. Queue mode adds per-cell total,
-primary, borrowed, and lent runtime, normal/affinity enqueues and execution
-selections, clock transitions, and live-rehome convergence counters. FIFO
-reports shared-DSQ enqueues and explicit dispatches.
+runtime, lag clamps, and accounting errors. Every queue policy adds per-rung
+enqueue and dispatch outcomes, selections, atomic move misses, and bounded
+fallback counters.
+Cell layouts also add per-cell total, primary, borrowed, and lent runtime,
+normal/affinity enqueues and execution selections, clock transitions, and
+live-rehome convergence counters. FIFO reports shared-DSQ enqueues and explicit
+dispatches.
 
 The VM-only VTIME regression combines a heavily oversubscribed narrow affinity
 group with wide work. It must survive beyond the watchdog interval and report
@@ -323,6 +348,20 @@ per-CPU queue activity:
 sudo scheds/rust/scx_snake/tests/vtime_mixed_affinity.sh \
   target/release/scx_snake
 ```
+
+The focused LLC queue regression validates one global clock with no synthetic
+cells, local and per-CPU enqueue paths, dispatch selections, and queue-rung
+counter invariants. It runs on a one-LLC guest as an attach/local/CPU smoke test
+and additionally requires remote selection when multiple LLC queues exist:
+
+```bash
+sudo scheds/rust/scx_snake/tests/vtime_llc_queues.sh \
+  target/release/scx_snake
+```
+
+For a local virtme-ng guest, `--cpus 8,sockets=2,cores=4,threads=1` exposes two
+four-CPU LLCs. The combined gauntlet always runs the focused test and derives
+the remote-path expectation from the compiled queue topology.
 
 The VTIME watchdog regression requires at least 128 guest CPUs and preserves its
 artifacts under `/tmp`. It combines a nice-19 `khugepaged` thread, persistent
@@ -359,6 +398,7 @@ Additional VM-only contracts cover the remaining queue boundaries:
 | Test | Contract |
 | --- | --- |
 | `fifo_fallback.sh` | Shared FIFO fallback is explicitly drained. |
+| `vtime_llc_queues.sh` | Global-clock LLC queues exercise local, CPU, and bounded remote-candidate paths with consistent rung counters. |
 | `vtime_queue_ladders.sh` | Callback ladders activate, live reorder, switch to `min_vtime`, and dispatch both queue classes. |
 | `vtime_max_cells.sh` | 31 declared cells plus cell 0 run under `cell` and `cell_llc`. |
 | `vtime_single_runner_rehome.sh` | A sole running task is re-enqueued and cannot retain an obsolete cell indefinitely. |
@@ -378,11 +418,12 @@ sudo scheds/rust/scx_snake/tests/eevdf_affinity_future.sh \
 
 ## Current scope
 
-Global VTIME and EEVDF each use one global fairness clock. Queue-mode VTIME uses
-one clock per cell for both its normal work and affinity work targeting its
-CPUs; it has neither a global affinity clock nor per-CPU clocks. Cell CPU
-weights allocate primary CPUs but do not provide hierarchical group fairness.
-There are no per-NUMA clocks, live fairness-mode changes, queued-work borrowing,
-or cross-cell normal-queue stealing. The clocks use BPF spin locks, so
-scalability under large runnable sets remains an explicit experiment rather
-than a production claim.
+Global VTIME and EEVDF each use one global fairness clock. The `llc` queue layout
+shards global VTIME storage but not that clock. Cell-layout VTIME uses one clock
+per cell for both its normal work and affinity work targeting its CPUs; it has
+neither a global affinity clock nor per-CPU clocks. Cell CPU weights allocate
+primary CPUs but do not provide hierarchical group fairness. There are no
+per-NUMA clocks, live fairness-mode changes, queued-work borrowing, or
+cross-cell normal-queue stealing. The clocks use BPF spin locks, so scalability
+under large runnable sets remains an explicit experiment rather than a
+production claim.

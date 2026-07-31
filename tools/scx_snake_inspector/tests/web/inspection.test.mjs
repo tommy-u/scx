@@ -1646,6 +1646,36 @@ test("rung ladder percentages use all select calls as the denominator", () => {
   );
 });
 
+test("queue rung percentages use callback-specific denominators", () => {
+  assert.equal(typeof inspectionState.queueRungCallbackPercentages, "function");
+  if (typeof inspectionState.queueRungCallbackPercentages !== "function") {
+    return;
+  }
+
+  assert.deepEqual(
+    inspectionState.queueRungCallbackPercentages(
+      { hits: 30, misses: 8 },
+      200,
+    ),
+    { hit: 15, miss: 4 },
+  );
+  assert.deepEqual(
+    inspectionState.queueRungCallbackPercentages(
+      { hits: 30, misses: 8 },
+      0,
+    ),
+    { hit: 0, miss: 0 },
+  );
+  assert.deepEqual(
+    inspectionState.queueRungMetricPercentages(
+      { attempts: 40, selected: 10 },
+      "selected",
+      200,
+    ),
+    { rung: 25, callback: 5 },
+  );
+});
+
 test("rung timing reports sampled p95 only after twenty samples", () => {
   const buckets = Array(64).fill(0);
   buckets[4] = 19;
@@ -1763,6 +1793,73 @@ test("min_vtime dispatch is presented as a combined clock-order operation", () =
   assert.equal(sections[1].rungs[0].role, "operation");
 });
 
+test("LLC queue ladders expose routing, candidate, and consume semantics", () => {
+  const sections = queueLadderSections(
+    {
+      layout: "llc",
+      enqueue: [
+        { index: 0, operation: "try_insert(local)" },
+        { index: 1, operation: "insert(cpu)" },
+      ],
+      dispatch: [
+        { index: 0, operation: "peek(cpu)" },
+        { index: 1, operation: "peek(local)" },
+        { index: 2, operation: "peek(remote)" },
+        {
+          index: 3,
+          operation: "consume(min_vtime;fallback=cpu,local,remote)",
+        },
+      ],
+    },
+    { enqueues: 120, dispatch_calls: 80 },
+  );
+
+  assert.equal(sections[0].behavior, "First applicable route");
+  assert.equal(sections[0].callbackCalls, 120);
+  assert.deepEqual(
+    sections[0].rungs.map((rung) => rung.role),
+    ["conditional route", "terminal route"],
+  );
+  assert.equal(sections[0].rungs[0].flow.miss, "Inapplicable → rung 1");
+  assert.equal(sections[0].rungs[1].flow.miss, "Insert failure → error");
+
+  assert.equal(sections[1].behavior, "Peek candidates → minimum VTIME consume");
+  assert.equal(sections[1].callbackCalls, 80);
+  assert.equal(sections[1].cyclic, false);
+  assert.deepEqual(
+    sections[1].rungs.map((rung) => rung.role),
+    ["candidate", "candidate", "candidate", "consume"],
+  );
+  assert.deepEqual(sections[1].rungs[0].metricKeys, [
+    "selected",
+    "fallback_attempts",
+    "fallback_hits",
+    "fallback_misses",
+  ]);
+  assert.deepEqual(sections[1].rungs[3].metricKeys, ["move_misses"]);
+  assert.equal(sections[1].rungs[0].flow.hit, "Candidate → accumulate");
+  assert.equal(sections[1].rungs[3].flow.miss, "Move miss or empty → bounded fallback");
+  assert.equal(
+    sections[1].terminal,
+    "No candidate or fallback work → replenish previous task or idle",
+  );
+});
+
+test("queue rung rows render callback rates and conditional outcomes", () => {
+  const script = readFileSync(
+    new URL("../../src/web/app.js", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(script, /renderQueueRungMetrics/);
+  assert.match(script, /queueRungCallbackPercentages/);
+  assert.match(script, /selected:\s*"Selected"/);
+  assert.match(script, /move_misses:\s*"Move misses"/);
+  assert.match(script, /fallback_attempts:\s*"Fallback attempts"/);
+  assert.match(script, /fallback_hits:\s*"Fallback hits"/);
+  assert.match(script, /fallback_misses:\s*"Fallback misses"/);
+});
+
 test("idle selection hits flow into the configured queue path", () => {
   assert.equal(selectionRungHitFlow({ scope: "task_allowed" }, null), "Hit → dispatch");
   assert.equal(
@@ -1827,6 +1924,48 @@ test("resolved queue topology model labels cells and DSQs for display", () => {
     weight: 2,
     normalDsqs: [],
   });
+});
+
+test("LLC queue topology labels global ownership without synthetic cells", () => {
+  const model = queueTopologyModel(
+    {
+      mode_name: "vtime",
+      clock_model: "one global virtual-time clock shared by LLC queues",
+    },
+    {
+      layout: "llc",
+      affinity_queue_count: 2,
+      cells: [],
+      normal_queues: [
+        {
+          index: 0,
+          dsq_id: 536870912,
+          cell_id: null,
+          cell_index: null,
+          clock_index: 0,
+          llc_id: 10,
+          consumer_cpus: [0, 1],
+        },
+      ],
+      cpu_routes: [
+        {
+          cpu: 0,
+          owner_cell_id: null,
+          owner_cell_index: null,
+          llc_id: 10,
+          normal_queue_index: 0,
+          normal_dsq_id: 536870912,
+          affinity_dsq_id: 268435456,
+        },
+      ],
+    },
+    [0, 1],
+  );
+
+  assert.equal(model.cells.length, 0);
+  assert.equal(model.normalQueues[0].ownerLabel, "Global");
+  assert.equal(model.normalQueues[0].clockLabel, "global");
+  assert.equal(model.cpuRoutes[0].ownerLabel, "Global");
 });
 
 test("CPU masks are compacted into readable ranges", () => {

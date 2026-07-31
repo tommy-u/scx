@@ -1,5 +1,20 @@
 fallback = "previous_cpu"
 
+# Keep one shared VTIME domain while userspace lowers LLC topology into local
+# normal queues and a rotating remote source for each CPU.
+[queues]
+layout = "llc"
+enqueue = [
+  { action = "try_insert", target = "local" },
+  { action = "insert", target = "cpu" },
+]
+dispatch = [
+  { action = "peek", source = "cpu" },
+  { action = "peek", source = "local" },
+  { action = "peek", source = "remote" },
+  { action = "consume", operation = "min_vtime", fallback = ["cpu", "local", "remote"] },
+]
+
 [[rung]]
 operation = "sync_wake_affine"
 scope = "task_allowed"

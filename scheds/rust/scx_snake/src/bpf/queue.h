@@ -7,8 +7,6 @@
 #include "stats.h"
 
 #define SNAKE_SELECT_F_BORROWED (1ULL << 63)
-#define SNAKE_QUEUE_CELL_NONE 0xffffffffU
-
 enum snake_membership_kind {
 	SNAKE_MEMBERSHIP_NO_CELL = 0,
 	SNAKE_MEMBERSHIP_CELL,

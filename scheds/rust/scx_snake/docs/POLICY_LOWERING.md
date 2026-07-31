@@ -76,8 +76,8 @@ The implementation is split across:
   key-to-CPU-set tables.
 - [`src/cell_allocation.rs`](../src/cell_allocation.rs): weighted primary CPU
   ownership and borrowable masks for queue cells.
-- [`src/queue_topology.rs`](../src/queue_topology.rs): cell or cell/LLC normal
-  queues plus per-CPU affinity escape queues.
+- [`src/queue_topology.rs`](../src/queue_topology.rs): global LLC shards or cell
+  and cell/LLC normal queues, plus per-CPU affinity-safe queues.
 - [`src/main.rs`](../src/main.rs): ABI encoding, map writes, BPF preparation, and
   publication.
 - [`src/runtime_policy.rs`](../src/runtime_policy.rs): ordered two-slot replacement
@@ -114,8 +114,25 @@ count, cell IDs, CPU-list syntax, duplicate cells, incompatible
 operation/scope pairs, and the requirement that `kernel_default` be terminal.
 At this point the policy still contains semantic concepts.
 
-Queue policies add semantic configuration for layout, cell CPU weights, and
-callback ladders:
+The global LLC layout declares explicit callback actions and topology-neutral
+sources:
+
+```toml
+[queues]
+layout = "llc"
+enqueue = [
+  { action = "try_insert", target = "local" },
+  { action = "insert", target = "cpu" },
+]
+dispatch = [
+  { action = "peek", source = "cpu" },
+  { action = "peek", source = "local" },
+  { action = "peek", source = "remote" },
+  { action = "consume", operation = "min_vtime", fallback = ["cpu", "local", "remote"] },
+]
+```
+
+Cell queue policies add layout, cell CPU weights, and legacy callback ladders:
 
 ```toml
 [queues]
@@ -131,11 +148,11 @@ cpus = "0-7"
 cpu_weight = 2
 ```
 
-Userspace enforces a maximum of 31 declared queue cells plus synthetic cell 0,
-positive weights, a valid layout, and complete callback pairs. `min_vtime` is a
-single dispatch opcode that consumes both queue classes in the CPU owner's cell
-clock domain. Queue policies are accepted at runtime only with
-`--fairness vtime`.
+For cell layouts, userspace enforces a maximum of 31 declared queue cells plus
+synthetic cell 0, positive weights, and complete callback pairs. For `llc`, it
+rejects cells and validates unique peek sources, terminal consume and CPU insert
+rungs, and an exact bounded fallback source set. Queue policies are accepted at
+runtime only with `--fairness vtime`.
 
 ## Stage 2: lower to mechanical instructions
 
@@ -221,22 +238,29 @@ the `PICK_RANDOM` flag rather than a separate opcode.
 ### Queue callback instructions
 
 `snake_compiled_ladder` also contains up to eight fixed-size enqueue rungs and
-eight dispatch rungs. These have a smaller ABI because they operate on queue
-classes:
+eight dispatch rungs. Queue rungs use the same mechanical
+`{ opcode, input, flags, reserved, data }` shape as placement rungs:
 
-| Callback | Opcode | Value | BPF behavior |
-| --- | --- | ---: | --- |
-| enqueue | `CELL` | 1 | Insert into the task cell's normal queue. |
-| enqueue | `AFFINITY` | 2 | Insert into one allowed CPU's affinity queue. |
-| dispatch | `CELL` | 1 | Consume the CPU owner's normal queue class. |
-| dispatch | `AFFINITY` | 2 | Consume that CPU's affinity queue. |
-| dispatch | `MIN_VTIME` | 3 | Compare both heads in the owner-cell clock domain. |
+| Callback | Opcode | Value | Input | BPF behavior |
+| --- | --- | ---: | --- | --- |
+| enqueue | `CELL` | 1 | legacy cell | Insert into the task cell's normal queue. |
+| enqueue | `AFFINITY` | 2 | legacy affinity | Insert into one allowed CPU's affinity queue. |
+| enqueue | `TRY_INSERT` | 3 | `LOCAL` (2) | Insert into the selected CPU's normal queue only when all consumers are allowed. |
+| enqueue | `INSERT` | 4 | `CPU` (1) | Insert into an allowed CPU's ordered escape queue. |
+| dispatch | `CELL` | 1 | legacy cell | Consume the CPU owner's normal queue class. |
+| dispatch | `AFFINITY` | 2 | legacy affinity | Consume that CPU's affinity queue. |
+| dispatch | `MIN_VTIME` | 3 | legacy pair | Compare both heads in the owner-cell clock domain. |
+| dispatch | `PEEK` | 4 | `CPU` (1), `LOCAL` (2), or `REMOTE` (3) | Record one candidate without moving it. |
+| dispatch | `CONSUME` | 5 | `MIN_VTIME` (5) | Select the earliest peek and try its packed bounded fallback. |
 
-Enqueue is first-success and requires terminal `AFFINITY`. Source-based
-dispatch advances a per-CPU cyclic cursor after a source supplies work.
-`MIN_VTIME` must be the sole dispatch rung, represents both dispatch classes,
-and alternates exact ties per CPU. A policy exposes `CELL` through both callback
-directions or through neither.
+Cell enqueue is first-success and requires terminal `AFFINITY`. Source-based
+cell dispatch advances a per-CPU cyclic cursor after a source supplies work;
+legacy `MIN_VTIME` must be the sole dispatch rung. Global LLC enqueue requires
+terminal `INSERT / CPU`. Its three `PEEK` rungs feed terminal `CONSUME /
+MIN_VTIME`; `data` packs up to three eight-bit CPU, local, and remote fallback
+identifiers. The global remote cursor bounded-scans flat queue descriptors,
+advances past empty or head-incompatible sources, and returns at most one remote
+candidate rather than exposing LLC IDs to BPF.
 
 ## Stage 3: resolve semantic scopes into masks
 
@@ -255,12 +279,15 @@ Each CPU set is serialized as `snake_mask_data`, written into the inactive
 slot's `mask_data` map, and materialized by BPF as an immutable
 `bpf_cpumask`. BPF only sees a table number, key, and mask.
 
-Queue-mode cell masks do not consume one of the four generic mask tables.
-Userspace adds cell 0, resolves all online CPUs to one primary owner, derives
-each cell's borrowable mask, and assigns dense cell indices. It then builds one
-normal queue per cell or per populated cell/LLC ownership pair, plus one
-affinity escape queue per online CPU. BPF materializes each primary and
-borrowable mask once during attachment.
+Queue descriptor masks do not consume one of the four generic placement tables.
+For `llc`, userspace groups online CPUs by discovered LLC, emits one normal
+queue and consumer mask per group, maps each CPU to its local queue, and selects
+one global clock domain. No cell record or LLC identifier is required by the
+BPF routing mechanism. For cell layouts, userspace adds cell 0, resolves all
+online CPUs to one primary owner, derives each cell's borrowable mask, assigns
+dense indices, and builds one normal queue per cell or populated cell/LLC pair.
+Every layout also emits one per-CPU escape route. BPF materializes the immutable
+consumer, primary, and borrowable masks during attachment.
 
 ## Stage 4: encode the shared ABI
 
@@ -273,7 +300,7 @@ Userspace encodes the lowered rungs into `snake_compiled_ladder` with:
 - at most eight fixed-size placement rungs;
 - enqueue and dispatch callback rung counts and arrays.
 
-ABI version 16 limits each ladder to eight rungs, generic placement to four
+ABI version 21 limits each ladder to eight rungs, generic placement to four
 mask tables, CPU and mask keys to 1024, queue cells to 32 including cell 0, and
 policy storage to two ladder slots. Userspace and BPF share definitions from
 [`src/bpf/intf.h`](../src/bpf/intf.h); an ABI-version mismatch is rejected.
@@ -304,14 +331,15 @@ slot active. Each scheduling callback increments the chosen slot's per-CPU
 reader count, verifies the active slot did not change, uses the ladder, and
 decrements the count. Userspace therefore never rebuilds a slot still in use.
 
-Queue topology follows a different lifetime. Userspace installs cell, normal
-queue, CPU queue, and external-ID lookup descriptors before BPF attachment;
-BPF validates them, materializes cell masks, and creates the DSQs from
+Queue topology follows a different lifetime. Userspace installs the queue mode,
+normal queues, CPU routes, consumer masks, and optional cell descriptors before
+BPF attachment; BPF validates them, materializes masks, and creates DSQs from
 `init()`. A live replacement must resolve to exactly the same topology. The
 callback arrays still publish through the inactive ladder slot, but an active
-enqueue target or represented dispatch class cannot be removed because an old
-generation may have left work in that queue class. `MIN_VTIME` represents both
-the cell and affinity dispatch classes for this compatibility check.
+enqueue target or represented dispatch source cannot be removed because an old
+generation may have left work there. Legacy cell `MIN_VTIME` represents both
+cell and affinity classes; global `CONSUME` represents its declared peek and
+fallback sources.
 
 ## Map ownership and data direction
 
@@ -325,10 +353,11 @@ the cell and affinity dispatch classes for this compatibility check.
 | `stats` | BPF callbacks | Userspace | Per-CPU scheduler and per-rung counters. |
 | `task_cells` | Userspace through pidfd updates; BPF clears/restores `needs_rehome` | BPF hot path | Optional live cell assignment for one thread. |
 | `task_runtimes` | BPF task lifecycle and scheduling callbacks | BPF callbacks | Per-task placement and execution accounting state. |
-| `queue_header`, `queue_cells` | Userspace before attach | BPF | Immutable layout, dense cells, clocks, and primary/borrowable masks. |
-| `queue_cell_masks` | BPF `init()` | BPF hot path | Materialized primary and borrowable `bpf_cpumask` pointers. |
-| `normal_queues`, `cpu_queues` | Userspace before attach | BPF | Normal DSQ descriptors and CPU ownership/affinity routing. |
+| `queue_header`, `queue_cells` | Userspace before attach | BPF | Immutable global/cell mode plus optional dense cells and clocks. |
+| `queue_cell_masks`, `normal_queue_masks` | BPF `init()` | BPF hot path | Materialized cell and normal-consumer `bpf_cpumask` pointers. |
+| `normal_queues`, `cpu_queues` | Userspace before attach | BPF | Normal DSQ descriptors and topology-neutral CPU routing. |
 | `queue_cell_lookup` | Userspace before attach | BPF | External cell ID to dense queue-cell index. |
+| `vtime_domain` | BPF callbacks | BPF callbacks | One global VTIME clock shared by unsharded and LLC-sharded global modes. |
 | `cell_vtime_domains` | BPF callbacks | BPF callbacks | One VTIME clock per queue cell, shared by its normal and affinity queues. |
 | `cell_stats` | BPF callbacks | Userspace | Runtime, borrowing/lending, queue, and clock-transition counters. |
 
@@ -355,9 +384,9 @@ did not enter through a normal wakeup. Queue mode instead runs its compiled
 enqueue callback ladder; an ordinary select result is only a preferred CPU
 hint for that ladder.
 
-`dispatch` receives the CPU and previous task. In queue mode it runs either the
-cyclic source ladder or the single `MIN_VTIME` operation when the CPU's local
-DSQ is empty.
+`dispatch` receives the CPU and previous task. Cell queue mode runs either the
+cyclic source ladder or legacy `MIN_VTIME`. Global LLC mode runs every peek rung
+and then one terminal consume rung when the CPU's local DSQ is empty.
 
 ### Live kernel and task state
 
@@ -376,8 +405,9 @@ DSQ is empty.
 - the active compiled ladder and generation;
 - materialized generic mask tables;
 - optional task-local `cell_id` and `needs_rehome` annotation;
-- attachment-time dense queue cells, ownership masks, and DSQ descriptors;
-- per-task cell and affinity vruntime coordinates;
+- attachment-time queue mode, normal consumer masks, CPU routes, and optional
+  dense cell ownership descriptors;
+- per-task global or cell/affinity vruntime coordinates;
 - per-slot reader counters and per-CPU statistics.
 
 The hot path does **not** receive TOML strings, scope names, Rust topology
@@ -400,8 +430,9 @@ CPU owner and dispatches directly. If all rungs miss, the configured fallback
 either keeps the previous allowed CPU or chooses any CPU from the task's
 allowed mask; queue mode records that result as another enqueue hint.
 
-Missing task-cell annotation, undefined cell key, no idle CPU, and an empty
-cell/affinity intersection are expected misses rather than policy errors.
+Missing task-cell annotation, undefined cell key, no idle CPU, an unsafe local
+consumer mask, and empty queue sources are expected misses rather than policy
+errors.
 
 ## Information returned from BPF to userspace
 
@@ -411,6 +442,7 @@ through maps and program return values:
 | BPF information | Userspace use |
 | --- | --- |
 | Per-rung attempts, hits, misses, and errors | Explains which ladder stages make decisions. |
+| Queue-rung selections, atomic move misses, and bounded fallback results | Explains enqueue and dispatch arbitration. |
 | Global callback, FIFO shared-DSQ, fallback, dispatch, equal-head tie, latency, and invalid-error counters | Scheduler health and behavior. |
 | Per-CPU runtime counters | Shows where Snake tasks actually ran. |
 | Cell rehome, deferred-rehome, queue-preemption, and stale-run counters | Tracks convergence after live cell changes, including one old normal-DSQ execution. |
@@ -492,5 +524,5 @@ confirming that another cell owns the CPU.
   updates.
 - [`FAIRNESS.md`](FAIRNESS.md): queueing and service models, which are separate
   from placement lowering.
-- [`QUEUE_POLICY.md`](QUEUE_POLICY.md): cell ownership, DSQ layouts, callback
-  ladders, clocks, borrowing, and live-update restrictions.
+- [`QUEUE_POLICY.md`](QUEUE_POLICY.md): global LLC and cell DSQ layouts,
+  callback ladders, clocks, borrowing, and live-update restrictions.

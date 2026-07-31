@@ -21,7 +21,7 @@ pub struct QueueCell {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NormalQueue {
     pub index: u32,
-    pub cell_index: u32,
+    pub cell_index: Option<u32>,
     pub clock_index: u32,
     pub llc_id: Option<u32>,
     pub consumers: BTreeSet<u32>,
@@ -30,7 +30,7 @@ pub struct NormalQueue {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CpuQueue {
     pub cpu: u32,
-    pub owner_cell_index: u32,
+    pub owner_cell_index: Option<u32>,
     pub llc_id: u32,
     pub normal_queue_index: u32,
 }
@@ -38,6 +38,7 @@ pub struct CpuQueue {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct QueueTopology {
     pub layout: QueueLayout,
+    pub nr_clock_domains: u32,
     pub cells: Vec<QueueCell>,
     pub cell_index_by_id: BTreeMap<u32, u32>,
     pub normal_queues: Vec<NormalQueue>,
@@ -56,6 +57,12 @@ pub fn resolve_queue_topology(
         if !cpu_to_llc.contains_key(&cpu) {
             bail!("CPU {cpu} has no LLC mapping");
         }
+    }
+    if queues.layout == QueueLayout::Llc {
+        return Ok(Some(compile_llc_queue_topology(
+            available_cpus,
+            cpu_to_llc,
+        )?));
     }
     let allocation = resolve_cell_allocation(policy, available_cpus)?
         .expect("queue policy existence was checked above");
@@ -91,8 +98,9 @@ pub fn resolve_host_queue_topology(policy: &CompiledPolicy) -> Result<Option<Que
 
 pub fn dump_queue_topology(topology: &QueueTopology) -> String {
     let mut output = format!(
-        "queue topology: layout={} cells={} normal_queues={} affinity_queues={}\n",
+        "queue topology: layout={} clocks={} cells={} normal_queues={} affinity_queues={}\n",
         topology.layout.as_str(),
+        topology.nr_clock_domains,
         topology.cells.len(),
         topology.normal_queues.len(),
         topology.cpu_queues.len(),
@@ -110,7 +118,7 @@ pub fn dump_queue_topology(topology: &QueueTopology) -> String {
     }
     for queue in &topology.normal_queues {
         output.push_str(&format!(
-            "  normal queue {}: cell_index={} clock_index={} llc={:?} consumers=[{}]\n",
+            "  normal queue {}: cell_index={:?} clock_index={} llc={:?} consumers=[{}]\n",
             queue.index,
             queue.cell_index,
             queue.clock_index,
@@ -167,6 +175,7 @@ fn compile_queue_topology(
                 }
                 by_llc
             }
+            QueueLayout::Llc => unreachable!("LLC topology does not use cell allocation"),
         };
         for (llc_id, consumers) in groups {
             if consumers.is_empty() {
@@ -175,7 +184,7 @@ fn compile_queue_topology(
             let index = u32::try_from(normal_queues.len())?;
             normal_queues.push(NormalQueue {
                 index,
-                cell_index: cell.index,
+                cell_index: Some(cell.index),
                 clock_index: cell.index,
                 llc_id,
                 consumers,
@@ -201,6 +210,7 @@ fn compile_queue_topology(
             let queue_key = match layout {
                 QueueLayout::Cell => (owner_cell_index, None),
                 QueueLayout::CellLlc => (owner_cell_index, Some(llc_id)),
+                QueueLayout::Llc => unreachable!("LLC topology does not use cell allocation"),
             };
             let normal_queue_index =
                 normal_by_cell_llc.get(&queue_key).copied().ok_or_else(|| {
@@ -212,7 +222,7 @@ fn compile_queue_topology(
                 cpu,
                 CpuQueue {
                     cpu,
-                    owner_cell_index,
+                    owner_cell_index: Some(owner_cell_index),
                     llc_id,
                     normal_queue_index,
                 },
@@ -222,8 +232,65 @@ fn compile_queue_topology(
 
     Ok(QueueTopology {
         layout,
+        nr_clock_domains: u32::try_from(cells.len())?,
         cells,
         cell_index_by_id,
+        normal_queues,
+        cpu_queues,
+    })
+}
+
+fn compile_llc_queue_topology(
+    available_cpus: &BTreeSet<u32>,
+    cpu_to_llc: &BTreeMap<u32, u32>,
+) -> Result<QueueTopology> {
+    let mut cpus_by_llc: BTreeMap<u32, BTreeSet<u32>> = BTreeMap::new();
+    for &cpu in available_cpus {
+        cpus_by_llc.entry(cpu_to_llc[&cpu]).or_default().insert(cpu);
+    }
+
+    let mut normal_queues = Vec::with_capacity(cpus_by_llc.len());
+    let mut normal_by_llc = BTreeMap::new();
+    for (llc_id, consumers) in cpus_by_llc {
+        let index = u32::try_from(normal_queues.len())?;
+        normal_queues.push(NormalQueue {
+            index,
+            cell_index: None,
+            clock_index: 0,
+            llc_id: Some(llc_id),
+            consumers,
+        });
+        normal_by_llc.insert(llc_id, index);
+    }
+    if normal_queues.len() > available_cpus.len() {
+        bail!(
+            "queue topology has {} normal queues for only {} CPUs",
+            normal_queues.len(),
+            available_cpus.len()
+        );
+    }
+
+    let cpu_queues = available_cpus
+        .iter()
+        .map(|&cpu| {
+            let llc_id = cpu_to_llc[&cpu];
+            Ok((
+                cpu,
+                CpuQueue {
+                    cpu,
+                    owner_cell_index: None,
+                    llc_id,
+                    normal_queue_index: normal_by_llc[&llc_id],
+                },
+            ))
+        })
+        .collect::<Result<BTreeMap<_, _>>>()?;
+
+    Ok(QueueTopology {
+        layout: QueueLayout::Llc,
+        nr_clock_domains: 1,
+        cells: Vec::new(),
+        cell_index_by_id: BTreeMap::new(),
         normal_queues,
         cpu_queues,
     })
@@ -281,7 +348,7 @@ scope = "task_cell"
         for cell in &topology.cells {
             assert_eq!(cell.normal_queues.len(), 1);
             let queue = &topology.normal_queues[cell.normal_queues[0] as usize];
-            assert_eq!(queue.cell_index, cell.index);
+            assert_eq!(queue.cell_index, Some(cell.index));
             assert_eq!(queue.clock_index, cell.index);
             assert_eq!(queue.llc_id, None);
             assert_eq!(queue.consumers, cell.primary);
@@ -294,7 +361,7 @@ scope = "task_cell"
 
         assert!(topology.normal_queues.len() <= topology.cpu_queues.len());
         for queue in &topology.normal_queues {
-            assert_eq!(queue.clock_index, queue.cell_index);
+            assert_eq!(Some(queue.clock_index), queue.cell_index);
             assert!(queue.llc_id.is_some());
             assert!(!queue.consumers.is_empty());
             assert!(queue
@@ -306,6 +373,60 @@ scope = "task_cell"
             let queue = &topology.normal_queues[cpu.normal_queue_index as usize];
             assert_eq!(queue.cell_index, cpu.owner_cell_index);
             assert!(queue.consumers.contains(&cpu.cpu));
+        }
+    }
+
+    #[test]
+    fn llc_layout_creates_one_global_clock_queue_per_llc_without_cells() {
+        let policy = policy::compile_policy(
+            r#"
+[queues]
+layout = "llc"
+
+[[rung]]
+operation = "pick_idle"
+scope = "task_allowed"
+"#,
+        )
+        .expect("LLC policy should compile");
+        let topology = resolve_queue_topology(
+            &policy,
+            &BTreeSet::from([0, 1, 2, 3, 4, 5]),
+            &BTreeMap::from([(0, 10), (1, 10), (2, 20), (3, 20), (4, 10), (5, 20)]),
+        )
+        .expect("LLC topology should resolve")
+        .expect("queue policy should have a topology");
+
+        assert_eq!(topology.layout.as_str(), "llc");
+        assert!(topology.cells.is_empty());
+        assert!(topology.cell_index_by_id.is_empty());
+        assert_eq!(topology.nr_clock_domains, 1);
+        assert_eq!(topology.normal_queues.len(), 2);
+        assert_eq!(topology.cpu_queues.len(), 6);
+        assert!(topology
+            .normal_queues
+            .iter()
+            .all(|queue| queue.clock_index == 0));
+        assert!(topology
+            .normal_queues
+            .iter()
+            .all(|queue| queue.cell_index.is_none()));
+        assert_eq!(
+            topology
+                .normal_queues
+                .iter()
+                .map(|queue| (queue.llc_id, queue.consumers.clone()))
+                .collect::<Vec<_>>(),
+            vec![
+                (Some(10), BTreeSet::from([0, 1, 4])),
+                (Some(20), BTreeSet::from([2, 3, 5])),
+            ]
+        );
+        for route in topology.cpu_queues.values() {
+            assert!(route.owner_cell_index.is_none());
+            let queue = &topology.normal_queues[route.normal_queue_index as usize];
+            assert_eq!(queue.llc_id, Some(route.llc_id));
+            assert!(queue.consumers.contains(&route.cpu));
         }
     }
 
@@ -338,5 +459,27 @@ scope = "task_allowed"
                 .unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn topology_dump_distinguishes_primary_and_borrowable_cpus() {
+        let topology = QueueTopology {
+            layout: QueueLayout::Cell,
+            nr_clock_domains: 1,
+            cells: vec![QueueCell {
+                index: 0,
+                external_id: 7,
+                cpu_weight: 1,
+                primary: BTreeSet::from([1]),
+                borrowable: BTreeSet::from([2]),
+                normal_queues: vec![0],
+            }],
+            cell_index_by_id: BTreeMap::from([(7, 0)]),
+            normal_queues: Vec::new(),
+            cpu_queues: BTreeMap::new(),
+        };
+
+        let dump = dump_queue_topology(&topology);
+        assert!(dump.contains("primary=[1] borrowable=[2]"), "{dump}");
     }
 }

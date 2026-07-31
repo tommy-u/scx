@@ -128,7 +128,8 @@ s32 BPF_STRUCT_OPS(snake_select_cpu, struct task_struct *p, s32 prev_cpu,
 				fine_stage_started_at =
 					fine_timing_select_start(
 						callback_started_at);
-				ret = queue_cell_index ==
+				ret = !queue_cell_mode_enabled() ? -EINVAL :
+				      queue_cell_index ==
 						      SNAKE_QUEUE_CELL_NONE ?
 					      -EINVAL :
 					      queue_fairness_direct_borrow(
@@ -293,6 +294,7 @@ void BPF_STRUCT_OPS(snake_dispatch, s32 cpu, struct task_struct *prev)
 	fine_timing_finish(&fine_timing,
 			   SNAKE_FINE_TIMING_DISPATCH_ACQUIRE_LADDER,
 			   stage_started_at);
+	stat_inc(&ladder_ctx, SNAKE_STAT_DISPATCH_CALLS);
 	scheduler_mode_dispatch(&ladder_ctx, cpu, prev, &fine_timing,
 				callback_started_at);
 }
@@ -427,6 +429,12 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(snake_init)
 	ret = queue_init_cell_masks();
 	if (ret) {
 		scx_bpf_error("snake queue mask initialization failed: %d",
+			      ret);
+		return ret;
+	}
+	ret = queue_init_normal_masks();
+	if (ret) {
+		scx_bpf_error("snake normal queue mask initialization failed: %d",
 			      ret);
 		return ret;
 	}

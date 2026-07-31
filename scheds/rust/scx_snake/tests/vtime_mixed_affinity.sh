@@ -6,7 +6,7 @@ set -euo pipefail
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 repo=${SNAKE_REPO:-$(cd -- "${script_dir}/../../../.." && pwd)}
 snake_bin=${1:-${repo}/target/release/scx_snake}
-policy=${2:-${repo}/scheds/rust/scx_snake/examples/kernel-default-sim.toml}
+policy=${2:-${repo}/scheds/rust/scx_snake/examples/basic.toml}
 duration=${VTIME_AFFINITY_DURATION:-10}
 tmpdir=$(mktemp -d)
 snake_log=${tmpdir}/snake.log

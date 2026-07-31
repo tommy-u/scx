@@ -107,7 +107,8 @@ static __always_inline int
 queue_fairness_affinity_candidate(s32				cpu,
 				  struct snake_queue_candidate *candidate)
 {
-	if (!candidate || cpu < 0 || cpu >= nr_cpu_ids)
+	if (!candidate || cpu < 0 || cpu >= nr_cpu_ids ||
+	    cpu >= SNAKE_MAX_CPUS)
 		return -EINVAL;
 	candidate->valid = 0;
 	candidate->dsq	 = dsq_affinity(cpu);
@@ -375,6 +376,592 @@ static __always_inline s32 queue_fairness_dispatch_source(
 	return keep ? 1 : 0;
 }
 
+static __always_inline int
+queue_dispatch_peek_cpu(s32 cpu, struct snake_queue_candidate *candidate)
+{
+	if (!candidate || cpu < 0 || cpu >= nr_cpu_ids)
+		return -EINVAL;
+	*candidate = (struct snake_queue_candidate){
+		.dsq = dsq_affinity(cpu),
+		.class = SNAKE_QUEUE_CLASS_AFFINITY,
+	};
+	candidate->valid = dsq_vtime_head(candidate->dsq, &candidate->vtime);
+	return 0;
+}
+
+static __always_inline int
+queue_dispatch_peek_local(struct snake_cpu_queue *cpuq,
+			  struct snake_queue_candidate *candidate)
+{
+	if (!candidate || !cpuq)
+		return -EINVAL;
+	*candidate = (struct snake_queue_candidate){
+		.dsq = dsq_normal(cpuq->normal_queue_index),
+		.class = SNAKE_QUEUE_CLASS_NORMAL,
+	};
+	candidate->valid = dsq_vtime_head(candidate->dsq, &candidate->vtime);
+	return 0;
+}
+
+struct snake_remote_scan_loop_ctx {
+	struct snake_queue_candidate candidate;
+	u32 local_queue;
+	u32 start;
+	u32 nr_queues;
+	u32 next_remote_queue;
+	s32 cpu;
+};
+
+static long queue_dispatch_remote_scan_callback(
+	u32 offset, struct snake_remote_scan_loop_ctx *loop_ctx)
+{
+	struct task_struct *p, *task;
+	dsq_id_t dsq;
+	u32 index, nr_queues, start;
+	s32 cpu;
+	bool eligible = false;
+
+	nr_queues = loop_ctx->nr_queues;
+	start = loop_ctx->start;
+	cpu = loop_ctx->cpu;
+	if (nr_queues <= 1 || nr_queues > SNAKE_MAX_NORMAL_QUEUES ||
+	    start >= nr_queues || loop_ctx->local_queue >= nr_queues || cpu < 0 ||
+	    cpu >= nr_cpu_ids || cpu >= SNAKE_MAX_CPUS || offset >= nr_queues)
+		return 1;
+	index = (start + offset) % nr_queues;
+	if (index >= SNAKE_MAX_NORMAL_QUEUES)
+		return 1;
+	if (index == loop_ctx->local_queue)
+		return 0;
+
+	dsq = dsq_normal(index);
+	loop_ctx->candidate.dsq = dsq;
+	loop_ctx->next_remote_queue = index + 1;
+	if (loop_ctx->next_remote_queue >= nr_queues)
+		loop_ctx->next_remote_queue = 0;
+
+	bpf_rcu_read_lock();
+	p = dsq_peek(dsq);
+	if (p) {
+		task = bpf_task_from_pid(p->pid);
+		if (task) {
+			eligible = bpf_cpumask_test_cpu(cpu, task->cpus_ptr);
+			bpf_task_release(task);
+		}
+	}
+	if (eligible && dsq_vtime_head(dsq, &loop_ctx->candidate.vtime)) {
+		loop_ctx->candidate.valid = 1;
+		bpf_rcu_read_unlock();
+		return 1;
+	}
+	bpf_rcu_read_unlock();
+	return 0;
+}
+
+static __always_inline int
+queue_dispatch_peek_remote(struct snake_cpu_queue *cpuq,
+			   struct snake_queue_cpu_state *state, s32 cpu,
+			   struct snake_queue_candidate *candidate)
+{
+	struct snake_queue_header *header = queue_config();
+	struct snake_remote_scan_loop_ctx loop_ctx;
+	u32 nr_queues, start;
+	long nr_loops;
+
+	if (!candidate || !cpuq || !state || !header ||
+	    header->mode != SNAKE_QUEUE_MODE_GLOBAL || cpu < 0 ||
+	    cpu >= nr_cpu_ids || cpu >= SNAKE_MAX_CPUS)
+		return -EINVAL;
+	*candidate = (struct snake_queue_candidate){
+		.dsq = dsq_invalid(),
+		.class = SNAKE_QUEUE_CLASS_NORMAL,
+	};
+	nr_queues = header->nr_normal_queues;
+	if (nr_queues <= 1)
+		return 0;
+	if (nr_queues > SNAKE_MAX_NORMAL_QUEUES ||
+	    cpuq->normal_queue_index >= nr_queues)
+		return -EINVAL;
+	start = state->next_remote_queue;
+	if (start >= nr_queues)
+		start = 0;
+	loop_ctx = (struct snake_remote_scan_loop_ctx){
+		.candidate = *candidate,
+		.local_queue = cpuq->normal_queue_index,
+		.start = start,
+		.nr_queues = nr_queues,
+		.next_remote_queue = start,
+		.cpu = cpu,
+	};
+	nr_loops = bpf_loop(SNAKE_MAX_NORMAL_QUEUES,
+			    queue_dispatch_remote_scan_callback, &loop_ctx, 0);
+	if (nr_loops < 0)
+		return nr_loops;
+	state->next_remote_queue = loop_ctx.next_remote_queue;
+	*candidate = loop_ctx.candidate;
+	return 0;
+}
+
+static __always_inline bool
+queue_global_move(struct snake_ladder_ctx *ctx, u64 source_dsq, u32 class)
+{
+	dsq_id_t source = { .raw = source_dsq };
+
+	if (dsq_is_invalid(source) || !dsq_move_to_local_untimed(source))
+		return false;
+	stat_inc(ctx, SNAKE_STAT_VTIME_DISPATCHES);
+	if (class == SNAKE_QUEUE_CLASS_AFFINITY)
+		stat_inc(ctx, SNAKE_STAT_VTIME_CPU_DISPATCHES);
+	return true;
+}
+
+static __always_inline int queue_global_replenish(
+	struct snake_ladder_ctx *ctx, struct task_struct *prev)
+{
+	struct snake_task_runtime *runtime;
+	u32 weight;
+
+	if (!prev || !(prev->scx.flags & SCX_TASK_QUEUED))
+		return 0;
+	runtime = fairness_task(ctx, prev, false);
+	weight = runtime && runtime->runtime_valid ? runtime->active_weight :
+						 fairness_task_weight(prev);
+	fairness_vtime_replenish(runtime, prev, weight);
+	return 0;
+}
+
+struct snake_global_consume_args {
+	struct task_struct *prev;
+	struct snake_queue_cpu_state *state;
+	struct snake_queue_candidate *cpu_candidate;
+	struct snake_queue_candidate *local_candidate;
+	struct snake_queue_candidate *remote_candidate;
+	u64 fallback;
+	s32 cpu;
+	u32 consume_rung;
+};
+
+static __noinline s32 queue_dispatch_try_selected(
+	struct snake_ladder_ctx *ctx,
+	const struct snake_global_consume_args *args, u32 source)
+{
+	struct snake_queue_candidate *candidate;
+	u32 class, rung;
+	s32 cpu;
+
+	if (!ctx || !args)
+		return -EINVAL;
+	if (source == SNAKE_QUEUE_INPUT_CPU) {
+		candidate = args->cpu_candidate;
+		class = SNAKE_QUEUE_CLASS_AFFINITY;
+		rung = 0;
+	} else if (source == SNAKE_QUEUE_INPUT_LOCAL) {
+		candidate = args->local_candidate;
+		class = SNAKE_QUEUE_CLASS_NORMAL;
+		rung = 1;
+	} else if (source == SNAKE_QUEUE_INPUT_REMOTE) {
+		candidate = args->remote_candidate;
+		class = SNAKE_QUEUE_CLASS_NORMAL;
+		rung = 2;
+	} else {
+		return -EINVAL;
+	}
+	cpu = args->cpu;
+	if (!candidate || cpu < 0 || cpu >= nr_cpu_ids ||
+	    cpu >= SNAKE_MAX_CPUS)
+		return -EINVAL;
+	stat_inc(ctx, SNAKE_STAT_DISPATCH_RUNG_SELECTED_BASE + rung);
+	if (fairness_vtime_keep_running(ctx, args->prev, candidate->vtime) ||
+	    queue_global_move(ctx, candidate->dsq.raw, class))
+		return 1;
+	return 0;
+}
+
+struct snake_global_fallback_candidate {
+	u64 dsq;
+	u32 rung;
+};
+
+struct snake_global_fallback_loop_ctx {
+	struct snake_ladder_ctx ladder_ctx;
+	struct snake_global_fallback_candidate cpu_candidate;
+	struct snake_global_fallback_candidate local_candidate;
+	struct snake_global_fallback_candidate remote_candidate;
+	u64 fallback;
+	s32 cpu;
+	s32 result;
+};
+
+static __noinline long queue_dispatch_try_cpu_fallback(
+	struct snake_global_fallback_loop_ctx *loop_ctx)
+{
+	struct snake_global_fallback_candidate *candidate =
+		&loop_ctx->cpu_candidate;
+	s32 cpu = loop_ctx->cpu;
+
+	if (candidate->rung >= 3 || cpu < 0 || cpu >= nr_cpu_ids ||
+	    cpu >= SNAKE_MAX_CPUS) {
+		loop_ctx->result = -EINVAL;
+		return 1;
+	}
+	stat_inc(&loop_ctx->ladder_ctx,
+		 SNAKE_STAT_DISPATCH_RUNG_FALLBACK_ATTEMPT_BASE + candidate->rung);
+	if (queue_global_move(&loop_ctx->ladder_ctx, candidate->dsq,
+			      SNAKE_QUEUE_CLASS_AFFINITY)) {
+		stat_inc(&loop_ctx->ladder_ctx,
+			 SNAKE_STAT_DISPATCH_RUNG_FALLBACK_HIT_BASE + candidate->rung);
+		loop_ctx->result = 1;
+		return 1;
+	}
+	stat_inc(&loop_ctx->ladder_ctx,
+		 SNAKE_STAT_DISPATCH_RUNG_FALLBACK_MISS_BASE + candidate->rung);
+	return 0;
+}
+
+static __noinline long queue_dispatch_try_local_fallback(
+	struct snake_global_fallback_loop_ctx *loop_ctx)
+{
+	struct snake_global_fallback_candidate *candidate =
+		&loop_ctx->local_candidate;
+	s32 cpu = loop_ctx->cpu;
+
+	if (candidate->rung >= 3 || cpu < 0 || cpu >= nr_cpu_ids ||
+	    cpu >= SNAKE_MAX_CPUS) {
+		loop_ctx->result = -EINVAL;
+		return 1;
+	}
+	stat_inc(&loop_ctx->ladder_ctx,
+		 SNAKE_STAT_DISPATCH_RUNG_FALLBACK_ATTEMPT_BASE + candidate->rung);
+	if (queue_global_move(&loop_ctx->ladder_ctx, candidate->dsq,
+			      SNAKE_QUEUE_CLASS_NORMAL)) {
+		stat_inc(&loop_ctx->ladder_ctx,
+			 SNAKE_STAT_DISPATCH_RUNG_FALLBACK_HIT_BASE + candidate->rung);
+		loop_ctx->result = 1;
+		return 1;
+	}
+	stat_inc(&loop_ctx->ladder_ctx,
+		 SNAKE_STAT_DISPATCH_RUNG_FALLBACK_MISS_BASE + candidate->rung);
+	return 0;
+}
+
+static __noinline long queue_dispatch_try_remote_fallback(
+	struct snake_global_fallback_loop_ctx *loop_ctx)
+{
+	struct snake_global_fallback_candidate *candidate =
+		&loop_ctx->remote_candidate;
+	s32 cpu = loop_ctx->cpu;
+
+	if (candidate->rung >= 3 || cpu < 0 || cpu >= nr_cpu_ids ||
+	    cpu >= SNAKE_MAX_CPUS) {
+		loop_ctx->result = -EINVAL;
+		return 1;
+	}
+	stat_inc(&loop_ctx->ladder_ctx,
+		 SNAKE_STAT_DISPATCH_RUNG_FALLBACK_ATTEMPT_BASE + candidate->rung);
+	if (queue_global_move(&loop_ctx->ladder_ctx, candidate->dsq,
+			      SNAKE_QUEUE_CLASS_NORMAL)) {
+		stat_inc(&loop_ctx->ladder_ctx,
+			 SNAKE_STAT_DISPATCH_RUNG_FALLBACK_HIT_BASE + candidate->rung);
+		loop_ctx->result = 1;
+		return 1;
+	}
+	stat_inc(&loop_ctx->ladder_ctx,
+		 SNAKE_STAT_DISPATCH_RUNG_FALLBACK_MISS_BASE + candidate->rung);
+	return 0;
+}
+
+static long queue_dispatch_fallback_callback(
+	u32 offset, struct snake_global_fallback_loop_ctx *loop_ctx)
+{
+	u32 source;
+
+	if (offset >= SNAKE_DISPATCH_FALLBACK_MAX)
+		return 1;
+	source = (loop_ctx->fallback >>
+		  (offset * SNAKE_DISPATCH_FALLBACK_BITS)) &
+		 SNAKE_DISPATCH_FALLBACK_MASK;
+	if (source == SNAKE_DISPATCH_FALLBACK_CPU)
+		return queue_dispatch_try_cpu_fallback(loop_ctx);
+	if (source == SNAKE_DISPATCH_FALLBACK_LOCAL)
+		return queue_dispatch_try_local_fallback(loop_ctx);
+	if (source == SNAKE_DISPATCH_FALLBACK_REMOTE)
+		return queue_dispatch_try_remote_fallback(loop_ctx);
+	loop_ctx->result = -EINVAL;
+	return 1;
+}
+
+static __always_inline s32 queue_dispatch_try_fallbacks(
+	struct snake_ladder_ctx *ctx,
+	const struct snake_global_consume_args *args)
+{
+	struct snake_global_fallback_loop_ctx loop_ctx;
+	long nr_loops;
+
+	if (!args->cpu_candidate || !args->local_candidate ||
+	    !args->remote_candidate)
+		return -EINVAL;
+	loop_ctx = (struct snake_global_fallback_loop_ctx){
+		.ladder_ctx = *ctx,
+		.cpu_candidate = {
+			.dsq = args->cpu_candidate->dsq.raw,
+			.rung = 0,
+		},
+		.local_candidate = {
+			.dsq = args->local_candidate->dsq.raw,
+			.rung = 1,
+		},
+		.remote_candidate = {
+			.dsq = args->remote_candidate->dsq.raw,
+			.rung = 2,
+		},
+		.fallback = args->fallback,
+		.cpu = args->cpu,
+	};
+	nr_loops = bpf_loop(SNAKE_DISPATCH_FALLBACK_MAX,
+			    queue_dispatch_fallback_callback, &loop_ctx, 0);
+	if (nr_loops < 0)
+		return nr_loops;
+	return loop_ctx.result;
+}
+
+static __noinline s32 queue_dispatch_consume_min_vtime(
+	struct snake_ladder_ctx *ctx,
+	const struct snake_global_consume_args *args)
+{
+	u64 min_vtime = 0;
+	u64 cpu_vtime = 0, local_vtime = 0, remote_vtime = 0;
+	u32 preference, winner_source = SNAKE_QUEUE_INPUT_INVALID;
+	u32 nr_min = 0;
+	bool cpu_valid = args->cpu_candidate && args->cpu_candidate->valid != 0;
+	bool local_valid =
+		args->local_candidate && args->local_candidate->valid != 0;
+	bool remote_valid =
+		args->remote_candidate && args->remote_candidate->valid != 0;
+	bool found = false;
+
+	if (cpu_valid) {
+		cpu_vtime = args->cpu_candidate->vtime;
+		min_vtime = cpu_vtime;
+		found = true;
+	}
+	if (local_valid) {
+		local_vtime = args->local_candidate->vtime;
+	}
+	if (local_valid && (!found || time_before(local_vtime, min_vtime))) {
+		min_vtime = local_vtime;
+		found = true;
+	}
+	if (remote_valid) {
+		remote_vtime = args->remote_candidate->vtime;
+	}
+	if (remote_valid && (!found || time_before(remote_vtime, min_vtime))) {
+		min_vtime = remote_vtime;
+		found = true;
+	}
+	if (found) {
+		if (cpu_valid && cpu_vtime == min_vtime)
+			nr_min++;
+		if (local_valid && local_vtime == min_vtime)
+			nr_min++;
+		if (remote_valid && remote_vtime == min_vtime)
+			nr_min++;
+		if (nr_min > 1)
+			stat_inc(ctx, SNAKE_STAT_VTIME_EQUAL_HEAD_TIES);
+		preference = args->state->next_equal_source;
+		if (preference < SNAKE_QUEUE_INPUT_CPU ||
+		    preference > SNAKE_QUEUE_INPUT_REMOTE)
+			preference = SNAKE_QUEUE_INPUT_CPU;
+		if (preference == SNAKE_QUEUE_INPUT_CPU) {
+			if (cpu_valid && cpu_vtime == min_vtime)
+				winner_source = SNAKE_QUEUE_INPUT_CPU;
+			else if (local_valid && local_vtime == min_vtime)
+				winner_source = SNAKE_QUEUE_INPUT_LOCAL;
+			else
+				winner_source = SNAKE_QUEUE_INPUT_REMOTE;
+		} else if (preference == SNAKE_QUEUE_INPUT_LOCAL) {
+			if (local_valid && local_vtime == min_vtime)
+				winner_source = SNAKE_QUEUE_INPUT_LOCAL;
+			else if (remote_valid && remote_vtime == min_vtime)
+				winner_source = SNAKE_QUEUE_INPUT_REMOTE;
+			else
+				winner_source = SNAKE_QUEUE_INPUT_CPU;
+		} else {
+			if (remote_valid && remote_vtime == min_vtime)
+				winner_source = SNAKE_QUEUE_INPUT_REMOTE;
+			else if (cpu_valid && cpu_vtime == min_vtime)
+				winner_source = SNAKE_QUEUE_INPUT_CPU;
+			else
+				winner_source = SNAKE_QUEUE_INPUT_LOCAL;
+		}
+		args->state->next_equal_source = winner_source + 1;
+		if (args->state->next_equal_source > SNAKE_QUEUE_INPUT_REMOTE)
+			args->state->next_equal_source = SNAKE_QUEUE_INPUT_CPU;
+		{
+			s32 ret = queue_dispatch_try_selected(ctx, args, winner_source);
+
+			if (ret)
+				return ret;
+		}
+		stat_inc(ctx, SNAKE_STAT_DISPATCH_RUNG_MOVE_MISS_BASE +
+				      args->consume_rung);
+	}
+
+	{
+		s32 ret = queue_dispatch_try_fallbacks(ctx, args);
+
+		if (ret)
+			return ret;
+	}
+	queue_global_replenish(ctx, args->prev);
+	return 0;
+}
+
+/* Keep shared ladder state and fixed rung metadata out of this stack frame. */
+struct snake_global_dispatch_loop_ctx {
+	struct task_struct *prev;
+	struct snake_queue_cpu_state *state;
+	struct snake_cpu_queue *cpuq;
+	struct snake_queue_candidate cpu_candidate;
+	struct snake_queue_candidate local_candidate;
+	struct snake_queue_candidate remote_candidate;
+	s32 cpu;
+	u64 callback_started_at;
+};
+
+static __noinline s32 queue_global_dispatch_peek_rung(
+	struct snake_ladder_ctx *ctx,
+	struct snake_global_dispatch_loop_ctx *loop_ctx, u32 index)
+{
+	const struct snake_queue_rung *rung;
+	bool hit = false;
+	s32 ret;
+	u64 rung_started_at;
+
+	if (index >= 3 || index >= ctx->ladder->nr_dispatch_rungs)
+		return -EINVAL;
+	rung = MEMBER_VPTR(ctx->ladder->dispatch_rungs, [index]);
+	if (!rung)
+		return -EINVAL;
+	stat_inc(ctx, SNAKE_STAT_DISPATCH_RUNG_ATTEMPT_BASE + index);
+	rung_started_at = rung_timing_start(loop_ctx->callback_started_at);
+	if (rung->opcode != SNAKE_DISPATCH_OP_PEEK) {
+		ret = -EINVAL;
+	} else if (index == 0) {
+		if (rung->input != SNAKE_QUEUE_INPUT_CPU) {
+			ret = -EINVAL;
+		} else {
+			ret = queue_dispatch_peek_cpu(loop_ctx->cpu,
+						      &loop_ctx->cpu_candidate);
+			hit = loop_ctx->cpu_candidate.valid;
+		}
+	} else if (index == 1) {
+		if (rung->input != SNAKE_QUEUE_INPUT_LOCAL) {
+			ret = -EINVAL;
+		} else {
+			ret = queue_dispatch_peek_local(loop_ctx->cpuq,
+							&loop_ctx->local_candidate);
+			hit = loop_ctx->local_candidate.valid;
+		}
+	} else if (index == 2) {
+		if (rung->input != SNAKE_QUEUE_INPUT_REMOTE) {
+			ret = -EINVAL;
+		} else {
+			ret = queue_dispatch_peek_remote(
+				loop_ctx->cpuq, loop_ctx->state, loop_ctx->cpu,
+				&loop_ctx->remote_candidate);
+			hit = loop_ctx->remote_candidate.valid;
+		}
+	} else {
+		ret = -EINVAL;
+	}
+	rung_timing_finish(ctx, SNAKE_RUNG_LADDER_DISPATCH, index,
+			   rung_started_at);
+	if (ret < 0) {
+		stat_inc(ctx, SNAKE_STAT_DISPATCH_RUNG_ERROR_BASE + index);
+		return ret;
+	}
+	stat_inc(ctx,
+		 (hit ? SNAKE_STAT_DISPATCH_RUNG_HIT_BASE :
+			SNAKE_STAT_DISPATCH_RUNG_MISS_BASE) +
+		 index);
+	return 0;
+}
+
+static __noinline s32 queue_global_dispatch_consume_rung(
+	struct snake_ladder_ctx *ctx,
+	struct snake_global_dispatch_loop_ctx *loop_ctx, u32 index)
+{
+	const struct snake_queue_rung *rung;
+	struct snake_global_consume_args args;
+	s32 ret;
+	u64 rung_started_at;
+
+	if (index != 3 || index >= ctx->ladder->nr_dispatch_rungs)
+		return -EINVAL;
+	rung = MEMBER_VPTR(ctx->ladder->dispatch_rungs, [index]);
+	if (!rung)
+		return -EINVAL;
+	stat_inc(ctx, SNAKE_STAT_DISPATCH_RUNG_ATTEMPT_BASE + index);
+	rung_started_at = rung_timing_start(loop_ctx->callback_started_at);
+	if (rung->opcode != SNAKE_DISPATCH_OP_CONSUME ||
+	    rung->input != SNAKE_QUEUE_INPUT_MIN_VTIME) {
+		ret = -EINVAL;
+	} else {
+		args = (struct snake_global_consume_args){
+			.prev = loop_ctx->prev,
+			.state = loop_ctx->state,
+			.cpu_candidate = &loop_ctx->cpu_candidate,
+			.local_candidate = &loop_ctx->local_candidate,
+			.remote_candidate = &loop_ctx->remote_candidate,
+			.fallback = rung->data,
+			.cpu = loop_ctx->cpu,
+			.consume_rung = index,
+		};
+		ret = queue_dispatch_consume_min_vtime(ctx, &args);
+	}
+	rung_timing_finish(ctx, SNAKE_RUNG_LADDER_DISPATCH, index,
+			   rung_started_at);
+	if (ret < 0) {
+		stat_inc(ctx, SNAKE_STAT_DISPATCH_RUNG_ERROR_BASE + index);
+		return ret;
+	}
+	stat_inc(ctx,
+		 (ret ? SNAKE_STAT_DISPATCH_RUNG_HIT_BASE :
+			SNAKE_STAT_DISPATCH_RUNG_MISS_BASE) +
+		 index);
+	return ret;
+}
+
+static __noinline int queue_global_ladder_dispatch(
+	struct snake_ladder_ctx *ctx, s32 cpu, struct task_struct *prev,
+	struct snake_queue_cpu_state *state,
+	u64 callback_started_at)
+{
+	struct snake_cpu_queue *cpuq = queue_cpu(cpu);
+	struct snake_global_dispatch_loop_ctx loop_ctx = {
+		.prev = prev,
+		.state = state,
+		.cpuq = cpuq,
+		.cpu = cpu,
+		.callback_started_at = callback_started_at,
+	};
+	s32 ret;
+
+	if (!cpuq || ctx->ladder->nr_dispatch_rungs != 4)
+		return -EINVAL;
+	ret = queue_global_dispatch_peek_rung(ctx, &loop_ctx, 0);
+	if (ret)
+		return ret;
+	ret = queue_global_dispatch_peek_rung(ctx, &loop_ctx, 1);
+	if (ret)
+		return ret;
+	ret = queue_global_dispatch_peek_rung(ctx, &loop_ctx, 2);
+	if (ret)
+		return ret;
+	ret = queue_global_dispatch_consume_rung(ctx, &loop_ctx, 3);
+	return ret < 0 ? ret : 0;
+}
+
 struct snake_queue_dispatch_loop_ctx {
 	struct snake_ladder_ctx	     ladder_ctx;
 	struct task_struct	    *prev;
@@ -419,17 +1006,26 @@ queue_ladder_dispatch_callback(u32				     step,
 		return 1;
 	}
 	rung_started_at = rung_timing_start(loop_ctx->callback_started_at);
+	stat_inc(&loop_ctx->ladder_ctx,
+		 SNAKE_STAT_DISPATCH_RUNG_ATTEMPT_BASE + index);
 	result = queue_fairness_dispatch_source(&loop_ctx->ladder_ctx, cpuq,
 						loop_ctx->cpu, loop_ctx->prev,
 						rung->opcode, &loop_ctx->fine);
 	rung_timing_finish(&loop_ctx->ladder_ctx, SNAKE_RUNG_LADDER_DISPATCH,
 			   index, rung_started_at);
 	if (result < 0) {
+		stat_inc(&loop_ctx->ladder_ctx,
+			 SNAKE_STAT_DISPATCH_RUNG_ERROR_BASE + index);
 		loop_ctx->result = result;
 		return 1;
 	}
-	if (!result)
+	if (!result) {
+		stat_inc(&loop_ctx->ladder_ctx,
+			 SNAKE_STAT_DISPATCH_RUNG_MISS_BASE + index);
 		return 0;
+	}
+	stat_inc(&loop_ctx->ladder_ctx,
+		 SNAKE_STAT_DISPATCH_RUNG_HIT_BASE + index);
 	index++;
 	if (index >= loop_ctx->ladder_ctx.ladder->nr_dispatch_rungs)
 		index = 0;
@@ -478,10 +1074,15 @@ static __always_inline int queue_ladder_dispatch(
 		state->generation	  = ctx->ladder->generation;
 		state->next_dispatch_rung = 0;
 		state->next_equal_class	  = SNAKE_QUEUE_CLASS_NORMAL;
+		state->next_remote_queue  = cpuq->normal_queue_index + 1;
+		state->next_equal_source  = SNAKE_QUEUE_INPUT_CPU;
 		state->initialized	  = 1;
 	}
 	fine_timing_finish(fine, SNAKE_FINE_TIMING_DISPATCH_STATE_LOOKUP,
 			   stage_started_at);
+	if (queue_global_mode_enabled())
+		return queue_global_ladder_dispatch(ctx, cpu, prev, state,
+						    callback_started_at);
 	if (ctx->ladder->nr_dispatch_rungs == 1) {
 		const struct snake_queue_rung *only =
 			MEMBER_VPTR(ctx->ladder->dispatch_rungs, [0]);
@@ -492,6 +1093,7 @@ static __always_inline int queue_ladder_dispatch(
 		if (!only)
 			return -EINVAL;
 		if (only->opcode == SNAKE_DISPATCH_OP_MIN_VTIME) {
+			stat_inc(ctx, SNAKE_STAT_DISPATCH_RUNG_ATTEMPT_BASE);
 			args = (struct snake_queue_dispatch_min_args){
 				.fine		  = fine,
 				.equal_preference = &state->next_equal_class,
@@ -504,9 +1106,15 @@ static __always_inline int queue_ladder_dispatch(
 			rung_timing_finish(ctx, SNAKE_RUNG_LADDER_DISPATCH, 0,
 					   rung_started_at);
 			if (result < 0)
+				stat_inc(ctx,
+					 SNAKE_STAT_DISPATCH_RUNG_ERROR_BASE);
+			if (result < 0)
 				return result;
-			if (result)
+			if (result) {
+				stat_inc(ctx, SNAKE_STAT_DISPATCH_RUNG_HIT_BASE);
 				return 0;
+			}
+			stat_inc(ctx, SNAKE_STAT_DISPATCH_RUNG_MISS_BASE);
 			stage_started_at = fine_timing_start(fine);
 			result = queue_fairness_replenish(ctx, cpuq, prev);
 			fine_timing_finish(fine,

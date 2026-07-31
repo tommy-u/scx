@@ -60,9 +60,11 @@ static __noinline void rung_timing_finish(const struct snake_ladder_ctx *ctx,
 					  u32 ladder, u32 rung, u64 started_at)
 {
 	struct snake_rung_timing_event event = {};
+	u32 max_rungs = ladder == SNAKE_RUNG_LADDER_IDLE ?
+				SNAKE_MAX_RUNGS : SNAKE_MAX_QUEUE_RUNGS;
 
 	if (!started_at || ctx->slot >= SNAKE_LADDER_SLOTS ||
-	    ladder >= SNAKE_NR_RUNG_LADDERS || rung >= SNAKE_MAX_RUNGS)
+	    ladder >= SNAKE_NR_RUNG_LADDERS || rung >= max_rungs)
 		return;
 	event.generation = ctx->ladder->generation;
 	event.elapsed_ns = bpf_ktime_get_ns() - started_at;

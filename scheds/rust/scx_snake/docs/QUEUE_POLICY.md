@@ -1,10 +1,13 @@
-# Cell Queue Policy
+# Queue Policies
 
-Cell queue policies add a resource allocation and custom-DSQ layer to Snake's
-existing task-cell annotations. They are experimental, require
-`--fairness vtime`, and leave FIFO as the scheduler default.
+Queue policies replace Snake's default global VTIME storage with an
+attachment-time custom-DSQ topology. The global `llc` layout shards one fairness
+domain by cache locality; `cell` and `cell_llc` add resource allocation to task
+cell annotations. All queue policies are experimental, require `--fairness
+vtime`, and leave FIFO as the scheduler default.
 
-See [`../examples/cell-queues.toml`](../examples/cell-queues.toml),
+See [`../examples/kernel-default-sim.toml`](../examples/kernel-default-sim.toml),
+[`../examples/cell-queues.toml`](../examples/cell-queues.toml),
 [`../examples/cell-llc-queues.toml`](../examples/cell-llc-queues.toml),
 [`../examples/cell-min-vtime.toml`](../examples/cell-min-vtime.toml), and
 [`../examples/cell-borrowing.toml`](../examples/cell-borrowing.toml) for
@@ -15,6 +18,30 @@ This document is the configuration and resource-topology reference. See
 [`CELL_POLICY.md`](CELL_POLICY.md) for live task annotations.
 
 ## Configuration
+
+### Global LLC queues
+
+```toml
+[queues]
+layout = "llc"
+enqueue = [
+  { action = "try_insert", target = "local" },
+  { action = "insert", target = "cpu" },
+]
+dispatch = [
+  { action = "peek", source = "cpu" },
+  { action = "peek", source = "local" },
+  { action = "peek", source = "remote" },
+  { action = "consume", operation = "min_vtime", fallback = ["cpu", "local", "remote"] },
+]
+```
+
+The `llc` layout rejects cell declarations, cell placement scopes, and
+userspace membership. If its callback ladders are omitted, Snake supplies the
+exact ladders above. Userspace resolves CPU-to-LLC membership into flat queue
+descriptors and consumer masks; BPF receives no LLC topology graph.
+
+### Cell queues
 
 ```toml
 [queues]
@@ -47,15 +74,14 @@ operation = "pick_idle"
 scope = "task_allowed"
 ```
 
-`layout` is either `cell` or `cell_llc`. If both callback ladders are omitted,
-Snake uses enqueue `[cell, affinity]` and dispatch `[affinity, cell]`. If either
-is specified, both must be specified explicitly. `cell0_cpu_weight` defaults to
-1.
+For `cell` and `cell_llc`, omitting both callback ladders selects enqueue
+`[cell, affinity]` and dispatch `[affinity, cell]`. If either is specified, both
+must be specified explicitly. `cell0_cpu_weight` defaults to 1.
 
 ## Cells and CPU ownership
 
-Queue mode turns overlapping CPU declarations into an attachment-time resource
-allocation:
+The two cell layouts turn overlapping CPU declarations into an attachment-time
+resource allocation:
 
 - Cell ID 0 is reserved for a synthetic cell containing unannotated tasks.
   It claims every online CPU and uses `cell0_cpu_weight`.
@@ -104,26 +130,39 @@ Snake creates all queue-policy DSQs when the scheduler attaches.
 
 | Layout | Normal VTIME DSQs | Clock |
 | --- | --- | --- |
+| `llc` | One per discovered LLC | One global clock shared by every queue |
 | `cell` | One per cell | One per cell |
 | `cell_llc` | One for each cell/LLC pair that owns at least one CPU | One per cell, shared by all of that cell's LLC shards |
 
-Both layouts also create exactly one affinity escape DSQ per online CPU. Each
-affinity DSQ uses the clock of the cell that owns its CPU. Snake does not create
-a cell-by-CPU matrix of DSQs or any per-CPU clocks. In particular, `cell_llc`
-creates only populated ownership pairs, not the Cartesian product of all cells
-and LLCs. Every normal queue owns at least one CPU, so there are never more
-normal queues than online CPUs. CPU IDs may be sparse; descriptors remain keyed
-by the real CPU IDs.
+Every layout also creates exactly one affinity-safe DSQ per online CPU. In
+`llc`, all normal and CPU queues use the global clock. In cell layouts, each
+affinity queue uses the clock of the cell that owns its CPU. Snake does not
+create a cell-by-CPU matrix or any per-CPU clocks. `cell_llc` creates only
+populated ownership pairs, not the Cartesian product of all cells and LLCs.
+Every normal queue owns at least one CPU, so there are never more normal queues
+than online CPUs. CPU IDs may be sparse; descriptors remain keyed by real IDs.
 
-The affinity queues exist because a task whose affinity excludes any CPU in
-its cell's primary mask cannot safely sit on a normal DSQ consumed by all of
-those CPUs. Keeping one ordered escape queue per CPU provides forward progress
-and preserves VTIME ordering for pinned tasks without introducing per-CPU
-fairness clocks.
+In cell layouts, the affinity queues exist because a task whose affinity
+excludes any CPU in its cell's primary mask cannot safely sit on a normal DSQ
+consumed by all of those CPUs. Keeping one ordered escape queue per CPU provides
+forward progress and preserves VTIME ordering for pinned tasks without
+introducing per-CPU fairness clocks.
 
 ## Enqueue ladder
 
-The enqueue ladder is a first-success sequence:
+The `llc` enqueue ladder is a first-success sequence:
+
+- `try_insert(local)` maps the selected or fallback CPU to its normal queue. It
+  succeeds only if that queue's complete consumer mask is a subset of the
+  task's live allowed mask.
+- terminal `insert(cpu)` stores the task in one allowed CPU's ordered escape
+  queue. This is the affinity-safe path; queue depth does not influence the
+  choice.
+
+An explicit `llc` enqueue ladder must contain exactly those two rungs in that
+order. Snake rejects omitted, duplicated, reordered, or additional targets.
+
+The cell-layout enqueue ladder is also first-success:
 
 - `cell` inserts into the task cell's normal VTIME DSQ. It succeeds only when
   the task may run on every CPU in that cell's primary mask. For `cell_llc`,
@@ -131,12 +170,32 @@ The enqueue ladder is a first-success sequence:
 - `affinity` inserts into an allowed CPU's affinity escape DSQ. It is the
   required terminal fallback.
 
-Targets cannot be duplicated. `affinity` must be present and terminal. A
-policy that enqueues to `cell` must also dispatch from `cell`.
+Targets cannot be duplicated. In cell layouts, `affinity` must be present and
+terminal, and a policy that enqueues to `cell` must dispatch from `cell`.
 
 ## Dispatch ladder
 
-The dispatch ladder either lists `cell` and `affinity` sources or contains the
+The `llc` dispatch ladder first peeks candidates without moving them:
+
+1. the dispatching CPU's per-CPU queue;
+2. its local normal queue;
+3. one remote candidate found by a bounded scan from a per-CPU rotating cursor.
+
+The terminal `consume(min_vtime)` rung selects the earliest candidate under the
+one global clock. Exact ties rotate by source. A selected atomic move can miss
+because the head changed or its affinity excludes the dispatching CPU. The
+consume rung then makes at most one direct attempt per configured fallback
+source, normally CPU, local, remote. Consume never loops. The remote peek may
+scan the configured queues once, advancing past local, empty, or
+head-incompatible queues until it finds one eligible candidate. Its cursor
+therefore cannot be pinned by a hot or unusable shard.
+
+An explicit `llc` dispatch ladder must contain exactly one `peek` for each of
+`cpu`, `local`, and `remote`, followed by one terminal `consume(min_vtime)`.
+The three peeks may be ordered freely. The consume fallback must also name all
+three sources exactly once; its order is independently configurable.
+
+Cell-layout dispatch either lists `cell` and `affinity` sources or contains the
 single combined operation:
 
 ```toml
@@ -162,7 +221,11 @@ source consumes only that CPU's escape queue.
 
 ## Clocks and task coordinates
 
-Normal queues use one VTIME clock per cell. All `cell_llc` shards for a cell
+The `llc` layout has one global VTIME coordinate and clock. LLCs are storage and
+consumer-locality groups, not entitlements. Normal queues and per-CPU escape
+queues therefore compare raw vruntimes directly.
+
+Cell layouts use one VTIME clock per cell. All `cell_llc` shards for a cell
 share that clock, so changing LLC storage does not create a new entitlement
 domain.
 
@@ -180,9 +243,9 @@ to the old and new cell clocks, clamped to one VTIME slice. Raw values are
 compared only after both candidates are in the same CPU-owner cell domain.
 [`FAIRNESS.md`](FAIRNESS.md) gives the charging and bounded-lag equations.
 
-## Borrowing rung
+## Cell borrowing rung
 
-Queue mode gives the placement ladder two cell scopes:
+Cell layouts give the placement ladder two cell scopes:
 
 - `task_cell` searches the task cell's primary mask.
 - `task_cell_borrowable` searches its borrowable mask.
@@ -225,17 +288,18 @@ idle capacity.
 Queue topology is attachment-time state because custom DSQs cannot be removed
 and recreated as part of an atomic ladder publication. A live policy update
 must resolve to the exact same layout, cells, weights, primary allocation,
-borrowable masks, normal queues, and affinity queues. Restart Snake to change
-any of them.
+borrowable masks, normal queues, and CPU queues. For `llc`, CPU-to-local routes
+and normal consumer masks must also match. Restart Snake to change any of them.
 
-Callback ladders are part of the double-buffered policy generation. Dispatch
-sources may be reordered, a full source pair may switch to or from `min_vtime`,
-and a previously unused cell target/source pair may be added when the
-attachment-time topology already contains its queues. The enqueue ladder must
-still keep `affinity` terminal. A live update may not
-remove an active enqueue target or represented dispatch class: work queued by
-the old generation could otherwise be stranded. Placement-rung changes remain
-live-updateable when the queue topology is unchanged.
+Callback ladders are part of the double-buffered policy generation. Cell
+dispatch sources may be reordered, a full source pair may switch to or from
+`min_vtime`, and a previously unused cell target/source pair may be added when
+the attachment-time topology already contains its queues. The cell enqueue
+ladder must still keep `affinity` terminal. The `llc` layout retains its
+validated peek/consume source set and terminal CPU enqueue escape. A live update
+may not remove an active enqueue target or represented dispatch class: work
+queued by the old generation could otherwise be stranded. Placement-rung
+changes remain live-updateable when the queue topology is unchanged.
 
 A live task-cell assignment is different from a topology update. If the task
 is running when its annotation changes, dispatch suppresses keep-running slice
@@ -246,19 +310,27 @@ CPU-bound task from remaining indefinitely in the old cell.
 A task already linked on a normal DSQ cannot be atomically removed when its
 annotation changes. If the old cell dequeues it first, Snake preserves that
 queue decision for one execution: runtime and vruntime remain charged to the
-old cell. The pending-rehome check prevents slice renewal, and queue mode's
+old cell. The pending-rehome check prevents slice renewal, and cell queue mode's
 `SCX_OPS_ENQ_LAST` setting forces even an isolated previous task through the
 following enqueue. That enqueue translates the task to its requested cell
-clock, or synthetic cell 0 after a clear. An affinity DSQ is keyed by CPU and ordered in that CPU owner's
-cell clock. A task dequeued there may adopt the requested task-cell identity in
-`running`; its affinity coordinate remains relative to the executing CPU
-owner's clock and is translated if a later target belongs to another owner
-cell.
+clock, or synthetic cell 0 after a clear. An affinity DSQ is keyed by CPU and
+ordered in that CPU owner's cell clock. A task dequeued there may adopt the
+requested task-cell identity in `running`; its affinity coordinate remains
+relative to the executing CPU owner's clock and is translated if a later target
+belongs to another owner cell.
 
 ## Accounting and inspection
 
-`--stats` reports each cell's total, primary, borrowed, and lent runtime,
-normal and affinity enqueues and execution selections, and clock transitions.
+All queue layouts report enqueue and dispatch rung attempts, hits, misses, and
+errors. Dispatch peek rungs also report arbitration selections; the consume
+path reports selected atomic move misses from head changes or affinity rejection and
+fallback attempts, hits, and misses. These counters obey `attempts = hits +
+misses + errors` and `fallback_attempts =
+fallback_hits + fallback_misses`.
+
+For cell layouts, `--stats` reports each cell's total, primary, borrowed, and
+lent runtime, normal and affinity enqueues and execution selections, and clock
+transitions.
 The global
 `queue_rehome_preemptions` counter records dispatches that forced an expired
 task through enqueue to complete a live reassignment.
@@ -279,8 +351,8 @@ instead of being renewed or compared across cell clocks.
 
 The compiled-policy dump includes the resolved queue topology. The web
 inspector shows the placement, enqueue, and dispatch ladders; fairness and clock
-model; synthetic cell 0 and dense cell indices; weights and resolved primary and
-borrowable masks; normal DSQ/LLC consumers; and each CPU's owner cell, normal
-DSQ, and affinity DSQ. Per-queue depth and per-cell enqueue, dispatch,
-borrowing, lending, and clock-transition metrics remain available through
-`--stats` rather than the topology tables.
+model; normal DSQ consumers; and each CPU's local normal and per-CPU route. Cell
+layouts additionally show synthetic cell 0, dense cell indices, weights, and
+resolved primary and borrowable masks. Per-queue depth and per-cell enqueue,
+dispatch, borrowing, lending, and clock-transition metrics remain available
+through `--stats` rather than the topology tables.

@@ -11,7 +11,7 @@ INSPECTOR_MANIFEST := $(REPO_ROOT)/tools/scx_snake_inspector/Cargo.toml
 INSPECTOR_BIN := $(REPO_ROOT)/tools/scx_snake_inspector/target/release/scx_snake_inspector
 
 SUDO ?= sudo
-POLICY ?= kernel-default-sim
+POLICY ?= kernel-default
 STATS ?= 1
 FAIRNESS ?= fifo
 FAIRNESS_CPU ?=
@@ -24,11 +24,12 @@ CELL ?= 1
 DEMO_INTERVAL ?= 2
 ART_INTERVAL ?= 10
 ART_CYCLES ?= 0
-RESTORE_POLICY ?= kernel-default-sim
+RESTORE_POLICY ?= kernel-default
 CELL_DEMO := $(SNAKE_DIR)/interactive/cell-demo.sh
 FAIRNESS_DEMO := $(SNAKE_DIR)/interactive/fairness-demo.sh
 
-POLICIES := basic kernel-default-sim kernel-default llc llc-random llc-half llc-half-random llc-whole-core llc-whole-core-random previous-only random-idle
+LIVE_POLICIES := basic kernel-default llc llc-random llc-half llc-half-random llc-whole-core llc-whole-core-random previous-only random-idle
+POLICIES := $(LIVE_POLICIES)
 
 GREEN := \033[0;32m
 BOLD_GREEN := \033[1;32m
@@ -60,7 +61,6 @@ help:
 	@printf "  $(YELLOW)*$(NC) $(GREEN)%-31s$(NC) %s\n" "stop" "Stop Snake gracefully"
 	@printf "\n$(BLUE)Policy switches$(NC)\n"
 	@printf "    $(GREEN)%-31s$(NC) %s\n" "basic" "Minimal previous-CPU policy"
-	@printf "    $(GREEN)%-31s$(NC) %s\n" "kernel-default-sim" "Eight-rung userspace simulation"
 	@printf "    $(GREEN)%-31s$(NC) %s\n" "kernel-default" "Kernel default selector"
 	@printf "    $(GREEN)%-31s$(NC) %s\n" "llc" "Previous CPU, then previous LLC"
 	@printf "    $(GREEN)%-31s$(NC) %s\n" "llc-half" "Previous CPU, then half LLC"
@@ -71,6 +71,9 @@ help:
 	@printf "    $(GREEN)%-31s$(NC) %s\n" "llc-half-random" "Random idle CPU in previous half LLC"
 	@printf "    $(GREEN)%-31s$(NC) %s\n" "llc-whole-core-random" "Random wholly idle core in previous LLC"
 	@printf "    $(GREEN)%-31s$(NC) %s\n" "random-idle" "Random allowed idle CPU"
+	@printf "\n$(BLUE)Launch-only queue policy$(NC)\n"
+	@printf "    $(GREEN)%-31s$(NC) %s\n" "kernel-default-sim" "Eight-rung simulation with LLC VTIME queues"
+	@printf "%36s$(YELLOW)%s$(NC)\n" "" "make start POLICY=kernel-default-sim FAIRNESS=vtime"
 	@printf "\n$(BLUE)Bonus$(NC)\n"
 	@printf "  $(YELLOW)*$(NC) $(GREEN)%-31s$(NC) %s\n" "screensaver" "Cycle every policy until Ctrl-C"
 	@printf "%36s$(YELLOW)%s$(NC)\n" "" "SWITCH_INTERVAL=$(SWITCH_INTERVAL)"
@@ -110,7 +113,7 @@ $(POLICIES): %:
 screensaver:
 	@trap 'printf "\n$(YELLOW)Screensaver stopped$(NC)\n"; exit 0' INT TERM; \
 	while true; do \
-	  for policy in $(POLICIES); do \
+	  for policy in $(LIVE_POLICIES); do \
 	    printf "$(BOLD_GREEN)Current policy: %s$(NC)\n" "$$policy"; \
 	    if ! $(SUDO) "$(SNAKE_BIN)" --update-policy "$(POLICY_DIR)/$$policy.toml" >/dev/null; then \
 	      exit 1; \

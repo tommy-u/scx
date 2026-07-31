@@ -22,7 +22,8 @@ data flow, [`QUEUE_POLICY.md`](QUEUE_POLICY.md) for queue semantics, and
 - Expected policy misses use `-ENOENT`. Other negative results propagate to a
   sched_ext callback, which reports the unrecoverable error once.
 - Hot-path code operates on lowered opcodes, dense queue indices, generic CPU
-  masks, and task state. TOML and topology names remain in userspace.
+  masks, and task state. TOML and topology names remain in userspace; global
+  mode sees only CPU-to-local routes and normal consumer masks.
 - Verifier limits are part of the design. A bounded source loop is not enough
   when its body contains a policy interpreter; each such walk has a callback
   boundary with an explicit constant and runtime index check.
@@ -45,8 +46,8 @@ data flow, [`QUEUE_POLICY.md`](QUEUE_POLICY.md) for queue semantics, and
 | Queue state | `queue_state.h`, `queue.h` | queue maps, immutable routing lookup, queue masks, and allowed-CPU selection. |
 | Queue initialization | `queue_init.h`, `queue_ladder.h` | queue topology validation, DSQ creation, and callback-ladder validation. |
 | Queue enqueue | `queue_enqueue.h` | first-success queue target selection and ordered insertion. |
-| Queue dispatch | `queue_dispatch.h` | cyclic source selection, minimum-vtime arbitration, and replenishment. |
-| Queue fairness state | `queue_vtime.h`, `queue_fairness.h` | cell clocks, task transitions, rehome state, and queue callback composition. |
+| Queue dispatch | `queue_dispatch.h` | legacy cyclic sources, bounded global peek/consume arbitration, and replenishment. |
+| Queue fairness state | `queue_vtime.h`, `queue_fairness.h` | global or cell clocks, task transitions, rehome state, and queue callback composition. |
 | Scheduler mode | `scheduler_mode.h` | the only switch between placement-only fairness and queue-topology callbacks. |
 | Telemetry | `stats.h`, `timing.h`, `queue_timing.h` | counters, sampled callback/rung/DSQ timing, and queue residence captures. |
 
@@ -76,7 +77,10 @@ limit.
 
 ## Stable surfaces
 
-The refactor does not change:
+ABI version 21 expands queue rungs to the mechanical
+`{ opcode, input, flags, reserved, data }` record and adds global queue mode,
+normal consumer masks, per-CPU remote cursors, and queue-rung counters. From
+that version onward, the coordinated surfaces are:
 
 - map names, map types, or map key/value records;
 - sched_ext program and struct-ops names;
@@ -99,7 +103,7 @@ intended extraction order is:
 2. Reuse task-state lifetime, callback reader lifetime, statistics, and timing.
 3. Reuse generic mask materialization and topology-blind mask lookup.
 4. Reuse queue state, initialization, and routing only if Mitosis adopts the
-   same dense-cell and owner-CPU model.
+   same flat global routes or dense-cell owner model.
 5. Provide a Mitosis scheduler-mode facade and policy implementation behind
    the shared callback-facing contracts.
 

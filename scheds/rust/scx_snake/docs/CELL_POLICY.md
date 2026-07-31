@@ -8,13 +8,15 @@ Cell annotations have two policy interpretations:
 
 - Without `[queues]`, `task_cell` uses the declared CPU set as a generic
   placement mask.
-- With `[queues]`, userspace converts declarations into disjoint primary CPU
-  ownership and borrowable masks. `task_cell` means the allocated primary mask;
-  `task_cell_borrowable` means the remainder of that cell's claim.
+- With a cell queue layout (`cell` or `cell_llc`), userspace converts
+  declarations into disjoint primary CPU ownership and borrowable masks.
+  `task_cell` means the allocated primary mask; `task_cell_borrowable` means the
+  remainder of that cell's claim.
 
 The annotation format and pidfd control path are identical in both modes.
-Queue mode may additionally populate the managed layer from a cgroup-v2 policy
-described in [`CGROUP_MEMBERSHIP_PROPOSAL.md`](CGROUP_MEMBERSHIP_PROPOSAL.md).
+Cell queue mode may additionally populate the managed layer from a cgroup-v2
+policy described in
+[`CGROUP_MEMBERSHIP_PROPOSAL.md`](CGROUP_MEMBERSHIP_PROPOSAL.md).
 This document is the control-path and annotation-lifecycle reference. See
 [`QUEUE_POLICY.md`](QUEUE_POLICY.md) for queue allocation and
 [`FAIRNESS.md`](FAIRNESS.md) for service-ordering clocks.
@@ -121,20 +123,20 @@ struct {
 
 The cell rung receives `struct task_struct *p` and reads `task_cells` with
 `bpf_task_storage_get(&task_cells, p, NULL, 0)`. Placement-only mode uses
-`cell_id` directly as a generic mask-table key. Queue mode translates it to a
-dense queue-cell index; a missing annotation is the `NoCell` marker and resolves
-to synthetic cell 0. In both modes, BPF intersects the chosen mask with live `p->cpus_ptr`
-before selecting an idle CPU.
+`cell_id` directly as a generic mask-table key. Cell queue mode translates it
+to a dense queue-cell index; a missing annotation is the `NoCell` marker and
+resolves to synthetic cell 0. In both modes, BPF intersects the chosen mask
+with live `p->cpus_ptr` before selecting an idle CPU.
 
 Missing placement-only annotations, missing definitions, no idle CPU, and empty
 intersections are normal rung misses, so later policy rungs remain
 authoritative. `needs_rehome` is set by a live userspace update. Placement-only
-mode clears it on a successful cell placement; queue mode clears it after a
-scheduling callback has adopted and translated the requested identity. Queue
-dispatch declines to renew an expired running task while its annotation targets
-another cell. Queue mode enables `SCX_OPS_ENQ_LAST`, so even an otherwise
-isolated CPU-bound task returns
-through enqueue to complete the clock translation. A normal task already
+mode clears it on a successful cell placement; cell queue mode clears it after
+a scheduling callback has adopted and translated the requested identity. Cell
+queue dispatch declines to renew an expired running task while its annotation
+targets another cell. Cell queue mode enables `SCX_OPS_ENQ_LAST`, so even an
+otherwise isolated CPU-bound task returns through enqueue to complete the clock
+translation. A normal task already
 linked on its old cell DSQ cannot be removed by the annotation update. If it is
 dispatched before re-enqueue, Snake charges that one execution to the old cell,
 suppresses renewal, and adopts the new cell on its next enqueue.
@@ -208,7 +210,7 @@ The BPF ABI remains topology-blind: the rung means only "read this task's
 integer key and use the corresponding generic mask." Placement-only policies
 allow cell ID 0 and up to 1024 cell IDs in the mask-key space.
 
-## Queue-mode policy shape
+## Cell queue policy shape
 
 ```toml
 [queues]
@@ -228,7 +230,7 @@ operation = "pick_idle"
 scope = "task_cell_borrowable"
 ```
 
-Queue mode reserves ID 0 for `NoCell` tasks and permits at most 31 declared
+Cell queue mode reserves ID 0 for `NoCell` tasks and permits at most 31 declared
 cells. Userspace creates synthetic cell 0, resolves overlapping declarations
 into dense cells with disjoint primary masks, and derives borrowable masks.
 These masks do not consume generic placement mask-table slots.
@@ -255,13 +257,14 @@ also evaluates configured task-cell rungs for annotated runnable tasks. If all
 eligible cell CPUs are busy, normal fairness enqueue continues and cell
 placement is retried later.
 
-Queue mode does not re-run placement rungs from `enqueue`. The queue callback
-ladder uses the current cell identity directly. Normal-cell enqueue requires
-the task to be allowed on the complete primary mask; otherwise its terminal
-affinity target provides forward progress. A live annotation change translates
-the task's vruntime between cell clocks when a scheduling callback adopts the
-new identity. A task already linked on an old normal DSQ retains that identity
-for its next execution, then must return through enqueue before translation.
+Cell queue mode does not re-run placement rungs from `enqueue`. The queue
+callback ladder uses the current cell identity directly. Normal-cell enqueue
+requires the task to be allowed on the complete primary mask; otherwise its
+terminal affinity target provides forward progress. A live annotation change
+translates the task's vruntime between cell clocks when a scheduling callback
+adopts the new identity. A task already linked on an old normal DSQ retains that
+identity for its next execution, then must return through enqueue before
+translation.
 
 For the lifetime of the running Snake instance, annotations remain attached
 until explicitly cleared or the thread exits. Restarting or unloading Snake

@@ -410,6 +410,21 @@ fn cell_stats_distinguish_policy_mode_support_and_generation_sync() {
     );
 }
 
+#[test]
+fn cell_stats_are_not_applicable_to_llc_queue_sharding() {
+    let dashboard = dashboard();
+    dashboard.set_scheduler("snake", true, 4);
+    let mut llc_queues = callback_timing_snapshot(7, 0, 0);
+    llc_queues["queue_topology"] = json!({"layout": "llc", "cells": []});
+    dashboard.set_inspection_at(0, Some(llc_queues), None);
+    dashboard.ingest_top_metrics(100, 7, &BTreeMap::from([(0, 0)]), Some(&BTreeMap::new()));
+
+    assert_eq!(
+        dashboard.snapshot(1_000).unwrap().cell_stats.status,
+        CellStatsStatus::NotApplicable
+    );
+}
+
 #[tokio::test]
 async fn stats_reset_requires_token_and_sends_collector_command() {
     use scx_snake_inspector::collector::StatsResetResponse;

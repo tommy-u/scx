@@ -15,7 +15,7 @@ mod runtime_policy;
 mod stats;
 mod task_cells;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Write;
 use std::mem::{size_of, MaybeUninit};
@@ -35,7 +35,8 @@ use log::{debug, info, warn};
 use mask_tables::{dump_mask_tables, resolve_mask_tables, ResolvedMaskTable};
 use membership::MembershipManager;
 use policy::{
-    CompiledPolicy, CompiledRung, InputSource, Opcode, QueueDispatchSource, QueueEnqueueTarget,
+    CompiledPolicy, CompiledRung, InputSource, Opcode, QueueDispatchAction, QueueDispatchOperation,
+    QueueDispatchSource, QueueEnqueueAction, QueueEnqueueTarget,
 };
 use queue_topology::{dump_queue_topology, resolve_host_queue_topology};
 use runtime_policy::RuntimePolicy;
@@ -48,7 +49,8 @@ use scx_utils::{
     UserExitInfo,
 };
 use stats::{
-    CallbackTimingMetrics, CellMetrics, CpuMetrics, Metrics, RungMetrics, RungTimingMetrics,
+    CallbackTimingMetrics, CellMetrics, CpuMetrics, Metrics, QueueRungMetrics, RungMetrics,
+    RungTimingMetrics,
 };
 use task_cells::{ThreadCellAssignment, ThreadCellResponse};
 
@@ -269,31 +271,89 @@ fn encode_ladder(
 
     let mut enqueue_rungs = std::array::from_fn(|_| bpf_intf::snake_queue_rung {
         opcode: 0,
+        input: 0,
         flags: 0,
+        reserved: 0,
+        data: 0,
     });
     let mut dispatch_rungs = std::array::from_fn(|_| bpf_intf::snake_queue_rung {
         opcode: 0,
+        input: 0,
         flags: 0,
+        reserved: 0,
+        data: 0,
     });
     let (nr_enqueue_rungs, nr_dispatch_rungs) = if let Some(queues) = &policy.queues {
-        for (destination, target) in enqueue_rungs.iter_mut().zip(&queues.enqueue) {
-            destination.opcode = match target {
-                QueueEnqueueTarget::Cell => bpf_intf::snake_enqueue_opcode_SNAKE_ENQUEUE_OP_CELL,
-                QueueEnqueueTarget::Affinity => {
-                    bpf_intf::snake_enqueue_opcode_SNAKE_ENQUEUE_OP_AFFINITY
+        for (destination, rung) in enqueue_rungs.iter_mut().zip(&queues.enqueue) {
+            match (rung.action, rung.target) {
+                (QueueEnqueueAction::TryInsert, QueueEnqueueTarget::Cell) => {
+                    destination.opcode = bpf_intf::snake_enqueue_opcode_SNAKE_ENQUEUE_OP_CELL;
                 }
-            };
+                (QueueEnqueueAction::Insert, QueueEnqueueTarget::Affinity) => {
+                    destination.opcode = bpf_intf::snake_enqueue_opcode_SNAKE_ENQUEUE_OP_AFFINITY;
+                }
+                (QueueEnqueueAction::TryInsert, QueueEnqueueTarget::Local) => {
+                    destination.opcode = bpf_intf::snake_enqueue_opcode_SNAKE_ENQUEUE_OP_TRY_INSERT;
+                    destination.input = bpf_intf::snake_queue_input_SNAKE_QUEUE_INPUT_LOCAL;
+                }
+                (QueueEnqueueAction::Insert, QueueEnqueueTarget::Cpu) => {
+                    destination.opcode = bpf_intf::snake_enqueue_opcode_SNAKE_ENQUEUE_OP_INSERT;
+                    destination.input = bpf_intf::snake_queue_input_SNAKE_QUEUE_INPUT_CPU;
+                }
+                _ => bail!("unsupported compiled enqueue rung {}", rung.describe()),
+            }
         }
-        for (destination, source) in dispatch_rungs.iter_mut().zip(&queues.dispatch) {
-            destination.opcode = match source {
-                QueueDispatchSource::Cell => bpf_intf::snake_dispatch_opcode_SNAKE_DISPATCH_OP_CELL,
-                QueueDispatchSource::Affinity => {
-                    bpf_intf::snake_dispatch_opcode_SNAKE_DISPATCH_OP_AFFINITY
+        for (destination, rung) in dispatch_rungs.iter_mut().zip(&queues.dispatch) {
+            match (rung.action, rung.source, rung.operation) {
+                (QueueDispatchAction::Consume, Some(QueueDispatchSource::Cell), None) => {
+                    destination.opcode = bpf_intf::snake_dispatch_opcode_SNAKE_DISPATCH_OP_CELL;
                 }
-                QueueDispatchSource::MinVtime => {
-                    bpf_intf::snake_dispatch_opcode_SNAKE_DISPATCH_OP_MIN_VTIME
+                (QueueDispatchAction::Consume, Some(QueueDispatchSource::Affinity), None) => {
+                    destination.opcode = bpf_intf::snake_dispatch_opcode_SNAKE_DISPATCH_OP_AFFINITY;
                 }
-            };
+                (QueueDispatchAction::Consume, None, Some(QueueDispatchOperation::MinVtime))
+                    if rung.fallback.is_empty() =>
+                {
+                    destination.opcode =
+                        bpf_intf::snake_dispatch_opcode_SNAKE_DISPATCH_OP_MIN_VTIME;
+                }
+                (QueueDispatchAction::Peek, Some(source), None) => {
+                    destination.opcode = bpf_intf::snake_dispatch_opcode_SNAKE_DISPATCH_OP_PEEK;
+                    destination.input = match source {
+                        QueueDispatchSource::Cpu => {
+                            bpf_intf::snake_queue_input_SNAKE_QUEUE_INPUT_CPU
+                        }
+                        QueueDispatchSource::Local => {
+                            bpf_intf::snake_queue_input_SNAKE_QUEUE_INPUT_LOCAL
+                        }
+                        QueueDispatchSource::Remote => {
+                            bpf_intf::snake_queue_input_SNAKE_QUEUE_INPUT_REMOTE
+                        }
+                        _ => bail!("unsupported peek source {}", source.as_str()),
+                    };
+                }
+                (QueueDispatchAction::Consume, None, Some(QueueDispatchOperation::MinVtime)) => {
+                    destination.opcode = bpf_intf::snake_dispatch_opcode_SNAKE_DISPATCH_OP_CONSUME;
+                    destination.input = bpf_intf::snake_queue_input_SNAKE_QUEUE_INPUT_MIN_VTIME;
+                    for (index, source) in rung.fallback.iter().enumerate() {
+                        let encoded = match source {
+                            QueueDispatchSource::Cpu => {
+                                bpf_intf::snake_dispatch_fallback_SNAKE_DISPATCH_FALLBACK_CPU
+                            }
+                            QueueDispatchSource::Local => {
+                                bpf_intf::snake_dispatch_fallback_SNAKE_DISPATCH_FALLBACK_LOCAL
+                            }
+                            QueueDispatchSource::Remote => {
+                                bpf_intf::snake_dispatch_fallback_SNAKE_DISPATCH_FALLBACK_REMOTE
+                            }
+                            _ => bail!("unsupported fallback source {}", source.as_str()),
+                        };
+                        destination.data |= u64::from(encoded)
+                            << (index as u32 * bpf_intf::SNAKE_DISPATCH_FALLBACK_BITS);
+                    }
+                }
+                _ => bail!("unsupported compiled dispatch rung {}", rung.describe()),
+            }
         }
         (
             queues
@@ -685,6 +745,16 @@ struct EncodedQueueTopology {
     cpu_queues: Vec<bpf_intf::snake_cpu_queue>,
 }
 
+fn queue_mode_for_topology(topology: Option<&queue_topology::QueueTopology>) -> u32 {
+    match topology.map(|topology| topology.layout) {
+        None => bpf_intf::SNAKE_QUEUE_MODE_NONE,
+        Some(policy::QueueLayout::Cell | policy::QueueLayout::CellLlc) => {
+            bpf_intf::SNAKE_QUEUE_MODE_CELL
+        }
+        Some(policy::QueueLayout::Llc) => bpf_intf::SNAKE_QUEUE_MODE_GLOBAL,
+    }
+}
+
 fn encode_queue_topology(topology: &queue_topology::QueueTopology) -> Result<EncodedQueueTopology> {
     let mut cell_lookup = vec![0_u32; policy::MAX_CELL_IDS as usize];
     let mut cells = (0..bpf_intf::SNAKE_MAX_QUEUE_CELLS)
@@ -711,17 +781,20 @@ fn encode_queue_topology(topology: &queue_topology::QueueTopology) -> Result<Enc
             valid: 0,
             cell_index: 0,
             clock_index: 0,
-            llc_id: bpf_intf::SNAKE_QUEUE_LLC_NONE,
             consumer_cpu: 0,
-            reserved: [0; 3],
+            reserved: [0; 4],
+            consumers: bpf_intf::snake_mask_data {
+                valid: 0,
+                bits: [0; bpf_intf::SNAKE_MASK_BYTES as usize],
+            },
         })
         .collect::<Vec<_>>();
     let mut cpu_queues = (0..bpf_intf::SNAKE_MAX_CPUS)
         .map(|_| bpf_intf::snake_cpu_queue {
             valid: 0,
             owner_cell_index: 0,
-            llc_id: 0,
             normal_queue_index: 0,
+            reserved: 0,
         })
         .collect::<Vec<_>>();
 
@@ -754,14 +827,16 @@ fn encode_queue_topology(topology: &queue_topology::QueueTopology) -> Result<Enc
     for queue in &topology.normal_queues {
         normal_queues[queue.index as usize] = bpf_intf::snake_normal_queue {
             valid: 1,
-            cell_index: queue.cell_index,
-            clock_index: queue.clock_index,
-            llc_id: queue.llc_id.unwrap_or(bpf_intf::SNAKE_QUEUE_LLC_NONE),
+            cell_index: queue.cell_index.unwrap_or(bpf_intf::SNAKE_QUEUE_CELL_NONE),
+            clock_index: queue
+                .cell_index
+                .map_or(bpf_intf::SNAKE_QUEUE_CELL_NONE, |_| queue.clock_index),
             consumer_cpu: *queue
                 .consumers
                 .first()
                 .context("normal queue has no consumer CPU")?,
-            reserved: [0; 3],
+            reserved: [0; 4],
+            consumers: mask_tables::serialize_entry(&queue.consumers)?,
         };
     }
     for (&cpu, queue) in &topology.cpu_queues {
@@ -770,19 +845,18 @@ fn encode_queue_topology(topology: &queue_topology::QueueTopology) -> Result<Enc
             .with_context(|| format!("CPU {cpu} exceeds BPF queue capacity"))?;
         *destination = bpf_intf::snake_cpu_queue {
             valid: 1,
-            owner_cell_index: queue.owner_cell_index,
-            llc_id: queue.llc_id,
+            owner_cell_index: queue
+                .owner_cell_index
+                .unwrap_or(bpf_intf::SNAKE_QUEUE_CELL_NONE),
             normal_queue_index: queue.normal_queue_index,
+            reserved: 0,
         };
     }
     let nr_cpus = topology.cpu_queues.len().try_into()?;
-    let layout = match topology.layout {
-        policy::QueueLayout::Cell => bpf_intf::SNAKE_QUEUE_LAYOUT_CELL,
-        policy::QueueLayout::CellLlc => bpf_intf::SNAKE_QUEUE_LAYOUT_CELL_LLC,
-    };
+    let mode = queue_mode_for_topology(Some(topology));
     Ok(EncodedQueueTopology {
         header: bpf_intf::snake_queue_header {
-            layout,
+            mode,
             nr_cells: topology.cells.len().try_into()?,
             nr_normal_queues: topology.normal_queues.len().try_into()?,
             nr_cpus,
@@ -845,29 +919,39 @@ fn validate_queue_callback_replacement(
     let (Some(active), Some(candidate)) = (&active.queues, &candidate.queues) else {
         return Ok(());
     };
-    for target in &active.enqueue {
-        if !candidate.enqueue.contains(target) {
+    for rung in &active.enqueue {
+        if !candidate.enqueue.contains(rung) {
             bail!(
                 "cannot remove active queue enqueue target `{}` during live replacement",
-                target.as_str()
+                rung.target.as_str()
             );
         }
     }
-    let dispatch_classes = |dispatch: &[QueueDispatchSource]| {
-        let min_vtime = dispatch.contains(&QueueDispatchSource::MinVtime);
-        (
-            min_vtime || dispatch.contains(&QueueDispatchSource::Cell),
-            min_vtime || dispatch.contains(&QueueDispatchSource::Affinity),
-        )
+    let dispatch_sources = |dispatch: &[policy::QueueDispatchRung]| {
+        let mut sources = BTreeSet::new();
+        for rung in dispatch {
+            if let Some(source) = rung.source {
+                sources.insert(source);
+            }
+            if rung.operation == Some(QueueDispatchOperation::MinVtime) {
+                if rung.fallback.is_empty() {
+                    sources.insert(QueueDispatchSource::Cell);
+                    sources.insert(QueueDispatchSource::Affinity);
+                } else {
+                    sources.extend(rung.fallback.iter().copied());
+                }
+            }
+        }
+        sources
     };
-    let (active_cell, active_affinity) = dispatch_classes(&active.dispatch);
-    let (candidate_cell, candidate_affinity) = dispatch_classes(&candidate.dispatch);
-    for (active, candidate, source) in [
-        (active_cell, candidate_cell, "cell"),
-        (active_affinity, candidate_affinity, "affinity"),
-    ] {
-        if active && !candidate {
-            bail!("cannot remove active queue dispatch source `{source}` during live replacement");
+    let active_sources = dispatch_sources(&active.dispatch);
+    let candidate_sources = dispatch_sources(&candidate.dispatch);
+    for source in active_sources {
+        if !candidate_sources.contains(&source) {
+            bail!(
+                "cannot remove active queue dispatch source `{}` during live replacement",
+                source.as_str()
+            );
         }
     }
     Ok(())
@@ -1196,11 +1280,72 @@ fn aggregate_raw_stats(
             ))
         })
         .collect::<Result<BTreeMap<_, _>>>()?;
+    let enqueue_rungs = policy
+        .queues
+        .iter()
+        .flat_map(|queues| queues.enqueue.iter())
+        .enumerate()
+        .map(|(index, rung)| {
+            let index = index as u32;
+            (
+                index,
+                QueueRungMetrics {
+                    index,
+                    operation: rung.describe(),
+                    attempts: value(
+                        bpf_intf::snake_stat_SNAKE_STAT_ENQUEUE_RUNG_ATTEMPT_BASE + index,
+                    ),
+                    hits: value(bpf_intf::snake_stat_SNAKE_STAT_ENQUEUE_RUNG_HIT_BASE + index),
+                    misses: value(bpf_intf::snake_stat_SNAKE_STAT_ENQUEUE_RUNG_MISS_BASE + index),
+                    errors: value(bpf_intf::snake_stat_SNAKE_STAT_ENQUEUE_RUNG_ERROR_BASE + index),
+                    ..Default::default()
+                },
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let dispatch_rungs = policy
+        .queues
+        .iter()
+        .flat_map(|queues| queues.dispatch.iter())
+        .enumerate()
+        .map(|(index, rung)| {
+            let index = index as u32;
+            (
+                index,
+                QueueRungMetrics {
+                    index,
+                    operation: rung.describe(),
+                    attempts: value(
+                        bpf_intf::snake_stat_SNAKE_STAT_DISPATCH_RUNG_ATTEMPT_BASE + index,
+                    ),
+                    hits: value(bpf_intf::snake_stat_SNAKE_STAT_DISPATCH_RUNG_HIT_BASE + index),
+                    misses: value(bpf_intf::snake_stat_SNAKE_STAT_DISPATCH_RUNG_MISS_BASE + index),
+                    errors: value(bpf_intf::snake_stat_SNAKE_STAT_DISPATCH_RUNG_ERROR_BASE + index),
+                    selected: value(
+                        bpf_intf::snake_stat_SNAKE_STAT_DISPATCH_RUNG_SELECTED_BASE + index,
+                    ),
+                    move_misses: value(
+                        bpf_intf::snake_stat_SNAKE_STAT_DISPATCH_RUNG_MOVE_MISS_BASE + index,
+                    ),
+                    fallback_attempts: value(
+                        bpf_intf::snake_stat_SNAKE_STAT_DISPATCH_RUNG_FALLBACK_ATTEMPT_BASE + index,
+                    ),
+                    fallback_hits: value(
+                        bpf_intf::snake_stat_SNAKE_STAT_DISPATCH_RUNG_FALLBACK_HIT_BASE + index,
+                    ),
+                    fallback_misses: value(
+                        bpf_intf::snake_stat_SNAKE_STAT_DISPATCH_RUNG_FALLBACK_MISS_BASE + index,
+                    ),
+                },
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
 
     Ok(Metrics {
         policy_generation: generation,
         fairness_mode: fairness.as_str().into(),
         select_calls: value(bpf_intf::snake_stat_SNAKE_STAT_SELECT_CALLS),
+        dispatch_calls: value(bpf_intf::snake_stat_SNAKE_STAT_DISPATCH_CALLS),
         direct_dispatches: value(bpf_intf::snake_stat_SNAKE_STAT_DIRECT_DISPATCHES),
         ladder_exhaustions: value(bpf_intf::snake_stat_SNAKE_STAT_LADDER_EXHAUSTIONS),
         fallback_prev: value(bpf_intf::snake_stat_SNAKE_STAT_FALLBACK_PREV),
@@ -1248,6 +1393,8 @@ fn aggregate_raw_stats(
         cpus,
         cells: BTreeMap::new(),
         rungs,
+        enqueue_rungs,
+        dispatch_rungs,
         rung_timing: BTreeMap::new(),
         callback_timing: BTreeMap::new(),
     })
@@ -1490,11 +1637,13 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
         builder.obj_builder.debug(opts.verbose);
         let open_opts = opts.libbpf.clone().into_bpf_open_opts();
         let mut skel = scx_ops_open!(builder, open_object, snake_ops, open_opts)?;
-        skel.maps
+        let rodata = skel
+            .maps
             .rodata_data
             .as_mut()
-            .context("BPF read-only data is unavailable")?
-            .fairness_mode = opts.fairness as u32;
+            .context("BPF read-only data is unavailable")?;
+        rodata.fairness_mode = opts.fairness as u32;
+        rodata.queue_mode = queue_mode_for_topology(queue_topology);
         skel.maps
             .bss_data
             .as_mut()
@@ -1741,7 +1890,13 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
             .compiled
             .cells
             .contains_key(&assignment.cell_id)
-            && !(assignment.cell_id == 0 && self.queue_topology.is_some())
+            && !(assignment.cell_id == 0
+                && self.queue_topology.as_ref().is_some_and(|topology| {
+                    matches!(
+                        topology.layout,
+                        policy::QueueLayout::Cell | policy::QueueLayout::CellLlc
+                    )
+                }))
         {
             bail!(
                 "active policy generation {} does not define cell {}",
@@ -1765,7 +1920,12 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
         Ok(ThreadCellResponse {
             tid,
             cell_id: None,
-            rehome_requested: self.queue_topology.is_some(),
+            rehome_requested: self.queue_topology.as_ref().is_some_and(|topology| {
+                matches!(
+                    topology.layout,
+                    policy::QueueLayout::Cell | policy::QueueLayout::CellLlc
+                )
+            }),
         })
     }
 
@@ -2777,6 +2937,7 @@ scope = "task_allowed"
             "mask_data",
             "mask_scratch",
             "mask_slots",
+            "normal_queue_masks",
             "normal_queues",
             "queue_cell_lookup",
             "queue_cell_masks",
@@ -3224,6 +3385,14 @@ scope = "task_allowed"
     }
 
     #[test]
+    fn vtime_keep_running_stays_inline_for_dispatch_stack() {
+        let bpf_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bpf");
+        let vtime = fs::read_to_string(bpf_dir.join("fairness_vtime.h")).unwrap();
+
+        assert!(vtime.contains("static __always_inline bool\nfairness_vtime_keep_running("));
+    }
+
+    #[test]
     fn bpf_fairness_facade_vectors_to_separate_policy_modules() {
         const CALLBACKS: &[&str] = &[
             "runnable",
@@ -3427,6 +3596,264 @@ scope = "task_allowed"
     }
 
     #[test]
+    fn global_sharded_queue_contract_is_topology_blind() {
+        let bpf_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bpf");
+        let intf = fs::read_to_string(bpf_dir.join("intf.h")).unwrap();
+        let state = fs::read_to_string(bpf_dir.join("queue_state.h")).unwrap();
+        let enqueue = fs::read_to_string(bpf_dir.join("queue_enqueue.h")).unwrap();
+        let dispatch = fs::read_to_string(bpf_dir.join("queue_dispatch.h")).unwrap();
+        let userspace =
+            fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/main.rs"))
+                .unwrap();
+
+        for field in ["u32 input;", "u32 reserved;", "u64 data;"] {
+            let queue_rung = intf
+                .split_once("struct snake_queue_rung {")
+                .unwrap()
+                .1
+                .split_once("};")
+                .unwrap()
+                .0;
+            assert!(queue_rung.contains(field), "queue rung is missing {field}");
+        }
+        assert!(intf.contains("SNAKE_QUEUE_MODE_GLOBAL"));
+        assert!(state.contains("const volatile u32 queue_mode = SNAKE_QUEUE_MODE_NONE;"));
+        assert!(state.contains("return queue_mode != SNAKE_QUEUE_MODE_NONE;"));
+        assert!(state.contains("return queue_mode == SNAKE_QUEUE_MODE_GLOBAL;"));
+        assert!(state.contains("return queue_mode == SNAKE_QUEUE_MODE_CELL;"));
+        assert!(userspace.contains("rodata.queue_mode = queue_mode_for_topology(queue_topology);"));
+        assert_text_order(
+            &userspace,
+            &[
+                "rodata.queue_mode = queue_mode_for_topology(queue_topology);",
+                "scx_ops_load!(skel, snake_ops, uei)",
+                "install_queue_topology(&mut skel, queue_topology)",
+            ],
+        );
+        assert!(state.contains("next_remote_queue"));
+        assert!(dispatch.contains("state->next_remote_queue  = cpuq->normal_queue_index + 1;"));
+        assert!(enqueue.contains("queue_global_enqueue_local("));
+        assert!(enqueue.contains("queue_global_enqueue_cpu("));
+        assert!(dispatch.contains("queue_dispatch_peek_cpu("));
+        assert!(dispatch.contains("queue_dispatch_peek_local("));
+        assert!(dispatch.contains("queue_dispatch_peek_remote("));
+        assert!(dispatch.contains("queue_dispatch_consume_min_vtime("));
+        assert!(dispatch.contains("static __always_inline bool\nqueue_global_move("));
+        let global_move = dispatch
+            .split_once("queue_global_move(")
+            .unwrap()
+            .1
+            .split_once("queue_global_replenish(")
+            .unwrap()
+            .0;
+        assert!(global_move.contains("dsq_move_to_local_untimed(source)"));
+        assert!(!global_move.contains("scx_bpf_dsq_move_to_local"));
+        assert!(!global_move.contains("dsq_move_to_local(source, cpu, fine)"));
+        assert!(!dispatch.contains("queue_global_dispatch_callback("));
+        assert!(dispatch.contains("queue_global_dispatch_peek_rung(ctx, &loop_ctx, 0)"));
+        assert!(dispatch.contains("queue_global_dispatch_peek_rung(ctx, &loop_ctx, 1)"));
+        assert!(dispatch.contains("queue_global_dispatch_peek_rung(ctx, &loop_ctx, 2)"));
+        assert!(dispatch.contains("queue_global_dispatch_consume_rung(ctx, &loop_ctx, 3)"));
+        assert!(dispatch.contains("static __noinline s32 queue_global_dispatch_consume_rung("));
+        assert!(dispatch.contains("static __noinline int queue_global_ladder_dispatch("));
+        let candidate = dispatch
+            .split_once("struct snake_queue_candidate {")
+            .unwrap()
+            .1
+            .split_once("};")
+            .unwrap()
+            .0;
+        assert!(!candidate.contains("source"));
+        assert!(!candidate.contains("rung"));
+        assert!(dispatch.contains(".rung = 0"));
+        assert!(dispatch.contains(".rung = 1"));
+        assert!(dispatch.contains(".rung = 2"));
+        let global_context = dispatch
+            .split_once("struct snake_global_dispatch_loop_ctx {")
+            .unwrap()
+            .1
+            .split_once("};")
+            .unwrap()
+            .0;
+        assert!(!global_context.contains("snake_ladder_ctx"));
+        assert!(dispatch.contains(".callback_started_at = callback_started_at"));
+        let global_peek = dispatch
+            .split_once("queue_global_dispatch_peek_rung(")
+            .unwrap()
+            .1
+            .split_once("queue_global_dispatch_consume_rung(")
+            .unwrap()
+            .0;
+        assert!(global_peek.contains("if (index == 0)"));
+        assert!(global_peek.contains("else if (index == 1)"));
+        assert!(!global_peek.contains("else if (rung->input =="));
+        let remote_peek = dispatch
+            .split_once("queue_dispatch_peek_remote(")
+            .unwrap()
+            .1
+            .split_once("queue_global_move(")
+            .unwrap()
+            .0;
+        assert!(dispatch.contains("queue_dispatch_remote_scan_callback("));
+        assert!(remote_peek.contains("bpf_loop(SNAKE_MAX_NORMAL_QUEUES,"));
+        assert!(!remote_peek.contains("bpf_for(offset, 0, SNAKE_MAX_NORMAL_QUEUES)"));
+        let remote_scan = dispatch
+            .split_once("queue_dispatch_remote_scan_callback(")
+            .unwrap()
+            .1
+            .split_once("queue_dispatch_peek_remote(")
+            .unwrap()
+            .0;
+        assert!(remote_scan.contains("nr_queues > SNAKE_MAX_NORMAL_QUEUES"));
+        assert!(remote_scan.contains("dsq_id_t dsq"));
+        assert!(remote_scan.contains("index = (start + offset) % nr_queues"));
+        assert!(remote_scan.contains("if (index >= SNAKE_MAX_NORMAL_QUEUES)"));
+        assert!(!remote_scan.contains("index -= nr_queues"));
+        assert!(!remote_scan.contains("return loop_ctx->candidate.valid ? 1 : 0"));
+        assert!(dispatch.contains("bpf_cpumask_test_cpu"));
+        assert!(dispatch.contains("bpf_rcu_read_lock"));
+        assert!(dispatch.contains("bpf_task_from_pid"));
+        assert!(dispatch.contains("bpf_task_release"));
+        assert!(dispatch.contains("bpf_rcu_read_unlock"));
+        assert!(dispatch.contains("SNAKE_DISPATCH_FALLBACK_CPU"));
+        assert!(dispatch.contains("SNAKE_DISPATCH_FALLBACK_LOCAL"));
+        assert!(dispatch.contains("SNAKE_DISPATCH_FALLBACK_REMOTE"));
+        assert!(
+            !dispatch.contains("candidate->dsq.raw == winner->dsq.raw"),
+            "bounded fallback must retry a raced winner DSQ"
+        );
+        let consume = dispatch
+            .split_once("queue_dispatch_consume_min_vtime(")
+            .unwrap()
+            .1
+            .split_once("struct snake_global_dispatch_loop_ctx")
+            .unwrap()
+            .0;
+        assert!(
+            consume.contains("SNAKE_STAT_VTIME_EQUAL_HEAD_TIES"),
+            "global min-VTIME arbitration must account exact head ties"
+        );
+        assert!(
+            !consume.contains("bpf_for(offset, 0, 3)"),
+            "fixed three-source arbitration must not use verifier iterators"
+        );
+        for source in ["cpu", "local", "remote"] {
+            assert!(consume.contains(&format!("bool {source}_valid")));
+            assert_eq!(
+                consume
+                    .matches(&format!("args->{source}_candidate->valid"))
+                    .count(),
+                1,
+                "consume must normalize {source} candidate validity once"
+            );
+        }
+        for helper in [
+            "queue_dispatch_try_selected(",
+            "queue_dispatch_try_fallbacks(",
+            "queue_dispatch_fallback_callback(",
+            "queue_dispatch_try_cpu_fallback(",
+            "queue_dispatch_try_local_fallback(",
+            "queue_dispatch_try_remote_fallback(",
+        ] {
+            assert!(dispatch.contains(helper), "missing {helper}");
+        }
+        assert!(
+            !consume.contains("bpf_for(offset, 0, SNAKE_DISPATCH_FALLBACK_MAX)"),
+            "the fixed three-source fallback must not multiply verifier iterator states"
+        );
+        assert!(dispatch.contains("bpf_loop(SNAKE_DISPATCH_FALLBACK_MAX,"));
+        assert!(!dispatch.contains("queue_dispatch_selected_callback("));
+        assert!(!dispatch.contains("bpf_loop(1, queue_dispatch_selected_callback,"));
+        assert_eq!(
+            dispatch.matches("queue_global_move(").count(),
+            5,
+            "selected dispatch and each fallback leaf must have one move path"
+        );
+        assert_eq!(dispatch.matches("candidate->rung >= 3").count(), 3);
+        assert!(!dispatch.contains("queue_dispatch_callback_fine("));
+        let move_callbacks = dispatch
+            .split_once("static __noinline s32 queue_dispatch_try_selected")
+            .unwrap()
+            .1
+            .split_once("static __noinline s32 queue_dispatch_consume_min_vtime")
+            .unwrap()
+            .0;
+        assert!(!move_callbacks.contains("snake_fine_timing_ctx"));
+        let selected = dispatch
+            .split_once("static __noinline s32 queue_dispatch_try_selected(")
+            .unwrap()
+            .1
+            .split_once("struct snake_global_fallback_candidate")
+            .unwrap()
+            .0;
+        assert!(selected.contains("u32 class, rung;"));
+        assert!(!selected.contains("candidate->rung"));
+        let fallback_ctx = dispatch
+            .split_once("struct snake_global_fallback_loop_ctx {")
+            .unwrap()
+            .1
+            .split_once("};")
+            .unwrap()
+            .0;
+        assert!(dispatch.contains("struct snake_global_fallback_candidate {"));
+        assert!(!fallback_ctx.contains("struct snake_queue_candidate"));
+        assert!(!dispatch.contains("candidate->class, loop_ctx->cpu, &loop_ctx->fine"));
+        assert!(
+            dispatch.matches("cpu >= SNAKE_MAX_CPUS").count() >= 7,
+            "every callback boundary that consumes a CPU must restore the DSQ encoding bound"
+        );
+        for obsolete in [
+            "queue_dispatch_try_fallback_slot0(",
+            "queue_dispatch_try_fallback_slot1(",
+            "queue_dispatch_try_fallback_slot2(",
+        ] {
+            assert!(
+                !dispatch.contains(obsolete),
+                "typed move fanout must not reappear through {obsolete}"
+            );
+        }
+
+        let normal_queue = intf
+            .split_once("struct snake_normal_queue {")
+            .unwrap()
+            .1
+            .split_once("};")
+            .unwrap()
+            .0;
+        assert!(normal_queue.contains("struct snake_mask_data consumers;"));
+        assert!(!normal_queue.contains("llc_id"));
+    }
+
+    #[test]
+    fn queue_rungs_have_independent_outcome_and_move_miss_counter_ranges() {
+        let intf =
+            fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bpf/intf.h"))
+                .unwrap();
+
+        for counter in [
+            "SNAKE_STAT_DISPATCH_CALLS",
+            "SNAKE_STAT_ENQUEUE_RUNG_ATTEMPT_BASE",
+            "SNAKE_STAT_ENQUEUE_RUNG_HIT_BASE",
+            "SNAKE_STAT_ENQUEUE_RUNG_MISS_BASE",
+            "SNAKE_STAT_ENQUEUE_RUNG_ERROR_BASE",
+            "SNAKE_STAT_DISPATCH_RUNG_ATTEMPT_BASE",
+            "SNAKE_STAT_DISPATCH_RUNG_HIT_BASE",
+            "SNAKE_STAT_DISPATCH_RUNG_MISS_BASE",
+            "SNAKE_STAT_DISPATCH_RUNG_ERROR_BASE",
+            "SNAKE_STAT_DISPATCH_RUNG_SELECTED_BASE",
+            "SNAKE_STAT_DISPATCH_RUNG_MOVE_MISS_BASE",
+            "SNAKE_STAT_DISPATCH_RUNG_FALLBACK_ATTEMPT_BASE",
+            "SNAKE_STAT_DISPATCH_RUNG_FALLBACK_HIT_BASE",
+            "SNAKE_STAT_DISPATCH_RUNG_FALLBACK_MISS_BASE",
+        ] {
+            assert!(
+                intf.contains(counter),
+                "missing queue rung counter {counter}"
+            );
+        }
+    }
+
+    #[test]
     fn bpf_scheduler_mode_facade_routes_callback_families() {
         let bpf_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bpf");
         let mode = fs::read_to_string(bpf_dir.join("scheduler_mode.h"))
@@ -3435,6 +3862,7 @@ scope = "task_allowed"
         let normalized_mode = mode.split_whitespace().collect::<Vec<_>>().join(" ");
 
         assert!(main.contains("#include \"scheduler_mode.h\""));
+        assert!(normalized_mode.contains("static __noinline int scheduler_mode_enqueue("));
         assert!(normalized_mode.contains("static __always_inline void scheduler_mode_dispatch("));
         assert_text_order(
             &mode,
@@ -3517,7 +3945,7 @@ scope = "task_allowed"
                 "scheduler_mode_quiescent(",
                 "stat_inc(ctx, SNAKE_STAT_QUIESCENT)",
                 "queue_timing_cancel(",
-                "queue_topology_enabled()",
+                "queue_cell_mode_enabled()",
             ],
         );
         let stopping = main
@@ -3536,7 +3964,7 @@ scope = "task_allowed"
             ],
         );
         assert!(
-            mode.contains("return queue_topology_enabled() ? task_state_init_queue_mask(p) : 0;")
+            mode.contains("return queue_cell_mode_enabled() ? task_state_init_queue_mask(p) : 0;")
         );
 
         let select = main
@@ -3702,11 +4130,16 @@ scope = "task_allowed"
             .expect("queue enqueue walker should have one definition");
 
         assert!(normalized.contains(
-            "bpf_loop(SNAKE_MAX_QUEUE_RUNGS, queue_ladder_enqueue_callback, &loop_ctx, 0)"
+            "bpf_loop(SNAKE_MAX_QUEUE_RUNGS, queue_cell_ladder_enqueue_callback, &loop_ctx, 0)"
         ));
         assert!(normalized.contains(
             "if (i >= SNAKE_MAX_QUEUE_RUNGS || i >= loop_ctx->ladder_ctx.ladder->nr_enqueue_rungs) return 1;"
         ));
+        assert!(normalized.contains("static __noinline int queue_global_ladder_enqueue("));
+        assert!(normalized.contains("static __noinline int queue_global_enqueue_local_ctx("));
+        assert!(normalized.contains("static __noinline int queue_global_enqueue_cpu_ctx("));
+        assert!(normalized.contains("queue_global_ladder_enqueue_rung(loop_ctx, 0)"));
+        assert!(normalized.contains("queue_global_ladder_enqueue_rung(loop_ctx, 1)"));
         assert!(!enqueue_walk.contains("bpf_for(i, 0, SNAKE_MAX_QUEUE_RUNGS)"));
     }
 
@@ -4096,7 +4529,7 @@ scope = "task_allowed"
                 .iter()
                 .map(|source| source.matches("queue_timing_record_insert(").count())
                 .sum::<usize>(),
-            8
+            10
         );
         assert_eq!(
             outside_owner
@@ -4313,7 +4746,7 @@ scope = "task_allowed"
         let policy = policy::compile_policy(policy_source()).expect("policy should compile");
         let encoded = encode_ladder(&policy, 42).expect("ladder should encode");
 
-        assert_eq!(bpf_intf::SNAKE_ABI_VERSION, 20);
+        assert_eq!(bpf_intf::SNAKE_ABI_VERSION, 21);
         assert_eq!(size_of::<bpf_intf::snake_callback_timing>(), 520);
         assert_eq!(offset_of!(bpf_intf::snake_callback_timing, total_ns), 0);
         assert_eq!(offset_of!(bpf_intf::snake_callback_timing, buckets), 8);
@@ -4432,7 +4865,7 @@ scope = "task_allowed"
         assert_field_type::<bpf_intf::snake_queue_timing_event, u32>(|value| {
             &value.depth_after_dispatch
         });
-        assert_eq!(size_of::<bpf_intf::snake_compiled_ladder>(), 352);
+        assert_eq!(size_of::<bpf_intf::snake_compiled_ladder>(), 608);
         assert_eq!(offset_of!(bpf_intf::snake_compiled_ladder, generation), 0);
         assert_eq!(
             offset_of!(bpf_intf::snake_compiled_ladder, policy_abi_version),
@@ -4462,7 +4895,7 @@ scope = "task_allowed"
         );
         assert_eq!(
             offset_of!(bpf_intf::snake_compiled_ladder, dispatch_rungs),
-            288
+            416
         );
         assert_eq!(encoded.generation, 42);
         assert_eq!(encoded.policy_abi_version, bpf_intf::SNAKE_ABI_VERSION);
@@ -4560,6 +4993,44 @@ scope = "task_allowed"
         assert_eq!(encoded.nr_dispatch_rungs, 1);
         assert_eq!(encoded.dispatch_rungs[0].opcode, 3);
         assert_eq!(encoded.dispatch_rungs[0].flags, 0);
+    }
+
+    #[test]
+    fn encodes_global_llc_queue_rungs_and_fallback_order() {
+        let policy = policy::compile_policy(
+            r#"
+[queues]
+layout = "llc"
+
+[[rung]]
+operation = "pick_idle"
+scope = "task_allowed"
+"#,
+        )
+        .unwrap();
+        let encoded = encode_ladder(&policy, 9).unwrap();
+
+        assert_eq!(size_of::<bpf_intf::snake_queue_rung>(), 24);
+        assert_eq!(encoded.nr_enqueue_rungs, 2);
+        assert_eq!(encoded.enqueue_rungs[0].opcode, 3);
+        assert_eq!(encoded.enqueue_rungs[0].input, 2);
+        assert_eq!(encoded.enqueue_rungs[1].opcode, 4);
+        assert_eq!(encoded.enqueue_rungs[1].input, 1);
+        assert_eq!(encoded.nr_dispatch_rungs, 4);
+        assert_eq!(
+            encoded
+                .dispatch_rungs
+                .iter()
+                .take(3)
+                .map(|rung| (rung.opcode, rung.input))
+                .collect::<Vec<_>>(),
+            vec![(4, 1), (4, 2), (4, 3)]
+        );
+        assert_eq!(encoded.dispatch_rungs[3].opcode, 5);
+        assert_eq!(encoded.dispatch_rungs[3].input, 5);
+        assert_eq!(encoded.dispatch_rungs[3].data, 0x0003_0201);
+        assert!(encoded.enqueue_rungs.iter().all(|rung| rung.reserved == 0));
+        assert!(encoded.dispatch_rungs.iter().all(|rung| rung.reserved == 0));
     }
 
     #[test]
@@ -4661,7 +5132,7 @@ scope = "task_cell"
         .unwrap();
         let encoded = encode_queue_topology(&topology).unwrap();
 
-        assert_eq!(encoded.header.layout, bpf_intf::SNAKE_QUEUE_LAYOUT_CELL_LLC);
+        assert_eq!(encoded.header.mode, bpf_intf::SNAKE_QUEUE_MODE_CELL);
         assert_eq!(encoded.header.nr_cells, 2);
         assert_eq!(encoded.header.nr_cpus, 4);
         assert_eq!(encoded.cell_lookup[0], 1);
@@ -4714,6 +5185,39 @@ scope = "task_cell"
         assert_eq!(encoded.cpu_queues[1].valid, 1);
         assert_eq!(encoded.cpu_queues[2].valid, 0);
         assert_eq!(encoded.cpu_queues[3].valid, 1);
+    }
+
+    #[test]
+    fn global_llc_topology_encoding_has_no_synthetic_cells() {
+        let policy = policy::compile_policy(
+            r#"
+[queues]
+layout = "llc"
+[[rung]]
+operation = "pick_idle"
+scope = "task_allowed"
+"#,
+        )
+        .unwrap();
+        let topology = queue_topology::resolve_queue_topology(
+            &policy,
+            &std::collections::BTreeSet::from([0, 1, 2, 3]),
+            &BTreeMap::from([(0, 10), (1, 10), (2, 20), (3, 20)]),
+        )
+        .unwrap()
+        .unwrap();
+        let encoded = encode_queue_topology(&topology).unwrap();
+
+        assert_eq!(encoded.header.mode, bpf_intf::SNAKE_QUEUE_MODE_GLOBAL);
+        assert_eq!(encoded.header.nr_cells, 0);
+        assert_eq!(encoded.header.nr_normal_queues, 2);
+        assert!(encoded.cell_lookup.iter().all(|value| *value == 0));
+        assert_eq!(encoded.normal_queues[0].cell_index, u32::MAX);
+        assert_eq!(encoded.normal_queues[0].clock_index, u32::MAX);
+        assert_eq!(encoded.normal_queues[0].consumers.valid, 1);
+        assert_eq!(encoded.cpu_queues[0].owner_cell_index, u32::MAX);
+        assert_eq!(encoded.cpu_queues[0].normal_queue_index, 0);
+        assert_eq!(encoded.cpu_queues[2].normal_queue_index, 1);
     }
 
     #[test]
@@ -5110,7 +5614,9 @@ scope = "task_cell_borrowable"
 
     #[test]
     fn aggregates_raw_percpu_stats_with_max_gauge_and_semantic_rung_labels() {
-        let policy = policy::compile_policy(policy_source()).expect("policy should compile");
+        let policy =
+            policy::compile_policy(&format!("[queues]\nlayout = \"llc\"\n{}", policy_source()))
+                .expect("policy should compile");
         let mut raw = raw_percpu_stats();
         set_stat(
             &mut raw,
@@ -5162,6 +5668,36 @@ scope = "task_cell_borrowable"
             bpf_intf::snake_stat_SNAKE_STAT_RUNG_HIT_BASE + 1,
             &[2, 3],
         );
+        set_stat(
+            &mut raw,
+            bpf_intf::snake_stat_SNAKE_STAT_DISPATCH_CALLS,
+            &[9, 11],
+        );
+        set_stat(
+            &mut raw,
+            bpf_intf::snake_stat_SNAKE_STAT_ENQUEUE_RUNG_ATTEMPT_BASE,
+            &[4, 6],
+        );
+        set_stat(
+            &mut raw,
+            bpf_intf::snake_stat_SNAKE_STAT_ENQUEUE_RUNG_HIT_BASE,
+            &[3, 5],
+        );
+        set_stat(
+            &mut raw,
+            bpf_intf::snake_stat_SNAKE_STAT_DISPATCH_RUNG_SELECTED_BASE + 1,
+            &[2, 4],
+        );
+        set_stat(
+            &mut raw,
+            bpf_intf::snake_stat_SNAKE_STAT_DISPATCH_RUNG_MOVE_MISS_BASE + 3,
+            &[1, 2],
+        );
+        set_stat(
+            &mut raw,
+            bpf_intf::snake_stat_SNAKE_STAT_DISPATCH_RUNG_FALLBACK_HIT_BASE + 2,
+            &[5, 7],
+        );
 
         let metrics = aggregate_raw_stats(&raw, &policy, 42, FairnessMode::Eevdf)
             .expect("stats should aggregate");
@@ -5182,6 +5718,13 @@ scope = "task_cell_borrowable"
         assert_eq!(metrics.rungs[&1].hits, 5);
         assert_eq!(metrics.rungs[&1].operation, "pick_idle");
         assert_eq!(metrics.rungs[&1].scope, "task_allowed");
+        let serialized = serde_json::to_value(&metrics).unwrap();
+        assert_eq!(serialized["dispatch_calls"], 20);
+        assert_eq!(serialized["enqueue_rungs"]["0"]["attempts"], 10);
+        assert_eq!(serialized["enqueue_rungs"]["0"]["hits"], 8);
+        assert_eq!(serialized["dispatch_rungs"]["1"]["selected"], 6);
+        assert_eq!(serialized["dispatch_rungs"]["3"]["move_misses"], 3);
+        assert_eq!(serialized["dispatch_rungs"]["2"]["fallback_hits"], 12);
     }
 
     #[test]

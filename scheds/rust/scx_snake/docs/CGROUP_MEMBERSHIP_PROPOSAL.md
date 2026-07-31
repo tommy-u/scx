@@ -80,7 +80,8 @@ Each `child` is one direct child name beneath `parent`. The assignment applies
 to threads in that child and all of its descendants. The parent must already
 exist. Assigned child directories may appear and disappear while Snake runs.
 
-Membership requires a `[queues]` policy and every target cell must be declared.
+Membership requires a cell queue layout (`cell` or `cell_llc`) and every target
+cell must be declared.
 It is attachment-time configuration: live policy replacement may change
 ladders but must not change membership paths or assignments.
 

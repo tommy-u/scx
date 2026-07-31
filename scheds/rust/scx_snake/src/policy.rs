@@ -74,14 +74,22 @@ pub struct MembershipPolicy {
 pub enum QueueLayout {
     Cell,
     CellLlc,
+    Llc,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct QueuePolicy {
     pub layout: QueueLayout,
     pub cell0_cpu_weight: u32,
-    pub enqueue: Vec<QueueEnqueueTarget>,
-    pub dispatch: Vec<QueueDispatchSource>,
+    pub enqueue: Vec<QueueEnqueueRung>,
+    pub dispatch: Vec<QueueDispatchRung>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum QueueEnqueueAction {
+    TryInsert = 1,
+    Insert = 2,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -89,14 +97,45 @@ pub struct QueuePolicy {
 pub enum QueueEnqueueTarget {
     Cell = 1,
     Affinity = 2,
+    Local = 3,
+    Cpu = 4,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct QueueEnqueueRung {
+    pub action: QueueEnqueueAction,
+    pub target: QueueEnqueueTarget,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u32)]
+pub enum QueueDispatchAction {
+    Peek = 1,
+    Consume = 2,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[repr(u32)]
 pub enum QueueDispatchSource {
     Cell = 1,
     Affinity = 2,
-    MinVtime = 3,
+    Cpu = 3,
+    Local = 4,
+    Remote = 5,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum QueueDispatchOperation {
+    MinVtime = 1,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct QueueDispatchRung {
+    pub action: QueueDispatchAction,
+    pub source: Option<QueueDispatchSource>,
+    pub operation: Option<QueueDispatchOperation>,
+    pub fallback: Vec<QueueDispatchSource>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -127,20 +166,25 @@ impl CompiledPolicy {
     pub fn dump(&self) -> String {
         let mut output = format!("fallback: {}\n", self.fallback.as_str());
         if let Some(queues) = &self.queues {
+            let cell_weight = if queues.layout == QueueLayout::Llc {
+                String::new()
+            } else {
+                format!(" cell0_cpu_weight={}", queues.cell0_cpu_weight)
+            };
             output.push_str(&format!(
-                "queues: layout={} cell0_cpu_weight={} enqueue={} dispatch={}\n",
+                "queues: layout={}{} enqueue={} dispatch={}\n",
                 queues.layout.as_str(),
-                queues.cell0_cpu_weight,
+                cell_weight,
                 queues
                     .enqueue
                     .iter()
-                    .map(|target| target.as_str())
+                    .map(QueueEnqueueRung::describe)
                     .collect::<Vec<_>>()
                     .join(","),
                 queues
                     .dispatch
                     .iter()
-                    .map(|source| source.as_str())
+                    .map(QueueDispatchRung::describe)
                     .collect::<Vec<_>>()
                     .join(","),
             ));
@@ -183,6 +227,16 @@ impl QueueLayout {
         match self {
             Self::Cell => "cell",
             Self::CellLlc => "cell_llc",
+            Self::Llc => "llc",
+        }
+    }
+}
+
+impl QueueEnqueueAction {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::TryInsert => "try_insert",
+            Self::Insert => "insert",
         }
     }
 }
@@ -192,6 +246,29 @@ impl QueueEnqueueTarget {
         match self {
             Self::Cell => "cell",
             Self::Affinity => "affinity",
+            Self::Local => "local",
+            Self::Cpu => "cpu",
+        }
+    }
+}
+
+impl QueueEnqueueRung {
+    pub fn describe(&self) -> String {
+        if matches!(
+            self.target,
+            QueueEnqueueTarget::Cell | QueueEnqueueTarget::Affinity
+        ) {
+            return self.target.as_str().into();
+        }
+        format!("{}({})", self.action.as_str(), self.target.as_str())
+    }
+}
+
+impl QueueDispatchAction {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Peek => "peek",
+            Self::Consume => "consume",
         }
     }
 }
@@ -201,8 +278,50 @@ impl QueueDispatchSource {
         match self {
             Self::Cell => "cell",
             Self::Affinity => "affinity",
-            Self::MinVtime => "min_vtime(cell,affinity)",
+            Self::Cpu => "cpu",
+            Self::Local => "local",
+            Self::Remote => "remote",
         }
+    }
+}
+
+impl QueueDispatchOperation {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::MinVtime => "min_vtime",
+        }
+    }
+}
+
+impl QueueDispatchRung {
+    pub fn describe(&self) -> String {
+        if let Some(source) = self.source {
+            if matches!(
+                source,
+                QueueDispatchSource::Cell | QueueDispatchSource::Affinity
+            ) {
+                return source.as_str().into();
+            }
+            return format!("{}({})", self.action.as_str(), source.as_str());
+        }
+        let operation = self
+            .operation
+            .expect("compiled dispatch rung has a source or operation");
+        if self.fallback.is_empty() {
+            return match operation {
+                QueueDispatchOperation::MinVtime => "min_vtime(cell,affinity)".into(),
+            };
+        }
+        format!(
+            "{}({};fallback={})",
+            self.action.as_str(),
+            operation.as_str(),
+            self.fallback
+                .iter()
+                .map(|source| source.as_str())
+                .collect::<Vec<_>>()
+                .join(",")
+        )
     }
 }
 
@@ -298,8 +417,7 @@ struct SemanticCell {
 #[serde(deny_unknown_fields)]
 struct SemanticQueuePolicy {
     layout: String,
-    #[serde(default = "default_cell_weight")]
-    cell0_cpu_weight: u32,
+    cell0_cpu_weight: Option<u32>,
     enqueue: Option<Vec<SemanticQueueEnqueueRung>>,
     dispatch: Option<Vec<SemanticQueueDispatchRung>>,
 }
@@ -307,18 +425,18 @@ struct SemanticQueuePolicy {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SemanticQueueEnqueueRung {
+    action: Option<String>,
     target: String,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SemanticQueueDispatchRung {
+    action: Option<String>,
     source: Option<String>,
     operation: Option<String>,
-}
-
-const fn default_cell_weight() -> u32 {
-    1
+    #[serde(default)]
+    fallback: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -373,8 +491,9 @@ pub fn compile_policy(source: &str) -> Result<CompiledPolicy, PolicyError> {
     }
 
     let queues = compile_queue_policy(policy.queues.as_ref(), policy.cell.len())?;
+    let queue_layout = queues.as_ref().map(|queues| queues.layout);
     let (cells, cell_cpu_weights) = compile_cells(&policy.cell, queues.is_some())?;
-    let membership = compile_membership(policy.membership.as_ref(), queues.is_some(), &cells)?;
+    let membership = compile_membership(policy.membership.as_ref(), queue_layout, &cells)?;
     let partitions = compile_partitions(&policy.partition)?;
     let mut mask_tables = Vec::new();
     let mut rungs = Vec::with_capacity(policy.rung.len());
@@ -384,7 +503,7 @@ pub fn compile_policy(source: &str) -> Result<CompiledPolicy, PolicyError> {
             rung,
             &partitions,
             !cells.is_empty(),
-            queues.is_some(),
+            queue_layout,
             &mut mask_tables,
         )?);
     }
@@ -402,15 +521,20 @@ pub fn compile_policy(source: &str) -> Result<CompiledPolicy, PolicyError> {
 
 fn compile_membership(
     membership: Option<&SemanticMembershipPolicy>,
-    queue_mode: bool,
+    queue_layout: Option<QueueLayout>,
     cells: &BTreeMap<u32, BTreeSet<u32>>,
 ) -> Result<Option<MembershipPolicy>, PolicyError> {
     let Some(membership) = membership else {
         return Ok(None);
     };
-    if !queue_mode {
+    if queue_layout.is_none() {
         return Err(PolicyError(
             "userspace membership requires a [queues] policy".into(),
+        ));
+    }
+    if queue_layout == Some(QueueLayout::Llc) {
+        return Err(PolicyError(
+            "queue layout `llc` does not support membership".into(),
         ));
     }
     let parent = Path::new(&membership.parent);
@@ -465,48 +589,124 @@ fn compile_queue_policy(
     let Some(queues) = queues else {
         return Ok(None);
     };
-    if declared_cells >= MAX_QUEUE_CELLS {
+    let layout = match queues.layout.as_str() {
+        "cell" => QueueLayout::Cell,
+        "cell_llc" => QueueLayout::CellLlc,
+        "llc" => QueueLayout::Llc,
+        layout => {
+            return Err(PolicyError(format!(
+                "unknown queue layout `{layout}`; expected `cell`, `cell_llc`, or `llc`"
+            )))
+        }
+    };
+    if layout == QueueLayout::Llc && declared_cells != 0 {
+        return Err(PolicyError(
+            "queue layout `llc` does not support declared cells".into(),
+        ));
+    }
+    if layout == QueueLayout::Llc && queues.cell0_cpu_weight.is_some() {
+        return Err(PolicyError(
+            "queue layout `llc` does not support cell0_cpu_weight".into(),
+        ));
+    }
+    if layout != QueueLayout::Llc && declared_cells >= MAX_QUEUE_CELLS {
         return Err(PolicyError(format!(
             "queue policies support at most {} declared cells plus synthetic cell 0",
             MAX_QUEUE_CELLS - 1
         )));
     }
-    let layout = match queues.layout.as_str() {
-        "cell" => QueueLayout::Cell,
-        "cell_llc" => QueueLayout::CellLlc,
-        layout => {
-            return Err(PolicyError(format!(
-                "unknown queue layout `{layout}`; expected `cell` or `cell_llc`"
-            )))
-        }
-    };
-    if queues.cell0_cpu_weight == 0 {
+    let cell0_cpu_weight = queues.cell0_cpu_weight.unwrap_or(1);
+    if cell0_cpu_weight == 0 {
         return Err(PolicyError(
             "queue default cell weight must be positive".into(),
         ));
     }
     let (enqueue, dispatch) = if queues.enqueue.is_none() && queues.dispatch.is_none() {
-        (
-            vec![QueueEnqueueTarget::Cell, QueueEnqueueTarget::Affinity],
-            vec![QueueDispatchSource::Affinity, QueueDispatchSource::Cell],
-        )
+        default_queue_callbacks(layout)
     } else {
-        let enqueue = compile_queue_enqueue(queues.enqueue.as_deref().unwrap_or(&[]))?;
-        let dispatch = compile_queue_dispatch(queues.dispatch.as_deref().unwrap_or(&[]))?;
-        validate_queue_callback_pair(&enqueue, &dispatch)?;
+        let enqueue = compile_queue_enqueue(queues.enqueue.as_deref().unwrap_or(&[]), layout)?;
+        let dispatch = compile_queue_dispatch(queues.dispatch.as_deref().unwrap_or(&[]), layout)?;
+        validate_queue_callback_pair(layout, &enqueue, &dispatch)?;
         (enqueue, dispatch)
     };
     Ok(Some(QueuePolicy {
         layout,
-        cell0_cpu_weight: queues.cell0_cpu_weight,
+        cell0_cpu_weight,
         enqueue,
         dispatch,
     }))
 }
 
+fn default_queue_callbacks(layout: QueueLayout) -> (Vec<QueueEnqueueRung>, Vec<QueueDispatchRung>) {
+    if layout == QueueLayout::Llc {
+        return (
+            vec![
+                QueueEnqueueRung {
+                    action: QueueEnqueueAction::TryInsert,
+                    target: QueueEnqueueTarget::Local,
+                },
+                QueueEnqueueRung {
+                    action: QueueEnqueueAction::Insert,
+                    target: QueueEnqueueTarget::Cpu,
+                },
+            ],
+            vec![
+                llc_dispatch_peek(QueueDispatchSource::Cpu),
+                llc_dispatch_peek(QueueDispatchSource::Local),
+                llc_dispatch_peek(QueueDispatchSource::Remote),
+                QueueDispatchRung {
+                    action: QueueDispatchAction::Consume,
+                    source: None,
+                    operation: Some(QueueDispatchOperation::MinVtime),
+                    fallback: vec![
+                        QueueDispatchSource::Cpu,
+                        QueueDispatchSource::Local,
+                        QueueDispatchSource::Remote,
+                    ],
+                },
+            ],
+        );
+    }
+    (
+        vec![
+            QueueEnqueueRung {
+                action: QueueEnqueueAction::TryInsert,
+                target: QueueEnqueueTarget::Cell,
+            },
+            QueueEnqueueRung {
+                action: QueueEnqueueAction::Insert,
+                target: QueueEnqueueTarget::Affinity,
+            },
+        ],
+        vec![
+            legacy_dispatch_source(QueueDispatchSource::Affinity),
+            legacy_dispatch_source(QueueDispatchSource::Cell),
+        ],
+    )
+}
+
+fn llc_dispatch_peek(source: QueueDispatchSource) -> QueueDispatchRung {
+    QueueDispatchRung {
+        action: QueueDispatchAction::Peek,
+        source: Some(source),
+        operation: None,
+        fallback: Vec::new(),
+    }
+}
+
+fn legacy_dispatch_source(source: QueueDispatchSource) -> QueueDispatchRung {
+    QueueDispatchRung {
+        action: QueueDispatchAction::Consume,
+        source: Some(source),
+        operation: None,
+        fallback: Vec::new(),
+    }
+}
+
 fn compile_queue_enqueue(
     rungs: &[SemanticQueueEnqueueRung],
-) -> Result<Vec<QueueEnqueueTarget>, PolicyError> {
+    layout: QueueLayout,
+) -> Result<Vec<QueueEnqueueRung>, PolicyError> {
     if rungs.is_empty() {
         return Err(PolicyError("queue enqueue ladder must not be empty".into()));
     }
@@ -516,32 +716,44 @@ fn compile_queue_enqueue(
         )));
     }
 
-    let mut compiled = Vec::with_capacity(rungs.len());
+    if layout == QueueLayout::Llc {
+        return compile_llc_queue_enqueue(rungs);
+    }
+
+    let mut compiled: Vec<QueueEnqueueRung> = Vec::with_capacity(rungs.len());
     for rung in rungs {
-        let target = match rung.target.as_str() {
-            "cell" => QueueEnqueueTarget::Cell,
-            "affinity" => QueueEnqueueTarget::Affinity,
+        if rung.action.is_some() {
+            return Err(PolicyError(
+                "explicit enqueue actions require queue layout `llc`".into(),
+            ));
+        }
+        let (action, target) = match rung.target.as_str() {
+            "cell" => (QueueEnqueueAction::TryInsert, QueueEnqueueTarget::Cell),
+            "affinity" => (QueueEnqueueAction::Insert, QueueEnqueueTarget::Affinity),
             target => {
                 return Err(PolicyError(format!(
                     "unknown enqueue target `{target}`; expected `cell` or `affinity`"
                 )))
             }
         };
-        if compiled.contains(&target) {
+        if compiled.iter().any(|rung| rung.target == target) {
             return Err(PolicyError(format!(
                 "duplicate enqueue target `{}`",
                 target.as_str()
             )));
         }
-        compiled.push(target);
+        compiled.push(QueueEnqueueRung { action, target });
     }
 
-    if !compiled.contains(&QueueEnqueueTarget::Affinity) {
+    if !compiled
+        .iter()
+        .any(|rung| rung.target == QueueEnqueueTarget::Affinity)
+    {
         return Err(PolicyError(
             "queue enqueue ladder must contain `affinity`".into(),
         ));
     }
-    if compiled.last() != Some(&QueueEnqueueTarget::Affinity) {
+    if compiled.last().map(|rung| rung.target) != Some(QueueEnqueueTarget::Affinity) {
         return Err(PolicyError(
             "enqueue target `affinity` must be terminal".into(),
         ));
@@ -549,9 +761,92 @@ fn compile_queue_enqueue(
     Ok(compiled)
 }
 
+fn compile_llc_queue_enqueue(
+    rungs: &[SemanticQueueEnqueueRung],
+) -> Result<Vec<QueueEnqueueRung>, PolicyError> {
+    let mut compiled = Vec::with_capacity(rungs.len());
+    for (index, rung) in rungs.iter().enumerate() {
+        let action = match rung.action.as_deref() {
+            Some("try_insert") => QueueEnqueueAction::TryInsert,
+            Some("insert") => QueueEnqueueAction::Insert,
+            Some(action) => {
+                return Err(PolicyError(format!(
+                    "unknown enqueue action `{action}`; expected `try_insert` or `insert`"
+                )))
+            }
+            None => {
+                return Err(PolicyError(
+                    "queue layout `llc` enqueue rungs must specify `action`".into(),
+                ))
+            }
+        };
+        let target = match rung.target.as_str() {
+            "local" => QueueEnqueueTarget::Local,
+            "cpu" => QueueEnqueueTarget::Cpu,
+            target => {
+                return Err(PolicyError(format!(
+                    "unknown LLC enqueue target `{target}`; expected `local` or `cpu`"
+                )))
+            }
+        };
+        match (action, target) {
+            (QueueEnqueueAction::TryInsert, QueueEnqueueTarget::Local) => {}
+            (QueueEnqueueAction::Insert, QueueEnqueueTarget::Cpu) => {}
+            (QueueEnqueueAction::TryInsert, _) => {
+                return Err(PolicyError(
+                    "enqueue action `try_insert` must target `local`".into(),
+                ))
+            }
+            (QueueEnqueueAction::Insert, _) => {
+                return Err(PolicyError(
+                    "enqueue action `insert` must target `cpu`".into(),
+                ))
+            }
+        }
+        if compiled
+            .iter()
+            .any(|compiled: &QueueEnqueueRung| compiled.target == target)
+        {
+            return Err(PolicyError(format!(
+                "duplicate enqueue target `{}`",
+                target.as_str()
+            )));
+        }
+        if action == QueueEnqueueAction::Insert && index + 1 != rungs.len() {
+            return Err(PolicyError(
+                "enqueue action `insert` must be terminal".into(),
+            ));
+        }
+        compiled.push(QueueEnqueueRung { action, target });
+    }
+    if compiled.last()
+        != Some(&QueueEnqueueRung {
+            action: QueueEnqueueAction::Insert,
+            target: QueueEnqueueTarget::Cpu,
+        })
+    {
+        return Err(PolicyError(
+            "queue enqueue ladder must end with `insert` targeting `cpu`".into(),
+        ));
+    }
+    if compiled.len() != 2
+        || compiled[0]
+            != (QueueEnqueueRung {
+                action: QueueEnqueueAction::TryInsert,
+                target: QueueEnqueueTarget::Local,
+            })
+    {
+        return Err(PolicyError(
+            "queue layout `llc` enqueue ladder must try `local` before inserting into `cpu`".into(),
+        ));
+    }
+    Ok(compiled)
+}
+
 fn compile_queue_dispatch(
     rungs: &[SemanticQueueDispatchRung],
-) -> Result<Vec<QueueDispatchSource>, PolicyError> {
+    layout: QueueLayout,
+) -> Result<Vec<QueueDispatchRung>, PolicyError> {
     if rungs.is_empty() {
         return Err(PolicyError(
             "queue dispatch ladder must not be empty".into(),
@@ -563,17 +858,31 @@ fn compile_queue_dispatch(
         )));
     }
 
-    let mut compiled = Vec::with_capacity(rungs.len());
+    if layout == QueueLayout::Llc {
+        return compile_llc_queue_dispatch(rungs);
+    }
+
+    let mut compiled: Vec<QueueDispatchRung> = Vec::with_capacity(rungs.len());
     for rung in rungs {
-        let source = match (rung.source.as_deref(), rung.operation.as_deref()) {
-            (Some("cell"), None) => QueueDispatchSource::Cell,
-            (Some("affinity"), None) => QueueDispatchSource::Affinity,
+        if rung.action.is_some() || !rung.fallback.is_empty() {
+            return Err(PolicyError(
+                "explicit dispatch actions and fallback require queue layout `llc`".into(),
+            ));
+        }
+        let compiled_rung = match (rung.source.as_deref(), rung.operation.as_deref()) {
+            (Some("cell"), None) => legacy_dispatch_source(QueueDispatchSource::Cell),
+            (Some("affinity"), None) => legacy_dispatch_source(QueueDispatchSource::Affinity),
             (Some(source), None) => {
                 return Err(PolicyError(format!(
                     "unknown dispatch source `{source}`; expected `cell` or `affinity`"
                 )))
             }
-            (None, Some("min_vtime")) => QueueDispatchSource::MinVtime,
+            (None, Some("min_vtime")) => QueueDispatchRung {
+                action: QueueDispatchAction::Consume,
+                source: None,
+                operation: Some(QueueDispatchOperation::MinVtime),
+                fallback: Vec::new(),
+            },
             (None, Some(operation)) => {
                 return Err(PolicyError(format!(
                     "unknown dispatch operation `{operation}`; expected `min_vtime`"
@@ -585,23 +894,28 @@ fn compile_queue_dispatch(
                 ))
             }
         };
-        if compiled.contains(&source) {
+        if compiled.contains(&compiled_rung) {
             return Err(PolicyError(format!(
                 "duplicate dispatch source `{}`",
-                source.as_str()
+                compiled_rung.describe()
             )));
         }
-        compiled.push(source);
+        compiled.push(compiled_rung);
     }
 
-    if compiled.contains(&QueueDispatchSource::MinVtime) && compiled.len() != 1 {
+    let has_min_vtime = compiled
+        .iter()
+        .any(|rung| rung.operation == Some(QueueDispatchOperation::MinVtime));
+    if has_min_vtime && compiled.len() != 1 {
         return Err(PolicyError(
             "min_vtime must be the sole dispatch operation".into(),
         ));
     }
 
-    if !compiled.contains(&QueueDispatchSource::Affinity)
-        && !compiled.contains(&QueueDispatchSource::MinVtime)
+    if !compiled
+        .iter()
+        .any(|rung| rung.source == Some(QueueDispatchSource::Affinity))
+        && !has_min_vtime
     {
         return Err(PolicyError(
             "queue dispatch ladder must contain `affinity`".into(),
@@ -610,21 +924,157 @@ fn compile_queue_dispatch(
     Ok(compiled)
 }
 
+fn compile_llc_queue_dispatch(
+    rungs: &[SemanticQueueDispatchRung],
+) -> Result<Vec<QueueDispatchRung>, PolicyError> {
+    let mut compiled = Vec::with_capacity(rungs.len());
+    let mut peek_sources = BTreeSet::new();
+    for (index, rung) in rungs.iter().enumerate() {
+        match rung.action.as_deref() {
+            Some("peek") => {
+                if rung.operation.is_some() || !rung.fallback.is_empty() {
+                    return Err(PolicyError(
+                        "dispatch action `peek` accepts only `source`".into(),
+                    ));
+                }
+                let source = compile_llc_dispatch_source(rung.source.as_deref())?;
+                if !peek_sources.insert(source) {
+                    return Err(PolicyError(format!(
+                        "duplicate dispatch peek source `{}`",
+                        source.as_str()
+                    )));
+                }
+                compiled.push(llc_dispatch_peek(source));
+            }
+            Some("consume") => {
+                if index + 1 != rungs.len() {
+                    return Err(PolicyError(
+                        "dispatch action `consume` must be terminal".into(),
+                    ));
+                }
+                if rung.source.is_some() {
+                    return Err(PolicyError(
+                        "dispatch action `consume` accepts `operation`, not `source`".into(),
+                    ));
+                }
+                let operation = match rung.operation.as_deref() {
+                    Some("min_vtime") => QueueDispatchOperation::MinVtime,
+                    Some(operation) => {
+                        return Err(PolicyError(format!(
+                            "unknown dispatch operation `{operation}`; expected `min_vtime`"
+                        )))
+                    }
+                    None => {
+                        return Err(PolicyError(
+                            "dispatch action `consume` must specify `operation`".into(),
+                        ))
+                    }
+                };
+                let mut fallback_set = BTreeSet::new();
+                let mut fallback = Vec::with_capacity(rung.fallback.len());
+                for source in &rung.fallback {
+                    let source = compile_llc_dispatch_source(Some(source))?;
+                    if !fallback_set.insert(source) {
+                        return Err(PolicyError(format!(
+                            "duplicate dispatch fallback source `{}`",
+                            source.as_str()
+                        )));
+                    }
+                    fallback.push(source);
+                }
+                if fallback_set != peek_sources {
+                    return Err(PolicyError(
+                        "dispatch fallback must reference every configured peek source exactly once"
+                            .into(),
+                    ));
+                }
+                compiled.push(QueueDispatchRung {
+                    action: QueueDispatchAction::Consume,
+                    source: None,
+                    operation: Some(operation),
+                    fallback,
+                });
+            }
+            Some(action) => {
+                return Err(PolicyError(format!(
+                    "unknown dispatch action `{action}`; expected `peek` or `consume`"
+                )))
+            }
+            None => {
+                return Err(PolicyError(
+                    "queue layout `llc` dispatch rungs must specify `action`".into(),
+                ))
+            }
+        }
+    }
+    if compiled.last().map(|rung| rung.action) != Some(QueueDispatchAction::Consume) {
+        return Err(PolicyError(
+            "queue dispatch ladder must end with `consume`".into(),
+        ));
+    }
+    let required = BTreeSet::from([
+        QueueDispatchSource::Cpu,
+        QueueDispatchSource::Local,
+        QueueDispatchSource::Remote,
+    ]);
+    if peek_sources != required {
+        return Err(PolicyError(
+            "queue layout `llc` dispatch ladder must peek `cpu`, `local`, and `remote` exactly once"
+                .into(),
+        ));
+    }
+    let consume = compiled
+        .pop()
+        .expect("validated LLC dispatch ladder has terminal consume");
+    compiled.sort_by_key(|rung| rung.source);
+    compiled.push(consume);
+    Ok(compiled)
+}
+
+fn compile_llc_dispatch_source(source: Option<&str>) -> Result<QueueDispatchSource, PolicyError> {
+    match source {
+        Some("cpu") => Ok(QueueDispatchSource::Cpu),
+        Some("local") => Ok(QueueDispatchSource::Local),
+        Some("remote") => Ok(QueueDispatchSource::Remote),
+        Some(source) => Err(PolicyError(format!(
+            "unknown LLC dispatch source `{source}`; expected `cpu`, `local`, or `remote`"
+        ))),
+        None => Err(PolicyError(
+            "dispatch action `peek` must specify `source`".into(),
+        )),
+    }
+}
+
 fn validate_queue_callback_pair(
-    enqueue: &[QueueEnqueueTarget],
-    dispatch: &[QueueDispatchSource],
+    layout: QueueLayout,
+    enqueue: &[QueueEnqueueRung],
+    dispatch: &[QueueDispatchRung],
 ) -> Result<(), PolicyError> {
-    let enqueue_has_cell = enqueue.contains(&QueueEnqueueTarget::Cell);
-    let min_vtime = dispatch.contains(&QueueDispatchSource::MinVtime);
+    if layout == QueueLayout::Llc {
+        return Ok(());
+    }
+    let enqueue_has_cell = enqueue
+        .iter()
+        .any(|rung| rung.target == QueueEnqueueTarget::Cell);
+    let min_vtime = dispatch
+        .iter()
+        .any(|rung| rung.operation == Some(QueueDispatchOperation::MinVtime));
     if min_vtime
-        && !(enqueue.contains(&QueueEnqueueTarget::Cell)
-            && enqueue.contains(&QueueEnqueueTarget::Affinity))
+        && !(enqueue
+            .iter()
+            .any(|rung| rung.target == QueueEnqueueTarget::Cell)
+            && enqueue
+                .iter()
+                .any(|rung| rung.target == QueueEnqueueTarget::Affinity))
     {
         return Err(PolicyError(
             "min_vtime requires both `cell` and `affinity` enqueue targets".into(),
         ));
     }
-    let dispatch_has_cell = dispatch.contains(&QueueDispatchSource::Cell) || min_vtime;
+    let dispatch_has_cell = dispatch
+        .iter()
+        .any(|rung| rung.source == Some(QueueDispatchSource::Cell))
+        || min_vtime;
     match (enqueue_has_cell, dispatch_has_cell) {
         (true, false) => Err(PolicyError(
             "queue dispatch ladder must contain `cell` when enqueue contains `cell`".into(),
@@ -760,9 +1210,10 @@ fn compile_rung(
     rung: &SemanticRung,
     partitions: &BTreeMap<String, MaskTableSource>,
     has_cells: bool,
-    queue_mode: bool,
+    queue_layout: Option<QueueLayout>,
     mask_tables: &mut Vec<MaskTableSpec>,
 ) -> Result<CompiledRung, PolicyError> {
+    let queue_mode = queue_layout.is_some();
     if !matches!(
         rung.scope.as_str(),
         "previous_cpu"
@@ -787,6 +1238,13 @@ fn compile_rung(
         return Err(PolicyError(format!(
             "rung {index}: scope `task_cell_borrowable` requires a [queues] policy"
         )));
+    }
+    if queue_layout == Some(QueueLayout::Llc)
+        && matches!(rung.scope.as_str(), "task_cell" | "task_cell_borrowable")
+    {
+        return Err(PolicyError(
+            "queue layout `llc` does not support task-cell scopes".into(),
+        ));
     }
 
     if queue_mode
@@ -1293,17 +1751,204 @@ scope = "task_cell"
         .expect("queue policy should compile");
 
         let queues = policy.queues.as_ref().unwrap();
-        assert_eq!(
-            queues.enqueue,
-            vec![QueueEnqueueTarget::Cell, QueueEnqueueTarget::Affinity]
-        );
-        assert_eq!(
-            queues.dispatch,
-            vec![QueueDispatchSource::Affinity, QueueDispatchSource::Cell]
-        );
+        let (expected_enqueue, expected_dispatch) = default_queue_callbacks(QueueLayout::Cell);
+        assert_eq!(queues.enqueue, expected_enqueue);
+        assert_eq!(queues.dispatch, expected_dispatch);
         assert!(policy
             .dump()
             .contains("enqueue=cell,affinity dispatch=affinity,cell"));
+    }
+
+    #[test]
+    fn llc_queue_policy_defaults_to_local_routing_and_min_vtime_dispatch() {
+        let policy = compile_policy(
+            r#"
+[queues]
+layout = "llc"
+
+[[rung]]
+operation = "pick_idle"
+scope = "task_allowed"
+"#,
+        )
+        .expect("global LLC queue policy should compile");
+
+        let queues = policy.queues.as_ref().unwrap();
+        assert_eq!(queues.layout.as_str(), "llc");
+        assert!(policy.cells.is_empty());
+        assert!(policy.cell_cpu_weights.is_empty());
+        assert!(policy.membership.is_none());
+        assert!(policy.dump().contains(
+            "enqueue=try_insert(local),insert(cpu) dispatch=peek(cpu),peek(local),peek(remote),consume(min_vtime;fallback=cpu,local,remote)"
+        ));
+    }
+
+    #[test]
+    fn compiles_explicit_llc_queue_callback_ladders() {
+        let policy = compile_policy(
+            r#"
+[queues]
+layout = "llc"
+
+[[queues.enqueue]]
+action = "try_insert"
+target = "local"
+
+[[queues.enqueue]]
+action = "insert"
+target = "cpu"
+
+[[queues.dispatch]]
+action = "peek"
+source = "cpu"
+
+[[queues.dispatch]]
+action = "peek"
+source = "local"
+
+[[queues.dispatch]]
+action = "peek"
+source = "remote"
+
+[[queues.dispatch]]
+action = "consume"
+operation = "min_vtime"
+fallback = ["cpu", "local", "remote"]
+
+[[rung]]
+operation = "pick_idle"
+scope = "task_allowed"
+"#,
+        )
+        .expect("explicit LLC callback ladders should compile");
+
+        assert!(policy.dump().contains(
+            "enqueue=try_insert(local),insert(cpu) dispatch=peek(cpu),peek(local),peek(remote),consume(min_vtime;fallback=cpu,local,remote)"
+        ));
+
+        let reordered = compile_policy(
+            r#"
+[queues]
+layout = "llc"
+enqueue = [{ action = "try_insert", target = "local" }, { action = "insert", target = "cpu" }]
+dispatch = [
+  { action = "peek", source = "remote" },
+  { action = "peek", source = "cpu" },
+  { action = "peek", source = "local" },
+  { action = "consume", operation = "min_vtime", fallback = ["remote", "cpu", "local"] },
+]
+[[rung]]
+operation = "pick_idle"
+scope = "task_allowed"
+"#,
+        )
+        .expect("LLC peek order should be semantically neutral");
+        assert!(reordered.dump().contains(
+            "dispatch=peek(cpu),peek(local),peek(remote),consume(min_vtime;fallback=remote,cpu,local)"
+        ));
+    }
+
+    #[test]
+    fn rejects_invalid_llc_enqueue_ladders() {
+        let cases = [
+            (
+                "enqueue = [{ action = \"insert\", target = \"cpu\" }, { action = \"try_insert\", target = \"local\" }]",
+                "enqueue action `insert` must be terminal",
+            ),
+            (
+                "enqueue = [{ action = \"try_insert\", target = \"local\" }]",
+                "enqueue ladder must end with `insert` targeting `cpu`",
+            ),
+            (
+                "enqueue = [{ action = \"try_insert\", target = \"local\" }, { action = \"insert\", target = \"local\" }]",
+                "enqueue action `insert` must target `cpu`",
+            ),
+        ];
+
+        for (enqueue, expected) in cases {
+            let source = format!(
+                "[queues]\nlayout = \"llc\"\n{enqueue}\ndispatch = [{{ action = \"peek\", source = \"cpu\" }}, {{ action = \"peek\", source = \"local\" }}, {{ action = \"peek\", source = \"remote\" }}, {{ action = \"consume\", operation = \"min_vtime\", fallback = [\"cpu\", \"local\", \"remote\"] }}]\n[[rung]]\noperation = \"pick_idle\"\nscope = \"task_allowed\"\n"
+            );
+            let error = error_for(&source);
+            assert!(error.contains(expected), "{error}");
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_llc_dispatch_ladders() {
+        let cases = [
+            (
+                "dispatch = [{ action = \"consume\", operation = \"min_vtime\", fallback = [\"cpu\", \"local\", \"remote\"] }, { action = \"peek\", source = \"cpu\" }]",
+                "dispatch action `consume` must be terminal",
+            ),
+            (
+                "dispatch = [{ action = \"peek\", source = \"cpu\" }, { action = \"peek\", source = \"cpu\" }, { action = \"consume\", operation = \"min_vtime\", fallback = [\"cpu\"] }]",
+                "duplicate dispatch peek source `cpu`",
+            ),
+            (
+                "dispatch = [{ action = \"peek\", source = \"cpu\" }, { action = \"peek\", source = \"local\" }, { action = \"consume\", operation = \"min_vtime\", fallback = [\"cpu\"] }]",
+                "fallback must reference every configured peek source exactly once",
+            ),
+            (
+                "dispatch = [{ action = \"peek\", source = \"cpu\" }, { action = \"consume\", operation = \"min_vtime\", fallback = [\"cpu\", \"cpu\"] }]",
+                "duplicate dispatch fallback source `cpu`",
+            ),
+            (
+                "dispatch = [{ action = \"peek\", source = \"cpu\" }]",
+                "dispatch ladder must end with `consume`",
+            ),
+        ];
+
+        for (dispatch, expected) in cases {
+            let source = format!(
+                "[queues]\nlayout = \"llc\"\nenqueue = [{{ action = \"try_insert\", target = \"local\" }}, {{ action = \"insert\", target = \"cpu\" }}]\n{dispatch}\n[[rung]]\noperation = \"pick_idle\"\nscope = \"task_allowed\"\n"
+            );
+            let error = error_for(&source);
+            assert!(error.contains(expected), "{error}");
+        }
+    }
+
+    #[test]
+    fn llc_queue_policy_rejects_cell_semantics() {
+        let cases = [
+            (
+                "cell0_cpu_weight = 2\n",
+                "queue layout `llc` does not support cell0_cpu_weight",
+            ),
+            (
+                r#"
+[[cell]]
+id = 7
+cpus = "0"
+"#,
+                "queue layout `llc` does not support declared cells",
+            ),
+            (
+                r#"
+[membership]
+parent = "/sys/fs/cgroup/workloads"
+"#,
+                "queue layout `llc` does not support membership",
+            ),
+        ];
+
+        for (extra, expected) in cases {
+            let source = format!(
+                "[queues]\nlayout = \"llc\"\n{extra}\n[[rung]]\noperation = \"pick_idle\"\nscope = \"task_allowed\"\n"
+            );
+            let error = error_for(&source);
+            assert!(error.contains(expected), "{error}");
+        }
+
+        for scope in ["task_cell", "task_cell_borrowable"] {
+            let error = error_for(&format!(
+                "[queues]\nlayout = \"llc\"\n[[rung]]\noperation = \"pick_idle\"\nscope = \"{scope}\"\n"
+            ));
+            assert!(
+                error.contains("queue layout `llc` does not support task-cell scopes"),
+                "{error}"
+            );
+        }
     }
 
     #[test]
@@ -1339,11 +1984,23 @@ scope = "task_cell"
         let queues = policy.queues.as_ref().unwrap();
         assert_eq!(
             queues.enqueue,
-            vec![QueueEnqueueTarget::Cell, QueueEnqueueTarget::Affinity]
+            vec![
+                QueueEnqueueRung {
+                    action: QueueEnqueueAction::TryInsert,
+                    target: QueueEnqueueTarget::Cell,
+                },
+                QueueEnqueueRung {
+                    action: QueueEnqueueAction::Insert,
+                    target: QueueEnqueueTarget::Affinity,
+                },
+            ]
         );
         assert_eq!(
             queues.dispatch,
-            vec![QueueDispatchSource::Cell, QueueDispatchSource::Affinity]
+            vec![
+                legacy_dispatch_source(QueueDispatchSource::Cell),
+                legacy_dispatch_source(QueueDispatchSource::Affinity),
+            ]
         );
     }
 
@@ -1422,8 +2079,17 @@ scope = "task_cell"
         .expect("affinity-only callback ladders should compile");
 
         let queues = policy.queues.as_ref().unwrap();
-        assert_eq!(queues.enqueue, vec![QueueEnqueueTarget::Affinity]);
-        assert_eq!(queues.dispatch, vec![QueueDispatchSource::Affinity]);
+        assert_eq!(
+            queues.enqueue,
+            vec![QueueEnqueueRung {
+                action: QueueEnqueueAction::Insert,
+                target: QueueEnqueueTarget::Affinity,
+            }]
+        );
+        assert_eq!(
+            queues.dispatch,
+            vec![legacy_dispatch_source(QueueDispatchSource::Affinity)]
+        );
     }
 
     #[test]
@@ -1891,6 +2557,32 @@ scope = "task_cell"
             compile_policy(KERNEL_DEFAULT_SIM_POLICY).expect("simulation policy should compile");
 
         assert_eq!(policy.fallback, Fallback::PreviousCpu);
+        let queues = policy
+            .queues
+            .as_ref()
+            .expect("kernel-default simulation should shard VTIME queues by LLC");
+        assert_eq!(queues.layout, QueueLayout::Llc);
+        assert_eq!(
+            queues
+                .enqueue
+                .iter()
+                .map(QueueEnqueueRung::describe)
+                .collect::<Vec<_>>(),
+            ["try_insert(local)", "insert(cpu)"]
+        );
+        assert_eq!(
+            queues
+                .dispatch
+                .iter()
+                .map(QueueDispatchRung::describe)
+                .collect::<Vec<_>>(),
+            [
+                "peek(cpu)",
+                "peek(local)",
+                "peek(remote)",
+                "consume(min_vtime;fallback=cpu,local,remote)",
+            ]
+        );
         assert_eq!(
             policy.rungs,
             vec![

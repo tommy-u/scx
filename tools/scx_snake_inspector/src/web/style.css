@@ -1983,6 +1983,34 @@ button:focus-visible {
   font-weight: 650;
 }
 
+.queue-rung-outcomes {
+  margin: 9px 0 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(112px, 1fr));
+  gap: 8px;
+}
+
+.queue-rung-outcomes dt {
+  color: var(--muted);
+  font-size: 0.63rem;
+  font-weight: 680;
+}
+
+.queue-rung-outcomes dd {
+  margin: 2px 0 0;
+  font-size: 0.72rem;
+  font-variant-numeric: tabular-nums;
+  font-weight: 650;
+}
+
+.queue-rung-outcomes dd small {
+  display: block;
+  margin-top: 1px;
+  color: var(--muted);
+  font-size: 0.58rem;
+  font-weight: 650;
+}
+
 .rung-timing {
   min-width: 92px;
   margin: 0;
