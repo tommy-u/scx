@@ -172,6 +172,7 @@ test("testing UI loads live results and exposes authenticated controls", () => {
   assert.match(styles, /\.testing-tooltip\s*\{/);
   assert.match(styles, /\.testing-fairness-toggle\s*\{/);
   assert.match(styles, /\.testing-kernel-tabs\s*\{/);
+  assert.match(styles, /\.testing-matrix-wrap\s*\{[^}]*contain:\s*layout;/s);
 });
 
 test("fairness result passes only when every case passes", () => {
@@ -287,6 +288,51 @@ test("kernel tabs show whole-campaign pass and failure outcomes", () => {
       },
     ],
   );
+});
+
+test("running kernel tabs identify the campaign as running", () => {
+  const run = {
+    campaign_id: "campaign-next",
+    environment: { kernel_release: "7.0-test" },
+    status: "running",
+    matrix: {
+      aggregate: true,
+      workloads: ["cpu_saturation", "mixed_affinity"],
+      groups: [{
+        fairness: "eevdf",
+        rows: [{
+          policy_id: "basic.toml",
+          cases: [
+            {
+              id: "eevdf/basic.toml/cpu_saturation",
+              workload: "cpu_saturation",
+              status: "passed",
+            },
+            {
+              id: "eevdf/basic.toml/mixed_affinity",
+              workload: "mixed_affinity",
+              status: "running",
+            },
+          ],
+        }],
+      }],
+    },
+  };
+  const [tab] = testingCampaignTabs([run]).tabs;
+
+  assert.equal(tab.status, "running");
+  assert.equal(tab.summary, "Running \u00b7 1 / 2 passed");
+  assert.equal(tab.symbol, "");
+  assert.match(
+    script,
+    /aria-label="\$\{escapeHtml\(`\$\{tab\.label\}: \$\{tab\.summary\}`\)\}"/,
+  );
+
+  run.matrix.groups[0].rows[0].cases[1].status = "failed";
+  const [failedTab] = testingCampaignTabs([run]).tabs;
+  assert.equal(failedTab.status, "failed");
+  assert.equal(failedTab.summary, "Running \u00b7 1 failed");
+  assert.equal(failedTab.symbol, "×");
 });
 
 test("duplicate kernel tab labels are disambiguated without changing selection keys", () => {
