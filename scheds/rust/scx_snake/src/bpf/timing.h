@@ -6,6 +6,7 @@
 
 extern u32 callback_timing_sample_rate;
 extern u64 select_fine_timing_session_id;
+extern u64 dispatch_fine_timing_session_id;
 
 struct snake_fine_timing_ctx {
 	u64 session_id;
@@ -239,26 +240,26 @@ static __noinline void
 fine_timing_record_dispatch_transfer(u64 callback_started_at, u64 source_dsq_id,
 				     u64 target_dsq_id, u32 queue_class)
 {
-	struct snake_fine_timing_config *config;
-	struct snake_fine_timing_event event = {};
-	u32 key = 0;
+	struct snake_fine_timing_event *event;
+	u64 session_id;
 
 	if (!callback_started_at)
 		return;
-	config = bpf_map_lookup_elem(&fine_timing_config, &key);
-	if (!config || !(READ_ONCE(config->enabled_mask) &
-			 SNAKE_FINE_TIMING_DISPATCH))
+	session_id = READ_ONCE(dispatch_fine_timing_session_id);
+	if (!session_id)
 		return;
-	event.session_id = READ_ONCE(
-		config->session_ids[SNAKE_FINE_TIMING_CALLBACK_DISPATCH]);
-	if (!event.session_id)
+	event = bpf_ringbuf_reserve(&fine_timing_events, sizeof(*event), 0);
+	if (!event)
 		return;
-	event.source_dsq_id = source_dsq_id;
-	event.target_dsq_id = target_dsq_id;
-	event.operation = SNAKE_DSQ_OP_TRANSFER;
-	event.outcome = SNAKE_DSQ_OUTCOME_SUCCESS;
-	event.queue_class = queue_class;
-	bpf_ringbuf_output(&fine_timing_events, &event, sizeof(event), 0);
+	event->session_id = session_id;
+	event->elapsed_ns = 0;
+	event->source_dsq_id = source_dsq_id;
+	event->target_dsq_id = target_dsq_id;
+	event->stage = 0;
+	event->operation = SNAKE_DSQ_OP_TRANSFER;
+	event->outcome = SNAKE_DSQ_OUTCOME_SUCCESS;
+	event->queue_class = queue_class;
+	bpf_ringbuf_submit(event, 0);
 }
 
 static __always_inline void

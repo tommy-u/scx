@@ -514,13 +514,11 @@ queue_dispatch_peek_remote(struct snake_cpu_queue	*cpuq,
 }
 
 static __always_inline bool
-queue_global_move(struct snake_ladder_ctx *ctx, u64 source_dsq, u32 class,
-		  s32 cpu, u64 callback_started_at)
+queue_global_move(struct snake_ladder_ctx *ctx, u64 source_dsq, u32 class)
 {
 	dsq_id_t source = { .raw = source_dsq };
 
-	if (dsq_is_invalid(source) ||
-	    !dsq_move_to_local_untimed(source, cpu, callback_started_at))
+	if (dsq_is_invalid(source) || !dsq_move_to_local_untimed(source))
 		return false;
 	stat_inc(ctx, SNAKE_STAT_VTIME_DISPATCHES);
 	if (class == SNAKE_QUEUE_CLASS_AFFINITY)
@@ -550,9 +548,16 @@ struct snake_global_consume_args {
 	struct snake_queue_candidate *local_candidate;
 	struct snake_queue_candidate *remote_candidate;
 	u64 fallback;
-	u64 callback_started_at;
 	s32 cpu;
 	u32 consume_rung;
+};
+
+enum snake_global_dispatch_result {
+	SNAKE_GLOBAL_DISPATCH_MISS = 0,
+	SNAKE_GLOBAL_DISPATCH_KEEP_RUNNING,
+	SNAKE_GLOBAL_DISPATCH_TRANSFER_CPU,
+	SNAKE_GLOBAL_DISPATCH_TRANSFER_LOCAL,
+	SNAKE_GLOBAL_DISPATCH_TRANSFER_REMOTE,
 };
 
 static __noinline s32 queue_dispatch_try_selected(
@@ -585,11 +590,11 @@ static __noinline s32 queue_dispatch_try_selected(
 	    cpu >= SNAKE_MAX_CPUS)
 		return -EINVAL;
 	stat_inc(ctx, SNAKE_STAT_DISPATCH_RUNG_SELECTED_BASE + rung);
-	if (fairness_vtime_keep_running(ctx, args->prev, candidate->vtime) ||
-	    queue_global_move(ctx, candidate->dsq.raw, class, cpu,
-			      args->callback_started_at))
-		return 1;
-	return 0;
+	if (fairness_vtime_keep_running(ctx, args->prev, candidate->vtime))
+		return SNAKE_GLOBAL_DISPATCH_KEEP_RUNNING;
+	if (queue_global_move(ctx, candidate->dsq.raw, class))
+		return source + SNAKE_GLOBAL_DISPATCH_KEEP_RUNNING;
+	return SNAKE_GLOBAL_DISPATCH_MISS;
 }
 
 struct snake_global_fallback_candidate {
@@ -603,7 +608,6 @@ struct snake_global_fallback_loop_ctx {
 	struct snake_global_fallback_candidate local_candidate;
 	struct snake_global_fallback_candidate remote_candidate;
 	u64 fallback;
-	u64 callback_started_at;
 	s32 cpu;
 	s32 result;
 };
@@ -623,11 +627,10 @@ static __noinline long queue_dispatch_try_cpu_fallback(
 	stat_inc(&loop_ctx->ladder_ctx,
 		 SNAKE_STAT_DISPATCH_RUNG_FALLBACK_ATTEMPT_BASE + candidate->rung);
 	if (queue_global_move(&loop_ctx->ladder_ctx, candidate->dsq,
-			      SNAKE_QUEUE_CLASS_AFFINITY, cpu,
-			      loop_ctx->callback_started_at)) {
+			      SNAKE_QUEUE_CLASS_AFFINITY)) {
 		stat_inc(&loop_ctx->ladder_ctx,
 			 SNAKE_STAT_DISPATCH_RUNG_FALLBACK_HIT_BASE + candidate->rung);
-		loop_ctx->result = 1;
+		loop_ctx->result = SNAKE_GLOBAL_DISPATCH_TRANSFER_CPU;
 		return 1;
 	}
 	stat_inc(&loop_ctx->ladder_ctx,
@@ -650,11 +653,10 @@ static __noinline long queue_dispatch_try_local_fallback(
 	stat_inc(&loop_ctx->ladder_ctx,
 		 SNAKE_STAT_DISPATCH_RUNG_FALLBACK_ATTEMPT_BASE + candidate->rung);
 	if (queue_global_move(&loop_ctx->ladder_ctx, candidate->dsq,
-			      SNAKE_QUEUE_CLASS_NORMAL, cpu,
-			      loop_ctx->callback_started_at)) {
+			      SNAKE_QUEUE_CLASS_NORMAL)) {
 		stat_inc(&loop_ctx->ladder_ctx,
 			 SNAKE_STAT_DISPATCH_RUNG_FALLBACK_HIT_BASE + candidate->rung);
-		loop_ctx->result = 1;
+		loop_ctx->result = SNAKE_GLOBAL_DISPATCH_TRANSFER_LOCAL;
 		return 1;
 	}
 	stat_inc(&loop_ctx->ladder_ctx,
@@ -677,11 +679,10 @@ static __noinline long queue_dispatch_try_remote_fallback(
 	stat_inc(&loop_ctx->ladder_ctx,
 		 SNAKE_STAT_DISPATCH_RUNG_FALLBACK_ATTEMPT_BASE + candidate->rung);
 	if (queue_global_move(&loop_ctx->ladder_ctx, candidate->dsq,
-			      SNAKE_QUEUE_CLASS_NORMAL, cpu,
-			      loop_ctx->callback_started_at)) {
+			      SNAKE_QUEUE_CLASS_NORMAL)) {
 		stat_inc(&loop_ctx->ladder_ctx,
 			 SNAKE_STAT_DISPATCH_RUNG_FALLBACK_HIT_BASE + candidate->rung);
-		loop_ctx->result = 1;
+		loop_ctx->result = SNAKE_GLOBAL_DISPATCH_TRANSFER_REMOTE;
 		return 1;
 	}
 	stat_inc(&loop_ctx->ladder_ctx,
@@ -734,7 +735,6 @@ static __always_inline s32 queue_dispatch_try_fallbacks(
 			.rung = 2,
 		},
 		.fallback = args->fallback,
-		.callback_started_at = args->callback_started_at,
 		.cpu = args->cpu,
 	};
 	nr_loops = bpf_loop(SNAKE_DISPATCH_FALLBACK_MAX,
@@ -934,7 +934,6 @@ static __noinline s32 queue_global_dispatch_consume_rung(
 			.local_candidate = &loop_ctx->local_candidate,
 			.remote_candidate = &loop_ctx->remote_candidate,
 			.fallback = rung->data,
-			.callback_started_at = loop_ctx->callback_started_at,
 			.cpu = loop_ctx->cpu,
 			.consume_rung = index,
 		};
@@ -980,6 +979,18 @@ static __noinline int queue_global_ladder_dispatch(
 	if (ret)
 		return ret;
 	ret = queue_global_dispatch_consume_rung(ctx, &loop_ctx, 3);
+	if (ret == SNAKE_GLOBAL_DISPATCH_TRANSFER_CPU)
+		fine_timing_record_dispatch_transfer(
+			callback_started_at, loop_ctx.cpu_candidate.dsq.raw,
+			dsq_local_on(cpu).raw, SNAKE_QUEUE_CLASS_AFFINITY);
+	else if (ret == SNAKE_GLOBAL_DISPATCH_TRANSFER_LOCAL)
+		fine_timing_record_dispatch_transfer(
+			callback_started_at, loop_ctx.local_candidate.dsq.raw,
+			dsq_local_on(cpu).raw, SNAKE_QUEUE_CLASS_NORMAL);
+	else if (ret == SNAKE_GLOBAL_DISPATCH_TRANSFER_REMOTE)
+		fine_timing_record_dispatch_transfer(
+			callback_started_at, loop_ctx.remote_candidate.dsq.raw,
+			dsq_local_on(cpu).raw, SNAKE_QUEUE_CLASS_NORMAL);
 	return ret < 0 ? ret : 0;
 }
 

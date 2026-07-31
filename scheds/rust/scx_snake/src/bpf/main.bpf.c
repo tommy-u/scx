@@ -16,6 +16,7 @@ UEI_DEFINE(uei);
 u32				   staging_ladder_slot;
 u32				   callback_timing_sample_rate;
 u64				   select_fine_timing_session_id;
+u64				   dispatch_fine_timing_session_id;
 u64				   queue_timing_session_id;
 struct snake_queue_timing_counters queue_timing_counters;
 

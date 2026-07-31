@@ -1983,15 +1983,24 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
             .fine_timing_config
             .update(&key.to_ne_bytes(), bytes_of(&config), MapFlags::ANY)
             .context("updating fine timing configuration")?;
-        self.skel
+        let bss = self
+            .skel
             .maps
             .bss_data
             .as_mut()
-            .context("BPF bss map is not memory mapped")?
-            .select_fine_timing_session_id =
+            .context("BPF bss map is not memory mapped")?;
+        bss.select_fine_timing_session_id =
             if state.is_enabled(fine_timing::FineTimingCallback::SelectCpu) {
                 state
                     .session(fine_timing::FineTimingCallback::SelectCpu)
+                    .map_or(0, |session| session.session_id)
+            } else {
+                0
+            };
+        bss.dispatch_fine_timing_session_id =
+            if state.is_enabled(fine_timing::FineTimingCallback::Dispatch) {
+                state
+                    .session(fine_timing::FineTimingCallback::Dispatch)
                     .map_or(0, |session| session.session_id)
             } else {
                 0
@@ -3752,7 +3761,7 @@ scope = "task_allowed"
             .split_once("queue_global_replenish(")
             .unwrap()
             .0;
-        assert!(global_move.contains("dsq_move_to_local_untimed(source, cpu, callback_started_at)"));
+        assert!(global_move.contains("dsq_move_to_local_untimed(source)"));
         assert!(!global_move.contains("scx_bpf_dsq_move_to_local"));
         assert!(!global_move.contains("dsq_move_to_local(source, cpu, fine)"));
         assert!(!dispatch.contains("queue_global_dispatch_callback("));
@@ -4350,6 +4359,53 @@ scope = "task_allowed"
     }
 
     #[test]
+    fn dispatch_transfer_sampling_uses_ring_storage_instead_of_dispatch_stack() {
+        let timing =
+            fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bpf/timing.h"))
+                .unwrap();
+        let helper = timing
+            .split_once("fine_timing_record_dispatch_transfer(")
+            .and_then(|(_, body)| {
+                body.split_once("static __always_inline void\nfine_timing_finish(")
+            })
+            .map(|(body, _)| body)
+            .expect("dispatch transfer helper should have one definition");
+
+        assert!(timing.contains("static __noinline void\nfine_timing_record_dispatch_transfer("));
+        assert!(helper.contains("bpf_ringbuf_reserve(&fine_timing_events"));
+        assert!(helper.contains("bpf_ringbuf_submit(event, 0)"));
+        assert!(helper.contains("READ_ONCE(dispatch_fine_timing_session_id)"));
+        assert!(!helper.contains("bpf_map_lookup_elem"));
+        assert!(!helper.contains("struct snake_fine_timing_event event = {}"));
+    }
+
+    #[test]
+    fn dispatch_transfer_sampling_unwinds_before_ringbuf_emission() {
+        let bpf_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bpf");
+        let dsq = fs::read_to_string(bpf_dir.join("dsq.h")).unwrap();
+        let dispatch = fs::read_to_string(bpf_dir.join("queue_dispatch.h")).unwrap();
+        let ladder = dispatch
+            .split_once("static __noinline int queue_global_ladder_dispatch(")
+            .and_then(|(_, body)| body.split_once("struct snake_queue_dispatch_loop_ctx"))
+            .map(|(body, _)| body)
+            .expect("global dispatch ladder should have one definition");
+
+        assert!(!dsq.contains("fine_timing_record_dispatch_transfer("));
+        assert_eq!(
+            dispatch
+                .matches("fine_timing_record_dispatch_transfer(")
+                .count(),
+            3
+        );
+        assert!(
+            ladder.find("queue_global_dispatch_consume_rung(").unwrap()
+                < ladder
+                    .find("fine_timing_record_dispatch_transfer(")
+                    .unwrap()
+        );
+    }
+
+    #[test]
     fn queue_dispatch_keep_running_has_a_stack_boundary() {
         let queue_dispatch = fs::read_to_string(
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bpf/queue_dispatch.h"),
@@ -4498,7 +4554,7 @@ scope = "task_allowed"
             .split_once("fine_timing_record_dsq_operation(")
             .unwrap()
             .1
-            .split_once("fine_timing_finish(")
+            .split_once("/* Global dispatch stays untimed")
             .unwrap()
             .0;
 
