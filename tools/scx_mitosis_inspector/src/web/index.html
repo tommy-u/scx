@@ -104,6 +104,29 @@
           </div>
         </section>
 
+        <section class="table-section" aria-labelledby="bpfRuntimeHeading">
+          <div class="table-section-heading">
+            <h2 id="bpfRuntimeHeading">BPF program runtime</h2>
+            <p id="bpfRuntimeStatus">Checking kernel counters</p>
+          </div>
+          <div class="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">Program</th>
+                  <th scope="col">ID</th>
+                  <th scope="col">Runs</th>
+                  <th scope="col">Runtime (ns)</th>
+                  <th scope="col">Average (ns)</th>
+                  <th scope="col">Recursion misses</th>
+                  <th scope="col">Verified insns</th>
+                </tr>
+              </thead>
+              <tbody id="bpfProgramRows"></tbody>
+            </table>
+          </div>
+        </section>
+
         <section class="table-section" aria-labelledby="schedulerTimingHeading">
           <div class="table-section-heading">
             <h2 id="schedulerTimingHeading">Scheduler latency</h2>
