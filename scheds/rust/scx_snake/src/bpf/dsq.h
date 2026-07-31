@@ -135,9 +135,17 @@ dsq_move_to_local(dsq_id_t source, s32 cpu,
 	return moved;
 }
 
-static __always_inline bool dsq_move_to_local_untimed(dsq_id_t source)
+static __always_inline bool
+dsq_move_to_local_untimed(dsq_id_t source, s32 cpu, u64 callback_started_at)
 {
-	return scx_bpf_dsq_move_to_local(source.raw, 0);
+	dsq_id_t target = cpu < 0 ? dsq_invalid() : dsq_local_on(cpu);
+	bool moved = scx_bpf_dsq_move_to_local(source.raw, 0);
+
+	if (moved)
+		fine_timing_record_dispatch_transfer(
+			callback_started_at, source.raw, target.raw,
+			dsq_queue_class(source));
+	return moved;
 }
 
 static __always_inline bool dsq_move(struct bpf_iter_scx_dsq *iterator,

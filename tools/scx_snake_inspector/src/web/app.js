@@ -3351,13 +3351,14 @@ function renderResolvedQueueTopology() {
       ? `<p class="notice queue-capture-notice">Historical capture policy generation ${formatNullableCount(timing.capture?.policy_generation)} does not match the current queue topology; DSQ measurements are not joined.</p>`
       : "";
   const operationDsqs = fineTimingDsqModels(state.fineTiming);
+  const compatibleTimingDsqs = timing.topologyCompatible === false ? [] : timing.dsqs;
   const dsqActivity = renderDsqActivity(dsqActivityModels(
     operationDsqs,
-    timing.dsqs,
+    compatibleTimingDsqs,
   ));
   const activityHeatmap = renderDsqActivityHeatmap(dsqActivityHeatmapModel(
     state.fineTiming,
-    timing.dsqs,
+    compatibleTimingDsqs,
   ));
   const transferHeatmap = renderDsqTransferHeatmap(dsqTransferHeatmapModel(
     state.fineTiming,
@@ -3478,8 +3479,9 @@ function renderDsqTrafficCell(dsq, metric, kind, label, rateAvailable) {
   const high = metric.intensity >= 0.68 ? " high" : "";
   const tooltip = dsqTrafficTooltip(dsq, metric, label, rateAvailable);
   return `
-    <td class="dsq-traffic-cell ${kind}${high}" style="--heat:${metric.intensity.toFixed(3)}"
-      title="${escapeHtml(tooltip)}">
+    <td class="dsq-traffic-cell ${kind}${high}" tabindex="0"
+      style="--heat:${metric.intensity.toFixed(3)}"
+      aria-label="${escapeHtml(tooltip)}" title="${escapeHtml(tooltip)}">
       <strong>${escapeHtml(formatTrafficMetric(metric, rateAvailable))}</strong>
       <small>${formatCount(metric.samples)} samples</small>
     </td>`;

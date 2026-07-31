@@ -1544,14 +1544,19 @@ function mergeTrafficMetric(target, source) {
   }
 }
 
-function captureRateMultiplier(capture, sampleRate, nowMs) {
+function captureRateMultiplier(capture, sampleRate) {
+  const observedMs = finiteValue(capture?.observed_ms);
   const startedAt = finiteValue(capture?.started_at_ms);
   const stoppedAt = finiteValue(capture?.stopped_at_ms);
-  const end = stoppedAt ?? finiteValue(nowMs);
-  if (sampleRate <= 0 || startedAt === null || end === null || end <= startedAt) {
+  const durationMs = observedMs !== null
+    ? observedMs
+    : startedAt !== null && stoppedAt !== null
+      ? stoppedAt - startedAt
+      : null;
+  if (sampleRate <= 0 || durationMs === null || durationMs <= 0) {
     return null;
   }
-  return sampleRate * 1_000 / (end - startedAt);
+  return sampleRate * 1_000 / durationMs;
 }
 
 function trafficScore(metric) {
@@ -1591,7 +1596,7 @@ function trafficGenerationMatches(payload, capture) {
 export function dsqActivityHeatmapModel(
   payload,
   queueTimingDsqs = [],
-  { limit = 12, nowMs = Date.now() } = {},
+  { limit = 12 } = {},
 ) {
   const queueTiming = new Map((queueTimingDsqs || []).map((timing) => [
     timing?.dsqKey ?? canonicalDsqKey(timing?.dsqId),
@@ -1625,7 +1630,9 @@ export function dsqActivityHeatmapModel(
       0,
       finiteValue(capture?.sample_rate, sampleRate) ?? 0,
     );
-    const rateMultiplier = captureRateMultiplier(capture, captureSampleRate, nowMs);
+    const rateMultiplier = captureRateMultiplier(capture, captureSampleRate);
+    const transferCoverage = (capture?.dsq_transfers || [])
+      .some((transfer) => (finiteValue(transfer?.samples) ?? 0) > 0);
     for (const operation of capture?.dsq_operations || []) {
       const dsqId = canonicalDsqKey(operation?.dsq_id);
       if (dsqId === null) {
@@ -1640,6 +1647,14 @@ export function dsqActivityHeatmapModel(
       }
       const row = rows.get(dsqId) || createRow(dsqId);
       rows.set(dsqId, row);
+      if (
+        transferCoverage
+        && capture.callback === "dispatch"
+        && operation.outcome === "success"
+        && (operation.operation === "insert" || operation.operation === "remove")
+      ) {
+        continue;
+      }
       if (operation.operation === "insert" && operation.outcome === "success") {
         addTrafficMetric(row.insert, samples, rateMultiplier);
         addTrafficMetric(row.total, samples, rateMultiplier);
@@ -1650,11 +1665,30 @@ export function dsqActivityHeatmapModel(
         addTrafficMetric(row.failed, samples, rateMultiplier);
       }
     }
+    for (const transfer of capture?.dsq_transfers || []) {
+      const sourceDsqId = canonicalDsqKey(transfer?.source_dsq_id);
+      const targetDsqId = canonicalDsqKey(transfer?.target_dsq_id);
+      const samples = Math.max(0, finiteValue(transfer?.samples) ?? 0);
+      if (sourceDsqId === null || targetDsqId === null || samples === 0) {
+        continue;
+      }
+      if (rateMultiplier !== null) {
+        sampleRates.add(captureSampleRate);
+      }
+      const source = rows.get(sourceDsqId) || createRow(sourceDsqId);
+      const target = rows.get(targetDsqId) || createRow(targetDsqId);
+      rows.set(sourceDsqId, source);
+      rows.set(targetDsqId, target);
+      addTrafficMetric(source.remove, samples, rateMultiplier);
+      addTrafficMetric(source.total, samples, rateMultiplier);
+      addTrafficMetric(target.insert, samples, rateMultiplier);
+      addTrafficMetric(target.total, samples, rateMultiplier);
+    }
   }
 
   const ranked = [...rows.values()].sort((left, right) => (
-    trafficScore(right.total) - trafficScore(left.total)
-    || trafficScore(right.failed) - trafficScore(left.failed)
+    trafficScore(right.total) + trafficScore(right.failed)
+    - trafficScore(left.total) - trafficScore(left.failed)
     || compareDsqKeys(left.dsqId, right.dsqId)
   ));
   const safeLimit = Math.max(1, Math.trunc(finiteValue(limit) ?? 12));
@@ -1699,7 +1733,7 @@ export function dsqActivityHeatmapModel(
 
 export function dsqTransferHeatmapModel(
   payload,
-  { limit = 12, nowMs = Date.now() } = {},
+  { limit = 12 } = {},
 ) {
   const sampleRate = Math.max(0, finiteValue(payload?.sample_rate) ?? 0);
   const sampleRates = new Set();
@@ -1714,7 +1748,7 @@ export function dsqTransferHeatmapModel(
       0,
       finiteValue(capture?.sample_rate, sampleRate) ?? 0,
     );
-    const rateMultiplier = captureRateMultiplier(capture, captureSampleRate, nowMs);
+    const rateMultiplier = captureRateMultiplier(capture, captureSampleRate);
     for (const transfer of capture?.dsq_transfers || []) {
       const sourceDsqId = canonicalDsqKey(transfer?.source_dsq_id);
       const targetDsqId = canonicalDsqKey(transfer?.target_dsq_id);

@@ -514,11 +514,13 @@ queue_dispatch_peek_remote(struct snake_cpu_queue	*cpuq,
 }
 
 static __always_inline bool
-queue_global_move(struct snake_ladder_ctx *ctx, u64 source_dsq, u32 class)
+queue_global_move(struct snake_ladder_ctx *ctx, u64 source_dsq, u32 class,
+		  s32 cpu, u64 callback_started_at)
 {
 	dsq_id_t source = { .raw = source_dsq };
 
-	if (dsq_is_invalid(source) || !dsq_move_to_local_untimed(source))
+	if (dsq_is_invalid(source) ||
+	    !dsq_move_to_local_untimed(source, cpu, callback_started_at))
 		return false;
 	stat_inc(ctx, SNAKE_STAT_VTIME_DISPATCHES);
 	if (class == SNAKE_QUEUE_CLASS_AFFINITY)
@@ -548,6 +550,7 @@ struct snake_global_consume_args {
 	struct snake_queue_candidate *local_candidate;
 	struct snake_queue_candidate *remote_candidate;
 	u64 fallback;
+	u64 callback_started_at;
 	s32 cpu;
 	u32 consume_rung;
 };
@@ -583,7 +586,8 @@ static __noinline s32 queue_dispatch_try_selected(
 		return -EINVAL;
 	stat_inc(ctx, SNAKE_STAT_DISPATCH_RUNG_SELECTED_BASE + rung);
 	if (fairness_vtime_keep_running(ctx, args->prev, candidate->vtime) ||
-	    queue_global_move(ctx, candidate->dsq.raw, class))
+	    queue_global_move(ctx, candidate->dsq.raw, class, cpu,
+			      args->callback_started_at))
 		return 1;
 	return 0;
 }
@@ -599,6 +603,7 @@ struct snake_global_fallback_loop_ctx {
 	struct snake_global_fallback_candidate local_candidate;
 	struct snake_global_fallback_candidate remote_candidate;
 	u64 fallback;
+	u64 callback_started_at;
 	s32 cpu;
 	s32 result;
 };
@@ -618,7 +623,8 @@ static __noinline long queue_dispatch_try_cpu_fallback(
 	stat_inc(&loop_ctx->ladder_ctx,
 		 SNAKE_STAT_DISPATCH_RUNG_FALLBACK_ATTEMPT_BASE + candidate->rung);
 	if (queue_global_move(&loop_ctx->ladder_ctx, candidate->dsq,
-			      SNAKE_QUEUE_CLASS_AFFINITY)) {
+			      SNAKE_QUEUE_CLASS_AFFINITY, cpu,
+			      loop_ctx->callback_started_at)) {
 		stat_inc(&loop_ctx->ladder_ctx,
 			 SNAKE_STAT_DISPATCH_RUNG_FALLBACK_HIT_BASE + candidate->rung);
 		loop_ctx->result = 1;
@@ -644,7 +650,8 @@ static __noinline long queue_dispatch_try_local_fallback(
 	stat_inc(&loop_ctx->ladder_ctx,
 		 SNAKE_STAT_DISPATCH_RUNG_FALLBACK_ATTEMPT_BASE + candidate->rung);
 	if (queue_global_move(&loop_ctx->ladder_ctx, candidate->dsq,
-			      SNAKE_QUEUE_CLASS_NORMAL)) {
+			      SNAKE_QUEUE_CLASS_NORMAL, cpu,
+			      loop_ctx->callback_started_at)) {
 		stat_inc(&loop_ctx->ladder_ctx,
 			 SNAKE_STAT_DISPATCH_RUNG_FALLBACK_HIT_BASE + candidate->rung);
 		loop_ctx->result = 1;
@@ -670,7 +677,8 @@ static __noinline long queue_dispatch_try_remote_fallback(
 	stat_inc(&loop_ctx->ladder_ctx,
 		 SNAKE_STAT_DISPATCH_RUNG_FALLBACK_ATTEMPT_BASE + candidate->rung);
 	if (queue_global_move(&loop_ctx->ladder_ctx, candidate->dsq,
-			      SNAKE_QUEUE_CLASS_NORMAL)) {
+			      SNAKE_QUEUE_CLASS_NORMAL, cpu,
+			      loop_ctx->callback_started_at)) {
 		stat_inc(&loop_ctx->ladder_ctx,
 			 SNAKE_STAT_DISPATCH_RUNG_FALLBACK_HIT_BASE + candidate->rung);
 		loop_ctx->result = 1;
@@ -726,6 +734,7 @@ static __always_inline s32 queue_dispatch_try_fallbacks(
 			.rung = 2,
 		},
 		.fallback = args->fallback,
+		.callback_started_at = args->callback_started_at,
 		.cpu = args->cpu,
 	};
 	nr_loops = bpf_loop(SNAKE_DISPATCH_FALLBACK_MAX,
@@ -925,6 +934,7 @@ static __noinline s32 queue_global_dispatch_consume_rung(
 			.local_candidate = &loop_ctx->local_candidate,
 			.remote_candidate = &loop_ctx->remote_candidate,
 			.fallback = rung->data,
+			.callback_started_at = loop_ctx->callback_started_at,
 			.cpu = loop_ctx->cpu,
 			.consume_rung = index,
 		};

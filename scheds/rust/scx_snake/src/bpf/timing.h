@@ -234,6 +234,33 @@ fine_timing_record_dsq_operation(const struct snake_fine_timing_ctx *ctx,
 	bpf_ringbuf_output(&fine_timing_events, sample, sizeof(*sample), 0);
 }
 
+/* Global dispatch stays untimed; retain only the sampled transfer identity. */
+static __noinline void
+fine_timing_record_dispatch_transfer(u64 callback_started_at, u64 source_dsq_id,
+				     u64 target_dsq_id, u32 queue_class)
+{
+	struct snake_fine_timing_config *config;
+	struct snake_fine_timing_event event = {};
+	u32 key = 0;
+
+	if (!callback_started_at)
+		return;
+	config = bpf_map_lookup_elem(&fine_timing_config, &key);
+	if (!config || !(READ_ONCE(config->enabled_mask) &
+			 SNAKE_FINE_TIMING_DISPATCH))
+		return;
+	event.session_id = READ_ONCE(
+		config->session_ids[SNAKE_FINE_TIMING_CALLBACK_DISPATCH]);
+	if (!event.session_id)
+		return;
+	event.source_dsq_id = source_dsq_id;
+	event.target_dsq_id = target_dsq_id;
+	event.operation = SNAKE_DSQ_OP_TRANSFER;
+	event.outcome = SNAKE_DSQ_OUTCOME_SUCCESS;
+	event.queue_class = queue_class;
+	bpf_ringbuf_output(&fine_timing_events, &event, sizeof(event), 0);
+}
+
 static __always_inline void
 fine_timing_finish(const struct snake_fine_timing_ctx *ctx, u32 stage,
 		   u64 started_at)

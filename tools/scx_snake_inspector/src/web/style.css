@@ -1780,6 +1780,11 @@ button:focus-visible {
   outline-offset: -3px;
 }
 
+.dsq-traffic-cell:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: -3px;
+}
+
 @media (max-width: 700px) {
   .dsq-heatmap-heading {
     align-items: flex-start;

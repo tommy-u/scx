@@ -478,6 +478,11 @@ impl FineTimingAccumulator {
             return;
         }
         match operation {
+            bpf_intf::snake_dsq_operation_SNAKE_DSQ_OP_TRANSFER => {
+                if outcome == bpf_intf::snake_dsq_outcome_SNAKE_DSQ_OUTCOME_SUCCESS {
+                    self.record_dsq_transfer(session_id, source_dsq_id, target_dsq_id);
+                }
+            }
             bpf_intf::snake_dsq_operation_SNAKE_DSQ_OP_INSERT => {
                 self.record_dsq_metric(
                     session_id,
@@ -497,10 +502,7 @@ impl FineTimingAccumulator {
                     elapsed_ns,
                 );
                 if outcome == bpf_intf::snake_dsq_outcome_SNAKE_DSQ_OUTCOME_SUCCESS {
-                    *self
-                        .dsq_transfers
-                        .entry((session_id, source_dsq_id, target_dsq_id))
-                        .or_default() += 1;
+                    self.record_dsq_transfer(session_id, source_dsq_id, target_dsq_id);
                     self.record_dsq_metric(
                         session_id,
                         target_dsq_id,
@@ -537,6 +539,13 @@ impl FineTimingAccumulator {
             .entry((session_id, dsq_id, operation, outcome))
             .or_insert_with(empty_fine_timing_metrics);
         record_timing_sample(metrics, elapsed_ns);
+    }
+
+    fn record_dsq_transfer(&mut self, session_id: u64, source_dsq_id: u64, target_dsq_id: u64) {
+        *self
+            .dsq_transfers
+            .entry((session_id, source_dsq_id, target_dsq_id))
+            .or_default() += 1;
     }
 
     fn dsq_operations(&self, session_id: u64) -> Vec<inspection::DsqOperationTimingInspectionView> {
@@ -3743,7 +3752,7 @@ scope = "task_allowed"
             .split_once("queue_global_replenish(")
             .unwrap()
             .0;
-        assert!(global_move.contains("dsq_move_to_local_untimed(source)"));
+        assert!(global_move.contains("dsq_move_to_local_untimed(source, cpu, callback_started_at)"));
         assert!(!global_move.contains("scx_bpf_dsq_move_to_local"));
         assert!(!global_move.contains("dsq_move_to_local(source, cpu, fine)"));
         assert!(!dispatch.contains("queue_global_dispatch_callback("));
@@ -6289,6 +6298,39 @@ scope = "task_allowed"
             );
         assert_eq!(helper.buckets.iter().sum::<u64>(), 1);
         assert_eq!(success.buckets.iter().sum::<u64>(), 1);
+    }
+
+    #[test]
+    fn fine_timing_accumulator_records_untimed_transfer_pairs_only() {
+        use crate::fine_timing::FineTimingCallback;
+
+        let accumulator = Mutex::new(FineTimingAccumulator::default());
+        accumulator
+            .lock()
+            .expect("accumulator should lock")
+            .reset(FineTimingCallback::Dispatch, 19);
+        let event = bpf_intf::snake_fine_timing_event {
+            session_id: 19,
+            elapsed_ns: 0,
+            source_dsq_id: u64::from(bpf_intf::SNAKE_FIFO_DSQ),
+            target_dsq_id: 13_835_058_055_282_163_720,
+            stage: 0,
+            operation: bpf_intf::snake_dsq_operation_SNAKE_DSQ_OP_TRANSFER,
+            outcome: bpf_intf::snake_dsq_outcome_SNAKE_DSQ_OUTCOME_SUCCESS,
+            queue_class: bpf_intf::SNAKE_QUEUE_CLASS_NORMAL,
+        };
+        assert_eq!(relay_fine_timing(bytes_of(&event), &accumulator), 0);
+
+        let accumulator = accumulator.lock().expect("accumulator should lock");
+        assert!(accumulator.dsq_operations(19).is_empty());
+        let transfers = accumulator.dsq_transfers(19);
+        assert_eq!(transfers.len(), 1);
+        assert_eq!(
+            transfers[0].source_dsq_id,
+            u64::from(bpf_intf::SNAKE_FIFO_DSQ)
+        );
+        assert_eq!(transfers[0].target_dsq_id, 13_835_058_055_282_163_720);
+        assert_eq!(transfers[0].samples, 1);
     }
 
     #[test]

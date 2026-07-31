@@ -1595,6 +1595,67 @@ test("DSQ activity heatmap uses the capture sampling denominator", () => {
   assert.equal(model.sampleRate, 5);
 });
 
+test("DSQ activity heatmap uses server-observed duration for a live capture", () => {
+  const model = dsqActivityHeatmapModel({
+    sample_rate: 5,
+    captures: [{
+      sample_rate: 5,
+      started_at_ms: 9_000_000,
+      stopped_at_ms: null,
+      observed_ms: 2_000,
+      dsq_operations: [
+        { dsq_id: 1, operation: "insert", outcome: "success", samples: 4 },
+      ],
+    }],
+  }, [], { nowMs: 1_000 });
+
+  assert.equal(model.rows[0].insert.ratePerSecond, 10);
+});
+
+test("DSQ activity heatmap ranks failure-heavy queues by total traffic", () => {
+  const dsq_operations = [
+    ...Array.from({ length: 12 }, (_, index) => ({
+      dsq_id: index + 1,
+      operation: "insert",
+      outcome: "success",
+      samples: 1,
+    })),
+    { dsq_id: 99, operation: "remove", outcome: "miss", samples: 1_000 },
+  ];
+  const model = dsqActivityHeatmapModel({
+    sample_rate: 1,
+    captures: [{
+      observed_ms: 1_000,
+      dsq_operations,
+    }],
+  }, [], { limit: 12 });
+
+  assert.equal(model.rows[0].dsqId, "99");
+  assert.equal(model.rows[0].failed.samples, 1_000);
+});
+
+test("DSQ activity heatmap derives move traffic from transfer pairs once", () => {
+  const model = dsqActivityHeatmapModel({
+    sample_rate: 1,
+    captures: [{
+      callback: "dispatch",
+      observed_ms: 1_000,
+      dsq_operations: [
+        { dsq_id: 1, operation: "remove", outcome: "success", samples: 10 },
+        { dsq_id: 2, operation: "insert", outcome: "success", samples: 10 },
+      ],
+      dsq_transfers: [{ source_dsq_id: 1, target_dsq_id: 2, samples: 10 }],
+    }],
+  });
+
+  const source = model.rows.find((row) => row.dsqId === "1");
+  const target = model.rows.find((row) => row.dsqId === "2");
+  assert.equal(source.remove.samples, 10);
+  assert.equal(source.insert.samples, 0);
+  assert.equal(target.insert.samples, 10);
+  assert.equal(target.remove.samples, 0);
+});
+
 test("DSQ activity heatmap keeps top queues and aggregates the remainder", () => {
   const dsq_operations = Array.from({ length: 5 }, (_, index) => ({
     dsq_id: index + 1,
@@ -1675,6 +1736,8 @@ test("queue topology renders accessible DSQ traffic heatmaps", () => {
   assert.match(script, /class="dsq-traffic-heatmap"/);
   assert.match(script, /class="dsq-transfer-heatmap"/);
   assert.match(script, /data-transfer-row=/);
+  assert.match(script, /class="dsq-traffic-cell[^>]*tabindex="0"/s);
+  assert.match(script, /timing\.topologyCompatible === false \? \[\] : timing\.dsqs/);
   assert.match(script, /scope="row"/);
   assert.match(styles, /\.dsq-traffic-cell/);
   assert.match(styles, /\.dsq-transfer-cell/);

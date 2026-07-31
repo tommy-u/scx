@@ -1502,6 +1502,7 @@ async fn fine_timing_endpoint_summarizes_stages_and_controls_callbacks_independe
     assert_eq!(dispatch["unavailable_reason"], Value::Null);
     assert_eq!(dispatch["state"], "historical");
     assert_eq!(dispatch["sample_rate"], 32);
+    assert_eq!(dispatch["observed_ms"], 400);
     assert_eq!(dispatch["stages"][0]["stage"], "remote_normal_scan");
     assert_eq!(dispatch["stages"][0]["samples"], 100);
     assert_eq!(dispatch["stages"][0]["mean_ns"], 63);

@@ -5,6 +5,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, RwLock};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
@@ -202,6 +203,7 @@ pub struct FineTimingCaptureView {
     pub sample_rate: u32,
     pub started_at_ms: Option<u64>,
     pub stopped_at_ms: Option<u64>,
+    pub observed_ms: Option<u64>,
     pub stages: Vec<FineTimingStageView>,
     pub dsq_operations: Vec<FineTimingDsqOperationView>,
     pub dsq_transfers: Vec<FineTimingDsqTransferView>,
@@ -703,6 +705,13 @@ impl Dashboard {
                     .captures
                     .into_iter()
                     .map(|capture| {
+                        let observed_at_ms = unix_time_ms();
+                        let observed_ms = capture.started_at_ms.map(|started_at_ms| {
+                            capture
+                                .stopped_at_ms
+                                .unwrap_or(observed_at_ms)
+                                .saturating_sub(started_at_ms)
+                        });
                         let unavailable_reason = if payload.sample_rate == 0 {
                             Some(
                                 "Enable callback sampling to collect fine-grained timestamps."
@@ -721,6 +730,7 @@ impl Dashboard {
                             sample_rate: capture.sample_rate.unwrap_or(payload.sample_rate),
                             started_at_ms: capture.started_at_ms,
                             stopped_at_ms: capture.stopped_at_ms,
+                            observed_ms,
                             stages: capture
                                 .stages
                                 .into_iter()
@@ -861,6 +871,15 @@ impl Dashboard {
     pub fn subscribe(&self) -> watch::Receiver<u64> {
         self.updates.subscribe()
     }
+}
+
+fn unix_time_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
 }
 
 fn runtime_context(live: &LiveData) -> RuntimeContextView {

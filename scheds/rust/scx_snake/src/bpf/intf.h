@@ -167,6 +167,7 @@ enum snake_dsq_operation {
 	SNAKE_DSQ_OP_MOVE,
 	SNAKE_DSQ_OP_MOVE_TO_LOCAL,
 	SNAKE_DSQ_OP_REMOVE,
+	SNAKE_DSQ_OP_TRANSFER,
 };
 
 enum snake_dsq_outcome {
