@@ -14,9 +14,15 @@
           <p>Scheduler activity and runtime statistics</p>
         </div>
       </div>
-      <div class="status" id="status" role="status" aria-live="polite">
-        <span class="status-dot" aria-hidden="true"></span>
-        <span id="statusText">Connecting</span>
+      <div class="topbar-actions">
+        <div class="reset-stats-control">
+          <button class="reset-all-stats" id="resetAllStats" type="button">Reset all stats</button>
+          <span id="resetStatsStatus" role="status" aria-live="polite"></span>
+        </div>
+        <div class="status" id="status" role="status" aria-live="polite">
+          <span class="status-dot" aria-hidden="true"></span>
+          <span id="statusText">Connecting</span>
+        </div>
       </div>
     </header>
 
@@ -38,7 +44,7 @@
           </div>
         </header>
 
-        <section class="summary" aria-label="Stats summary">
+        <section class="summary" aria-label="Stats summary" data-feedback-key="Scheduler:Summary">
           <dl>
             <div><dt>Source</dt><dd>Mitosis stats server</dd></div>
             <div><dt>Cells</dt><dd id="cellCount">--</dd></div>
@@ -46,7 +52,7 @@
           </dl>
         </section>
 
-        <section class="table-section" aria-labelledby="cellHistoryHeading">
+        <section class="table-section" aria-labelledby="cellHistoryHeading" data-feedback-key="Scheduler:Cell-history">
           <div class="section-heading">
             <div>
               <h2 id="cellHistoryHeading">Cell history</h2>
@@ -75,7 +81,7 @@
           </div>
         </section>
 
-        <section class="table-section" aria-labelledby="globalStatsHeading">
+        <section class="table-section" aria-labelledby="globalStatsHeading" data-feedback-key="Scheduler:Global-metrics">
           <h2 id="globalStatsHeading">Global metrics</h2>
           <div class="table-scroll">
             <table>
@@ -85,7 +91,7 @@
           </div>
         </section>
 
-        <section class="table-section" aria-labelledby="cellStatsHeading">
+        <section class="table-section" aria-labelledby="cellStatsHeading" data-feedback-key="Scheduler:Cell-metrics">
           <h2 id="cellStatsHeading">Cell metrics</h2>
           <div class="table-scroll">
             <table id="cellStatsTable">
@@ -97,6 +103,8 @@
       </main>
     </div>
     <script src="/assets/charts.js" defer></script>
+    <script src="/assets/feedback.js" defer></script>
+    <script src="/assets/reset.js" defer></script>
     <script src="/assets/stats.js" defer></script>
   </body>
 </html>

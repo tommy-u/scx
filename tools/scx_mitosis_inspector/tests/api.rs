@@ -315,6 +315,8 @@ async fn index_is_the_one_page_inspector() {
         assert!(html.contains(&format!("id=\"{id}\"")), "missing {id}");
     }
     assert!(html.contains("/assets/charts.js"));
+    assert!(html.contains("/assets/feedback.js"));
+    assert!(html.contains("/assets/reset.js"));
     assert!(html.contains("/assets/app.js"));
     assert!(
         html.find("id=\"migration-locality\"").unwrap()
@@ -338,6 +340,42 @@ async fn shared_chart_library_is_served() {
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let javascript = std::str::from_utf8(&body).unwrap();
     assert!(javascript.contains("MitosisCharts"));
+}
+
+#[tokio::test]
+async fn shared_feedback_library_is_served() {
+    let response = app()
+        .oneshot(
+            Request::builder()
+                .uri("/assets/feedback.js")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let javascript = std::str::from_utf8(&body).unwrap();
+    assert!(javascript.contains("data-feedback-toggle"));
+}
+
+#[tokio::test]
+async fn shared_reset_library_is_served() {
+    let response = app()
+        .oneshot(
+            Request::builder()
+                .uri("/assets/reset.js")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let javascript = std::str::from_utf8(&body).unwrap();
+    assert!(javascript.contains("mitosis:stats-reset"));
 }
 
 #[tokio::test]
@@ -399,6 +437,11 @@ async fn scheduler_stats_is_a_distinct_third_page() {
     assert!(html.contains("Scheduler stats"));
     assert!(html.contains("class=\"workspace-sidebar\""));
     assert!(html.contains("aria-current=\"page\" href=\"/stats\">Scheduler"));
+    assert!(html.contains("data-feedback-key=\"Scheduler:Summary\""));
+    assert!(html.contains("data-feedback-key=\"Scheduler:Cell-history\""));
+    assert!(html.contains("id=\"resetAllStats\""));
+    assert!(html.contains("/assets/feedback.js"));
+    assert!(html.contains("/assets/reset.js"));
     assert!(html.contains("/assets/stats.js"));
 }
 
@@ -419,5 +462,10 @@ async fn system_is_a_distinct_page() {
     let html = std::str::from_utf8(&body).unwrap();
     assert!(html.contains("System stats"));
     assert!(html.contains("aria-current=\"page\" href=\"/system\">System"));
+    assert!(html.contains("data-feedback-key=\"System:Summary\""));
+    assert!(html.contains("data-feedback-key=\"System:Resource-history\""));
+    assert!(html.contains("id=\"resetAllStats\""));
+    assert!(html.contains("/assets/feedback.js"));
+    assert!(html.contains("/assets/reset.js"));
     assert!(html.contains("/assets/system.js"));
 }
