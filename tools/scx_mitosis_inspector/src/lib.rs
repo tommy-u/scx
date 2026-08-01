@@ -17,9 +17,9 @@ pub mod topology;
 
 pub use model::{
     build_callback_timing_rows, build_counters, build_cpu_runtime_rows, build_timing_metric_row,
-    parse_callback_timing_sample_rate, summarize_callback_timing, CallbackCounter,
-    CallbackTimingCounters, CallbackTimingRow, CallbackTimingSummary, CpuRuntimeRow, MigrationRow,
-    TimingMetricRow, CALLBACK_NAMES, CALLBACK_TIMING_BUCKETS,
+    parse_callback_timing_sample_rate, project_cpu_runtime, summarize_callback_timing,
+    CallbackCounter, CallbackTimingCounters, CallbackTimingRow, CallbackTimingSummary,
+    CpuRuntimeRow, MigrationRow, TimingMetricRow, CALLBACK_NAMES, CALLBACK_TIMING_BUCKETS,
 };
 
 pub fn program_name_matches(loaded: &str, expected: &str) -> bool {

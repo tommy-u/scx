@@ -286,9 +286,10 @@ int BPF_PROG(on_sched_switch, bool preempt, struct task_struct *prev,
 	now = bpf_ktime_get_ns();
 	runtime = bpf_map_lookup_elem(&cpu_runtime, &key);
 	if (runtime) {
-		if (runtime->last_switch_ns && prev && BPF_CORE_READ(prev, pid) != 0)
+		if (runtime->last_switch_ns && runtime->current_busy)
 			runtime->busy_ns += now - runtime->last_switch_ns;
 		runtime->last_switch_ns = now;
+		runtime->current_busy = BPF_CORE_READ(next, pid) != 0;
 	}
 	if (prev) {
 		observation = bpf_task_storage_get(&task_observations, prev, 0, 0);
