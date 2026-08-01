@@ -95,6 +95,7 @@ async fn main() -> Result<()> {
         block_io: Default::default(),
         interrupt_cpu: Vec::new(),
         hardirqs: Default::default(),
+        probe_manifest: Vec::new(),
     }));
     let (ready_tx, ready_rx) = mpsc::channel();
     let collector_state = state.clone();
