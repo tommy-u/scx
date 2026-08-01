@@ -106,6 +106,7 @@ pub struct QueuePolicy {
 pub enum QueueEnqueueAction {
     TryInsert = 1,
     Insert = 2,
+    TryDirect = 3,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -138,6 +139,7 @@ pub enum QueueDispatchSource {
     Cpu = 3,
     Local = 4,
     Remote = 5,
+    CellSibling = 6,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -267,6 +269,7 @@ impl QueueEnqueueAction {
         match self {
             Self::TryInsert => "try_insert",
             Self::Insert => "insert",
+            Self::TryDirect => "try_direct",
         }
     }
 }
@@ -284,12 +287,6 @@ impl QueueEnqueueTarget {
 
 impl QueueEnqueueRung {
     pub fn describe(&self) -> String {
-        if matches!(
-            self.target,
-            QueueEnqueueTarget::Cell | QueueEnqueueTarget::Affinity
-        ) {
-            return self.target.as_str().into();
-        }
         format!("{}({})", self.action.as_str(), self.target.as_str())
     }
 }
@@ -311,6 +308,7 @@ impl QueueDispatchSource {
             Self::Cpu => "cpu",
             Self::Local => "local",
             Self::Remote => "remote",
+            Self::CellSibling => "cell_sibling",
         }
     }
 }
@@ -326,10 +324,12 @@ impl QueueDispatchOperation {
 impl QueueDispatchRung {
     pub fn describe(&self) -> String {
         if let Some(source) = self.source {
-            if matches!(
-                source,
-                QueueDispatchSource::Cell | QueueDispatchSource::Affinity
-            ) {
+            if self.action == QueueDispatchAction::Consume
+                && matches!(
+                    source,
+                    QueueDispatchSource::Cell | QueueDispatchSource::Affinity
+                )
+            {
                 return source.as_str().into();
             }
             return format!("{}({})", self.action.as_str(), source.as_str());
@@ -808,6 +808,15 @@ fn compile_queue_policy(
         validate_queue_callback_pair(layout, &enqueue, &dispatch)?;
         (enqueue, dispatch)
     };
+    if enqueue
+        .iter()
+        .any(|rung| rung.action == QueueEnqueueAction::TryDirect)
+        && !queues.direct_dispatch
+    {
+        return Err(PolicyError(
+            "enqueue action `try_direct` requires direct_dispatch = true".into(),
+        ));
+    }
     Ok(Some(QueuePolicy {
         layout,
         cell0_cpu_weight,
@@ -899,6 +908,9 @@ fn compile_queue_enqueue(
     if layout == QueueLayout::Llc {
         return compile_llc_queue_enqueue(rungs);
     }
+    if rungs.iter().any(|rung| rung.action.is_some()) {
+        return compile_mitosis_queue_enqueue(rungs);
+    }
 
     let mut compiled: Vec<QueueEnqueueRung> = Vec::with_capacity(rungs.len());
     for rung in rungs {
@@ -936,6 +948,61 @@ fn compile_queue_enqueue(
     if compiled.last().map(|rung| rung.target) != Some(QueueEnqueueTarget::Affinity) {
         return Err(PolicyError(
             "enqueue target `affinity` must be terminal".into(),
+        ));
+    }
+    Ok(compiled)
+}
+
+fn compile_mitosis_queue_enqueue(
+    rungs: &[SemanticQueueEnqueueRung],
+) -> Result<Vec<QueueEnqueueRung>, PolicyError> {
+    let mut compiled = Vec::with_capacity(rungs.len());
+    for rung in rungs {
+        let action = match rung.action.as_deref() {
+            Some("try_direct") => QueueEnqueueAction::TryDirect,
+            Some("try_insert") => QueueEnqueueAction::TryInsert,
+            Some("insert") => QueueEnqueueAction::Insert,
+            Some(action) => {
+                return Err(PolicyError(format!(
+                    "unknown cell enqueue action `{action}`; expected `try_direct`, `try_insert`, or `insert`"
+                )))
+            }
+            None => {
+                return Err(PolicyError(
+                    "explicit cell enqueue rungs must specify `action`".into(),
+                ))
+            }
+        };
+        let target = match rung.target.as_str() {
+            "cell" => QueueEnqueueTarget::Cell,
+            "cpu" => QueueEnqueueTarget::Cpu,
+            target => {
+                return Err(PolicyError(format!(
+                    "unknown explicit cell enqueue target `{target}`; expected `cell` or `cpu`"
+                )))
+            }
+        };
+        compiled.push(QueueEnqueueRung { action, target });
+    }
+
+    let expected = [
+        QueueEnqueueRung {
+            action: QueueEnqueueAction::TryDirect,
+            target: QueueEnqueueTarget::Cell,
+        },
+        QueueEnqueueRung {
+            action: QueueEnqueueAction::TryInsert,
+            target: QueueEnqueueTarget::Cell,
+        },
+        QueueEnqueueRung {
+            action: QueueEnqueueAction::Insert,
+            target: QueueEnqueueTarget::Cpu,
+        },
+    ];
+    if compiled != expected {
+        return Err(PolicyError(
+            "explicit cell enqueue ladder must try direct cell placement, try the cell queue, then insert into a CPU queue"
+                .into(),
         ));
     }
     Ok(compiled)
@@ -980,6 +1047,11 @@ fn compile_llc_queue_enqueue(
             (QueueEnqueueAction::Insert, _) => {
                 return Err(PolicyError(
                     "enqueue action `insert` must target `cpu`".into(),
+                ))
+            }
+            (QueueEnqueueAction::TryDirect, _) => {
+                return Err(PolicyError(
+                    "enqueue action `try_direct` is not supported by queue layout `llc`".into(),
                 ))
             }
         }
@@ -1041,6 +1113,12 @@ fn compile_queue_dispatch(
     if layout == QueueLayout::Llc {
         return compile_llc_queue_dispatch(rungs);
     }
+    if rungs
+        .iter()
+        .any(|rung| rung.action.is_some() || !rung.fallback.is_empty())
+    {
+        return compile_mitosis_queue_dispatch(rungs);
+    }
 
     let mut compiled: Vec<QueueDispatchRung> = Vec::with_capacity(rungs.len());
     for rung in rungs {
@@ -1099,6 +1177,92 @@ fn compile_queue_dispatch(
     {
         return Err(PolicyError(
             "queue dispatch ladder must contain `affinity`".into(),
+        ));
+    }
+    Ok(compiled)
+}
+
+fn compile_mitosis_queue_dispatch(
+    rungs: &[SemanticQueueDispatchRung],
+) -> Result<Vec<QueueDispatchRung>, PolicyError> {
+    let mut compiled = Vec::with_capacity(rungs.len());
+    for rung in rungs {
+        let action = match rung.action.as_deref() {
+            Some("peek") => QueueDispatchAction::Peek,
+            Some("consume") => QueueDispatchAction::Consume,
+            Some(action) => {
+                return Err(PolicyError(format!(
+                    "unknown cell dispatch action `{action}`; expected `peek` or `consume`"
+                )))
+            }
+            None => {
+                return Err(PolicyError(
+                    "explicit cell dispatch rungs must specify `action`".into(),
+                ))
+            }
+        };
+        let source = match rung.source.as_deref() {
+            Some("cell") => Some(QueueDispatchSource::Cell),
+            Some("cpu") => Some(QueueDispatchSource::Cpu),
+            Some(source) => {
+                return Err(PolicyError(format!(
+                    "unknown explicit cell dispatch source `{source}`; expected `cell` or `cpu`"
+                )))
+            }
+            None => None,
+        };
+        let operation = match rung.operation.as_deref() {
+            Some("min_vtime") => Some(QueueDispatchOperation::MinVtime),
+            Some(operation) => {
+                return Err(PolicyError(format!(
+                    "unknown cell dispatch operation `{operation}`; expected `min_vtime`"
+                )))
+            }
+            None => None,
+        };
+        let fallback = rung
+            .fallback
+            .iter()
+            .map(|source| match source.as_str() {
+                "cpu" => Ok(QueueDispatchSource::Cpu),
+                "cell_sibling" => Ok(QueueDispatchSource::CellSibling),
+                source => Err(PolicyError(format!(
+                    "unknown cell dispatch fallback `{source}`; expected `cpu` or `cell_sibling`"
+                ))),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        compiled.push(QueueDispatchRung {
+            action,
+            source,
+            operation,
+            fallback,
+        });
+    }
+
+    let expected = vec![
+        QueueDispatchRung {
+            action: QueueDispatchAction::Peek,
+            source: Some(QueueDispatchSource::Cell),
+            operation: None,
+            fallback: Vec::new(),
+        },
+        QueueDispatchRung {
+            action: QueueDispatchAction::Peek,
+            source: Some(QueueDispatchSource::Cpu),
+            operation: None,
+            fallback: Vec::new(),
+        },
+        QueueDispatchRung {
+            action: QueueDispatchAction::Consume,
+            source: None,
+            operation: Some(QueueDispatchOperation::MinVtime),
+            fallback: vec![QueueDispatchSource::Cpu, QueueDispatchSource::CellSibling],
+        },
+    ];
+    if compiled != expected {
+        return Err(PolicyError(
+            "explicit cell dispatch ladder must peek cell, peek CPU, then consume min_vtime with CPU and cell_sibling fallbacks"
+                .into(),
         ));
     }
     Ok(compiled)
@@ -1243,9 +1407,12 @@ fn validate_queue_callback_pair(
         && !(enqueue
             .iter()
             .any(|rung| rung.target == QueueEnqueueTarget::Cell)
-            && enqueue
-                .iter()
-                .any(|rung| rung.target == QueueEnqueueTarget::Affinity))
+            && enqueue.iter().any(|rung| {
+                matches!(
+                    rung.target,
+                    QueueEnqueueTarget::Affinity | QueueEnqueueTarget::Cpu
+                )
+            }))
     {
         return Err(PolicyError(
             "min_vtime requires both `cell` and `affinity` enqueue targets".into(),
@@ -1951,11 +2118,105 @@ scope = "task_cell_borrowable"
         assert!(queues.direct_dispatch);
         assert_eq!(queues.layout, QueueLayout::CellLlc);
         assert!(policy.managed_cells.is_some());
-        assert_eq!(queues.dispatch.len(), 1);
+        assert_eq!(queues.enqueue.len(), 3);
         assert_eq!(
-            queues.dispatch[0].operation,
-            Some(QueueDispatchOperation::MinVtime)
+            queues
+                .enqueue
+                .iter()
+                .map(QueueEnqueueRung::describe)
+                .collect::<Vec<_>>(),
+            vec!["try_direct(cell)", "try_insert(cell)", "insert(cpu)"]
         );
+        assert_eq!(
+            queues
+                .dispatch
+                .iter()
+                .map(QueueDispatchRung::describe)
+                .collect::<Vec<_>>(),
+            vec![
+                "peek(cell)",
+                "peek(cpu)",
+                "consume(min_vtime;fallback=cpu,cell_sibling)",
+            ]
+        );
+    }
+
+    #[test]
+    fn compiles_explicit_mitosis_enqueue_and_dispatch_ladders() {
+        let policy = compile_policy(
+            r#"
+[queues]
+layout = "cell_llc"
+direct_dispatch = true
+enqueue = [
+  { action = "try_direct", target = "cell" },
+  { action = "try_insert", target = "cell" },
+  { action = "insert", target = "cpu" },
+]
+dispatch = [
+  { action = "peek", source = "cell" },
+  { action = "peek", source = "cpu" },
+  { action = "consume", operation = "min_vtime", fallback = ["cpu", "cell_sibling"] },
+]
+
+[[cell]]
+id = 7
+cpus = "0-3"
+
+[[rung]]
+operation = "pick_idle_prefer_previous"
+scope = "task_cell"
+"#,
+        )
+        .expect("explicit Mitosis callback ladders should compile");
+
+        let queues = policy.queues.unwrap();
+        assert_eq!(
+            queues
+                .enqueue
+                .iter()
+                .map(QueueEnqueueRung::describe)
+                .collect::<Vec<_>>(),
+            vec!["try_direct(cell)", "try_insert(cell)", "insert(cpu)"]
+        );
+        assert_eq!(
+            queues
+                .dispatch
+                .iter()
+                .map(QueueDispatchRung::describe)
+                .collect::<Vec<_>>(),
+            vec![
+                "peek(cell)",
+                "peek(cpu)",
+                "consume(min_vtime;fallback=cpu,cell_sibling)",
+            ]
+        );
+    }
+
+    #[test]
+    fn explicit_mitosis_enqueue_requires_direct_dispatch() {
+        let error = error_for(
+            r#"
+[queues]
+layout = "cell_llc"
+enqueue = [
+  { action = "try_direct", target = "cell" },
+  { action = "try_insert", target = "cell" },
+  { action = "insert", target = "cpu" },
+]
+dispatch = [
+  { action = "peek", source = "cell" },
+  { action = "peek", source = "cpu" },
+  { action = "consume", operation = "min_vtime", fallback = ["cpu", "cell_sibling"] },
+]
+
+[[rung]]
+operation = "pick_idle_prefer_previous"
+scope = "task_cell"
+"#,
+        );
+
+        assert!(error.contains("requires direct_dispatch = true"));
     }
 
     #[test]
@@ -2028,7 +2289,7 @@ scope = "task_cell"
         assert_eq!(queues.dispatch, expected_dispatch);
         assert!(policy
             .dump()
-            .contains("enqueue=cell,affinity dispatch=affinity,cell"));
+            .contains("enqueue=try_insert(cell),insert(affinity) dispatch=affinity,cell"));
     }
 
     #[test]

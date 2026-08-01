@@ -8,7 +8,7 @@ typedef unsigned int	   u32;
 typedef unsigned long long u64;
 #endif
 
-#define SNAKE_ABI_VERSION 27
+#define SNAKE_ABI_VERSION 28
 #define SNAKE_MAX_RUNGS 9
 #define SNAKE_MAX_QUEUE_RUNGS 8
 #define SNAKE_LADDER_SLOTS 2
@@ -253,6 +253,8 @@ enum snake_enqueue_opcode {
 	SNAKE_ENQUEUE_OP_AFFINITY = 2,
 	SNAKE_ENQUEUE_OP_TRY_INSERT = 3,
 	SNAKE_ENQUEUE_OP_INSERT     = 4,
+	SNAKE_ENQUEUE_OP_TRY_DIRECT = 5,
+	SNAKE_ENQUEUE_OP_INSERT_CPU = 6,
 };
 
 enum snake_dispatch_opcode {
@@ -278,6 +280,7 @@ enum snake_dispatch_fallback {
 	SNAKE_DISPATCH_FALLBACK_CPU,
 	SNAKE_DISPATCH_FALLBACK_LOCAL,
 	SNAKE_DISPATCH_FALLBACK_REMOTE,
+	SNAKE_DISPATCH_FALLBACK_CELL_SIBLING,
 };
 
 #define SNAKE_DISPATCH_FALLBACK_BITS 8U

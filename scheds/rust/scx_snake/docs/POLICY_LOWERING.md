@@ -253,10 +253,12 @@ eight dispatch rungs. Queue rungs use the same mechanical
 | enqueue | `AFFINITY` | 2 | legacy affinity | Insert into one allowed CPU's affinity queue. |
 | enqueue | `TRY_INSERT` | 3 | `LOCAL` (2) | Insert into the selected CPU's normal queue only when all consumers are allowed. |
 | enqueue | `INSERT` | 4 | `CPU` (1) | Insert into an allowed CPU's ordered escape queue. |
+| enqueue | `TRY_DIRECT` | 5 | `CELL` (4) | When `select_cpu` was skipped, retry cell idle placement and dispatch unrestricted work directly. |
+| enqueue | `INSERT_CPU` | 6 | `CPU` (1) | Insert restricted work into a per-CPU queue, redistributing when the initial queue is occupied. |
 | dispatch | `CELL` | 1 | legacy cell | Consume the CPU owner's normal queue class. |
 | dispatch | `AFFINITY` | 2 | legacy affinity | Consume that CPU's affinity queue. |
 | dispatch | `MIN_VTIME` | 3 | legacy pair | Compare both heads in the owner-cell clock domain. |
-| dispatch | `PEEK` | 4 | `CPU` (1), `LOCAL` (2), or `REMOTE` (3) | Record one candidate without moving it. |
+| dispatch | `PEEK` | 4 | `CPU` (1), `LOCAL` (2), `REMOTE` (3), or `CELL` (4) | Record one candidate without moving it. |
 | dispatch | `CONSUME` | 5 | `MIN_VTIME` (5) | Select the earliest peek and try its packed bounded fallback. |
 
 Cell enqueue is first-success and requires terminal `AFFINITY`. Source-based
@@ -267,6 +269,13 @@ MIN_VTIME`; `data` packs up to three eight-bit CPU, local, and remote fallback
 identifiers. The global remote cursor bounded-scans flat queue descriptors,
 advances past empty or head-incompatible sources, and returns at most one remote
 candidate rather than exposing LLC IDs to BPF.
+
+The Mitosis cell ladder is an exact three-rung sequence: `TRY_DIRECT / CELL`,
+`CELL / CELL`, then `INSERT_CPU / CPU`. Its dispatch ladder peeks the local
+cell-LLC and CPU queues, then consumes minimum VTIME with packed `CPU` and
+`CELL_SIBLING` fallbacks. Ties prefer the cell queue. The CPU fallback is used
+only when a selected cell move races; sibling stealing is used only when both
+peeked queues were empty.
 
 ## Stage 3: resolve semantic scopes into masks
 
@@ -307,7 +316,7 @@ Userspace encodes the lowered rungs into `snake_compiled_ladder` with:
 - at most nine fixed-size placement rungs;
 - enqueue and dispatch callback rung counts and arrays.
 
-ABI version 27 limits placement ladders to nine rungs and enqueue/dispatch
+ABI version 28 limits placement ladders to nine rungs and enqueue/dispatch
 ladders to eight rungs. It also limits generic placement to four mask tables,
 CPU and mask keys to 1024, queue cells to 32 including cell 0, and policy
 storage to two ladder slots. Userspace and BPF share definitions from

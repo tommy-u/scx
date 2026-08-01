@@ -153,6 +153,7 @@ queue_fairness_enqueue_cell(struct snake_ladder_ctx *ctx, struct task_struct *p,
 	struct snake_queue_cell *cell;
 	struct snake_cpu_queue	*cpuq = NULL;
 	const struct cpumask	*primary;
+	s32			 restricted;
 	s32			 target_cpu = selected_cpu;
 	s32			 ret	    = 0;
 	u64			 flags	    = enq_flags & ~SCX_ENQ_PREEMPT;
@@ -166,8 +167,12 @@ queue_fairness_enqueue_cell(struct snake_ladder_ctx *ctx, struct task_struct *p,
 				SNAKE_QUEUE_MASK_PRIMARY);
 	if (!cell || !primary)
 		ret = -EINVAL;
-	else if (!queue_primary_subset(primary, p))
-		ret = -ENOENT;
+	else {
+		restricted = queue_task_cell_affinity_restricted(
+			ctx, p, runtime->cell_index);
+		if (restricted)
+			ret = restricted < 0 ? restricted : -ENOENT;
+	}
 	fine_timing_finish(fine, SNAKE_FINE_TIMING_ENQUEUE_CELL_VALIDATE,
 			   stage_started_at);
 	if (ret)
@@ -219,10 +224,11 @@ queue_fairness_enqueue_cell(struct snake_ladder_ctx *ctx, struct task_struct *p,
 static __always_inline int queue_fairness_enqueue_affinity(
 	struct snake_ladder_ctx *ctx, struct task_struct *p,
 	struct snake_task_runtime *runtime, s32 selected_cpu, u64 enq_flags,
-	const struct snake_fine_timing_ctx *fine)
+	const struct snake_fine_timing_ctx *fine, bool distribute_if_queued)
 {
 	struct snake_cpu_queue *cpuq;
 	s32	 target_cpu	  = queue_pick_allowed_cpu(ctx, p, selected_cpu);
+	s32	 distributed, nr_queued;
 	s32	 ret		  = 0;
 	u64	 flags		  = enq_flags & ~SCX_ENQ_PREEMPT;
 	u64	 stage_started_at = fine_timing_start(fine);
@@ -232,6 +238,19 @@ static __always_inline int queue_fairness_enqueue_affinity(
 	if (target_cpu < 0) {
 		ret = target_cpu;
 		goto out;
+	}
+	if (distribute_if_queued) {
+		nr_queued = dsq_nr_queued(dsq_affinity(target_cpu));
+		if (nr_queued < 0) {
+			ret = nr_queued;
+			goto out;
+		}
+		if (nr_queued > 0) {
+			distributed = bpf_cpumask_any_distribute(p->cpus_ptr);
+			if (distributed >= 0 && distributed < nr_cpu_ids &&
+			    queue_cpu(ctx, distributed))
+				target_cpu = distributed;
+		}
 	}
 	cpuq = queue_cpu(ctx, target_cpu);
 	if (!cpuq || queue_fairness_prepare_affinity(ctx, runtime,
@@ -318,6 +337,31 @@ struct snake_queue_enqueue_loop_ctx {
 	u64			     callback_started_at;
 	s32			     result;
 };
+
+static __noinline int queue_cell_enqueue_normal_ctx(
+	struct snake_queue_enqueue_loop_ctx *loop_ctx)
+{
+	return queue_fairness_enqueue_cell(
+		&loop_ctx->ladder_ctx, loop_ctx->p, loop_ctx->runtime,
+		loop_ctx->selected_cpu, loop_ctx->enq_flags, &loop_ctx->fine);
+}
+
+static __noinline int queue_cell_enqueue_affinity_ctx(
+	struct snake_queue_enqueue_loop_ctx *loop_ctx)
+{
+	return queue_fairness_enqueue_affinity(
+		&loop_ctx->ladder_ctx, loop_ctx->p, loop_ctx->runtime,
+		loop_ctx->selected_cpu, loop_ctx->enq_flags, &loop_ctx->fine,
+		false);
+}
+
+static __noinline int queue_cell_enqueue_cpu_ctx(
+	struct snake_queue_enqueue_loop_ctx *loop_ctx)
+{
+	return queue_fairness_enqueue_affinity(
+		&loop_ctx->ladder_ctx, loop_ctx->p, loop_ctx->runtime,
+		loop_ctx->selected_cpu, loop_ctx->enq_flags, &loop_ctx->fine, true);
+}
 
 static __noinline int queue_global_enqueue_local_ctx(
 	struct snake_queue_enqueue_loop_ctx *loop_ctx)
@@ -415,15 +459,9 @@ queue_cell_ladder_enqueue_callback(u32				   i,
 	stat_inc(&loop_ctx->ladder_ctx,
 		 SNAKE_STAT_ENQUEUE_RUNG_ATTEMPT_BASE + i);
 	if (rung->opcode == SNAKE_ENQUEUE_OP_CELL)
-		ret = queue_fairness_enqueue_cell(
-			&loop_ctx->ladder_ctx, loop_ctx->p, loop_ctx->runtime,
-			loop_ctx->selected_cpu, loop_ctx->enq_flags,
-			&loop_ctx->fine);
+		ret = queue_cell_enqueue_normal_ctx(loop_ctx);
 	else if (rung->opcode == SNAKE_ENQUEUE_OP_AFFINITY)
-		ret = queue_fairness_enqueue_affinity(
-			&loop_ctx->ladder_ctx, loop_ctx->p, loop_ctx->runtime,
-			loop_ctx->selected_cpu, loop_ctx->enq_flags,
-			&loop_ctx->fine);
+		ret = queue_cell_enqueue_affinity_ctx(loop_ctx);
 	else {
 		stat_inc(&loop_ctx->ladder_ctx,
 			 SNAKE_STAT_ENQUEUE_RUNG_ERROR_BASE + i);
@@ -448,6 +486,56 @@ queue_cell_ladder_enqueue_callback(u32				   i,
 		 SNAKE_STAT_ENQUEUE_RUNG_ERROR_BASE + i);
 	loop_ctx->result = ret;
 	return 1;
+}
+
+static __noinline int queue_mitosis_ladder_enqueue(
+	struct snake_queue_enqueue_loop_ctx *loop_ctx)
+{
+	const struct snake_queue_rung *cell_rung, *cpu_rung;
+	s32 ret;
+	u64 rung_started_at;
+
+	if (!loop_ctx || loop_ctx->ladder_ctx.ladder->nr_enqueue_rungs != 3)
+		return -EINVAL;
+	cell_rung = MEMBER_VPTR(loop_ctx->ladder_ctx.ladder->enqueue_rungs, [1]);
+	cpu_rung = MEMBER_VPTR(loop_ctx->ladder_ctx.ladder->enqueue_rungs, [2]);
+	if (!cell_rung || !cpu_rung ||
+	    cell_rung->opcode != SNAKE_ENQUEUE_OP_CELL ||
+	    cell_rung->input != SNAKE_QUEUE_INPUT_CELL ||
+	    cpu_rung->opcode != SNAKE_ENQUEUE_OP_INSERT_CPU ||
+	    cpu_rung->input != SNAKE_QUEUE_INPUT_CPU)
+		return -EINVAL;
+
+	stat_inc(&loop_ctx->ladder_ctx,
+		 SNAKE_STAT_ENQUEUE_RUNG_ATTEMPT_BASE + 1);
+	rung_started_at = rung_timing_start(loop_ctx->callback_started_at);
+	ret = queue_cell_enqueue_normal_ctx(loop_ctx);
+	rung_timing_finish(&loop_ctx->ladder_ctx, SNAKE_RUNG_LADDER_ENQUEUE, 1,
+			   rung_started_at);
+	if (!ret) {
+		stat_inc(&loop_ctx->ladder_ctx,
+			 SNAKE_STAT_ENQUEUE_RUNG_HIT_BASE + 1);
+		return 0;
+	}
+	if (ret != -ENOENT) {
+		stat_inc(&loop_ctx->ladder_ctx,
+			 SNAKE_STAT_ENQUEUE_RUNG_ERROR_BASE + 1);
+		return ret;
+	}
+	stat_inc(&loop_ctx->ladder_ctx,
+		 SNAKE_STAT_ENQUEUE_RUNG_MISS_BASE + 1);
+
+	stat_inc(&loop_ctx->ladder_ctx,
+		 SNAKE_STAT_ENQUEUE_RUNG_ATTEMPT_BASE + 2);
+	rung_started_at = rung_timing_start(loop_ctx->callback_started_at);
+	ret = queue_cell_enqueue_cpu_ctx(loop_ctx);
+	rung_timing_finish(&loop_ctx->ladder_ctx, SNAKE_RUNG_LADDER_ENQUEUE, 2,
+			   rung_started_at);
+	stat_inc(&loop_ctx->ladder_ctx,
+		 (!ret ? SNAKE_STAT_ENQUEUE_RUNG_HIT_BASE :
+			 SNAKE_STAT_ENQUEUE_RUNG_ERROR_BASE) +
+			 2);
+	return ret;
 }
 
 static __always_inline int
@@ -493,6 +581,14 @@ queue_ladder_enqueue(struct snake_ladder_ctx *ctx, struct task_struct *p,
 	};
 	if (queue_global_mode_enabled())
 		return queue_global_ladder_enqueue(&loop_ctx);
+	if (ctx->ladder->nr_enqueue_rungs == 3) {
+		const struct snake_queue_rung *first =
+			MEMBER_VPTR(ctx->ladder->enqueue_rungs, [0]);
+
+		if (first && first->opcode == SNAKE_ENQUEUE_OP_TRY_DIRECT &&
+		    first->input == SNAKE_QUEUE_INPUT_CELL)
+			return queue_mitosis_ladder_enqueue(&loop_ctx);
+	}
 	nr_loops = bpf_loop(SNAKE_MAX_QUEUE_RUNGS,
 			    queue_cell_ladder_enqueue_callback, &loop_ctx, 0);
 	if (nr_loops < 0) {

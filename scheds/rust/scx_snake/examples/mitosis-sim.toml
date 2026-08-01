@@ -13,8 +13,16 @@ reconcile_ms = 1000
 layout = "cell_llc"
 cell0_cpu_weight = 1
 direct_dispatch = true
-enqueue = [{ target = "cell" }, { target = "affinity" }]
-dispatch = [{ operation = "min_vtime" }]
+enqueue = [
+  { action = "try_direct", target = "cell" },
+  { action = "try_insert", target = "cell" },
+  { action = "insert", target = "cpu" },
+]
+dispatch = [
+  { action = "peek", source = "cell" },
+  { action = "peek", source = "cpu" },
+  { action = "consume", operation = "min_vtime", fallback = ["cpu", "cell_sibling"] },
+]
 
 # Prefer the previous CPU at every locality level, then an idle core, the
 # previous idle CPU, and finally any idle CPU in that level.

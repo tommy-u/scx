@@ -119,10 +119,17 @@ queue_mask_contains(const struct snake_mask_data *mask, u32 cpu)
 	return mask->bits[byte] & (1U << bit);
 }
 
-static __always_inline bool queue_primary_subset(const struct cpumask *primary,
-						 const struct task_struct *p)
+static __always_inline s32 queue_task_cell_affinity_restricted(
+	const struct snake_ladder_ctx *ctx, struct task_struct *p, u32 cell_index)
 {
-	return primary && bpf_cpumask_subset(primary, p->cpus_ptr);
+	const struct cpumask *primary, *borrowable;
+
+	primary = queue_cell_mask(ctx, cell_index, SNAKE_QUEUE_MASK_PRIMARY);
+	borrowable = queue_cell_mask(ctx, cell_index, SNAKE_QUEUE_MASK_BORROWABLE);
+	if (!primary || !borrowable)
+		return -EINVAL;
+	return !bpf_cpumask_subset(primary, p->cpus_ptr) ||
+	       !bpf_cpumask_subset(borrowable, p->cpus_ptr);
 }
 
 static __always_inline s32 queue_pick_primary_cpu(const struct cpumask *primary,

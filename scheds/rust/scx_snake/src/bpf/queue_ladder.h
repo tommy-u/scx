@@ -18,6 +18,49 @@ queue_direct_dispatch_enabled(const struct snake_ladder_ctx *ctx)
 	       first->flags == SNAKE_QUEUE_RUNG_F_DIRECT_DISPATCH;
 }
 
+static __always_inline bool queue_mitosis_callback_ladders(
+	const struct snake_compiled_ladder *ladder)
+{
+	const struct snake_queue_rung *enqueue0, *enqueue1, *enqueue2;
+	const struct snake_queue_rung *dispatch0, *dispatch1, *dispatch2;
+	u64 fallback = SNAKE_DISPATCH_FALLBACK_CPU |
+		       ((u64)SNAKE_DISPATCH_FALLBACK_CELL_SIBLING <<
+			SNAKE_DISPATCH_FALLBACK_BITS);
+
+	if (!ladder || ladder->nr_enqueue_rungs != 3 ||
+	    ladder->nr_dispatch_rungs != 3)
+		return false;
+	enqueue0 = MEMBER_VPTR(ladder->enqueue_rungs, [0]);
+	enqueue1 = MEMBER_VPTR(ladder->enqueue_rungs, [1]);
+	enqueue2 = MEMBER_VPTR(ladder->enqueue_rungs, [2]);
+	dispatch0 = MEMBER_VPTR(ladder->dispatch_rungs, [0]);
+	dispatch1 = MEMBER_VPTR(ladder->dispatch_rungs, [1]);
+	dispatch2 = MEMBER_VPTR(ladder->dispatch_rungs, [2]);
+	if (!enqueue0 || !enqueue1 || !enqueue2 || !dispatch0 || !dispatch1 ||
+	    !dispatch2)
+		return false;
+	return enqueue0->opcode == SNAKE_ENQUEUE_OP_TRY_DIRECT &&
+	       enqueue0->input == SNAKE_QUEUE_INPUT_CELL &&
+	       enqueue0->flags == SNAKE_QUEUE_RUNG_F_DIRECT_DISPATCH &&
+	       !enqueue0->reserved && !enqueue0->data &&
+	       enqueue1->opcode == SNAKE_ENQUEUE_OP_CELL &&
+	       enqueue1->input == SNAKE_QUEUE_INPUT_CELL && !enqueue1->flags &&
+	       !enqueue1->reserved && !enqueue1->data &&
+	       enqueue2->opcode == SNAKE_ENQUEUE_OP_INSERT_CPU &&
+	       enqueue2->input == SNAKE_QUEUE_INPUT_CPU && !enqueue2->flags &&
+	       !enqueue2->reserved && !enqueue2->data &&
+	       dispatch0->opcode == SNAKE_DISPATCH_OP_PEEK &&
+	       dispatch0->input == SNAKE_QUEUE_INPUT_CELL && !dispatch0->flags &&
+	       !dispatch0->reserved && !dispatch0->data &&
+	       dispatch1->opcode == SNAKE_DISPATCH_OP_PEEK &&
+	       dispatch1->input == SNAKE_QUEUE_INPUT_CPU && !dispatch1->flags &&
+	       !dispatch1->reserved && !dispatch1->data &&
+	       dispatch2->opcode == SNAKE_DISPATCH_OP_CONSUME &&
+	       dispatch2->input == SNAKE_QUEUE_INPUT_MIN_VTIME &&
+	       !dispatch2->flags && !dispatch2->reserved &&
+	       dispatch2->data == fallback;
+}
+
 static __always_inline int
 validate_queue_ladders(const struct snake_compiled_ladder *ladder)
 {
@@ -112,6 +155,8 @@ validate_queue_ladders(const struct snake_compiled_ladder *ladder)
 		}
 		return peek_sources == fallback_sources ? 0 : -EINVAL;
 	}
+	if (queue_mitosis_callback_ladders(ladder))
+		return 0;
 
 	bpf_for(i, 0, SNAKE_MAX_QUEUE_RUNGS)
 	{

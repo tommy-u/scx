@@ -297,8 +297,13 @@ fn encode_ladder(
     let (nr_enqueue_rungs, nr_dispatch_rungs) = if let Some(queues) = &policy.queues {
         for (destination, rung) in enqueue_rungs.iter_mut().zip(&queues.enqueue) {
             match (rung.action, rung.target) {
+                (QueueEnqueueAction::TryDirect, QueueEnqueueTarget::Cell) => {
+                    destination.opcode = bpf_intf::snake_enqueue_opcode_SNAKE_ENQUEUE_OP_TRY_DIRECT;
+                    destination.input = bpf_intf::snake_queue_input_SNAKE_QUEUE_INPUT_CELL;
+                }
                 (QueueEnqueueAction::TryInsert, QueueEnqueueTarget::Cell) => {
                     destination.opcode = bpf_intf::snake_enqueue_opcode_SNAKE_ENQUEUE_OP_CELL;
+                    destination.input = bpf_intf::snake_queue_input_SNAKE_QUEUE_INPUT_CELL;
                 }
                 (QueueEnqueueAction::Insert, QueueEnqueueTarget::Affinity) => {
                     destination.opcode = bpf_intf::snake_enqueue_opcode_SNAKE_ENQUEUE_OP_AFFINITY;
@@ -308,7 +313,11 @@ fn encode_ladder(
                     destination.input = bpf_intf::snake_queue_input_SNAKE_QUEUE_INPUT_LOCAL;
                 }
                 (QueueEnqueueAction::Insert, QueueEnqueueTarget::Cpu) => {
-                    destination.opcode = bpf_intf::snake_enqueue_opcode_SNAKE_ENQUEUE_OP_INSERT;
+                    destination.opcode = if queues.layout == policy::QueueLayout::Llc {
+                        bpf_intf::snake_enqueue_opcode_SNAKE_ENQUEUE_OP_INSERT
+                    } else {
+                        bpf_intf::snake_enqueue_opcode_SNAKE_ENQUEUE_OP_INSERT_CPU
+                    };
                     destination.input = bpf_intf::snake_queue_input_SNAKE_QUEUE_INPUT_CPU;
                 }
                 _ => bail!("unsupported compiled enqueue rung {}", rung.describe()),
@@ -343,6 +352,9 @@ fn encode_ladder(
                         QueueDispatchSource::Remote => {
                             bpf_intf::snake_queue_input_SNAKE_QUEUE_INPUT_REMOTE
                         }
+                        QueueDispatchSource::Cell => {
+                            bpf_intf::snake_queue_input_SNAKE_QUEUE_INPUT_CELL
+                        }
                         _ => bail!("unsupported peek source {}", source.as_str()),
                     };
                 }
@@ -359,6 +371,9 @@ fn encode_ladder(
                             }
                             QueueDispatchSource::Remote => {
                                 bpf_intf::snake_dispatch_fallback_SNAKE_DISPATCH_FALLBACK_REMOTE
+                            }
+                            QueueDispatchSource::CellSibling => {
+                                bpf_intf::snake_dispatch_fallback_SNAKE_DISPATCH_FALLBACK_CELL_SIBLING
                             }
                             _ => bail!("unsupported fallback source {}", source.as_str()),
                         };
@@ -4073,6 +4088,57 @@ scope = "task_allowed"
     }
 
     #[test]
+    fn mitosis_callback_ladders_preserve_the_kernel_control_flow() {
+        let bpf_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bpf");
+        let queue = fs::read_to_string(bpf_dir.join("queue.h")).unwrap();
+        let enqueue = fs::read_to_string(bpf_dir.join("queue_enqueue.h")).unwrap();
+        let dispatch = fs::read_to_string(bpf_dir.join("queue_dispatch.h")).unwrap();
+        let ladder = fs::read_to_string(bpf_dir.join("queue_ladder.h")).unwrap();
+        let scheduler = fs::read_to_string(bpf_dir.join("scheduler_mode.h")).unwrap();
+
+        let restricted = queue
+            .split_once("queue_task_cell_affinity_restricted(")
+            .and_then(|(_, body)| body.split_once("queue_pick_primary_cpu("))
+            .map(|(body, _)| body)
+            .expect("cell affinity classifier should be shared by enqueue and placement");
+        assert!(restricted.contains("SNAKE_QUEUE_MASK_PRIMARY"));
+        assert!(restricted.contains("SNAKE_QUEUE_MASK_BORROWABLE"));
+        assert_eq!(restricted.matches("bpf_cpumask_subset(").count(), 2);
+
+        assert!(scheduler.contains("SNAKE_ENQUEUE_OP_TRY_DIRECT"));
+        assert!(scheduler.contains("SNAKE_SELECT_F_AFFINITY"));
+        assert!(enqueue.contains("queue_fairness_enqueue_cell("));
+        assert!(enqueue.contains("queue_task_cell_affinity_restricted("));
+        assert!(enqueue.contains("bpf_cpumask_any_distribute(p->cpus_ptr)"));
+        assert!(enqueue.contains("dsq_nr_queued(dsq_affinity(target_cpu))"));
+        assert!(enqueue.contains("SNAKE_ENQUEUE_OP_INSERT_CPU"));
+
+        assert!(dispatch.contains("queue_mitosis_ladder_dispatch("));
+        assert!(dispatch.contains("queue_mitosis_steal_sibling("));
+        assert!(dispatch.contains("queue_dispatch_peek_local("));
+        assert!(dispatch.contains("queue_dispatch_peek_cpu("));
+        assert!(dispatch.contains("!time_before(cpu_candidate.vtime, cell_candidate.vtime)"));
+        let arbitration = dispatch
+            .split_once("queue_mitosis_ladder_dispatch(")
+            .and_then(|(_, body)| body.split_once("struct snake_queue_dispatch_loop_ctx"))
+            .map(|(body, _)| body)
+            .expect("Mitosis dispatch should have a dedicated bounded path");
+        let empty = arbitration
+            .find("!cell_candidate.valid && !cpu_candidate.valid")
+            .expect("sibling stealing should be guarded by two empty local candidates");
+        let steal = arbitration
+            .find("queue_mitosis_steal_sibling(")
+            .expect("empty local candidates should trigger sibling stealing");
+        assert!(empty < steal);
+        assert!(arbitration.contains("if (winner == &cell_candidate)"));
+        assert!(arbitration.contains("queue_fairness_move(ctx, cpu_candidate.dsq"));
+
+        assert!(ladder.contains("SNAKE_ENQUEUE_OP_TRY_DIRECT"));
+        assert!(ladder.contains("SNAKE_ENQUEUE_OP_INSERT_CPU"));
+        assert!(ladder.contains("SNAKE_DISPATCH_FALLBACK_CELL_SIBLING"));
+    }
+
+    #[test]
     fn global_sharded_queue_contract_is_topology_blind() {
         let bpf_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bpf");
         let intf = fs::read_to_string(bpf_dir.join("intf.h")).unwrap();
@@ -5380,7 +5446,7 @@ scope = "task_allowed"
         let policy = policy::compile_policy(policy_source()).expect("policy should compile");
         let encoded = encode_ladder(&policy, 42).expect("ladder should encode");
 
-        assert_eq!(bpf_intf::SNAKE_ABI_VERSION, 27);
+        assert_eq!(bpf_intf::SNAKE_ABI_VERSION, 28);
         assert_eq!(size_of::<bpf_intf::snake_callback_timing>(), 520);
         assert_eq!(offset_of!(bpf_intf::snake_callback_timing, total_ns), 0);
         assert_eq!(offset_of!(bpf_intf::snake_callback_timing, buckets), 8);
@@ -5627,6 +5693,58 @@ scope = "task_allowed"
         assert_eq!(encoded.nr_dispatch_rungs, 1);
         assert_eq!(encoded.dispatch_rungs[0].opcode, 3);
         assert_eq!(encoded.dispatch_rungs[0].flags, 0);
+    }
+
+    #[test]
+    fn encodes_explicit_mitosis_callback_ladders() {
+        let policy = policy::compile_policy(
+            r#"
+[queues]
+layout = "cell_llc"
+direct_dispatch = true
+enqueue = [
+  { action = "try_direct", target = "cell" },
+  { action = "try_insert", target = "cell" },
+  { action = "insert", target = "cpu" },
+]
+dispatch = [
+  { action = "peek", source = "cell" },
+  { action = "peek", source = "cpu" },
+  { action = "consume", operation = "min_vtime", fallback = ["cpu", "cell_sibling"] },
+]
+
+[[cell]]
+id = 7
+cpus = "0-3"
+
+[[rung]]
+operation = "pick_idle_prefer_previous"
+scope = "task_cell"
+"#,
+        )
+        .unwrap();
+        let encoded = encode_ladder(&policy, 9).unwrap();
+
+        assert_eq!(bpf_intf::SNAKE_ABI_VERSION, 28);
+        assert_eq!(encoded.nr_enqueue_rungs, 3);
+        assert_eq!(encoded.enqueue_rungs[0].opcode, 5);
+        assert_eq!(encoded.enqueue_rungs[0].input, 4);
+        assert_eq!(
+            encoded.enqueue_rungs[0].flags,
+            policy::QUEUE_RUNG_FLAG_DIRECT_DISPATCH
+        );
+        assert_eq!(encoded.enqueue_rungs[1].opcode, 1);
+        assert_eq!(encoded.enqueue_rungs[1].input, 4);
+        assert_eq!(encoded.enqueue_rungs[2].opcode, 6);
+        assert_eq!(encoded.enqueue_rungs[2].input, 1);
+        assert_eq!(encoded.nr_dispatch_rungs, 3);
+        assert_eq!(encoded.dispatch_rungs[0].opcode, 4);
+        assert_eq!(encoded.dispatch_rungs[0].input, 4);
+        assert_eq!(encoded.dispatch_rungs[1].opcode, 4);
+        assert_eq!(encoded.dispatch_rungs[1].input, 1);
+        assert_eq!(encoded.dispatch_rungs[2].opcode, 5);
+        assert_eq!(encoded.dispatch_rungs[2].input, 5);
+        assert_eq!(encoded.dispatch_rungs[2].data, 1 | (4 << 8));
     }
 
     #[test]
@@ -6229,7 +6347,7 @@ scope = "task_cell"
         let cpu_pick = include_str!("bpf/cpu_pick.h");
         let ladder = include_str!("bpf/ladder.h");
 
-        assert!(intf.contains("#define SNAKE_ABI_VERSION 27"));
+        assert!(intf.contains("#define SNAKE_ABI_VERSION 28"));
         assert!(intf.contains("SNAKE_OP_PICK_IDLE_PREFER_PREVIOUS = 8"));
         assert!(intf.contains("SNAKE_INPUT_TASK_ALLOWED_RESTRICTED = 5"));
         assert!(intf.contains("SNAKE_QUEUE_MASK_LOCAL_LLC"));

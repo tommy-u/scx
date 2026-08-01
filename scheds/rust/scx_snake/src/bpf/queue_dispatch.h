@@ -404,6 +404,193 @@ queue_dispatch_peek_local(struct snake_cpu_queue *cpuq,
 	return 0;
 }
 
+static __noinline s32 queue_mitosis_steal_sibling(
+	struct snake_ladder_ctx *ctx, struct snake_cpu_queue *cpuq, s32 cpu,
+	const struct snake_fine_timing_ctx *fine)
+{
+	struct snake_queue_cell *cell;
+	u32 local_offset, offset;
+
+	if (!cpuq || cpu < 0 || cpu >= nr_cpu_ids || cpu >= SNAKE_MAX_CPUS)
+		return -EINVAL;
+	cell = queue_cell(ctx, cpuq->owner_cell_index);
+	if (!cell || !cell->nr_normal_queues ||
+	    cell->nr_normal_queues > SNAKE_MAX_NORMAL_QUEUES)
+		return -EINVAL;
+	if (cpuq->normal_queue_index < cell->first_normal_queue)
+		return -EINVAL;
+	local_offset = cpuq->normal_queue_index - cell->first_normal_queue;
+	if (local_offset >= cell->nr_normal_queues)
+		return -EINVAL;
+	bpf_for(offset, 0, SNAKE_MAX_NORMAL_QUEUES)
+	{
+		dsq_id_t dsq;
+		u32 index;
+		s32 nr_queued;
+
+		if (offset >= cell->nr_normal_queues)
+			break;
+		index = cell->first_normal_queue +
+			((local_offset + offset) % cell->nr_normal_queues);
+		if (index >= SNAKE_MAX_NORMAL_QUEUES)
+			return -EINVAL;
+		if (index == cpuq->normal_queue_index)
+			continue;
+		dsq = dsq_normal(index);
+		nr_queued = dsq_nr_queued(dsq);
+		if (nr_queued < 0)
+			return nr_queued;
+		if (nr_queued > 0 && queue_fairness_move(
+					     ctx, dsq, cpu,
+					     SNAKE_QUEUE_CLASS_NORMAL, fine))
+			return 1;
+	}
+	return 0;
+}
+
+static __noinline s32 queue_mitosis_ladder_dispatch(
+	struct snake_ladder_ctx *ctx, s32 cpu, struct task_struct *prev,
+	const struct snake_fine_timing_ctx *fine, u64 callback_started_at)
+{
+	const struct snake_queue_rung *cell_rung, *cpu_rung, *consume_rung;
+	struct snake_cpu_queue *cpuq;
+	struct snake_queue_candidate cell_candidate = {}, cpu_candidate = {};
+	struct snake_queue_candidate *winner;
+	u32 winner_rung;
+	s32 keep, result = 0, ret;
+	u64 rung_started_at, stage_started_at;
+
+	if (!ctx || ctx->ladder->nr_dispatch_rungs != 3)
+		return -EINVAL;
+	cpuq = queue_cpu(ctx, cpu);
+	if (!cpuq)
+		return -EINVAL;
+	cell_rung = MEMBER_VPTR(ctx->ladder->dispatch_rungs, [0]);
+	cpu_rung = MEMBER_VPTR(ctx->ladder->dispatch_rungs, [1]);
+	consume_rung = MEMBER_VPTR(ctx->ladder->dispatch_rungs, [2]);
+	if (!cell_rung || !cpu_rung || !consume_rung ||
+	    cell_rung->opcode != SNAKE_DISPATCH_OP_PEEK ||
+	    cell_rung->input != SNAKE_QUEUE_INPUT_CELL ||
+	    cpu_rung->opcode != SNAKE_DISPATCH_OP_PEEK ||
+	    cpu_rung->input != SNAKE_QUEUE_INPUT_CPU ||
+	    consume_rung->opcode != SNAKE_DISPATCH_OP_CONSUME ||
+	    consume_rung->input != SNAKE_QUEUE_INPUT_MIN_VTIME)
+		return -EINVAL;
+
+	stat_inc(ctx, SNAKE_STAT_DISPATCH_RUNG_ATTEMPT_BASE);
+	rung_started_at = rung_timing_start(callback_started_at);
+	stage_started_at = fine_timing_start(fine);
+	ret = queue_dispatch_peek_local(cpuq, &cell_candidate);
+	fine_timing_finish(fine, SNAKE_FINE_TIMING_DISPATCH_NORMAL_HEAD_PEEK,
+			   stage_started_at);
+	rung_timing_finish(ctx, SNAKE_RUNG_LADDER_DISPATCH, 0,
+			   rung_started_at);
+	if (ret < 0) {
+		stat_inc(ctx, SNAKE_STAT_DISPATCH_RUNG_ERROR_BASE);
+		return ret;
+	}
+	stat_inc(ctx,
+		 (cell_candidate.valid ? SNAKE_STAT_DISPATCH_RUNG_HIT_BASE :
+					 SNAKE_STAT_DISPATCH_RUNG_MISS_BASE));
+
+	stat_inc(ctx, SNAKE_STAT_DISPATCH_RUNG_ATTEMPT_BASE + 1);
+	rung_started_at = rung_timing_start(callback_started_at);
+	stage_started_at = fine_timing_start(fine);
+	ret = queue_dispatch_peek_cpu(cpu, &cpu_candidate);
+	fine_timing_finish(fine, SNAKE_FINE_TIMING_DISPATCH_AFFINITY_HEAD_PEEK,
+			   stage_started_at);
+	rung_timing_finish(ctx, SNAKE_RUNG_LADDER_DISPATCH, 1,
+			   rung_started_at);
+	if (ret < 0) {
+		stat_inc(ctx, SNAKE_STAT_DISPATCH_RUNG_ERROR_BASE + 1);
+		return ret;
+	}
+	stat_inc(ctx,
+		 (cpu_candidate.valid ? SNAKE_STAT_DISPATCH_RUNG_HIT_BASE :
+					SNAKE_STAT_DISPATCH_RUNG_MISS_BASE) +
+			 1);
+
+	stat_inc(ctx, SNAKE_STAT_DISPATCH_RUNG_ATTEMPT_BASE + 2);
+	rung_started_at = rung_timing_start(callback_started_at);
+	if (!cell_candidate.valid && !cpu_candidate.valid) {
+		stat_inc(ctx, SNAKE_STAT_DISPATCH_RUNG_FALLBACK_ATTEMPT_BASE);
+		ret = queue_mitosis_steal_sibling(ctx, cpuq, cpu, fine);
+		if (ret < 0)
+			goto consume_error;
+		stat_inc(ctx,
+			 (ret ? SNAKE_STAT_DISPATCH_RUNG_FALLBACK_HIT_BASE :
+				SNAKE_STAT_DISPATCH_RUNG_FALLBACK_MISS_BASE));
+		result = ret;
+		goto consume_out;
+	}
+
+	stage_started_at = fine_timing_start(fine);
+	if (cell_candidate.valid &&
+	    (!cpu_candidate.valid ||
+	     !time_before(cpu_candidate.vtime, cell_candidate.vtime))) {
+		winner = &cell_candidate;
+		winner_rung = 0;
+		if (cpu_candidate.valid &&
+		    cpu_candidate.vtime == cell_candidate.vtime)
+			stat_inc(ctx, SNAKE_STAT_VTIME_EQUAL_HEAD_TIES);
+	} else {
+		winner = &cpu_candidate;
+		winner_rung = 1;
+	}
+	fine_timing_finish(fine, SNAKE_FINE_TIMING_DISPATCH_ARBITRATE,
+			   stage_started_at);
+	stat_inc(ctx, SNAKE_STAT_DISPATCH_RUNG_SELECTED_BASE + winner_rung);
+	stage_started_at = fine_timing_start(fine);
+	keep = queue_fairness_keep_running_min(ctx, cpuq, prev, winner->vtime);
+	fine_timing_finish(fine, SNAKE_FINE_TIMING_DISPATCH_KEEP_RUNNING,
+			   stage_started_at);
+	if (keep < 0) {
+		ret = keep;
+		goto consume_error;
+	}
+	if (keep) {
+		result = 1;
+		goto consume_out;
+	}
+	if (queue_fairness_move(ctx, winner->dsq, cpu, winner->class, fine)) {
+		result = 1;
+		goto consume_out;
+	}
+	stat_inc(ctx, SNAKE_STAT_DISPATCH_RUNG_MOVE_MISS_BASE + 2);
+	if (winner == &cell_candidate) {
+		stat_inc(ctx, SNAKE_STAT_DISPATCH_RUNG_FALLBACK_ATTEMPT_BASE + 1);
+		if (queue_fairness_move(ctx, cpu_candidate.dsq, cpu,
+					SNAKE_QUEUE_CLASS_AFFINITY, fine)) {
+			stat_inc(ctx,
+				 SNAKE_STAT_DISPATCH_RUNG_FALLBACK_HIT_BASE + 1);
+			result = 1;
+		} else {
+			stat_inc(ctx,
+				 SNAKE_STAT_DISPATCH_RUNG_FALLBACK_MISS_BASE + 1);
+		}
+	}
+
+consume_out:
+	if (!result) {
+		ret = queue_fairness_replenish(ctx, cpuq, prev);
+		if (ret < 0)
+			goto consume_error;
+	}
+	rung_timing_finish(ctx, SNAKE_RUNG_LADDER_DISPATCH, 2,
+			   rung_started_at);
+	stat_inc(ctx,
+		 (result ? SNAKE_STAT_DISPATCH_RUNG_HIT_BASE :
+			   SNAKE_STAT_DISPATCH_RUNG_MISS_BASE) +
+			 2);
+	return 0;
+
+consume_error:
+	rung_timing_finish(ctx, SNAKE_RUNG_LADDER_DISPATCH, 2,
+			   rung_started_at);
+	stat_inc(ctx, SNAKE_STAT_DISPATCH_RUNG_ERROR_BASE + 2);
+	return ret;
+}
+
 struct snake_remote_scan_loop_ctx {
 	struct snake_queue_candidate candidate;
 	u32 local_queue;
@@ -1117,6 +1304,15 @@ static __always_inline int queue_ladder_dispatch(
 	if (queue_global_mode_enabled())
 		return queue_global_ladder_dispatch(ctx, cpu, prev, state,
 						    callback_started_at);
+	if (ctx->ladder->nr_dispatch_rungs == 3) {
+		const struct snake_queue_rung *first =
+			MEMBER_VPTR(ctx->ladder->dispatch_rungs, [0]);
+
+		if (first && first->opcode == SNAKE_DISPATCH_OP_PEEK &&
+		    first->input == SNAKE_QUEUE_INPUT_CELL)
+			return queue_mitosis_ladder_dispatch(
+				ctx, cpu, prev, fine, callback_started_at);
+	}
 	if (ctx->ladder->nr_dispatch_rungs == 1) {
 		const struct snake_queue_rung *only =
 			MEMBER_VPTR(ctx->ladder->dispatch_rungs, [0]);

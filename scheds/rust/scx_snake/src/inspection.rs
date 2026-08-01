@@ -1361,7 +1361,7 @@ scope = "task_cell"
                 .iter()
                 .map(|rung| (rung.index, rung.operation.as_str()))
                 .collect::<Vec<_>>(),
-            vec![(0, "cell"), (1, "affinity")]
+            vec![(0, "try_insert(cell)"), (1, "insert(affinity)")]
         );
         assert_eq!(
             queues

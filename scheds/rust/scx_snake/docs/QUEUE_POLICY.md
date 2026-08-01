@@ -81,6 +81,24 @@ For `cell` and `cell_llc`, omitting both callback ladders selects enqueue
 `[cell, affinity]` and dispatch `[affinity, cell]`. If either is specified, both
 must be specified explicitly. `cell0_cpu_weight` defaults to 1.
 
+`mitosis-sim.toml` uses the explicit Mitosis callback form:
+
+```toml
+[queues]
+layout = "cell_llc"
+direct_dispatch = true
+enqueue = [
+  { action = "try_direct", target = "cell" },
+  { action = "try_insert", target = "cell" },
+  { action = "insert", target = "cpu" },
+]
+dispatch = [
+  { action = "peek", source = "cell" },
+  { action = "peek", source = "cpu" },
+  { action = "consume", operation = "min_vtime", fallback = ["cpu", "cell_sibling"] },
+]
+```
+
 ## Cells and CPU ownership
 
 The two cell layouts turn overlapping CPU declarations into an attachment-time
@@ -168,8 +186,8 @@ order. Snake rejects omitted, duplicated, reordered, or additional targets.
 The cell-layout enqueue ladder is also first-success:
 
 - `cell` inserts into the task cell's normal VTIME DSQ. It succeeds only when
-  the task may run on every CPU in that cell's primary mask. For `cell_llc`,
-  the selected or chosen primary CPU selects the LLC shard.
+  the task may run on every CPU in that cell's primary and borrowable masks.
+  For `cell_llc`, the selected or chosen primary CPU selects the LLC shard.
 - `affinity` inserts into an allowed CPU's affinity escape DSQ. It is the
   required terminal fallback.
 
@@ -181,6 +199,13 @@ custom enqueue ladder and inserts directly into the selected CPU's local DSQ.
 Primary, borrowable, and restricted-affinity rungs preserve their respective
 resource route. If sched_ext invokes `enqueue` without first invoking
 `select_cpu`, Snake retries the placement ladder there before queueing.
+
+The explicit Mitosis enqueue ladder makes those decisions visible as three
+rungs. `try_direct(cell)` retries idle placement only when `select_cpu` was
+skipped and never directly dispatches restricted work. `try_insert(cell)` is
+the shared cell-LLC path. Terminal `insert(cpu)` is the restricted path; if the
+initial CPU queue already has work, it uses the kernel's distributed allowed
+CPU selection before inserting. This form requires `direct_dispatch = true`.
 
 ## Dispatch ladder
 
@@ -227,6 +252,13 @@ For a `cell` source, a CPU first checks its local cell or cell/LLC shard. If
 that shard is empty, it may take the earliest VTIME head from another shard of
 the same cell. It never steals normal work from another cell. An `affinity`
 source consumes only that CPU's escape queue.
+
+The explicit Mitosis dispatch ladder does not use cyclic source priority. It
+peeks the local cell-LLC head, then the current CPU head, and chooses the lower
+VTIME while preferring the cell head on exact ties. If the winning cell move
+races and fails, it tries only the CPU DSQ. It scans sibling cell-LLC DSQs only
+when both local candidates were empty, starting after the local LLC, and never
+steals from another cell.
 
 ## Clocks and task coordinates
 

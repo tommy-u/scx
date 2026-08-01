@@ -14,6 +14,7 @@ static __always_inline int queue_try_direct_from_enqueue(
 	struct snake_ladder_ctx *ctx, struct task_struct *p, u64 enq_flags,
 	const struct snake_fine_timing_ctx *fine, u64 callback_started_at)
 {
+	const struct snake_queue_rung *first;
 	struct snake_ladder_walk_args walk_args = {
 		.prev_cpu = scx_bpf_task_cpu(p),
 		.queue_cell_index = SNAKE_QUEUE_CELL_NONE,
@@ -21,16 +22,35 @@ static __always_inline int queue_try_direct_from_enqueue(
 		.dispatch_flags = 0,
 		.callback_started_at = callback_started_at,
 	};
-	s32 cpu, ret;
+	s32 cpu, ret = 0;
+	u64 rung_started_at = 0;
+	bool explicit_direct;
 
-	if (!queue_cell_mode_enabled() || !queue_direct_dispatch_enabled(ctx) ||
-	    __COMPAT_is_enq_cpu_selected(enq_flags))
+	if (!queue_cell_mode_enabled() || !queue_direct_dispatch_enabled(ctx))
 		return 0;
+	first = MEMBER_VPTR(ctx->ladder->enqueue_rungs, [0]);
+	if (!first)
+		return -EINVAL;
+	explicit_direct = first->opcode == SNAKE_ENQUEUE_OP_TRY_DIRECT &&
+			  first->input == SNAKE_QUEUE_INPUT_CELL;
+	if (explicit_direct) {
+		stat_inc(ctx, SNAKE_STAT_ENQUEUE_RUNG_ATTEMPT_BASE);
+		rung_started_at = rung_timing_start(callback_started_at);
+		if (__COMPAT_is_enq_cpu_selected(enq_flags))
+			goto out;
+	} else if (__COMPAT_is_enq_cpu_selected(enq_flags)) {
+		return 0;
+	}
 	cpu = walk_policy_ladder(ctx, p, &walk_args);
 	if (cpu == -ENOENT)
-		return 0;
-	if (cpu < 0)
-		return cpu;
+		goto out;
+	if (cpu < 0) {
+		ret = cpu;
+		goto out;
+	}
+	if (explicit_direct &&
+	    (walk_args.dispatch_flags & SNAKE_SELECT_F_AFFINITY))
+		goto out;
 	if (walk_args.dispatch_flags & SNAKE_SELECT_F_BORROWED)
 		ret = queue_fairness_direct_borrow(
 			ctx, p, cpu, walk_args.queue_cell_index, fine);
@@ -41,10 +61,20 @@ static __always_inline int queue_try_direct_from_enqueue(
 		ret = queue_fairness_direct_primary(
 			ctx, p, cpu, walk_args.queue_cell_index, fine);
 	if (ret)
-		return ret;
+		goto out;
 	stat_inc(ctx, SNAKE_STAT_DIRECT_DISPATCHES);
 	scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
-	return 1;
+	ret = 1;
+out:
+	if (explicit_direct) {
+		rung_timing_finish(ctx, SNAKE_RUNG_LADDER_ENQUEUE, 0,
+				   rung_started_at);
+		stat_inc(ctx,
+			 (ret < 0 ? SNAKE_STAT_ENQUEUE_RUNG_ERROR_BASE :
+			  ret ? SNAKE_STAT_ENQUEUE_RUNG_HIT_BASE :
+				SNAKE_STAT_ENQUEUE_RUNG_MISS_BASE));
+	}
+	return ret;
 }
 
 /* Route enqueue through the active queue topology or global fairness policy. */

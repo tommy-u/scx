@@ -47,19 +47,6 @@ static __always_inline s32 queue_pick_task_cell_cpu(
 	return selected;
 }
 
-static __always_inline s32 queue_task_cell_affinity_restricted(
-	const struct snake_ladder_ctx *ctx, struct task_struct *p, u32 cell_index)
-{
-	const struct cpumask *primary, *borrowable;
-
-	primary = queue_cell_mask(ctx, cell_index, SNAKE_QUEUE_MASK_PRIMARY);
-	borrowable = queue_cell_mask(ctx, cell_index, SNAKE_QUEUE_MASK_BORROWABLE);
-	if (!primary || !borrowable)
-		return -EINVAL;
-	return !bpf_cpumask_subset(primary, p->cpus_ptr) ||
-	       !bpf_cpumask_subset(borrowable, p->cpus_ptr);
-}
-
 static __always_inline s32 queue_pick_task_cell_preferred_cpu(
 	const struct snake_ladder_ctx *ctx, struct task_struct *p, u32 kind,
 	s32 prev_cpu, u32 *cell_indexp)
