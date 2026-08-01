@@ -131,6 +131,25 @@
           </div>
         </section>
 
+        <section class="table-section" aria-labelledby="schedulerEventsHeading" data-feedback-key="Callbacks:Scheduler-events">
+          <div class="table-section-heading">
+            <h2 id="schedulerEventsHeading">Scheduler activity</h2>
+            <p>Exact tracepoint counters</p>
+          </div>
+          <div class="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">Event</th>
+                  <th scope="col">Total</th>
+                  <th scope="col">Rate / second</th>
+                </tr>
+              </thead>
+              <tbody id="schedulerEventRows"></tbody>
+            </table>
+          </div>
+        </section>
+
         <section class="table-section" aria-labelledby="schedulerTimingHeading" data-feedback-key="Callbacks:Scheduler-latency">
           <div class="table-section-heading">
             <h2 id="schedulerTimingHeading">Scheduler latency</h2>

@@ -8,6 +8,7 @@
 
 #include "intf.h"
 #include "dsq_observer.bpf.h"
+#include "scheduler_events.bpf.h"
 
 char _license[] SEC("license") = "GPL";
 

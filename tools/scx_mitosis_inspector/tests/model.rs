@@ -1,9 +1,9 @@
 use std::time::Duration;
 
 use scx_mitosis_inspector::{
-    build_counters, build_cpu_runtime_rows, parse_callback_timing_sample_rate,
-    program_name_matches, project_cpu_runtime, summarize_callback_timing, CallbackCounter,
-    CallbackTimingCounters,
+    build_counters, build_cpu_runtime_rows, build_scheduler_event_rows,
+    parse_callback_timing_sample_rate, program_name_matches, project_cpu_runtime,
+    summarize_callback_timing, CallbackCounter, CallbackTimingCounters,
 };
 
 fn timing(total_ns: u64, buckets: &[(usize, u64)]) -> CallbackTimingCounters {
@@ -111,4 +111,17 @@ fn cpu_runtime_uses_the_observation_interval() {
 fn cpu_runtime_includes_the_open_running_interval() {
     assert_eq!(project_cpu_runtime(40, 100, true, 160), 100);
     assert_eq!(project_cpu_runtime(40, 100, false, 160), 40);
+}
+
+#[test]
+fn scheduler_event_rows_include_interval_rates() {
+    let rows = build_scheduler_event_rows(
+        [20, 8, 0, 0, 0, 0, 0, 0, 0],
+        [10, 4, 0, 0, 0, 0, 0, 0, 0],
+        Duration::from_secs(2),
+    );
+
+    assert_eq!(rows[0].metric, "context_switches");
+    assert_eq!(rows[0].rate_per_second, 5.0);
+    assert_eq!(rows[1].rate_per_second, 2.0);
 }

@@ -38,6 +38,8 @@ Blocked off-CPU duration is measured from a blocking switch until wakeup.
 CPU migration pairs are aggregated from `sched_migrate_task` in a bounded map.
 Compatible DSQ insert and move symbols are observed with kprobes to report exact
 operation counts, queue residence-time histograms, and remaining queue depth.
+Scheduler tracepoints provide exact switch, preemption, blocking, wakeup, and
+task lifecycle totals with per-second rates.
 The callback page also reads kernel BPF program run counts and runtime totals;
 these fields are populated only when the host has `kernel.bpf_stats_enabled=1`.
 

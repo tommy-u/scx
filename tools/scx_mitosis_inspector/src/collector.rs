@@ -21,10 +21,11 @@ use serde::Serialize;
 use crate::bpf_program_stats::{query_bpf_program_stats, BpfProgramStatsRow};
 use crate::bpf_skel::{BpfSkel, BpfSkelBuilder};
 use crate::{
-    build_callback_timing_rows, build_counters, build_cpu_runtime_rows, build_timing_metric_row,
-    program_name_matches, project_cpu_runtime, summarize_callback_timing, CallbackCounter,
-    CallbackTimingCounters, CallbackTimingRow, CpuRuntimeRow, DsqMetricsView, MigrationRow,
-    TimingMetricRow, CALLBACK_NAMES, CALLBACK_TIMING_BUCKETS,
+    build_callback_timing_rows, build_counters, build_cpu_runtime_rows, build_scheduler_event_rows,
+    build_timing_metric_row, program_name_matches, project_cpu_runtime, summarize_callback_timing,
+    CallbackCounter, CallbackTimingCounters, CallbackTimingRow, CpuRuntimeRow, DsqMetricsView,
+    MigrationRow, SchedulerEventRow, TimingMetricRow, CALLBACK_NAMES, CALLBACK_TIMING_BUCKETS,
+    SCHEDULER_EVENT_NAMES,
 };
 
 const TARGET_NAMES: [&str; 5] = [
@@ -54,6 +55,7 @@ pub struct Snapshot {
     pub cpu_runtime: Vec<CpuRuntimeRow>,
     pub bpf_program_stats: Vec<BpfProgramStatsRow>,
     pub dsq_metrics: DsqMetricsView,
+    pub scheduler_events: Vec<SchedulerEventRow>,
 }
 
 fn find_targets() -> Result<[TargetProgram; 5]> {
@@ -141,6 +143,12 @@ fn attach_programs(
         skel.progs.observe_running.attach_trace()?,
         skel.progs.observe_stopping.attach_trace()?,
         skel.progs.on_sched_migrate_task.attach()?,
+        skel.progs.scheduler_event_switch.attach()?,
+        skel.progs.scheduler_event_wakeup.attach()?,
+        skel.progs.scheduler_event_wakeup_new.attach()?,
+        skel.progs.scheduler_event_fork.attach()?,
+        skel.progs.scheduler_event_exec.attach()?,
+        skel.progs.scheduler_event_exit.attach()?,
     ];
     if callback_timing_sample_rate > 0 {
         links.extend([
@@ -240,6 +248,29 @@ fn read_counts(skel: &BpfSkel<'_>) -> Result<[u64; 5]> {
         .collect::<Result<Vec<_>>>()?
         .try_into()
         .map_err(|_| anyhow::anyhow!("expected five callback counts"))
+}
+
+fn read_scheduler_events(skel: &BpfSkel<'_>) -> Result<[u64; 9]> {
+    const U64_BYTES: usize = std::mem::size_of::<u64>();
+    let key = 0_u32.to_ne_bytes();
+    let values = skel
+        .maps
+        .scheduler_event_metrics
+        .lookup_percpu(&key, MapFlags::ANY)?
+        .context("scheduler event metrics entry missing")?;
+    let mut totals = [0_u64; SCHEDULER_EVENT_NAMES.len()];
+    for value in values {
+        if value.len() < totals.len() * U64_BYTES {
+            bail!("short scheduler event metrics value");
+        }
+        for (index, total) in totals.iter_mut().enumerate() {
+            let start = index * U64_BYTES;
+            *total = total.saturating_add(u64::from_ne_bytes(
+                value[start..start + U64_BYTES].try_into()?,
+            ));
+        }
+    }
+    Ok(totals)
 }
 
 fn read_callback_timings(skel: &BpfSkel<'_>) -> Result<Vec<CallbackTimingCounters>> {
@@ -483,6 +514,7 @@ pub fn run(
 
     let started = Instant::now();
     let mut previous = read_counts(&skel)?;
+    let mut previous_scheduler_events = read_scheduler_events(&skel)?;
     let callback_timings = read_callback_timings(&skel)?;
     let wakeup_latency = read_wakeup_latency(&skel)?;
     let cpu_slice_duration = read_cpu_slice_duration(&skel)?;
@@ -515,6 +547,11 @@ pub fn run(
             ),
             bpf_program_stats,
             dsq_metrics,
+            scheduler_events: build_scheduler_event_rows(
+                previous_scheduler_events,
+                previous_scheduler_events,
+                Duration::ZERO,
+            ),
         };
     }
     ready
@@ -525,6 +562,7 @@ pub fn run(
         thread::sleep(Duration::from_secs(1));
         let now = Instant::now();
         let current = read_counts(&skel)?;
+        let current_scheduler_events = read_scheduler_events(&skel)?;
         let callback_timings = read_callback_timings(&skel)?;
         let wakeup_latency = read_wakeup_latency(&skel)?;
         let cpu_slice_duration = read_cpu_slice_duration(&skel)?;
@@ -551,6 +589,12 @@ pub fn run(
         previous_cpu_runtime = current_cpu_runtime;
         snapshot.bpf_program_stats = bpf_program_stats;
         snapshot.dsq_metrics = dsq_metrics;
+        snapshot.scheduler_events = build_scheduler_event_rows(
+            current_scheduler_events,
+            previous_scheduler_events,
+            elapsed,
+        );
+        previous_scheduler_events = current_scheduler_events;
         previous_at = now;
     }
     Ok(())
