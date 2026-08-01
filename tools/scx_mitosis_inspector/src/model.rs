@@ -9,10 +9,28 @@ use serde::Serialize;
 
 pub const CALLBACK_TIMING_BUCKETS: usize = 64;
 pub const CALLBACK_NAMES: [&str; 5] = ["select_cpu", "enqueue", "dispatch", "running", "stopping"];
+pub const SCHEDULER_EVENT_NAMES: [&str; 9] = [
+    "context_switches",
+    "preemptions",
+    "blocked_switches",
+    "voluntary_switches",
+    "wakeups",
+    "new_task_wakeups",
+    "task_forks",
+    "task_execs",
+    "task_exits",
+];
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct CallbackCounter {
     pub name: &'static str,
+    pub count: u64,
+    pub rate_per_second: f64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct SchedulerEventRow {
+    pub metric: &'static str,
     pub count: u64,
     pub rate_per_second: f64,
 }
@@ -140,6 +158,27 @@ pub fn build_counters(
         .enumerate()
         .map(|(index, name)| CallbackCounter {
             name,
+            count: current[index],
+            rate_per_second: if seconds > 0.0 {
+                current[index].saturating_sub(previous[index]) as f64 / seconds
+            } else {
+                0.0
+            },
+        })
+        .collect()
+}
+
+pub fn build_scheduler_event_rows(
+    current: [u64; 9],
+    previous: [u64; 9],
+    elapsed: Duration,
+) -> Vec<SchedulerEventRow> {
+    let seconds = elapsed.as_secs_f64();
+    SCHEDULER_EVENT_NAMES
+        .into_iter()
+        .enumerate()
+        .map(|(index, metric)| SchedulerEventRow {
+            metric,
             count: current[index],
             rate_per_second: if seconds > 0.0 {
                 current[index].saturating_sub(previous[index]) as f64 / seconds
