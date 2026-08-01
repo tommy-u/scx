@@ -55,11 +55,11 @@ Snake should not copy that property.
 
 | Mitosis behavior | Snake status | Gap |
 | --- | --- | --- |
-| Direct-child cgroup becomes a cell | Partial | Snake maps explicitly named trees to predeclared cells. |
+| Direct-child cgroup becomes a cell | Partial | Snake can synthesize cells from direct children at attach; live child lifecycle is still absent. |
 | Descendants inherit and live moves refresh | Partial | Recursive userspace polling eventually writes per-thread storage. |
-| Excluded children remain in cell 0 | Partial | Omitted assignments use cell 0, but no “all except” managed mode. |
+| Excluded children remain in cell 0 | Partial | Attach-time managed mode supports exact exclusions; it has no live identity reuse. |
 | Cell create/delete and ID reuse | Missing | Queue cells are attachment-time objects. |
-| Cpuset-aware resource claims | Partial | Static TOML claims use a deterministic weighted allocator. |
+| Cpuset-aware resource claims | Partial | Attach-time discovery reads effective cpusets into the deterministic allocator; live mutation and holdout are absent. |
 | Configurable cell-0 holdout | Partial | Snake guarantees cell 0 capacity but has no configurable minimum or diagnostic. |
 | Demand measurement | Partial | Runtime, primary, borrowed, and lent counters exist; utilization/EWMA does not. |
 | Demand-driven CPU allocation | Missing | No resource controller updates ownership. |
@@ -153,9 +153,15 @@ fairness, churn, and scale. It is not statistical confidence.
 
 ## Managed-mode v1 contract
 
-The managed mode needs a product contract before implementation. Otherwise the
-controller, policy compiler, inspector, and mutation API can each make a
-different assumption. The following is the recommended narrow first release.
+The attachment-time subset now implements `parent`, `exclude_children`,
+`max_children`, and `reconcile_ms`. It assigns sorted direct children to
+epoch-bearing slots, reads `cpuset.cpus.effective`, and keeps descendants flat
+inside the direct child's cell. It pins the discovered cgroup inode and detaches
+on deletion or same-name replacement. It does not watch direct-child lifecycle
+or cpuset changes, preserve logical identity across slot reuse, protect a
+configurable cell-0 holdout, or rebalance CPUs.
+
+The following remains the recommended contract for the live managed mode.
 
 An illustrative configuration shape is:
 
@@ -175,7 +181,8 @@ demand_ewma_alpha = 0.30
 layout = "cell_llc"
 ```
 
-This is a proposed schema, not current syntax. Its semantics are:
+The controller and rebalance fields are proposed syntax; the attachment-time
+fields described above are current. The target live semantics are:
 
 - `[managed_cells]` enables the mode at attachment. It requires VTIME and a
   queue layout; changing the parent, maximum, layout, or fairness mode requires
@@ -211,9 +218,10 @@ This is a proposed schema, not current syntax. Its semantics are:
   retains an affinity-invalid owner or publishes an active normal queue with no
   consumer. A later coordinated cpuset mutation API can provide a no-detach path.
 - Managed mode is mutually exclusive with static `[[cell]]` and `[membership]`
-  configuration in v1. Per-thread assignment to a numeric cell is rejected
-  while managed mode is active; clearing a pre-existing assignment remains
-  allowed. A future manual namespace requires explicit epochs and precedence.
+  configuration in v1. The attachment-time subset resolves a manual numeric
+  assignment to the slot's active epoch. Live slot reuse still needs an
+  explicit manual namespace and precedence contract before that API can remain
+  enabled safely.
 - Policies may use generic task-cell placement, enqueue, and dispatch semantics,
   but may not embed managed slot IDs. A policy candidate is compiled against the
   resource sub-epoch in the active configuration bank, then the coordinator
@@ -421,6 +429,10 @@ Exit gate: design invariants and tests are written; no managed cell can be confu
 with a reused slot.
 
 ### Phase 1: cgroup-native identity
+
+The attach-time scanner is a precursor, not completion of this phase: it
+synthesizes cells and recursively tags existing child trees, but it does not
+provide live logical identity or create/delete/recreate ordering.
 
 - Add direct-child discovery by path and inode.
 - Add exact child exclusions.

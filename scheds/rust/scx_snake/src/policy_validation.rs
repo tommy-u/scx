@@ -6,6 +6,7 @@ use std::path::Path;
 use serde::Serialize;
 
 use crate::bpf_intf;
+use crate::managed_cells::resolve_managed_cells;
 use crate::mask_tables::resolve_mask_tables;
 use crate::policy::{self, CompiledPolicy};
 use crate::queue_topology::resolve_host_queue_topology;
@@ -120,7 +121,7 @@ pub fn validate_policy_file(path: &Path) -> ValidationReport {
             });
         }
     };
-    let policy = match policy::compile_policy(&source) {
+    let mut policy = match policy::compile_policy(&source) {
         Ok(policy) => policy,
         Err(error) => {
             let location = error
@@ -134,6 +135,14 @@ pub fn validate_policy_file(path: &Path) -> ValidationReport {
             });
         }
     };
+    if let Err(error) = resolve_managed_cells(&mut policy) {
+        return ValidationReport::failure(ValidationError {
+            code: "managed_cell_resolution_failed",
+            message: format!("{error:#}"),
+            line: None,
+            column: None,
+        });
+    }
     if let Err(error) = resolve_mask_tables(&policy) {
         return ValidationReport::failure(ValidationError {
             code: "mask_resolution_failed",

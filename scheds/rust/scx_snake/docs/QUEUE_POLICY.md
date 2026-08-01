@@ -9,6 +9,7 @@ vtime`, and leave FIFO as the scheduler default.
 See [`../examples/kernel-default-sim.toml`](../examples/kernel-default-sim.toml),
 [`../examples/cell-queues.toml`](../examples/cell-queues.toml),
 [`../examples/cell-llc-queues.toml`](../examples/cell-llc-queues.toml),
+[`../examples/managed-cell-llc.toml`](../examples/managed-cell-llc.toml),
 [`../examples/cell-min-vtime.toml`](../examples/cell-min-vtime.toml), and
 [`../examples/cell-borrowing.toml`](../examples/cell-borrowing.toml) for
 complete policies.

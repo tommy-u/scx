@@ -170,6 +170,12 @@ defers ambiguous move observations; task annotations include a slot epoch so a
 stale assignment cannot enter a reused managed cell. See
 [Userspace Cgroup Cell Membership](docs/CGROUP_MEMBERSHIP_PROPOSAL.md).
 
+Alternatively, `[managed_cells]` discovers every non-excluded direct child at
+attachment, reads its `cpuset.cpus.effective`, and synthesizes both the cell and
+membership assignment. Descendants remain in the direct child's cell while
+their own narrower cpusets continue to constrain task execution. See
+[`examples/managed-cell-llc.toml`](examples/managed-cell-llc.toml).
+
 ### Queue policies
 
 The `llc` layout keeps one global VTIME clock while userspace creates one normal

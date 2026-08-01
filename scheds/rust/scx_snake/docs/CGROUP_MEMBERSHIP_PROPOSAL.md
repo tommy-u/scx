@@ -86,6 +86,45 @@ cell must be declared.
 It is attachment-time configuration: live policy replacement may change
 ladders but must not change membership paths or assignments.
 
+## Managed Direct Children
+
+Snake can synthesize the static cells and membership assignments at attachment
+instead of listing them individually:
+
+```toml
+[managed_cells]
+parent = "/workload.slice/workload-tw.slice"
+exclude_children = ["systemd-workaround.service"]
+max_children = 31
+reconcile_ms = 1000
+
+[queues]
+layout = "cell_llc"
+```
+
+`parent` is an absolute cgroup path. A path already rooted beneath
+`/sys/fs/cgroup` is also accepted. Each non-excluded direct child is assigned a
+deterministic cell ID, ordered by child name, and its
+`cpuset.cpus.effective` mask becomes that cell's CPU claim. Snake fails attach
+if the effective mask is missing, invalid, or empty, or if the number of
+children exceeds `max_children`.
+
+Only direct children create cells. All nested cgroups remain flat within their
+direct child's cell, and the membership walker applies the same cell reference
+to their threads. A nested cgroup's narrower effective cpuset is still enforced
+through each task's kernel allowed-CPU mask; it does not create a nested cell or
+another queue domain.
+
+Managed discovery is currently an attachment-time snapshot. New direct
+children, direct-child cpuset changes, and cell deletion require restarting
+Snake. The existing membership reconciliation still handles thread creation,
+exit, and movement within the synthesized child assignments.
+
+Discovery pins each managed child's cgroup inode. If a managed direct child is
+deleted or replaced under the same name, reconciliation fails closed and Snake
+detaches instead of applying the old CPU plan and slot epoch to a new cgroup.
+Restarting Snake discovers the replacement and builds a fresh plan.
+
 ## Semantics
 
 - A managed cell assignment creates the task-storage record consumed by BPF.
@@ -97,7 +136,9 @@ ladders but must not change membership paths or assignments.
   `running` is its denominator. `membership_invalid_runs` must remain zero.
 - A manual `--set-thread-cell` override takes precedence over the managed
   layer. Clearing it reveals the current managed assignment, or `NoCell` when
-  there is none. Manual cell 0 is an explicit `NoCell` override.
+  there is none. Manual cell 0 is an explicit `NoCell` override. The control
+  path resolves a managed target to its active slot epoch before writing the
+  override.
 - Rehoming is requested only when the effective `(cell, epoch)` reference
   changes. Merely confirming the same membership does not perturb queue state.
   Reusing the same numeric slot with a new epoch is an effective change and

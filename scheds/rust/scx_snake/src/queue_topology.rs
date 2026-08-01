@@ -12,6 +12,7 @@ use crate::policy::{CompiledPolicy, QueueLayout};
 pub struct QueueCell {
     pub index: u32,
     pub external_id: u32,
+    pub slot_epoch: u32,
     pub cpu_weight: u32,
     pub primary: BTreeSet<u32>,
     pub borrowable: BTreeSet<u32>,
@@ -70,6 +71,7 @@ pub fn resolve_queue_topology(
         queues.layout,
         allocation,
         cpu_to_llc,
+        &policy.cell_slot_epochs,
     )?))
 }
 
@@ -107,9 +109,10 @@ pub fn dump_queue_topology(topology: &QueueTopology) -> String {
     );
     for cell in &topology.cells {
         output.push_str(&format!(
-            "  cell {} (index {}): cpu_weight={} primary=[{}] borrowable=[{}] normal_queues={:?}\n",
+            "  cell {} (index {}): slot_epoch={} cpu_weight={} primary=[{}] borrowable=[{}] normal_queues={:?}\n",
             cell.external_id,
             cell.index,
+            cell.slot_epoch,
             cell.cpu_weight,
             cpulist(&cell.primary),
             cpulist(&cell.borrowable),
@@ -140,6 +143,7 @@ fn compile_queue_topology(
     layout: QueueLayout,
     allocation: CellAllocation,
     cpu_to_llc: &BTreeMap<u32, u32>,
+    slot_epochs: &BTreeMap<u32, u32>,
 ) -> Result<QueueTopology> {
     let cell_index_by_id = allocation
         .cells
@@ -153,6 +157,7 @@ fn compile_queue_topology(
         .map(|cell| QueueCell {
             index: cell_index_by_id[&cell.id],
             external_id: cell.id,
+            slot_epoch: slot_epochs.get(&cell.id).copied().unwrap_or(0),
             cpu_weight: cell.cpu_weight,
             primary: cell.primary.clone(),
             borrowable: cell.borrowable.clone(),
@@ -469,6 +474,7 @@ scope = "task_allowed"
             cells: vec![QueueCell {
                 index: 0,
                 external_id: 7,
+                slot_epoch: 0,
                 cpu_weight: 1,
                 primary: BTreeSet::from([1]),
                 borrowable: BTreeSet::from([2]),

@@ -60,8 +60,10 @@ pub struct CompiledPolicy {
     pub mask_tables: Vec<MaskTableSpec>,
     pub cells: BTreeMap<u32, BTreeSet<u32>>,
     pub cell_cpu_weights: BTreeMap<u32, u32>,
+    pub cell_slot_epochs: BTreeMap<u32, u32>,
     pub queues: Option<QueuePolicy>,
     pub membership: Option<MembershipPolicy>,
+    pub managed_cells: Option<ManagedCellsPolicy>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -69,6 +71,15 @@ pub struct MembershipPolicy {
     pub parent: String,
     pub reconcile_ms: u64,
     pub assignments: BTreeMap<String, u32>,
+    pub child_inodes: Option<BTreeMap<String, u64>>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ManagedCellsPolicy {
+    pub parent: String,
+    pub exclude_children: Vec<String>,
+    pub max_children: usize,
+    pub reconcile_ms: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -207,6 +218,15 @@ impl CompiledPolicy {
                     .map(|(child, cell)| format!("{child}:{cell}"))
                     .collect::<Vec<_>>()
                     .join(","),
+            ));
+        }
+        if let Some(managed) = &self.managed_cells {
+            output.push_str(&format!(
+                "managed_cells: parent={} max_children={} reconcile_ms={} excluded={}\n",
+                managed.parent,
+                managed.max_children,
+                managed.reconcile_ms,
+                managed.exclude_children.join(","),
             ));
         }
         output.push_str(
@@ -402,12 +422,29 @@ struct SemanticPolicy {
     fallback: Option<String>,
     queues: Option<SemanticQueuePolicy>,
     membership: Option<SemanticMembershipPolicy>,
+    managed_cells: Option<SemanticManagedCellsPolicy>,
     #[serde(default)]
     cell: Vec<SemanticCell>,
     #[serde(default)]
     partition: Vec<SemanticPartition>,
     #[serde(default)]
     rung: Vec<SemanticRung>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SemanticManagedCellsPolicy {
+    parent: String,
+    #[serde(default)]
+    exclude_children: Vec<String>,
+    #[serde(default = "default_managed_max_children")]
+    max_children: usize,
+    #[serde(default = "default_membership_reconcile_ms")]
+    reconcile_ms: u64,
+}
+
+const fn default_managed_max_children() -> usize {
+    MAX_QUEUE_CELLS - 1
 }
 
 #[derive(Deserialize)]
@@ -522,6 +559,12 @@ pub fn compile_policy(source: &str) -> Result<CompiledPolicy, PolicyError> {
     let queue_layout = queues.as_ref().map(|queues| queues.layout);
     let (cells, cell_cpu_weights) = compile_cells(&policy.cell, queues.is_some())?;
     let membership = compile_membership(policy.membership.as_ref(), queue_layout, &cells)?;
+    let managed_cells = compile_managed_cells(
+        policy.managed_cells.as_ref(),
+        queue_layout,
+        !policy.cell.is_empty(),
+        policy.membership.is_some(),
+    )?;
     let partitions = compile_partitions(&policy.partition)?;
     let mut mask_tables = Vec::new();
     let mut rungs = Vec::with_capacity(policy.rung.len());
@@ -542,9 +585,93 @@ pub fn compile_policy(source: &str) -> Result<CompiledPolicy, PolicyError> {
         mask_tables,
         cells,
         cell_cpu_weights,
+        cell_slot_epochs: BTreeMap::new(),
         queues,
         membership,
+        managed_cells,
     })
+}
+
+fn compile_managed_cells(
+    managed: Option<&SemanticManagedCellsPolicy>,
+    queue_layout: Option<QueueLayout>,
+    has_static_cells: bool,
+    has_membership: bool,
+) -> Result<Option<ManagedCellsPolicy>, PolicyError> {
+    let Some(managed) = managed else {
+        return Ok(None);
+    };
+    if has_static_cells {
+        return Err(PolicyError(
+            "managed cells are mutually exclusive with [[cell]]".into(),
+        ));
+    }
+    if has_membership {
+        return Err(PolicyError(
+            "managed cells are mutually exclusive with [membership]".into(),
+        ));
+    }
+    if !matches!(queue_layout, Some(QueueLayout::Cell | QueueLayout::CellLlc)) {
+        return Err(PolicyError(
+            "managed cells requires queue layout `cell` or `cell_llc`".into(),
+        ));
+    }
+    let parent = Path::new(&managed.parent);
+    if !parent.is_absolute() {
+        return Err(PolicyError(
+            "managed cells parent must be an absolute path".into(),
+        ));
+    }
+    if parent
+        .components()
+        .any(|component| !matches!(component, Component::RootDir | Component::Normal(_)))
+    {
+        return Err(PolicyError(
+            "managed cells parent must not contain `.` or `..` components".into(),
+        ));
+    }
+    if !(1..MAX_QUEUE_CELLS).contains(&managed.max_children) {
+        return Err(PolicyError(format!(
+            "managed cells max_children must be between 1 and {}",
+            MAX_QUEUE_CELLS - 1
+        )));
+    }
+    if managed.reconcile_ms < 50 {
+        return Err(PolicyError(
+            "managed cells reconcile_ms must be at least 50".into(),
+        ));
+    }
+
+    let mut seen = BTreeSet::new();
+    for child in &managed.exclude_children {
+        let path = Path::new(child);
+        let mut components = path.components();
+        let component = match components.next() {
+            Some(Component::Normal(component)) => component,
+            _ => {
+                return Err(PolicyError(format!(
+                    "managed cells excluded child must be one path component: `{child}`"
+                )))
+            }
+        };
+        if components.next().is_some() || component != path.as_os_str() {
+            return Err(PolicyError(format!(
+                "managed cells excluded child must be one path component: `{child}`"
+            )));
+        }
+        if !seen.insert(child.clone()) {
+            return Err(PolicyError(format!(
+                "managed cells has duplicate excluded child `{child}`"
+            )));
+        }
+    }
+
+    Ok(Some(ManagedCellsPolicy {
+        parent: managed.parent.clone(),
+        exclude_children: managed.exclude_children.clone(),
+        max_children: managed.max_children,
+        reconcile_ms: managed.reconcile_ms,
+    }))
 }
 
 fn compile_membership(
@@ -607,6 +734,7 @@ fn compile_membership(
         parent: membership.parent.clone(),
         reconcile_ms: membership.reconcile_ms,
         assignments,
+        child_inodes: None,
     }))
 }
 
@@ -3114,5 +3242,134 @@ scope = "task_cell"
 "#,
         );
         assert!(duplicate.contains("duplicate child `batch`"));
+    }
+
+    #[test]
+    fn compiles_managed_cells_policy_with_safe_defaults() {
+        let policy = compile_policy(
+            r#"
+[managed_cells]
+parent = "/workload.slice/workload-tw.slice"
+exclude_children = ["systemd-workaround.service"]
+
+[queues]
+layout = "cell_llc"
+
+[[rung]]
+operation = "pick_idle_core"
+scope = "task_cell"
+"#,
+        )
+        .expect("managed cell policy should compile");
+
+        let managed = policy
+            .managed_cells
+            .expect("managed cells should be configured");
+        assert_eq!(managed.parent, "/workload.slice/workload-tw.slice");
+        assert_eq!(managed.exclude_children, ["systemd-workaround.service"]);
+        assert_eq!(managed.max_children, MAX_QUEUE_CELLS - 1);
+        assert_eq!(managed.reconcile_ms, 1_000);
+        assert!(policy.cells.is_empty());
+        assert!(policy.membership.is_none());
+    }
+
+    #[test]
+    fn managed_cells_rejects_incompatible_static_configuration() {
+        let cases = [
+            (
+                r#"
+[membership]
+parent = "/sys/fs/cgroup/workloads"
+"#,
+                "mutually exclusive with [membership]",
+            ),
+            (
+                r#"
+[[cell]]
+id = 1
+cpus = "0"
+"#,
+                "mutually exclusive with [[cell]]",
+            ),
+        ];
+        for (extra, expected) in cases {
+            let error = error_for(&format!(
+                r#"
+[managed_cells]
+parent = "/workload.slice/workload-tw.slice"
+{extra}
+[queues]
+layout = "cell_llc"
+[[rung]]
+operation = "pick_idle"
+scope = "task_cell"
+"#
+            ));
+            assert!(error.contains(expected), "{error}");
+        }
+
+        let llc = error_for(
+            r#"
+[managed_cells]
+parent = "/workload.slice/workload-tw.slice"
+[queues]
+layout = "llc"
+[[rung]]
+operation = "pick_idle"
+scope = "task_allowed"
+"#,
+        );
+        assert!(
+            llc.contains("requires queue layout `cell` or `cell_llc`"),
+            "{llc}"
+        );
+    }
+
+    #[test]
+    fn managed_cells_validates_capacity_paths_and_exclusions() {
+        for (field, expected) in [
+            ("parent = \"workloads\"", "parent must be an absolute path"),
+            (
+                "parent = \"/workloads/../system\"",
+                "parent must not contain `.` or `..` components",
+            ),
+            (
+                "parent = \"/workloads\"\nmax_children = 0",
+                "max_children must be between 1 and 31",
+            ),
+            (
+                "parent = \"/workloads\"\nmax_children = 32",
+                "max_children must be between 1 and 31",
+            ),
+            (
+                "parent = \"/workloads\"\nreconcile_ms = 49",
+                "reconcile_ms must be at least 50",
+            ),
+            (
+                "parent = \"/workloads\"\nexclude_children = [\"batch/subgroup\"]",
+                "excluded child must be one path component",
+            ),
+            (
+                "parent = \"/workloads\"\nexclude_children = [\"batch/\"]",
+                "excluded child must be one path component",
+            ),
+            (
+                "parent = \"/workloads\"\nexclude_children = [\"batch\", \"batch\"]",
+                "duplicate excluded child `batch`",
+            ),
+        ] {
+            let error = error_for(&format!(
+                r#"
+[managed_cells]
+{field}
+[queues]
+layout = "cell"
+[[rung]]
+operation = "pick_idle"
+scope = "task_cell"
+"#
+            ));
+            assert!(error.contains(expected), "{error}");
+        }
     }
 }

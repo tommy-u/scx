@@ -6,6 +6,7 @@ mod cell_allocation;
 mod control;
 mod fine_timing;
 mod inspection;
+mod managed_cells;
 mod mask_tables;
 mod membership;
 mod policy;
@@ -247,8 +248,10 @@ fn resolve_mode(opts: &Opts) -> Result<RunMode> {
 fn load_policy(path: &PathBuf) -> Result<(String, CompiledPolicy)> {
     let source =
         fs::read_to_string(path).with_context(|| format!("reading policy {}", path.display()))?;
-    let compiled = policy::compile_policy(&source)
+    let mut compiled = policy::compile_policy(&source)
         .with_context(|| format!("compiling policy {}", path.display()))?;
+    managed_cells::resolve_managed_cells(&mut compiled)
+        .with_context(|| format!("resolving managed cells for policy {}", path.display()))?;
     Ok((source, compiled))
 }
 
@@ -864,7 +867,7 @@ fn encode_queue_topology(topology: &queue_topology::QueueTopology) -> Result<Enc
             clock_index: cell.index,
             first_normal_queue: cell.normal_queues.first().copied().unwrap_or(0),
             nr_normal_queues: cell.normal_queues.len().try_into()?,
-            slot_epoch: 0,
+            slot_epoch: cell.slot_epoch,
             reserved: 0,
             primary: mask_tables::serialize_entry(&cell.primary)?,
             borrowable: mask_tables::serialize_entry(&cell.borrowable)?,
@@ -1714,8 +1717,8 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
         set_active_ladder(&mut skel, 0)?;
         runtime.active_slot = 0;
         let membership = if let Some(policy) = &runtime.compiled.membership {
-            let mut manager =
-                MembershipManager::new(policy).context("initializing userspace task membership")?;
+            let mut manager = MembershipManager::new(policy, &runtime.compiled.cell_slot_epochs)
+                .context("initializing userspace task membership")?;
             let report = manager
                 .reconcile(&skel.maps.task_cells)
                 .context("applying initial userspace task membership")?;
@@ -1837,6 +1840,11 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
             self.runtime,
             source,
             |policy| {
+                if policy.managed_cells.is_some() || previous_policy.managed_cells.is_some() {
+                    bail!(
+                        "managed cells are attachment-time configuration; restart Snake to apply a policy update"
+                    );
+                }
                 let candidate = resolve_host_queue_topology(policy)
                     .context("resolving replacement policy queue topology")?;
                 if candidate != active_queue_topology {
@@ -1915,6 +1923,11 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
 
     fn validate_policy(&self, source: &str) -> Result<runtime_policy::PolicyValidationResponse> {
         let policy = policy::compile_policy(source).context("compiling candidate policy")?;
+        if policy.managed_cells.is_some() || self.runtime.compiled.managed_cells.is_some() {
+            bail!(
+                "managed cells are attachment-time configuration; restart Snake to apply a policy update"
+            );
+        }
         let candidate =
             resolve_host_queue_topology(&policy).context("resolving candidate queue topology")?;
         if candidate != self.queue_topology {
@@ -1952,7 +1965,15 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
                 assignment.cell_id
             );
         }
-        let rehome_requested = task_cells::set_thread_cell(&self.skel.maps.task_cells, assignment)?;
+        let slot_epoch = self
+            .runtime
+            .compiled
+            .cell_slot_epochs
+            .get(&assignment.cell_id)
+            .copied()
+            .unwrap_or(0);
+        let rehome_requested =
+            task_cells::set_thread_cell(&self.skel.maps.task_cells, assignment, slot_epoch)?;
         self.inspector
             .set_assignment(assignment.tid, assignment.cell_id);
         Ok(ThreadCellResponse {
@@ -2547,6 +2568,10 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
                         report.discovered, report.updated, report.transient
                     ),
                     Ok(_) => {}
+                    Err(error) if manager.identity_errors_are_fatal() => return Err(error)
+                        .context(
+                        "managed child identity changed; restart Snake to resolve managed cells",
+                    ),
                     Err(error) => warn!("task membership reconciliation failed: {error:#}"),
                 }
             }
@@ -5423,7 +5448,7 @@ scope = "task_allowed"
 
     #[test]
     fn queue_topology_encoding_matches_the_bpf_abi() {
-        let policy = policy::compile_policy(
+        let mut policy = policy::compile_policy(
             r#"
 [queues]
 layout = "cell_llc"
@@ -5436,6 +5461,7 @@ scope = "task_cell"
 "#,
         )
         .unwrap();
+        policy.cell_slot_epochs.insert(7, 42);
         let topology = queue_topology::resolve_queue_topology(
             &policy,
             &std::collections::BTreeSet::from([0, 1, 2, 3]),
@@ -5450,11 +5476,10 @@ scope = "task_cell"
         assert_eq!(encoded.header.nr_cpus, 4);
         assert_eq!(encoded.cell_lookup[0], 1);
         assert_eq!(encoded.cell_lookup[7], 2);
-        assert!(encoded
-            .cells
-            .iter()
-            .take(encoded.header.nr_cells as usize)
-            .all(|cell| cell.slot_epoch == 0));
+        assert_eq!(encoded.cells[0].external_id, 0);
+        assert_eq!(encoded.cells[0].slot_epoch, 0);
+        assert_eq!(encoded.cells[1].external_id, 7);
+        assert_eq!(encoded.cells[1].slot_epoch, 42);
         for queue in encoded
             .normal_queues
             .iter()

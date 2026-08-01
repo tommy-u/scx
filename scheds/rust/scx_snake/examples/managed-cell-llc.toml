@@ -1,0 +1,34 @@
+# Discover one attachment-time cell for each direct child of the workload
+# parent. Descendants inherit their direct child's cell while retaining any
+# narrower effective cpuset restriction.
+fallback = "any_allowed"
+
+[managed_cells]
+parent = "/workload.slice/workload-tw.slice"
+exclude_children = ["systemd-workaround.service"]
+max_children = 31
+reconcile_ms = 1000
+
+[queues]
+layout = "cell_llc"
+cell0_cpu_weight = 1
+
+[[queues.enqueue]]
+target = "cell"
+
+[[queues.enqueue]]
+target = "affinity"
+
+[[queues.dispatch]]
+source = "cell"
+
+[[queues.dispatch]]
+source = "affinity"
+
+[[rung]]
+operation = "pick_idle_core"
+scope = "task_cell"
+
+[[rung]]
+operation = "pick_idle"
+scope = "task_allowed"

@@ -124,9 +124,19 @@ fn open_thread(tid: i32) -> Result<OwnedFd> {
     Ok(unsafe { OwnedFd::from_raw_fd(fd as i32) })
 }
 
-pub fn set_thread_cell(map: &impl MapCore, assignment: ThreadCellAssignment) -> Result<bool> {
+pub fn set_thread_cell(
+    map: &impl MapCore,
+    assignment: ThreadCellAssignment,
+    slot_epoch: u32,
+) -> Result<bool> {
     update_task_cell(map, assignment.tid, |value| {
-        apply_manual_cell(value, assignment.cell_id)
+        apply_manual_cell(
+            value,
+            CellRef {
+                cell_id: assignment.cell_id,
+                slot_epoch,
+            },
+        )
     })
 }
 
@@ -168,10 +178,10 @@ fn empty_task_cell() -> bpf_intf::snake_task_cell {
     }
 }
 
-fn apply_manual_cell(value: &mut bpf_intf::snake_task_cell, cell_id: u32) -> bool {
+fn apply_manual_cell(value: &mut bpf_intf::snake_task_cell, cell: CellRef) -> bool {
     let previous = (value.cell_id, value.cell_epoch);
-    value.cell_id = cell_id;
-    value.cell_epoch = 0;
+    value.cell_id = cell.cell_id;
+    value.cell_epoch = cell.slot_epoch;
     value.flags |= bpf_intf::SNAKE_TASK_CELL_F_MANUAL;
     let changed = previous != (value.cell_id, value.cell_epoch);
     if changed {
@@ -488,7 +498,7 @@ mod tests {
         assert_eq!(value.needs_rehome, 1);
 
         value.needs_rehome = 0;
-        apply_manual_cell(&mut value, 2);
+        apply_manual_cell(&mut value, CellRef::static_cell(2));
         assert_eq!(value.needs_rehome, 1);
 
         value.needs_rehome = 0;
@@ -522,6 +532,20 @@ mod tests {
     }
 
     #[test]
+    fn manual_assignment_carries_the_active_slot_epoch() {
+        let mut value = empty_task_cell();
+        let cell = CellRef {
+            cell_id: 3,
+            slot_epoch: 7,
+        };
+
+        assert!(apply_manual_cell(&mut value, cell));
+
+        assert_eq!(value.cell_id, 3);
+        assert_eq!(value.cell_epoch, 7);
+    }
+
+    #[test]
     fn clearing_managed_membership_preserves_only_a_manual_override() {
         let mut managed_only = empty_task_cell();
         apply_managed_cell(&mut managed_only, CellRef::static_cell(1));
@@ -529,7 +553,7 @@ mod tests {
 
         let mut overridden = empty_task_cell();
         apply_managed_cell(&mut overridden, CellRef::static_cell(1));
-        apply_manual_cell(&mut overridden, 2);
+        apply_manual_cell(&mut overridden, CellRef::static_cell(2));
         overridden.needs_rehome = 0;
         assert!(clear_managed_cell(&mut overridden));
         assert_eq!(overridden.cell_id, 2);

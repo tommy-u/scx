@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::os::fd::{AsRawFd, OwnedFd};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -16,21 +17,48 @@ use crate::task_cells::{self, CellRef};
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct CellDirectory {
     assignments: BTreeMap<String, CellRef>,
+    child_inodes: Option<BTreeMap<String, u64>>,
 }
 
 impl CellDirectory {
     pub(crate) fn new(assignments: BTreeMap<String, CellRef>) -> Self {
-        Self { assignments }
+        Self {
+            assignments,
+            child_inodes: None,
+        }
     }
 
-    fn from_policy(policy: &MembershipPolicy) -> Self {
-        Self::new(
-            policy
-                .assignments
-                .iter()
-                .map(|(child, &cell_id)| (child.clone(), CellRef::static_cell(cell_id)))
-                .collect(),
-        )
+    pub(crate) fn with_child_inodes(
+        assignments: BTreeMap<String, CellRef>,
+        child_inodes: BTreeMap<String, u64>,
+    ) -> Self {
+        Self {
+            assignments,
+            child_inodes: Some(child_inodes),
+        }
+    }
+
+    fn from_policy(policy: &MembershipPolicy, slot_epochs: &BTreeMap<u32, u32>) -> Self {
+        let assignments = policy
+            .assignments
+            .iter()
+            .map(|(child, &cell_id)| {
+                (
+                    child.clone(),
+                    slot_epochs.get(&cell_id).copied().map_or_else(
+                        || CellRef::static_cell(cell_id),
+                        |slot_epoch| CellRef {
+                            cell_id,
+                            slot_epoch,
+                        },
+                    ),
+                )
+            })
+            .collect();
+        match policy.child_inodes.clone() {
+            Some(child_inodes) => Self::with_child_inodes(assignments, child_inodes),
+            None => Self::new(assignments),
+        }
     }
 }
 
@@ -80,7 +108,7 @@ pub struct MembershipManager {
 }
 
 impl MembershipManager {
-    pub fn new(policy: &MembershipPolicy) -> Result<Self> {
+    pub fn new(policy: &MembershipPolicy, slot_epochs: &BTreeMap<u32, u32>) -> Result<Self> {
         let parent = PathBuf::from(&policy.parent);
         let metadata = fs::metadata(&parent)
             .with_context(|| format!("reading membership parent {}", parent.display()))?;
@@ -96,13 +124,17 @@ impl MembershipManager {
             pidfds: HashMap::new(),
             proc_root: PathBuf::from("/proc"),
         };
-        manager.replace_directory(CellDirectory::from_policy(policy));
+        manager.replace_directory(CellDirectory::from_policy(policy, slot_epochs));
         Ok(manager)
     }
 
     pub fn time_until_reconcile(&self) -> Duration {
         self.next_reconcile
             .saturating_duration_since(Instant::now())
+    }
+
+    pub fn identity_errors_are_fatal(&self) -> bool {
+        self.directory.child_inodes.is_some()
     }
 
     pub(crate) fn replace_directory(&mut self, directory: CellDirectory) {
@@ -239,10 +271,20 @@ fn scan_assigned_tasks(
     let mut tasks = HashMap::new();
     let mut ambiguous = HashSet::new();
     for (child, &cell) in &directory.assignments {
+        let expected_inode = directory
+            .child_inodes
+            .as_ref()
+            .map(|inodes| {
+                inodes.get(child).copied().with_context(|| {
+                    format!("managed child {child} has no recorded cgroup identity")
+                })
+            })
+            .transpose()?;
         scan_cgroup_tree(
             &parent.join(child),
             proc_root,
             cell,
+            expected_inode,
             known,
             &mut tasks,
             &mut ambiguous,
@@ -260,10 +302,14 @@ fn scan_cgroup_tree(
     root: &Path,
     proc_root: &Path,
     cell: CellRef,
+    expected_inode: Option<u64>,
     known: &HashMap<i32, KnownTask>,
     tasks: &mut HashMap<i32, KnownTask>,
     ambiguous: &mut HashSet<i32>,
 ) -> Result<()> {
+    if let Some(expected_inode) = expected_inode {
+        verify_child_identity(root, expected_inode)?;
+    }
     if !root.exists() {
         return Ok(());
     }
@@ -321,6 +367,25 @@ fn scan_cgroup_tree(
             }
         }
     }
+    if let Some(expected_inode) = expected_inode {
+        verify_child_identity(root, expected_inode)?;
+    }
+    Ok(())
+}
+
+fn verify_child_identity(root: &Path, expected_inode: u64) -> Result<()> {
+    let metadata = fs::metadata(root).with_context(|| {
+        format!(
+            "managed child {} was removed; restart Snake to resolve managed cells",
+            root.display()
+        )
+    })?;
+    if metadata.ino() != expected_inode {
+        bail!(
+            "managed child {} identity changed; restart Snake to resolve managed cells",
+            root.display()
+        );
+    }
     Ok(())
 }
 
@@ -346,6 +411,7 @@ fn parse_task_start_time(stat: &str) -> Result<u64> {
 
 #[cfg(test)]
 mod tests {
+    use std::os::unix::fs::MetadataExt;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
@@ -409,6 +475,47 @@ mod tests {
         assert_eq!(tasks[&11].membership, cell(1));
         assert_eq!(tasks[&12].membership, cell(2));
         assert!(!tasks.contains_key(&13));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn managed_directory_preserves_epoch_for_descendants_and_rejects_recreation() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "snake-membership-identity-{}-{nonce}",
+            std::process::id()
+        ));
+        let parent = root.join("cgroup/workloads");
+        let proc_root = root.join("proc");
+        let child = parent.join("batch");
+        fs::create_dir_all(child.join("nested")).unwrap();
+        fs::write(child.join("cgroup.threads"), "").unwrap();
+        fs::write(child.join("nested/cgroup.threads"), "10\n").unwrap();
+        fs::create_dir_all(proc_root.join("10")).unwrap();
+        fs::write(proc_root.join("10/stat"), task_stat(10, 100)).unwrap();
+        let inode = fs::metadata(&child).unwrap().ino();
+        let cell = CellRef {
+            cell_id: 1,
+            slot_epoch: 7,
+        };
+        let directory = CellDirectory::with_child_inodes(
+            BTreeMap::from([("batch".into(), cell)]),
+            BTreeMap::from([("batch".into(), inode)]),
+        );
+
+        let tasks = scan_assigned_tasks(&parent, &proc_root, &directory, &HashMap::new()).unwrap();
+        assert_eq!(tasks[&10].membership, ManagedMembership::Cell(cell));
+
+        fs::remove_dir_all(&child).unwrap();
+        fs::create_dir_all(&child).unwrap();
+        fs::write(child.join("cgroup.threads"), "").unwrap();
+        let error = scan_assigned_tasks(&parent, &proc_root, &directory, &HashMap::new())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("identity changed"), "{error}");
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -549,6 +656,27 @@ mod tests {
 
         assert_eq!(manager.directory, replacement);
         assert_eq!(manager.time_until_reconcile(), Duration::ZERO);
+    }
+
+    #[test]
+    fn policy_directory_carries_managed_cell_slot_epochs() {
+        let policy = MembershipPolicy {
+            parent: "/unused".into(),
+            reconcile_ms: 1_000,
+            assignments: BTreeMap::from([("batch".into(), 3), ("static".into(), 4)]),
+            child_inodes: None,
+        };
+
+        let directory = CellDirectory::from_policy(&policy, &BTreeMap::from([(3, 7)]));
+
+        assert_eq!(
+            directory.assignments["batch"],
+            CellRef {
+                cell_id: 3,
+                slot_epoch: 7,
+            }
+        );
+        assert_eq!(directory.assignments["static"], CellRef::static_cell(4));
     }
 
     #[test]

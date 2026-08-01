@@ -26,7 +26,7 @@ The review's estimates are:
 | Snake production readiness | **35%** | EEVDF correctness, work conservation, hotplug, scale evidence, and soak time are not adequate for production. |
 | Static scheduling-data-plane parity with Mitosis | **73%** | Snake has cells, cell/LLC DSQs, affinity escapes, VTIME, borrowing, and accounting. |
 | Overall end-to-end Mitosis behavior parity | **55% ±5%** | The defining dynamic cgroup/cell and CPU-resource control plane is mostly absent. |
-| Mitosis dynamic control/resource plane | **33%** | Snake has static allocation and polling membership, but not dynamic lifecycle, cpusets, rebalancing, or safe live reassignment. |
+| Mitosis dynamic control/resource plane | **33%** | Snake has attach-time child discovery, effective cpuset claims, and polling membership, but not live lifecycle, holdout, rebalancing, or safe live reassignment. |
 | Inspector, current baseline | **87%** | Durable control, VM campaigns, LLC/VTIME diagnostics, and asset freshness landed; scaling and browser smoke remain. |
 
 These are engineering estimates, not test-coverage percentages. The scoring rubric
@@ -40,9 +40,10 @@ and feature-by-feature evidence are in [Feature completeness](feature-completene
    operations or scopes.
 
 2. **Mitosis parity is primarily a control-plane project.** Snake already owns
-   most static data-plane primitives. The missing work is direct-child cgroup
-   discovery and inheritance, cpuset-aware allocation, live cell/CPU ownership,
-   safe queue draining, demand tracking, EWMA/hysteresis, and rebalancing.
+   most static data-plane primitives. Attach-time direct-child discovery and
+   effective cpuset claims now exist; the missing work is stable live cgroup
+   identity and inheritance, cell-0 holdout, live cell/CPU ownership, safe queue
+   draining, demand tracking, EWMA/hysteresis, and rebalancing.
 
 3. **Keep Snake's declarative layer above a new dynamic resource provider.** Do
    not make TOML policy replacement responsible for changing DSQ existence. Create

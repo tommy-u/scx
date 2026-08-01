@@ -223,6 +223,7 @@ pub struct FairnessInspectionView {
 pub struct QueueCellInspectionView {
     pub external_id: u32,
     pub index: u32,
+    pub slot_epoch: u32,
     pub synthetic: bool,
     pub cpu_weight: u32,
     pub clock_index: u32,
@@ -447,6 +448,7 @@ fn queue_topology_view(topology: &QueueTopology) -> QueueTopologyInspectionView 
             .map(|cell| QueueCellInspectionView {
                 external_id: cell.external_id,
                 index: cell.index,
+                slot_epoch: cell.slot_epoch,
                 synthetic: cell.external_id == 0,
                 cpu_weight: cell.cpu_weight,
                 clock_index: cell.index,
@@ -1405,7 +1407,8 @@ cpu_weight = 2
 operation = "pick_idle"
 scope = "task_cell"
 "#;
-        let active = slot(0, 6, source, 1_000);
+        let mut active = slot(0, 6, source, 1_000);
+        active.compiled.cell_slot_epochs.insert(7, 9);
         let topology = queue_topology::resolve_queue_topology(
             &active.compiled,
             &[0, 1, 2, 3].into_iter().collect(),
@@ -1431,6 +1434,7 @@ scope = "task_cell"
         assert_eq!(resolved.cells[0].external_id, 0);
         assert!(resolved.cells[0].synthetic);
         assert_eq!(resolved.cells[1].external_id, 7);
+        assert_eq!(resolved.cells[1].slot_epoch, 9);
         assert_eq!(resolved.cells[1].cpu_weight, 2);
         assert_eq!(resolved.cells[1].clock_index, resolved.cells[1].index);
         assert!(!resolved.cells[1].primary_cpus.is_empty());
