@@ -1961,6 +1961,15 @@ test("cell layout diagram joins cells with LLC-scoped normal and affinity DSQs",
       { tid: 42, tgid: 40, cell_id: 7, cell_epoch: 4, name: "beta" },
     ],
     topology,
+    hostTopology: {
+      cpus: [
+        { cpu: 0, node: 0, package: 0, llc: 10, core: 0 },
+        { cpu: 1, node: 0, package: 0, llc: 10, core: 0 },
+        { cpu: 2, node: 0, package: 0, llc: 20, core: 1 },
+      ],
+      topology_order: [0, 1, 2],
+      numeric_order: [0, 1, 2],
+    },
     timing,
     stats,
   });
@@ -1985,7 +1994,81 @@ test("cell layout diagram joins cells with LLC-scoped normal and affinity DSQs",
   assert.equal(model.cells[0].affinityGroups[0].queueCount, 2);
   assert.equal(model.cells[0].affinityGroups[0].latestDepth, 3);
   assert.equal(model.cells[0].affinityGroups[1].latestDepth, null);
+  assert.equal(model.cells[0].cellWideNormalQueues.length, 0);
+  assert.deepEqual(
+    model.cells[0].llcGroups.map((group) => ({
+      llcId: group.llcId,
+      totalCpuCount: group.totalCpuCount,
+      primaryCpus: group.primaryCpus,
+      borrowableCpus: group.borrowableCpus,
+      normalQueueCount: group.normalQueues.length,
+      affinityQueueCount: group.affinity.queueCount,
+      affinityDepth: group.affinity.latestDepth,
+    })),
+    [
+      {
+        llcId: 10,
+        totalCpuCount: 2,
+        primaryCpus: [0, 1],
+        borrowableCpus: [],
+        normalQueueCount: 1,
+        affinityQueueCount: 2,
+        affinityDepth: 3,
+      },
+      {
+        llcId: 20,
+        totalCpuCount: 1,
+        primaryCpus: [],
+        borrowableCpus: [2],
+        normalQueueCount: 1,
+        affinityQueueCount: 1,
+        affinityDepth: null,
+      },
+    ],
+  );
   assert.equal(model.cells[0].stats.normalEnqueueRate, 20);
+});
+
+test("cell topology keeps cell-wide normal queues above LLC-specific affinity groups", () => {
+  const topology = queueTopologyModel(
+    { mode_name: "vtime" },
+    {
+      layout: "cell",
+      affinity_queue_count: 2,
+      cells: [{
+        external_id: 3,
+        index: 0,
+        slot_epoch: 1,
+        primary_cpus: [0, 1],
+        borrowable_cpus: [],
+      }],
+      normal_queues: [
+        { index: 0, dsq_id: 536870912, cell_index: 0, cell_id: 3, clock_index: 0, llc_id: null, consumer_cpus: [0, 1] },
+      ],
+      cpu_routes: [
+        { cpu: 0, owner_cell_id: 3, owner_cell_index: 0, llc_id: 4, normal_queue_index: 0, normal_dsq_id: 536870912, affinity_dsq_id: 268435456 },
+        { cpu: 1, owner_cell_id: 3, owner_cell_index: 0, llc_id: 5, normal_queue_index: 0, normal_dsq_id: 536870912, affinity_dsq_id: 268435457 },
+      ],
+    },
+    [0, 1],
+  );
+  const model = cellLayoutDiagramModel({
+    cells: [{ id: 3, cpus: [0, 1] }],
+    topology,
+    hostTopology: {
+      cpus: [
+        { cpu: 0, node: 0, package: 0, llc: 4, core: 0 },
+        { cpu: 1, node: 0, package: 0, llc: 5, core: 1 },
+      ],
+      topology_order: [0, 1],
+      numeric_order: [0, 1],
+    },
+  });
+
+  assert.equal(model.cells[0].cellWideNormalQueues.length, 1);
+  assert.deepEqual(model.cells[0].llcGroups.map((group) => group.llcId), [4, 5]);
+  assert.deepEqual(model.cells[0].llcGroups.map((group) => group.normalQueues.length), [0, 0]);
+  assert.deepEqual(model.cells[0].llcGroups.map((group) => group.affinity.queueCount), [1, 1]);
 });
 
 test("cell layout diagram keeps empty cells and creates epoch-safe unresolved lanes", () => {
@@ -2754,18 +2837,7 @@ test("per-CPU routing delegates vertical scrolling to the document", () => {
   assert.equal(routeRules.some((match) => /max-height\s*:/.test(match[1])), false);
 });
 
-test("Cell bars support independent LLC and numeric orderings", () => {
-  assert.equal(typeof inspectionState.cellCpuOrder, "function");
-  const topology = {
-    numeric_order: [0, 1, 2, 3],
-    topology_order: [0, 2, 1, 3],
-  };
-
-  assert.deepEqual(inspectionState.cellCpuOrder(topology, "llc"), [0, 2, 1, 3]);
-  assert.deepEqual(inspectionState.cellCpuOrder(topology, "numeric"), [0, 1, 2, 3]);
-});
-
-test("Cell rows reserve task and overlap details for the detail panel", () => {
+test("Cell topology keeps task and overlap details in the detail panel", () => {
   const page = readFileSync(
     new URL("../../src/web/index.html", import.meta.url),
     "utf8",
@@ -2780,19 +2852,17 @@ test("Cell rows reserve task and overlap details for the detail panel", () => {
   );
 
   for (const fragment of [
-    'id="cellOrderMode"',
-    'name="cellCpuOrder"',
     'id="cellBarTooltip"',
   ]) {
     assert.match(page, new RegExp(fragment), `missing ${fragment}`);
   }
   assert.doesNotMatch(script, /class="cell-count"/);
   assert.doesNotMatch(script, /class="cell-overlap"/);
-  assert.match(script, /data-cell-cpu=/);
+  assert.match(script, /data-cell-llc=/);
   assert.match(script, /mapped tasks/);
   assert.match(script, /Overlapping cells/);
   assert.doesNotMatch(script, /function renderCells\(\) \{\s*hideCellBarTooltip\(\)/);
-  assert.match(stylesheet, /\.cell-order-mode\s*\{[^}]*width:\s*100%/s);
+  assert.match(stylesheet, /\.cell-cpu-ownership/);
 });
 
 test("Cells page renders a live cell and DSQ layout diagram", () => {
@@ -2813,17 +2883,20 @@ test("Cells page renders a live cell and DSQ layout diagram", () => {
   assert.match(page, /<h3>Live cell layout<\/h3>/);
   assert.match(script, /cellLayoutDiagramModel/);
   assert.match(script, /class="cell-layout-summary"/);
-  assert.match(script, /class="cell-lane/);
+  assert.match(script, /class="cell-topology-band/);
   assert.match(script, /data-render-key="cell:/);
+  assert.match(script, /class="cell-llc-cluster/);
   assert.match(script, /class="cell-dsq-node normal/);
   assert.match(script, /class="cell-affinity-group/);
   assert.match(script, /<details[^>]*class="cell-affinity-group/s);
-  assert.match(script, /data-cell-role="primary"/);
-  assert.match(script, /data-cell-role="borrowable"/);
+  assert.match(script, /class="cell-cpu-ownership/);
+  assert.match(script, /data-cell-llc=/);
   assert.match(script, /Mapped tasks/);
   assert.match(script, /Primary CPUs/);
   assert.match(script, /Borrowable/);
   assert.match(stylesheet, /\.cell-layout-summary/);
+  assert.match(stylesheet, /\.cell-topology-band/);
+  assert.match(stylesheet, /\.cell-llc-cluster/);
   assert.match(stylesheet, /\.cell-dsq-node/);
   assert.match(stylesheet, /\.cell-affinity-group/);
 });
@@ -2837,7 +2910,7 @@ test("Cells mobile controls wrap without widening the viewport", () => {
   assert.match(stylesheet, /#cellsView\s*>\s*\.view-heading\s*\{[^}]*flex-wrap:\s*wrap/s);
   assert.match(stylesheet, /\.workload-control-band\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)/s);
   assert.match(stylesheet, /\.workload-control-band\s+\.control-field\s*\{[^}]*width:\s*100%/s);
-  assert.match(stylesheet, /\.cell-order-mode\s*\{[^}]*flex:\s*1\s+0\s+100%/s);
+  assert.match(stylesheet, /\.cell-llc-grid\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)/s);
 });
 
 test("current scheduler command formats exact argv and unavailable states", () => {

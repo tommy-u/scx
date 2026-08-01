@@ -776,9 +776,9 @@ test("roadmap completion bars expose their numeric meaning to assistive technolo
 test("Mitosis diagram percentages retain stable keys and report provenance", () => {
   for (const [key, value, label] of [
     ["mitosis-static-data-plane", 73, "Static scheduling data plane"],
-    ["mitosis-dynamic-control", 33, "Dynamic cell/resource control"],
-    ["mitosis-operations", 67, "Operations and diagnostics"],
-    ["mitosis-overall", 55, "Weighted end-to-end behavior"],
+    ["mitosis-dynamic-control", 58, "Dynamic cell/resource control"],
+    ["mitosis-operations", 70, "Operations and diagnostics"],
+    ["mitosis-overall", 70, "Weighted end-to-end behavior"],
   ]) {
     assert.match(
       page,
@@ -794,7 +794,7 @@ test("Mitosis diagram percentages retain stable keys and report provenance", () 
   const equivalent = page.match(
     /<table[^>]+data-diagram-equivalent="mitosis-capability-coverage"[\s\S]*?<\/table>/,
   )?.[0] || "";
-  for (const value of ["73%", "33%", "67%", "55% ±5"]) {
+  for (const value of ["73%", "58%", "70%", "70% ±5"]) {
     assert.match(equivalent, new RegExp(value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   }
 });

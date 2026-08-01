@@ -2182,10 +2182,109 @@ function affinityGroups(routes) {
     });
 }
 
+function compareLlcIds(left, right) {
+  if (left === "unknown") return 1;
+  if (right === "unknown") return -1;
+  return Number(left) - Number(right);
+}
+
+function cellLlcGroups({
+  primaryCpus,
+  borrowableCpus,
+  normalQueues,
+  routes,
+  hostTopology,
+}) {
+  const cpuInfo = new Map(
+    (hostTopology?.cpus || []).map((cpu) => [Number(cpu.cpu), cpu]),
+  );
+  const routeByCpu = new Map((routes || []).map((route) => [Number(route.cpu), route]));
+  const cpuOrder = new Map(
+    (hostTopology?.topology_order || hostTopology?.numeric_order || [])
+      .map((cpu, index) => [Number(cpu), index]),
+  );
+  const cpuLlc = (cpu) => finiteValue(cpuInfo.get(Number(cpu))?.llc)
+    ?? finiteValue(routeByCpu.get(Number(cpu))?.llc_id)
+    ?? "unknown";
+  const sortCpus = (cpus) => [...new Set(cpus.map(Number))].sort((left, right) => (
+    (cpuOrder.get(left) ?? Number.MAX_SAFE_INTEGER)
+      - (cpuOrder.get(right) ?? Number.MAX_SAFE_INTEGER)
+    || left - right
+  ));
+  const inventoryByLlc = new Map();
+  for (const cpu of hostTopology?.cpus || []) {
+    const llcId = finiteValue(cpu.llc) ?? "unknown";
+    const inventory = inventoryByLlc.get(llcId) || [];
+    inventory.push(Number(cpu.cpu));
+    inventoryByLlc.set(llcId, inventory);
+  }
+
+  const groupIds = new Set();
+  for (const cpu of primaryCpus) {
+    groupIds.add(cpuLlc(cpu));
+  }
+  for (const queue of normalQueues) {
+    if (queue.llc_id != null) groupIds.add(finiteValue(queue.llc_id) ?? "unknown");
+  }
+  for (const route of routes) {
+    groupIds.add(finiteValue(route.llc_id) ?? "unknown");
+  }
+
+  const affinityByLlc = new Map(
+    affinityGroups(routes).map((group) => [group.llcId, group]),
+  );
+  return [...groupIds]
+    .sort(compareLlcIds)
+    .map((llcId) => {
+      const primary = sortCpus(primaryCpus.filter((cpu) => cpuLlc(cpu) === llcId));
+      const primarySet = new Set(primary);
+      const borrowable = sortCpus(
+        borrowableCpus.filter((cpu) => cpuLlc(cpu) === llcId && !primarySet.has(Number(cpu))),
+      );
+      const llcRoutes = routes.filter(
+        (route) => (finiteValue(route.llc_id) ?? "unknown") === llcId,
+      );
+      const queueConsumers = normalQueues
+        .filter((queue) => queue.llc_id != null
+          && (finiteValue(queue.llc_id) ?? "unknown") === llcId)
+        .flatMap((queue) => queue.consumer_cpus || []);
+      const fallbackInventory = sortCpus([
+        ...primary,
+        ...borrowable,
+        ...llcRoutes.map((route) => route.cpu),
+        ...queueConsumers,
+      ]);
+      const inventory = sortCpus(inventoryByLlc.get(llcId) || fallbackInventory);
+      return {
+        llcId,
+        totalCpus: inventory,
+        totalCpuCount: inventory.length,
+        primaryCpus: primary,
+        primaryCpuCount: primary.length,
+        borrowableCpus: borrowable,
+        borrowableCpuCount: borrowable.length,
+        ownershipPct: inventory.length === 0 ? 0 : primary.length * 100 / inventory.length,
+        normalQueues: normalQueues.filter(
+          (queue) => queue.llc_id != null
+            && (finiteValue(queue.llc_id) ?? "unknown") === llcId,
+        ),
+        affinity: affinityByLlc.get(llcId) || {
+          llcId,
+          routes: [],
+          cpus: [],
+          queueCount: 0,
+          measuredQueueCount: 0,
+          latestDepth: null,
+        },
+      };
+    });
+}
+
 export function cellLayoutDiagramModel({
   cells = [],
   taskMappings = [],
   topology = null,
+  hostTopology = null,
   timing = null,
   stats = null,
 } = {}) {
@@ -2228,6 +2327,7 @@ export function cellLayoutDiagramModel({
         ));
       const routes = (timedTopology.cpuRoutes || [])
         .filter((route) => Number(route.owner_cell_id) === id);
+      const cellWideNormalQueues = normalQueues.filter((queue) => queue.llc_id == null);
       return {
         ...cell,
         id,
@@ -2246,6 +2346,14 @@ export function cellLayoutDiagramModel({
         borrowableCpuCount: borrowableCpus.length,
         normalQueues,
         affinityGroups: affinityGroups(routes),
+        cellWideNormalQueues,
+        llcGroups: cellLlcGroups({
+          primaryCpus,
+          borrowableCpus,
+          normalQueues,
+          routes,
+          hostTopology,
+        }),
         stats: statsByCell.get(id) || null,
       };
     })
@@ -2269,13 +2377,6 @@ export function cellLayoutDiagramModel({
       (timedTopology.cpuRoutes || []).filter((route) => route.owner_cell_id == null),
     ),
   };
-}
-
-export function cellCpuOrder(topology, mode) {
-  const order = mode === "numeric"
-    ? topology?.numeric_order
-    : topology?.topology_order;
-  return [...(order || [])];
 }
 
 export function rungPercentages(metrics) {

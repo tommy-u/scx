@@ -377,11 +377,11 @@
           <section class="cell-browser" aria-label="Configured cells" data-feedback-key="Cells:Cell-browser">
             <header class="cell-browser-heading">
               <h3>Live cell layout</h3>
-              <fieldset class="control-field segmented cell-order-mode" id="cellOrderMode">
-                <legend>CPU order</legend>
-                <label><input type="radio" name="cellCpuOrder" value="llc" checked><span>LLC</span></label>
-                <label><input type="radio" name="cellCpuOrder" value="numeric"><span>Numeric</span></label>
-              </fieldset>
+              <div class="cell-topology-legend" aria-label="Topology legend">
+                <span><i class="normal"></i>Normal DSQ</span>
+                <span><i class="affinity"></i>Affinity DSQs</span>
+                <span><i class="owned"></i>Primary CPUs</span>
+              </div>
             </header>
             <div class="cell-list" id="cellList"></div>
           </section>
@@ -820,7 +820,7 @@
             <div class="project-diagram-scroll">
               <svg class="project-diagram project-capability-diagram" data-diagram-key="mitosis-capability-coverage" role="group" aria-labelledby="mitosisCapabilityTitle mitosisCapabilityDesc" viewBox="0 0 1160 390">
                 <title id="mitosisCapabilityTitle">Mitosis capability coverage</title>
-                <desc id="mitosisCapabilityDesc">Snake has present cell and affinity queues, partial lifecycle, cpuset, borrowing, and latency behavior, and a missing demand controller. Static data-plane parity is 73 percent, dynamic control is 33 percent, operations are 67 percent, and overall parity is 55 percent plus or minus five.</desc>
+                <desc id="mitosisCapabilityDesc">Snake has present cell and affinity queues, live managed-cell lifecycle, partial cpuset, borrowing, and latency behavior, and a missing demand controller. Static data-plane parity is 73 percent, dynamic control is 58 percent, operations are 70 percent, and overall parity is 70 percent plus or minus five.</desc>
                 <a href="#/inspect/cells" tabindex="0" focusable="true" aria-label="Inspect cells and tasks for lifecycle and identity"><g class="project-diagram-node project-capability-partial project-diagram-linked"><rect x="20" y="35" width="250" height="82" rx="8"></rect><text x="145" y="69" text-anchor="middle">Lifecycle &amp; identity</text><text class="project-diagram-status" x="145" y="94" text-anchor="middle">PARTIAL</text></g></a>
                 <a href="#/inspect/cells" tabindex="0" focusable="true" aria-label="Inspect cells for cpuset allocation"><g class="project-diagram-node project-capability-partial project-diagram-linked"><rect x="305" y="35" width="250" height="82" rx="8"></rect><text x="430" y="69" text-anchor="middle">Cpuset allocation</text><text class="project-diagram-status" x="430" y="94" text-anchor="middle">PARTIAL</text></g></a>
                 <a href="#/overview" tabindex="0" focusable="true" aria-label="Open Overview for current resource counters"><g class="project-diagram-node project-capability-missing project-diagram-linked"><rect x="590" y="35" width="250" height="82" rx="8"></rect><text x="715" y="69" text-anchor="middle">Demand controller</text><text class="project-diagram-status" x="715" y="94" text-anchor="middle">MISSING</text></g></a>
@@ -830,13 +830,13 @@
                 <a href="#/observe/callbacks" tabindex="0" focusable="true" aria-label="Inspect latency and callback timing"><g class="project-diagram-node project-capability-partial project-diagram-linked"><rect x="590" y="145" width="250" height="82" rx="8"></rect><text x="715" y="179" text-anchor="middle">Pinned latency control</text><text class="project-diagram-status" x="715" y="204" text-anchor="middle">PARTIAL</text></g></a>
                 <a href="#/debugging/scheduler" tabindex="0" focusable="true" aria-label="Open debugging and diagnostics"><g class="project-diagram-node project-capability-present project-diagram-linked"><rect x="875" y="145" width="250" height="82" rx="8"></rect><text x="1000" y="179" text-anchor="middle">Metrics &amp; inspection</text><text class="project-diagram-status" x="1000" y="204" text-anchor="middle">PRESENT · managed gaps</text></g></a>
                 <g class="project-parity-score" data-score-key="mitosis-static-data-plane" data-score-value="73"><text x="145" y="300" text-anchor="middle">Static data plane</text><text x="145" y="344" text-anchor="middle">73%</text></g>
-                <g class="project-parity-score" data-score-key="mitosis-dynamic-control" data-score-value="33"><text x="430" y="300" text-anchor="middle">Dynamic control</text><text x="430" y="344" text-anchor="middle">33%</text></g>
-                <g class="project-parity-score" data-score-key="mitosis-operations" data-score-value="67"><text x="715" y="300" text-anchor="middle">Operations</text><text x="715" y="344" text-anchor="middle">67%</text></g>
-                <g class="project-parity-score project-parity-overall" data-score-key="mitosis-overall" data-score-value="55"><text x="1000" y="300" text-anchor="middle">Overall behavior</text><text x="1000" y="344" text-anchor="middle">55% ±5</text></g>
+                <g class="project-parity-score" data-score-key="mitosis-dynamic-control" data-score-value="58"><text x="430" y="300" text-anchor="middle">Dynamic control</text><text x="430" y="344" text-anchor="middle">58%</text></g>
+                <g class="project-parity-score" data-score-key="mitosis-operations" data-score-value="70"><text x="715" y="300" text-anchor="middle">Operations</text><text x="715" y="344" text-anchor="middle">70%</text></g>
+                <g class="project-parity-score project-parity-overall" data-score-key="mitosis-overall" data-score-value="70"><text x="1000" y="300" text-anchor="middle">Overall behavior</text><text x="1000" y="344" text-anchor="middle">70% ±5</text></g>
               </svg>
             </div>
             <table class="project-diagram-equivalent project-capability-table" data-diagram-equivalent="mitosis-capability-coverage" data-sort-key="roadmap:mitosis-capabilities">
-              <caption>Parity summary: static data plane 73%; dynamic control 33%; operations 67%; overall behavior 55% ±5.</caption>
+              <caption>Parity summary: static data plane 73%; dynamic control 58%; operations 70%; overall behavior 70% ±5.</caption>
               <thead><tr><th scope="col" data-sort-column="0" data-sort-type="text">Area</th><th scope="col" data-sort-column="1" data-sort-type="text">Status</th><th scope="col" data-sort-column="2" data-sort-type="text">Where to inspect</th></tr></thead>
               <tbody>
                 <tr><th scope="row">Lifecycle, identity, and cpusets</th><td>Partial</td><td><a href="#/inspect/cells">Cells &amp; tasks</a></td></tr>
