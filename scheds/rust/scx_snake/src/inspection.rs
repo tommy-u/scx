@@ -135,6 +135,9 @@ pub struct SlotInspectionView {
 #[derive(Clone, Debug, Serialize)]
 pub struct CellInspectionView {
     pub id: u32,
+    pub name: Option<String>,
+    pub source: String,
+    pub slot_epoch: u32,
     pub cpus: Vec<u32>,
     pub task_count: usize,
 }
@@ -341,19 +344,37 @@ impl Inspector {
         mut task_mappings: Vec<TaskMappingInspectionView>,
     ) -> InspectionView {
         task_mappings.sort_by_key(|mapping| (mapping.cell_id, mapping.tgid, mapping.tid));
-        let active_cells = self.slots[self.active_slot as usize]
+        let active_policy = self.slots[self.active_slot as usize]
             .as_ref()
-            .map(|slot| &slot.compiled.cells);
-        let mut cells = active_cells
+            .map(|slot| &slot.compiled);
+        let mut cells = active_policy
             .into_iter()
-            .flat_map(|cells| cells.iter())
-            .map(|(&id, cpus)| CellInspectionView {
-                id,
-                cpus: cpus.iter().copied().collect(),
-                task_count: task_mappings
-                    .iter()
-                    .filter(|mapping| mapping.cell_id == id)
-                    .count(),
+            .flat_map(|policy| {
+                policy.cells.iter().map(|(&id, cpus)| {
+                    let name = policy.managed_cells.as_ref().and_then(|_| {
+                        policy.membership.as_ref().and_then(|membership| {
+                            membership
+                                .assignments
+                                .iter()
+                                .find_map(|(name, &cell_id)| (cell_id == id).then(|| name.clone()))
+                        })
+                    });
+                    CellInspectionView {
+                        id,
+                        name,
+                        source: if policy.managed_cells.is_some() {
+                            "managed".into()
+                        } else {
+                            "static".into()
+                        },
+                        slot_epoch: policy.cell_slot_epochs.get(&id).copied().unwrap_or(0),
+                        cpus: cpus.iter().copied().collect(),
+                        task_count: task_mappings
+                            .iter()
+                            .filter(|mapping| mapping.cell_id == id)
+                            .count(),
+                    }
+                })
             })
             .collect::<Vec<_>>();
         if let Some(cell0) = self
@@ -363,6 +384,9 @@ impl Inspector {
         {
             cells.push(CellInspectionView {
                 id: 0,
+                name: None,
+                source: "synthetic".into(),
+                slot_epoch: cell0.slot_epoch,
                 cpus: cell0.primary_cpus.clone(),
                 task_count: task_mappings
                     .iter()
@@ -1441,6 +1465,54 @@ scope = "task_cell"
         assert_eq!(resolved.normal_queues[0].dsq_id, 0x20000000);
         assert_eq!(resolved.cpu_routes[0].affinity_dsq_id, 0x10000000);
         assert_eq!(resolved.cpu_routes[3].affinity_dsq_id, 0x10000003);
+    }
+
+    #[test]
+    fn managed_cells_expose_names_sources_and_slot_epochs() {
+        let source = r#"
+[queues]
+layout = "cell"
+
+[[cell]]
+id = 7
+cpus = "0-1"
+
+[[rung]]
+operation = "pick_idle"
+scope = "task_cell"
+"#;
+        let mut active = slot(0, 16, source, 1_000);
+        active.compiled.cell_slot_epochs.insert(7, 4);
+        active.compiled.managed_cells = Some(policy::ManagedCellsPolicy {
+            parent: "/workloads".into(),
+            exclude_children: Vec::new(),
+            max_children: 31,
+            reconcile_ms: 1_000,
+        });
+        active.compiled.membership = Some(policy::MembershipPolicy {
+            parent: "/workloads".into(),
+            reconcile_ms: 1_000,
+            assignments: BTreeMap::from([("batch.slice".into(), 7)]),
+            child_inodes: None,
+        });
+        let topology = queue_topology::resolve_queue_topology(
+            &active.compiled,
+            &[0, 1, 2].into_iter().collect(),
+            &BTreeMap::from([(0, 10), (1, 10), (2, 10)]),
+        )
+        .unwrap()
+        .unwrap();
+        let inspector = Inspector::new(active, FairnessMode::Vtime, Some(topology));
+
+        let view = inspector.snapshot(metrics(16, 1), Vec::new());
+        let managed = view.cells.iter().find(|cell| cell.id == 7).unwrap();
+        let synthetic = view.cells.iter().find(|cell| cell.id == 0).unwrap();
+
+        assert_eq!(managed.name.as_deref(), Some("batch.slice"));
+        assert_eq!(managed.source, "managed");
+        assert_eq!(managed.slot_epoch, 4);
+        assert_eq!(synthetic.source, "synthetic");
+        assert_eq!(synthetic.slot_epoch, 0);
     }
 
     #[test]
