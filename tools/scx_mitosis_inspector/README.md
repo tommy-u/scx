@@ -42,6 +42,10 @@ Scheduler tracepoints provide exact switch, preemption, blocking, wakeup, and
 task lifecycle totals with per-second rates.
 Softirq entry and exit tracepoints provide per-vector counts, rates, and
 duration percentiles.
+Hard IRQ entry and exit tracepoints provide per-IRQ counts, rates, duration
+percentiles, and explicit correlation-loss counters.
+The migration heatmap includes a per-CPU IRQ utilization band from kernel CPU
+accounting, split into hardirq and softirq time in its tooltip.
 When block request tracepoints are available, the inspector reports request
 rates, bytes, errors, correlation losses, and completion latency percentiles.
 The callback page also reads kernel BPF program run counts and runtime totals;
