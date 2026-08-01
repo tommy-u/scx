@@ -2130,6 +2130,146 @@ export function decorateCells(cells, taskMappings) {
   });
 }
 
+function cellDisplayName(cell) {
+  const names = [
+    cell?.name,
+    cell?.display_name,
+    cell?.managed_name,
+    ...(Array.isArray(cell?.names) ? cell.names : []),
+  ].filter((name) => typeof name === "string" && name.trim() !== "");
+  return names[0]?.trim() || null;
+}
+
+function cellEpoch(cell, queueCell, tasks) {
+  const configured = finiteValue(cell?.slot_epoch, queueCell?.slot_epoch);
+  if (configured !== null) {
+    return configured;
+  }
+  const taskEpochs = new Set(
+    (tasks || [])
+      .map((task) => finiteValue(task?.cell_epoch))
+      .filter((epoch) => epoch !== null),
+  );
+  return taskEpochs.size === 1 ? [...taskEpochs][0] : 0;
+}
+
+function affinityGroups(routes) {
+  const byLlc = new Map();
+  for (const route of routes || []) {
+    const llcId = finiteValue(route?.llc_id) ?? "unknown";
+    const group = byLlc.get(llcId) || { llcId, routes: [] };
+    group.routes.push(route);
+    byLlc.set(llcId, group);
+  }
+  return [...byLlc.values()]
+    .sort((left, right) => Number(left.llcId) - Number(right.llcId))
+    .map((group) => {
+      group.routes.sort((left, right) => left.cpu - right.cpu);
+      const measured = group.routes
+        .map((route) => route.affinityTiming)
+        .filter((timing) => timing?.depth?.latest != null);
+      return {
+        llcId: group.llcId,
+        routes: group.routes,
+        cpus: group.routes.map((route) => route.cpu),
+        queueCount: group.routes.length,
+        measuredQueueCount: measured.length,
+        latestDepth: measured.length === 0
+          ? null
+          : measured.reduce((total, timing) => total + timing.depth.latest, 0),
+      };
+    });
+}
+
+export function cellLayoutDiagramModel({
+  cells = [],
+  taskMappings = [],
+  topology = null,
+  timing = null,
+  stats = null,
+} = {}) {
+  const definitions = [...cells];
+  const definedIds = new Set(definitions.map((cell) => Number(cell.id)));
+  const orphanIds = [...new Set(
+    taskMappings
+      .filter((task) => !definedIds.has(Number(task.cell_id)))
+      .map((task) => Number(task.cell_id))
+      .filter(Number.isSafeInteger),
+  )].sort((left, right) => left - right);
+  for (const id of orphanIds) {
+    definitions.push({ id, cpus: [], task_count: 0, undefined: true });
+  }
+
+  const timedTopology = mergeQueueTimingTopology(topology || {}, timing || {});
+  const queueCells = new Map(
+    (timedTopology.cells || []).map((cell) => [Number(cell.external_id), cell]),
+  );
+  const statsByCell = new Map(
+    stats?.status === "ready"
+      ? (stats.cells || []).map((cell) => [Number(cell.id), cell])
+      : [],
+  );
+
+  const diagramCells = decorateCells(definitions, taskMappings)
+    .map((cell) => {
+      const id = Number(cell.id);
+      const queueCell = queueCells.get(id) || null;
+      const epoch = cellEpoch(cell, queueCell, cell.tasks);
+      const synthetic = Boolean(queueCell?.synthetic || cell.synthetic);
+      const name = cellDisplayName(cell);
+      const primaryCpus = [...(queueCell?.primary_cpus || cell.cpus || [])];
+      const borrowableCpus = [...(queueCell?.borrowable_cpus || [])];
+      const normalQueues = (timedTopology.normalQueues || [])
+        .filter((queue) => Number(queue.cell_id) === id)
+        .sort((left, right) => (
+          (finiteValue(left.llc_id) ?? -1) - (finiteValue(right.llc_id) ?? -1)
+          || left.index - right.index
+        ));
+      const routes = (timedTopology.cpuRoutes || [])
+        .filter((route) => Number(route.owner_cell_id) === id);
+      return {
+        ...cell,
+        id,
+        key: `${id}:${epoch}`,
+        epoch,
+        name,
+        label: cell.undefined
+          ? `Unresolved cell ${id}`
+          : name || (synthetic ? `Fallback cell ${id}` : `Cell ${id}`),
+        synthetic,
+        source: cell.source || (cell.undefined ? "unresolved" : synthetic ? "synthetic" : "configured"),
+        taskCount: cell.tasks.length,
+        primaryCpus,
+        primaryCpuCount: primaryCpus.length,
+        borrowableCpus,
+        borrowableCpuCount: borrowableCpus.length,
+        normalQueues,
+        affinityGroups: affinityGroups(routes),
+        stats: statsByCell.get(id) || null,
+      };
+    })
+    .sort((left, right) => left.id - right.id);
+
+  const primaryCpus = new Set(diagramCells.flatMap((cell) => cell.primaryCpus));
+  return {
+    summary: {
+      layout: timedTopology.layout || null,
+      cellCount: diagramCells.filter((cell) => !cell.undefined).length,
+      taskCount: diagramCells.reduce((total, cell) => total + cell.taskCount, 0),
+      primaryCpuCount: primaryCpus.size,
+      normalDsqCount: (timedTopology.normalQueues || []).length,
+      affinityDsqCount: (timedTopology.cpuRoutes || []).length,
+      captureState: timing?.state || "inactive",
+    },
+    cells: diagramCells,
+    unownedNormalQueues: (timedTopology.normalQueues || [])
+      .filter((queue) => queue.cell_id == null),
+    unownedAffinityGroups: affinityGroups(
+      (timedTopology.cpuRoutes || []).filter((route) => route.owner_cell_id == null),
+    ),
+  };
+}
+
 export function cellCpuOrder(topology, mode) {
   const order = mode === "numeric"
     ? topology?.numeric_order

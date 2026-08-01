@@ -10,6 +10,7 @@ import * as inspectionState from "../../src/web/inspection.js";
 
 import {
   callbackSampleRateOptions,
+  cellLayoutDiagramModel,
   compactCpuList,
   decorateCells,
   dsqActivityHeatmapModel,
@@ -1862,6 +1863,103 @@ test("cell decoration exposes overlaps and mapped tasks", () => {
   assert.deepEqual(cells[1].overlapIds, [2]);
   assert.equal(cells[0].tasks[0].tid, 41);
   assert.equal(cells[1].tasks[0].tid, 72);
+});
+
+test("cell layout diagram joins cells with LLC-scoped normal and affinity DSQs", () => {
+  const topology = queueTopologyModel(
+    { mode_name: "vtime" },
+    {
+      layout: "cell_llc",
+      affinity_queue_count: 3,
+      cells: [{
+        external_id: 7,
+        index: 1,
+        slot_epoch: 4,
+        synthetic: false,
+        cpu_weight: 2,
+        clock_index: 1,
+        primary_cpus: [0, 1],
+        borrowable_cpus: [2],
+      }],
+      normal_queues: [
+        { index: 0, dsq_id: 536870912, cell_index: 1, cell_id: 7, clock_index: 1, llc_id: 10, consumer_cpus: [0, 1] },
+        { index: 1, dsq_id: 536870913, cell_index: 1, cell_id: 7, clock_index: 1, llc_id: 20, consumer_cpus: [2] },
+      ],
+      cpu_routes: [
+        { cpu: 0, owner_cell_id: 7, owner_cell_index: 1, llc_id: 10, normal_queue_index: 0, normal_dsq_id: 536870912, affinity_dsq_id: 268435456 },
+        { cpu: 1, owner_cell_id: 7, owner_cell_index: 1, llc_id: 10, normal_queue_index: 0, normal_dsq_id: 536870912, affinity_dsq_id: 268435457 },
+        { cpu: 2, owner_cell_id: 7, owner_cell_index: 1, llc_id: 20, normal_queue_index: 1, normal_dsq_id: 536870913, affinity_dsq_id: 268435458 },
+      ],
+    },
+    [0, 1, 2],
+  );
+  const timing = inspectionState.queueTimingModel({
+    status: "ready",
+    state: "collecting",
+    policy_generation: 8,
+    dsqs: [
+      { dsq_id: 536870912, queue_class: "normal", depth: { samples: 8, latest: 3, max: 5 }, residence: { samples: 4, total_ns: 400 } },
+      { dsq_id: 268435456, queue_class: "affinity", depth: { samples: 4, latest: 1, max: 2 }, residence: { samples: 2, total_ns: 100 } },
+      { dsq_id: 268435457, queue_class: "affinity", depth: { samples: 4, latest: 2, max: 3 }, residence: { samples: 2, total_ns: 100 } },
+    ],
+  });
+  const stats = inspectionState.cellStatsModel({
+    status: "ready",
+    observed_ms: 1_000,
+    cells: [{ id: 7, normal_enqueues: 20, affinity_enqueues: 5, normal_dispatches: 18, affinity_dispatches: 4 }],
+  });
+
+  const model = cellLayoutDiagramModel({
+    cells: [{ id: 7, name: "batch.slice", cpus: [0, 1], task_count: 2 }],
+    taskMappings: [
+      { tid: 41, tgid: 40, cell_id: 7, cell_epoch: 4, name: "alpha" },
+      { tid: 42, tgid: 40, cell_id: 7, cell_epoch: 4, name: "beta" },
+    ],
+    topology,
+    timing,
+    stats,
+  });
+
+  assert.deepEqual(model.summary, {
+    layout: "cell_llc",
+    cellCount: 1,
+    taskCount: 2,
+    primaryCpuCount: 2,
+    normalDsqCount: 2,
+    affinityDsqCount: 3,
+    captureState: "collecting",
+  });
+  assert.equal(model.cells[0].key, "7:4");
+  assert.equal(model.cells[0].label, "batch.slice");
+  assert.equal(model.cells[0].taskCount, 2);
+  assert.equal(model.cells[0].primaryCpuCount, 2);
+  assert.equal(model.cells[0].borrowableCpuCount, 1);
+  assert.equal(model.cells[0].normalQueues.length, 2);
+  assert.equal(model.cells[0].normalQueues[0].timing.depth.latest, 3);
+  assert.deepEqual(model.cells[0].affinityGroups.map((group) => group.llcId), [10, 20]);
+  assert.equal(model.cells[0].affinityGroups[0].queueCount, 2);
+  assert.equal(model.cells[0].affinityGroups[0].latestDepth, 3);
+  assert.equal(model.cells[0].affinityGroups[1].latestDepth, null);
+  assert.equal(model.cells[0].stats.normalEnqueueRate, 20);
+});
+
+test("cell layout diagram keeps empty cells and creates epoch-safe unresolved lanes", () => {
+  const model = cellLayoutDiagramModel({
+    cells: [{ id: 2, cpus: [0], task_count: 0 }],
+    taskMappings: [{ tid: 91, tgid: 90, cell_id: 99, cell_epoch: 6, name: "orphan" }],
+    topology: queueTopologyModel({ mode_name: "vtime" }, null, [0]),
+    timing: inspectionState.queueTimingModel({ status: "ready", state: "inactive" }),
+    stats: inspectionState.cellStatsModel({ status: "not_applicable" }),
+  });
+
+  assert.equal(model.cells.length, 2);
+  assert.equal(model.cells[0].id, 2);
+  assert.equal(model.cells[0].taskCount, 0);
+  assert.equal(model.cells[1].id, 99);
+  assert.equal(model.cells[1].key, "99:6");
+  assert.equal(model.cells[1].undefined, true);
+  assert.equal(model.cells[1].label, "Unresolved cell 99");
+  assert.equal(model.cells[1].taskCount, 1);
 });
 
 test("workload assignment requests distinguish TID, TGID, and cgroup targets", () => {
