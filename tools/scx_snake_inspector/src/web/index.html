@@ -347,7 +347,7 @@
           <div class="cell-heading-actions">
             <label class="control-field compact-window-field" id="cellWindowField">
               <span>Window</span>
-              <select id="cellWindowSelect" aria-label="Cell statistics window"></select>
+              <select id="cellWindowSelect" aria-label="Cell and utilization window"></select>
             </label>
             <span class="view-freshness" id="cellsFreshness">Waiting for Snake</span>
           </div>
@@ -355,6 +355,7 @@
         <p class="notice hidden" id="cellsNotice" role="status"></p>
         <div class="cell-workspace-tabs" id="cellWorkspaceTabs" role="tablist" aria-label="Cell inspection views">
           <button class="cell-workspace-tab" id="cellLayoutTab" type="button" role="tab" aria-controls="cellLayoutPanel" aria-selected="true" tabindex="0" data-cell-workspace-tab="layout">Layout</button>
+          <button class="cell-workspace-tab" id="cellUtilizationTab" type="button" role="tab" aria-controls="cellUtilizationPanel" aria-selected="false" tabindex="-1" data-cell-workspace-tab="utilization">Utilization</button>
           <button class="cell-workspace-tab" id="cellChangesTab" type="button" role="tab" aria-controls="cellChangesPanel" aria-selected="false" tabindex="-1" data-cell-workspace-tab="changes">Changes <span class="cell-change-count hidden" id="cellChangeCount">0</span></button>
         </div>
         <section class="cell-workspace-panel" id="cellLayoutPanel" role="tabpanel" aria-labelledby="cellLayoutTab" tabindex="0">
@@ -393,6 +394,31 @@
             <div class="cell-bar-tooltip hidden" id="cellBarTooltip" role="tooltip"></div>
             <section class="cell-detail" id="cellDetail" aria-live="polite" data-feedback-key="Cells:Cell-detail"></section>
           </div>
+        </section>
+        <section class="cell-workspace-panel cell-utilization-panel" id="cellUtilizationPanel" role="tabpanel" aria-labelledby="cellUtilizationTab" tabindex="0" hidden data-feedback-key="Cells:Utilization">
+          <p class="notice hidden" id="cellUtilizationNotice" role="status"></p>
+          <dl class="cell-utilization-summary" id="cellUtilizationSummary" aria-label="Utilization summary"></dl>
+          <section class="cell-utilization-section" aria-labelledby="cellServiceTitle">
+            <header class="cell-utilization-heading">
+              <h3 id="cellServiceTitle">Cell service</h3>
+              <span id="cellServiceWindow"></span>
+            </header>
+            <div class="cell-utilization-grid" id="cellUtilizationGrid"></div>
+          </section>
+          <section class="cell-utilization-section" aria-labelledby="hostCapacityTitle">
+            <header class="cell-utilization-heading">
+              <h3 id="hostCapacityTitle">Host capacity</h3>
+              <div class="capacity-legend" aria-label="Host capacity categories">
+                <span><i class="snake"></i>Snake</span>
+                <span><i class="other"></i><em id="capacityTaskLegend">Task work</em></span>
+                <span><i class="hardirq"></i>Hard IRQ</span>
+                <span><i class="softirq"></i>SoftIRQ</span>
+                <span><i class="idle"></i>Idle / wait</span>
+                <span><i class="steal"></i>Steal</span>
+              </div>
+            </header>
+            <div class="host-capacity-list" id="hostCapacityList"></div>
+          </section>
         </section>
         <section class="cell-workspace-panel topology-lifecycle-panel" id="cellChangesPanel" role="tabpanel" aria-labelledby="cellChangesTab" tabindex="0" hidden data-feedback-key="Cells:Topology-changes">
           <div class="topology-lifecycle-summary" id="topologyLifecycleSummary"></div>

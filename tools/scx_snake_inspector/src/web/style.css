@@ -3208,6 +3208,318 @@ button:focus-visible {
   font-size: 0.7rem;
 }
 
+.cell-utilization-panel {
+  padding: 0 clamp(12px, 3vw, 40px) 32px;
+}
+
+.cell-utilization-panel > .notice {
+  margin: 16px 0 0;
+  border: 1px solid var(--border);
+}
+
+.cell-utilization-summary {
+  margin: 20px 0 0;
+  padding: 11px 14px;
+  display: grid;
+  grid-template-columns: repeat(8, minmax(88px, 1fr));
+  background: var(--surface-muted);
+  border: 1px solid var(--border);
+}
+
+.cell-utilization-summary > div {
+  min-width: 0;
+  padding: 0 13px;
+  border-left: 1px solid var(--border);
+}
+
+.cell-utilization-summary > div:first-child {
+  padding-left: 0;
+  border-left: 0;
+}
+
+.cell-utilization-summary dt {
+  color: var(--muted);
+  font-size: 0.57rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.cell-utilization-summary dd {
+  margin: 3px 0 0;
+  font-size: 0.78rem;
+  font-weight: 730;
+  font-variant-numeric: tabular-nums;
+}
+
+.cell-utilization-section {
+  margin-top: 18px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+}
+
+.cell-utilization-heading {
+  min-height: 54px;
+  padding: 9px 13px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.cell-utilization-heading h3 {
+  margin: 0;
+  font-size: 0.8rem;
+}
+
+.cell-utilization-heading > span {
+  color: var(--muted);
+  font-size: 0.64rem;
+  font-weight: 650;
+}
+
+.capacity-legend {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  color: var(--muted);
+  font-size: 0.6rem;
+  font-weight: 650;
+}
+
+.capacity-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+
+.capacity-legend em {
+  font-style: normal;
+}
+
+.capacity-legend i {
+  width: 9px;
+  height: 9px;
+  display: inline-block;
+  border: 1px solid rgb(0 0 0 / 10%);
+}
+
+.capacity-legend i.snake,
+.capacity-stack i.snake {
+  background: #16836b;
+}
+
+.capacity-legend i.other,
+.capacity-stack i.other {
+  background: #4d7799;
+}
+
+.capacity-legend i.hardirq,
+.capacity-stack i.hardirq {
+  background: #bd3f45;
+}
+
+.capacity-legend i.softirq,
+.capacity-stack i.softirq {
+  background: #cf7625;
+}
+
+.capacity-legend i.idle,
+.capacity-stack i.idle {
+  background: #d7dee3;
+}
+
+.capacity-legend i.steal,
+.capacity-stack i.steal {
+  background: #77658c;
+}
+
+.capacity-stack i.unclassified {
+  background: #aeb7bd;
+}
+
+.cell-utilization-grid,
+.host-capacity-list {
+  min-width: 0;
+}
+
+.cell-service-row + .cell-service-row,
+.host-capacity-llc + .host-capacity-llc {
+  border-top: 1px solid var(--border);
+}
+
+.cell-service-row > header {
+  min-height: 58px;
+  padding: 10px 13px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  background: #f7faf9;
+}
+
+.cell-utilization-columns {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(480px, 1fr));
+  border-top: 1px solid var(--border);
+}
+
+.cell-utilization-columns > section {
+  min-width: 0;
+}
+
+.cell-utilization-columns > section + section {
+  border-left: 1px solid var(--border);
+}
+
+.cell-utilization-columns h4 {
+  min-height: 34px;
+  margin: 0;
+  padding: 9px 13px;
+  color: var(--muted);
+  background: var(--surface-muted);
+  border-bottom: 1px solid var(--border);
+  font-size: 0.59rem;
+  font-weight: 720;
+  text-transform: uppercase;
+}
+
+.cell-service-row > header > span,
+.cell-service-total,
+.utilization-identity,
+.utilization-value,
+.utilization-cpu-row > span:first-child,
+.host-capacity-cpu > span:first-child {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.cell-service-row > header strong {
+  overflow-wrap: anywhere;
+  font-size: 0.75rem;
+}
+
+.cell-service-row small,
+.cell-service-llc small,
+.host-capacity-llc small,
+.utilization-cpu-row small,
+.host-capacity-cpu small {
+  color: var(--muted);
+  font-size: 0.58rem;
+}
+
+.cell-service-total,
+.utilization-value {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.cell-service-total strong,
+.utilization-value strong {
+  font-size: 0.69rem;
+}
+
+.cell-service-llc,
+.host-capacity-llc {
+  border-top: 1px solid var(--border);
+}
+
+.cell-service-llc > summary,
+.host-capacity-llc > summary {
+  min-height: 54px;
+  padding: 8px 13px;
+  display: grid;
+  align-items: center;
+  gap: 14px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.cell-service-llc > summary::-webkit-details-marker,
+.host-capacity-llc > summary::-webkit-details-marker {
+  display: none;
+}
+
+.cell-service-llc > summary::before,
+.host-capacity-llc > summary::before {
+  content: "+";
+  width: 14px;
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 750;
+}
+
+.cell-service-llc[open] > summary::before,
+.host-capacity-llc[open] > summary::before {
+  content: "-";
+}
+
+.cell-service-llc > summary,
+.host-capacity-llc > summary {
+  grid-template-columns: 14px minmax(100px, 0.5fr) minmax(120px, 2fr) minmax(92px, 0.55fr);
+}
+
+.service-meter,
+.capacity-stack {
+  width: 100%;
+  height: 12px;
+  display: flex;
+  overflow: hidden;
+  background: #edf1f3;
+  border: 1px solid #cbd4d9;
+  border-radius: 3px;
+}
+
+.service-meter i {
+  width: var(--fill);
+  display: block;
+  background: #16836b;
+}
+
+.capacity-stack i {
+  width: var(--share);
+  min-width: 0;
+  display: block;
+}
+
+.utilization-cpu-list,
+.host-capacity-cpus {
+  padding: 0 13px 10px 40px;
+  background: var(--surface-muted);
+  border-top: 1px solid var(--border);
+}
+
+.utilization-cpu-row,
+.host-capacity-cpu {
+  min-height: 42px;
+  display: grid;
+  grid-template-columns: minmax(95px, 0.45fr) minmax(120px, 2fr) minmax(90px, 0.5fr);
+  align-items: center;
+  gap: 14px;
+}
+
+.utilization-cpu-row + .utilization-cpu-row,
+.host-capacity-cpu + .host-capacity-cpu {
+  border-top: 1px solid var(--border);
+}
+
+.utilization-cpu-row strong,
+.host-capacity-cpu strong,
+.utilization-identity strong {
+  font-size: 0.67rem;
+}
+
+.cell-utilization-grid > .empty-state,
+.host-capacity-list > .empty-state,
+.cell-service-llcs > .empty-state,
+.cell-owned-llcs > .empty-state {
+  margin: 0;
+  padding: 18px 13px;
+}
+
 .cells-layout {
   padding: 20px clamp(12px, 3vw, 40px) 32px;
   display: grid;
@@ -4507,6 +4819,74 @@ button:focus-visible {
 
   .cell-workspace-tabs {
     padding: 0 12px;
+  }
+
+  .cell-utilization-panel {
+    padding: 0 8px 20px;
+  }
+
+  .cell-utilization-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .cell-utilization-summary > div,
+  .cell-utilization-summary > div:first-child {
+    padding: 8px;
+    border-top: 1px solid var(--border);
+    border-left: 0;
+  }
+
+  .cell-utilization-summary > div:nth-child(-n + 2) {
+    border-top: 0;
+  }
+
+  .cell-utilization-heading {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .cell-utilization-columns {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .cell-utilization-columns > section + section {
+    border-top: 1px solid var(--border);
+    border-left: 0;
+  }
+
+  .capacity-legend {
+    width: 100%;
+    justify-content: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .cell-service-llc > summary,
+  .host-capacity-llc > summary {
+    grid-template-columns: 14px minmax(0, 1fr) minmax(90px, 0.55fr);
+    gap: 8px;
+  }
+
+  .cell-service-llc > summary > .service-meter,
+  .host-capacity-llc > summary > .capacity-stack {
+    grid-row: 2;
+    grid-column: 2 / -1;
+  }
+
+  .utilization-cpu-list,
+  .host-capacity-cpus {
+    padding-left: 13px;
+  }
+
+  .utilization-cpu-row,
+  .host-capacity-cpu {
+    grid-template-columns: minmax(0, 1fr) minmax(90px, 0.65fr);
+    gap: 7px;
+  }
+
+  .utilization-cpu-row > .service-meter,
+  .host-capacity-cpu > .capacity-stack {
+    grid-row: 2;
+    grid-column: 1 / -1;
   }
 
   .topology-lifecycle-panel {
@@ -6256,7 +6636,34 @@ th[aria-sort] .table-sort-indicator {
   }
 }
 
+@media (min-width: 761px) and (max-width: 1200px) {
+  .cell-utilization-columns {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .cell-utilization-columns > section + section {
+    border-top: 1px solid var(--border);
+    border-left: 0;
+  }
+
+  .cell-utilization-summary {
+    grid-template-columns: repeat(4, minmax(88px, 1fr));
+  }
+
+  .cell-utilization-summary > div:nth-child(4n + 1) {
+    padding-left: 0;
+    border-left: 0;
+  }
+
+  .cell-utilization-summary > div:nth-child(n + 5) {
+    margin-top: 8px;
+    padding-top: 8px;
+    border-top: 1px solid var(--border);
+  }
+}
+
 @media (max-width: 1200px) {
+
   .configure-workspace {
     grid-template-columns: minmax(0, 1fr);
   }

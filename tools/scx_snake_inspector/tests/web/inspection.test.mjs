@@ -11,6 +11,8 @@ import * as inspectionState from "../../src/web/inspection.js";
 import {
   callbackSampleRateOptions,
   cellLayoutDiagramModel,
+  cellUtilizationModel,
+  cellUtilizationSignature,
   cellWorkspaceTabModel,
   compactCpuList,
   decorateCells,
@@ -2019,12 +2021,216 @@ test("topology lifecycle model explains outcomes stages and cell deltas", () => 
 test("cell workspace tabs preserve selection and keyboard order", () => {
   assert.deepEqual(cellWorkspaceTabModel("changes"), [
     { id: "layout", label: "Layout", selected: false },
+    { id: "utilization", label: "Utilization", selected: false },
     { id: "changes", label: "Changes", selected: true },
   ]);
-  assert.equal(nextCellWorkspaceTab("layout", "ArrowRight"), "changes");
+  assert.equal(nextCellWorkspaceTab("layout", "ArrowRight"), "utilization");
+  assert.equal(nextCellWorkspaceTab("utilization", "ArrowRight"), "changes");
   assert.equal(nextCellWorkspaceTab("changes", "ArrowRight"), "layout");
   assert.equal(nextCellWorkspaceTab("changes", "Home"), "layout");
   assert.equal(nextCellWorkspaceTab("layout", "End"), "changes");
+});
+
+test("cell utilization conserves service through LLC and CPU rollups", () => {
+  const model = cellUtilizationModel({
+    snapshot: {
+      window_ms: 10_000,
+      cell_stats: {
+        status: "ready",
+        observed_ms: 1_000,
+        cells: [{
+          id: 7,
+          runtime_ns: 800_000_000,
+          runtime_ns_by_cpu: { 0: 500_000_000, 2: 250_000_000 },
+        }],
+      },
+      cpu_usage_observed_ms: 1_000,
+      host_cpu_usage_observed_ms: 1_000,
+      host_cpu_usage: [
+        {
+          cpu: 0,
+          total_ns: 1_000_000_000,
+          task_ns: 600_000_000,
+          snake_ns: 500_000_000,
+          cell_ns: 450_000_000,
+          other_task_ns: 100_000_000,
+          hardirq_ns: 20_000_000,
+          softirq_ns: 30_000_000,
+          idle_ns: 340_000_000,
+          iowait_ns: 10_000_000,
+          steal_ns: 0,
+          unattributed_snake_ns: 50_000_000,
+          cell_overage_ns: 0,
+          source_overage_ns: 0,
+        },
+        {
+          cpu: 2,
+          total_ns: 1_000_000_000,
+          task_ns: 400_000_000,
+          snake_ns: 250_000_000,
+          cell_ns: 250_000_000,
+          other_task_ns: 150_000_000,
+          hardirq_ns: 10_000_000,
+          softirq_ns: 40_000_000,
+          idle_ns: 390_000_000,
+          iowait_ns: 150_000_000,
+          steal_ns: 10_000_000,
+          unattributed_snake_ns: 0,
+          cell_overage_ns: 0,
+          source_overage_ns: 0,
+        },
+        {
+          cpu: 4,
+          total_ns: 1_000_000_000,
+          task_ns: 50_000_000,
+          snake_ns: 0,
+          cell_ns: 0,
+          other_task_ns: 50_000_000,
+          hardirq_ns: 50_000_000,
+          softirq_ns: 20_000_000,
+          idle_ns: 880_000_000,
+          iowait_ns: 0,
+          steal_ns: 0,
+          unattributed_snake_ns: 0,
+          cell_overage_ns: 0,
+          source_overage_ns: 0,
+        },
+      ],
+    },
+    inspection: {
+      cells: [{ id: 7, name: "batch.slice" }],
+      queue_topology: {
+        cells: [{ external_id: 7, primary_cpus: [0, 4, 6] }],
+      },
+    },
+    topology: {
+      topology_order: [0, 4, 6, 2],
+      cpus: [
+        { cpu: 0, llc: 3, core: 0 },
+        { cpu: 4, llc: 3, core: 0 },
+        { cpu: 6, llc: 11, core: 2 },
+        { cpu: 2, llc: 9, core: 1 },
+      ],
+    },
+  });
+
+  assert.equal(model.cellStatus, "ready");
+  assert.equal(model.cellAttributionReady, true);
+  assert.equal(model.hostStatus, "ready");
+  assert.equal(model.cells[0].label, "batch.slice");
+  assert.equal(model.cells[0].runtimeNs, 750_000_000);
+  assert.equal(model.aggregateCellRuntimeNs, 750_000_000);
+  assert.equal(model.cells[0].serviceCores, 0.75);
+  assert.deepEqual(model.cells[0].llcs.map((llc) => llc.llcId), [3, 9]);
+  assert.equal(model.cells[0].llcs[0].runtimeNs, 500_000_000);
+  assert.equal(model.cells[0].llcs[1].cpus[0].cpu, 2);
+  assert.equal(
+    model.cells[0].llcs.reduce((total, llc) => total + llc.runtimeNs, 0),
+    model.cells[0].runtimeNs,
+  );
+  assert.equal(model.host.llcs[0].llcId, 3);
+  assert.equal(model.host.llcs[0].cpuCount, 2);
+  assert.deepEqual(model.cells[0].owned.llcs[0].cpus.map((cpu) => cpu.cpu), [0, 4]);
+  assert.equal(model.cells[0].owned.total.hardirqNs, 70_000_000);
+  assert.equal(model.cells[0].owned.llcs[1].llcId, 11);
+  assert.equal(model.cells[0].owned.llcs[1].cpus.length, 0);
+  assert.deepEqual(model.cells[0].owned.missingCpus, [6]);
+  assert.equal(model.host.total.hardirqNs, 80_000_000);
+  assert.equal(model.host.total.softirqNs, 90_000_000);
+  assert.equal(model.host.total.snakeNs, 750_000_000);
+  assert.match(model.warnings.join(" "), /differs from its CPU lanes/);
+  assert.equal(cellUtilizationSignature(model), cellUtilizationSignature({ ...model }));
+});
+
+test("cell utilization keeps host pressure visible when cell CPU lanes are unsupported", () => {
+  const model = cellUtilizationModel({
+    snapshot: {
+      cell_stats: {
+        status: "ready",
+        observed_ms: 1_000,
+        cells: [{ id: 7, runtime_ns: 10, runtime_ns_by_cpu: null }],
+      },
+      host_cpu_usage_observed_ms: 1_000,
+      host_cpu_usage: [{ cpu: 0, total_ns: 1_000, hardirq_ns: 10, softirq_ns: 20 }],
+    },
+    inspection: { cells: [{ id: 7 }] },
+    topology: { topology_order: [0], cpus: [{ cpu: 0, llc: 0, core: 0 }] },
+  });
+
+  assert.equal(model.cellStatus, "unsupported");
+  assert.equal(model.cellAttributionReady, false);
+  assert.equal(model.aggregateCellRuntimeNs, 10);
+  assert.equal(model.cells.length, 0);
+  assert.equal(model.hostStatus, "ready");
+  assert.equal(model.host.llcs.length, 1);
+});
+
+test("host capacity clamps the Snake overlay and reports source overage", () => {
+  const model = cellUtilizationModel({
+    snapshot: {
+      cell_stats: {
+        status: "ready",
+        observed_ms: 1_000,
+        cells: [{ id: 7, runtime_ns: 175, runtime_ns_by_cpu: { 0: 175 } }],
+      },
+      cpu_usage_observed_ms: 1_000,
+      host_cpu_usage_observed_ms: 1_000,
+      host_cpu_usage: [{
+        cpu: 0,
+        total_ns: 200,
+        task_ns: 100,
+        snake_ns: 150,
+        other_task_ns: 0,
+        hardirq_ns: 10,
+        softirq_ns: 10,
+        idle_ns: 80,
+        iowait_ns: 0,
+        steal_ns: 0,
+        cell_overage_ns: 25,
+        source_overage_ns: 50,
+      }],
+    },
+    inspection: { cells: [{ id: 7 }] },
+    topology: { topology_order: [0], cpus: [{ cpu: 0, llc: 0, core: 0 }] },
+  });
+
+  assert.equal(model.host.total.snakeNs, 150);
+  assert.equal(model.host.total.snakeCapacityNs, 100);
+  assert.equal(model.host.total.sourceOverageNs, 50);
+  assert.match(model.warnings.join(" "), /exceeds task-context capacity/);
+  assert.match(model.warnings.join(" "), /Cell runtime exceeds Snake runtime/);
+});
+
+test("host capacity does not split stale Snake runtime from a newer host window", () => {
+  const model = cellUtilizationModel({
+    snapshot: {
+      cell_stats: { status: "unavailable", observed_ms: 0, cells: [] },
+      cpu_usage_observed_ms: 500,
+      cpu_usage_error: "Snake stats unavailable",
+      host_cpu_usage_observed_ms: 1_000,
+      host_cpu_usage: [{
+        cpu: 0,
+        total_ns: 1_000,
+        task_ns: 600,
+        snake_ns: 500,
+        other_task_ns: 100,
+        hardirq_ns: 50,
+        softirq_ns: 50,
+        idle_ns: 300,
+        iowait_ns: 0,
+        steal_ns: 0,
+        cell_overage_ns: 80,
+        source_overage_ns: 100,
+      }],
+    },
+    topology: { topology_order: [0], cpus: [{ cpu: 0, llc: 0, core: 0 }] },
+  });
+
+  assert.equal(model.host.snakeOverlayReady, false);
+  assert.equal(model.host.total.snakeCapacityNs, 0);
+  assert.equal(model.host.total.otherTaskCapacityNs, 600);
+  assert.match(model.warnings.join(" "), /not aligned/);
+  assert.doesNotMatch(model.warnings.join(" "), /exceeds/);
 });
 
 test("cell layout diagram joins cells with LLC-scoped normal and affinity DSQs", () => {
@@ -3000,11 +3206,18 @@ test("Cells page renders a live cell and DSQ layout diagram", () => {
   assert.match(page, /<h3>Live cell layout<\/h3>/);
   assert.match(page, /id="cellWorkspaceTabs"[^>]*role="tablist"/);
   assert.match(page, /id="cellLayoutTab"[^>]*role="tab"/);
+  assert.match(page, /id="cellUtilizationTab"[^>]*role="tab"/);
   assert.match(page, /id="cellChangesTab"[^>]*role="tab"/);
   assert.match(page, /id="cellLayoutPanel"[^>]*role="tabpanel"/);
+  assert.match(page, /id="cellUtilizationPanel"[^>]*role="tabpanel"/);
   assert.match(page, /id="cellChangesPanel"[^>]*role="tabpanel"/);
   assert.match(page, /id="topologyTransitionList"/);
   assert.match(script, /cellLayoutDiagramModel/);
+  assert.match(script, /cellUtilizationModel/);
+  assert.match(script, /renderCellUtilization/);
+  assert.match(script, /CELL_UTILIZATION_RENDER_INTERVAL_MS = 1_000/);
+  assert.match(script, /cellUtilizationSignature/);
+  assert.match(script, /:summary"/);
   assert.match(script, /topologyLifecycleModel/);
   assert.match(script, /renderTopologyTransitions/);
   assert.match(script, /cellState\.identityLabel/);
@@ -3023,6 +3236,9 @@ test("Cells page renders a live cell and DSQ layout diagram", () => {
   assert.match(script, /Primary CPUs/);
   assert.match(script, /Borrowable/);
   assert.match(stylesheet, /\.cell-layout-summary/);
+  assert.match(stylesheet, /\.cell-utilization-grid/);
+  assert.match(stylesheet, /\.capacity-stack/);
+  assert.match(stylesheet, /@media \(min-width: 761px\) and \(max-width: 1200px\)[\s\S]*\.cell-utilization-summary\s*\{[^}]*repeat\(4,/);
   assert.match(stylesheet, /\.cell-topology-band/);
   assert.match(stylesheet, /\.cell-llc-cluster/);
   assert.match(stylesheet, /\.cell-dsq-node/);
@@ -3417,7 +3633,7 @@ test("Cells and Policy expose the shared window and on-demand queue capture cont
   );
 
   assert.match(page, /id="cellWindowSelect"/);
-  assert.match(page, /aria-label="Cell statistics window"/);
+  assert.match(page, /aria-label="Cell and utilization window"/);
   assert.match(script, /fetch\("\/api\/queue-timing"/);
   assert.match(script, /JSON\.stringify\(\{ enabled \}\)/);
   assert.match(script, /Queue capture/);

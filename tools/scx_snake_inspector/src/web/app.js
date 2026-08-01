@@ -24,6 +24,8 @@ import {
   cellLayoutDiagramModel,
   cellQueueFacts,
   cellStatsModel,
+  cellUtilizationModel,
+  cellUtilizationSignature,
   cellWorkspaceTabModel,
   compactCpuList,
   dsqActivityHeatmapModel,
@@ -146,6 +148,13 @@ const elements = {
   cellsView: document.querySelector("#cellsView"),
   cellWorkspaceTabs: document.querySelector("#cellWorkspaceTabs"),
   cellLayoutPanel: document.querySelector("#cellLayoutPanel"),
+  cellUtilizationPanel: document.querySelector("#cellUtilizationPanel"),
+  cellUtilizationNotice: document.querySelector("#cellUtilizationNotice"),
+  cellUtilizationSummary: document.querySelector("#cellUtilizationSummary"),
+  cellServiceWindow: document.querySelector("#cellServiceWindow"),
+  capacityTaskLegend: document.querySelector("#capacityTaskLegend"),
+  cellUtilizationGrid: document.querySelector("#cellUtilizationGrid"),
+  hostCapacityList: document.querySelector("#hostCapacityList"),
   cellChangesPanel: document.querySelector("#cellChangesPanel"),
   cellChangeCount: document.querySelector("#cellChangeCount"),
   cellDetail: document.querySelector("#cellDetail"),
@@ -293,6 +302,9 @@ const state = {
   callbackRatePending: false,
   callbackRateDirty: false,
   cellWorkspaceTab: "layout",
+  cellUtilizationLastRenderAt: 0,
+  cellUtilizationPendingModel: null,
+  cellUtilizationRenderSignature: null,
   topologyLifecycleRenderSignature: null,
   fineTiming: null,
   fineTimingError: null,
@@ -378,6 +390,7 @@ const state = {
 };
 
 let queueTopologyRenderTimer = null;
+let cellUtilizationRenderTimer = null;
 
 configureWindowSelector();
 configureCallbackRangeSelector();
@@ -4565,6 +4578,14 @@ function renderCells() {
     renderTopologyTransitions(lifecycleModel);
     return;
   }
+  if (state.cellWorkspaceTab === "utilization") {
+    renderCellUtilization(cellUtilizationModel({
+      snapshot: state.snapshot,
+      inspection: state.inspection,
+      topology: state.topology,
+    }));
+    return;
+  }
   renderWorkloadCellOptions();
   const statsModel = cellStatsModel(state.snapshot?.cell_stats, {
     policyGeneration: state.inspectionContext?.policy_generation,
@@ -4622,6 +4643,11 @@ function renderCells() {
 function selectCellWorkspaceTab(tabId, focus = false) {
   const selected = cellWorkspaceTabModel(tabId).find((tab) => tab.selected).id;
   state.cellWorkspaceTab = selected;
+  if (selected !== "utilization" && cellUtilizationRenderTimer !== null) {
+    window.clearTimeout(cellUtilizationRenderTimer);
+    cellUtilizationRenderTimer = null;
+    state.cellUtilizationPendingModel = null;
+  }
   renderCells();
   if (focus) {
     requestAnimationFrame(() => {
@@ -4643,9 +4669,11 @@ function renderCellWorkspaceTabs(lifecycle) {
     control?.setAttribute("tabindex", tab.selected ? "0" : "-1");
   }
   const showLayout = state.cellWorkspaceTab === "layout";
+  const showUtilization = state.cellWorkspaceTab === "utilization";
   elements.cellLayoutPanel.hidden = !showLayout;
-  elements.cellChangesPanel.hidden = showLayout;
-  elements.cellWindowField.classList.toggle("hidden", !showLayout);
+  elements.cellUtilizationPanel.hidden = !showUtilization;
+  elements.cellChangesPanel.hidden = state.cellWorkspaceTab !== "changes";
+  elements.cellWindowField.classList.toggle("hidden", state.cellWorkspaceTab === "changes");
   elements.cellChangeCount.textContent = formatCount(lifecycle.transitionCount);
   elements.cellChangeCount.classList.toggle("hidden", lifecycle.transitionCount === 0);
 }
@@ -4801,6 +4829,257 @@ function renderCellLayoutSummary(summary) {
       <div><dt>Layout</dt><dd>${escapeHtml(layout)}</dd></div>
       <div class="cell-capture-state"><dt>Queue samples</dt><dd>${escapeHtml(summary.captureState)}</dd></div>
     </dl>`;
+}
+
+function utilizationLlcLabel(llcId) {
+  return llcId == null ? "Unknown LLC" : `LLC ${llcId}`;
+}
+
+function utilizationCores(runtimeNs, observedMs) {
+  return observedMs > 0 ? runtimeNs / (observedMs * 1_000_000) : null;
+}
+
+function formatUtilizationCores(value) {
+  return value == null || !Number.isFinite(value) ? "—" : value.toFixed(2);
+}
+
+function formatUtilizationPercentage(value) {
+  return value == null || !Number.isFinite(value) ? "—" : formatPercentage(value);
+}
+
+function renderServiceMeter(utilizationPct) {
+  const fill = Math.max(0, Math.min(100, Number(utilizationPct) || 0));
+  return `<span class="service-meter" aria-hidden="true"><i style="--fill:${fill.toFixed(2)}%"></i></span>`;
+}
+
+function renderCellServiceCpu(cpu) {
+  const core = cpu.core == null ? "core unknown" : `core ${cpu.core}`;
+  const placement = cpu.placement === "primary" ? "primary CPU" : "borrowed CPU";
+  return `
+    <div class="utilization-cpu-row">
+      <span><strong>CPU ${formatCount(cpu.cpu)}</strong><small>${escapeHtml(core)} · ${escapeHtml(placement)}</small></span>
+      ${renderServiceMeter(cpu.utilizationPct)}
+      <span class="utilization-value"><strong>${formatPercentage(cpu.utilizationPct)}</strong><small>${escapeHtml(formatRuntime(cpu.runtimeNs))}</small></span>
+    </div>`;
+}
+
+function renderCellServiceLlc(cell, llc) {
+  const label = utilizationLlcLabel(llc.llcId);
+  const cpuCoverage = `${formatCount(llc.cpus.length)} active / ${formatCount(llc.topologyCpuCount)} CPUs`;
+  return `
+    <details class="cell-service-llc" data-render-key="util-cell:${cell.id}:llc:${llc.llcId ?? "unknown"}">
+      <summary data-render-key="util-cell:${cell.id}:llc:${llc.llcId ?? "unknown"}:summary">
+        <span class="utilization-identity"><strong>${escapeHtml(label)}</strong><small>${escapeHtml(cpuCoverage)}</small></span>
+        ${renderServiceMeter(llc.capacityPct)}
+        <span class="utilization-value"><strong>${formatUtilizationCores(llc.serviceCores)} CPUs</strong><small>${formatPercentage(llc.capacityPct)} full LLC · ${formatPercentage(llc.borrowedRuntimeNs * 100 / Math.max(1, llc.runtimeNs))} borrowed</small></span>
+      </summary>
+      <div class="utilization-cpu-list">
+        ${llc.cpus.map(renderCellServiceCpu).join("")}
+      </div>
+    </details>`;
+}
+
+function renderCellOwnedLlc(cell, llc) {
+  const label = utilizationLlcLabel(llc.llcId);
+  const coverage = `${formatCount(llc.cpuCount)} / ${formatCount(llc.topologyCpuCount)} owned CPUs sampled`;
+  return `
+    <details class="host-capacity-llc cell-owned-capacity" data-render-key="util-owned:${cell.id}:llc:${llc.llcId ?? "unknown"}">
+      <summary data-render-key="util-owned:${cell.id}:llc:${llc.llcId ?? "unknown"}:summary">
+        <span class="utilization-identity"><strong>${escapeHtml(label)}</strong><small>${escapeHtml(coverage)}</small></span>
+        ${renderCapacityStack(llc)}
+        <span class="utilization-value"><strong>${formatUtilizationPercentage(capacityBusyPct(llc))} busy</strong><small>${formatUtilizationPercentage(capacityIrqPct(llc))} IRQ</small></span>
+      </summary>
+      <div class="host-capacity-cpus">
+        ${llc.cpus.map(renderHostCpu).join("")}
+      </div>
+    </details>`;
+}
+
+function renderCellService(cell) {
+  const ownedBusy = capacityBusyPct(cell.owned.total);
+  const ownedStatus = ownedBusy === null
+    ? "owned pressure unavailable"
+    : `${formatUtilizationPercentage(ownedBusy)} owned busy`;
+  return `
+    <article class="cell-service-row" data-render-key="util-cell:${cell.id}">
+      <header>
+        <span><strong>${escapeHtml(cell.label)}</strong><small>Cell ${formatCount(cell.id)}</small></span>
+        <span class="cell-service-total"><strong>${formatUtilizationCores(cell.serviceCores)} average CPUs</strong><small>${escapeHtml(formatRuntime(cell.runtimeNs))} service · ${escapeHtml(ownedStatus)}</small></span>
+      </header>
+      <div class="cell-utilization-columns">
+        <section aria-label="Service by execution LLC">
+          <h4>Service by execution LLC</h4>
+          <div class="cell-service-llcs">
+            ${cell.llcs.length > 0
+              ? cell.llcs.map((llc) => renderCellServiceLlc(cell, llc)).join("")
+              : '<p class="empty-state">No service observed in this window.</p>'}
+          </div>
+        </section>
+        <section aria-label="Owned CPU pressure">
+          <h4>Owned CPU pressure</h4>
+          <div class="cell-owned-llcs">
+            ${cell.owned.llcs.length > 0
+              ? cell.owned.llcs.map((llc) => renderCellOwnedLlc(cell, llc)).join("")
+              : '<p class="empty-state">No owned CPU samples are available.</p>'}
+          </div>
+        </section>
+      </div>
+    </article>`;
+}
+
+function capacityParts(row) {
+  return [
+    { kind: "snake", label: "Snake", value: row.snakeCapacityNs ?? 0 },
+    {
+      kind: "other",
+      label: row.taskCapacityLabel || "Task work",
+      value: row.otherTaskCapacityNs ?? 0,
+    },
+    { kind: "hardirq", label: "Hard IRQ", value: row.hardirqNs ?? 0 },
+    { kind: "softirq", label: "SoftIRQ", value: row.softirqNs ?? 0 },
+    { kind: "idle", label: "Idle / wait", value: row.idleWaitNs ?? 0 },
+    { kind: "steal", label: "Steal", value: row.stealNs ?? 0 },
+    { kind: "unclassified", label: "Unclassified", value: row.unclassifiedNs ?? 0 },
+  ];
+}
+
+function renderCapacityStack(row) {
+  const totalNs = Math.max(0, Number(row.totalNs) || 0);
+  const parts = capacityParts(row);
+  const description = parts
+    .filter((part) => part.value > 0)
+    .map((part) => `${part.label} ${formatPercentage(totalNs > 0 ? part.value * 100 / totalNs : 0)}`)
+    .join(", ");
+  return `
+    <span class="capacity-stack" role="img" aria-label="${escapeHtml(description || "No accounted CPU time")}">
+      ${parts.map((part) => {
+        const share = totalNs > 0 ? Math.max(0, Math.min(100, part.value * 100 / totalNs)) : 0;
+        return `<i class="${part.kind}" style="--share:${share.toFixed(3)}%" aria-hidden="true"></i>`;
+      }).join("")}
+    </span>`;
+}
+
+function capacityBusyPct(row) {
+  if (row.totalNs == null) return null;
+  const totalNs = Number(row.totalNs) || 0;
+  if (totalNs <= 0) return null;
+  return ((Number(row.taskNs) || 0)
+    + (Number(row.hardirqNs) || 0)
+    + (Number(row.softirqNs) || 0)) * 100 / totalNs;
+}
+
+function capacityIrqPct(row) {
+  if (row.totalNs == null || Number(row.totalNs) <= 0) return null;
+  return ((Number(row.hardirqNs) || 0) + (Number(row.softirqNs) || 0))
+    * 100 / Number(row.totalNs);
+}
+
+function renderHostCpu(cpu) {
+  const core = cpu.core == null ? "core unknown" : `core ${cpu.core}`;
+  return `
+    <div class="host-capacity-cpu">
+      <span><strong>CPU ${formatCount(cpu.cpu)}</strong><small>${escapeHtml(core)}</small></span>
+      ${renderCapacityStack(cpu)}
+      <span class="utilization-value"><strong>${formatUtilizationPercentage(capacityBusyPct(cpu))} busy</strong><small>${formatUtilizationPercentage(capacityIrqPct(cpu))} IRQ</small></span>
+    </div>`;
+}
+
+function renderHostLlc(llc) {
+  const label = utilizationLlcLabel(llc.llcId);
+  const coverage = `${formatCount(llc.cpuCount)} / ${formatCount(llc.topologyCpuCount)} CPUs sampled`;
+  return `
+    <details class="host-capacity-llc" data-render-key="host-llc:${llc.llcId ?? "unknown"}">
+      <summary data-render-key="host-llc:${llc.llcId ?? "unknown"}:summary">
+        <span class="utilization-identity"><strong>${escapeHtml(label)}</strong><small>${escapeHtml(coverage)}</small></span>
+        ${renderCapacityStack(llc)}
+        <span class="utilization-value"><strong>${formatUtilizationPercentage(capacityBusyPct(llc))} busy</strong><small>${formatUtilizationCores(utilizationCores(llc.snakeCapacityNs ?? 0, state.snapshot?.host_cpu_usage_observed_ms || 0))} Snake CPUs</small></span>
+      </summary>
+      <div class="host-capacity-cpus">
+        ${llc.cpus.map(renderHostCpu).join("")}
+      </div>
+    </details>`;
+}
+
+const CELL_UTILIZATION_RENDER_INTERVAL_MS = 1_000;
+
+function renderCellUtilization(model, force = false) {
+  const signature = cellUtilizationSignature(model);
+  if (signature === state.cellUtilizationRenderSignature) {
+    state.cellUtilizationPendingModel = null;
+    if (cellUtilizationRenderTimer !== null) {
+      window.clearTimeout(cellUtilizationRenderTimer);
+      cellUtilizationRenderTimer = null;
+    }
+    return;
+  }
+  const elapsed = Date.now() - state.cellUtilizationLastRenderAt;
+  if (!force && state.cellUtilizationRenderSignature !== null
+      && elapsed < CELL_UTILIZATION_RENDER_INTERVAL_MS) {
+    state.cellUtilizationPendingModel = model;
+    if (cellUtilizationRenderTimer === null) {
+      cellUtilizationRenderTimer = window.setTimeout(() => {
+        cellUtilizationRenderTimer = null;
+        const pending = state.cellUtilizationPendingModel;
+        state.cellUtilizationPendingModel = null;
+        if (pending && state.cellWorkspaceTab === "utilization") {
+          renderCellUtilization(pending, true);
+        }
+      }, CELL_UTILIZATION_RENDER_INTERVAL_MS - elapsed);
+    }
+    return;
+  }
+  state.cellUtilizationPendingModel = null;
+  state.cellUtilizationRenderSignature = signature;
+  state.cellUtilizationLastRenderAt = Date.now();
+
+  const cellRuntimeNs = model.aggregateCellRuntimeNs;
+  const host = model.host.total;
+  const hostObservedMs = model.hostObservedMs;
+  const accountingOverageNs = model.host.snakeOverlayReady
+    ? (host.sourceOverageNs ?? 0)
+      + (model.cellAttributionReady ? host.cellOverageNs ?? 0 : 0)
+    : null;
+  const notices = [
+    model.cellStatus !== "ready" ? model.cellStatusLabel : null,
+    model.hostStatus !== "ready" ? model.hostStatusLabel : null,
+    ...model.warnings,
+  ].filter((message, index, messages) => message && messages.indexOf(message) === index);
+  const notice = notices.join(" ");
+  if (notice && (elements.cellUtilizationNotice.dataset.message !== notice
+      || elements.cellUtilizationNotice.classList.contains("hidden"))) {
+    showElementNotice(elements.cellUtilizationNotice, notice, "info");
+    elements.cellUtilizationNotice.dataset.message = notice;
+  } else if (!notice && !elements.cellUtilizationNotice.classList.contains("hidden")) {
+    hideElementNotice(elements.cellUtilizationNotice);
+    delete elements.cellUtilizationNotice.dataset.message;
+  }
+  elements.cellServiceWindow.textContent = model.observedMs > 0
+    ? `${formatDuration(model.observedMs)} observed`
+    : "Waiting for samples";
+  if (elements.capacityTaskLegend.textContent !== model.host.taskCapacityLabel) {
+    elements.capacityTaskLegend.textContent = model.host.taskCapacityLabel;
+  }
+  elements.cellUtilizationSummary.innerHTML = `
+    <div><dt>Cell service</dt><dd>${cellRuntimeNs === null ? "—" : `${formatUtilizationCores(utilizationCores(cellRuntimeNs, model.observedMs))} CPUs`}</dd></div>
+    <div><dt>Snake capacity</dt><dd>${model.host.snakeOverlayReady ? `${formatUtilizationCores(utilizationCores(host.snakeCapacityNs ?? 0, hostObservedMs))} CPUs` : "—"}</dd></div>
+    <div><dt>Unattributed Snake</dt><dd>${model.host.snakeOverlayReady && model.cellAttributionReady ? `${formatUtilizationCores(utilizationCores(host.unattributedSnakeNs ?? 0, hostObservedMs))} CPUs` : "—"}</dd></div>
+    <div><dt>${escapeHtml(model.host.taskCapacityLabel)}</dt><dd>${formatUtilizationCores(utilizationCores(host.otherTaskCapacityNs ?? 0, hostObservedMs))} CPUs</dd></div>
+    <div><dt>Hard IRQ</dt><dd>${formatUtilizationCores(utilizationCores(host.hardirqNs ?? 0, hostObservedMs))} CPUs</dd></div>
+    <div><dt>SoftIRQ</dt><dd>${formatUtilizationCores(utilizationCores(host.softirqNs ?? 0, hostObservedMs))} CPUs</dd></div>
+    <div><dt>Accounting overage</dt><dd>${accountingOverageNs === null ? "—" : `${formatUtilizationCores(utilizationCores(accountingOverageNs, hostObservedMs))} CPUs`}</dd></div>
+    <div><dt>Host window</dt><dd>${hostObservedMs > 0 ? escapeHtml(formatDuration(hostObservedMs)) : "—"}</dd></div>`;
+  replaceKeyedHtml(
+    elements.cellUtilizationGrid,
+    model.cellStatus === "ready"
+      ? model.cells.map(renderCellService).join("")
+      : `<p class="empty-state">${escapeHtml(model.cellStatusLabel)}</p>`,
+  );
+  replaceKeyedHtml(
+    elements.hostCapacityList,
+    model.hostStatus === "ready"
+      ? model.host.llcs.map(renderHostLlc).join("")
+      : `<p class="empty-state">${escapeHtml(model.hostStatusLabel)}</p>`,
+  );
 }
 
 function renderCellStatsStatus(model) {

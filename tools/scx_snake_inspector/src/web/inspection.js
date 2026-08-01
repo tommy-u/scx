@@ -1025,6 +1025,7 @@ export function overviewModel({
       ? `${Number(snapshot?.pair_map_failures || 0)} pair-map failures · ${Number(snapshot?.task_storage_failures || 0)} task-state failures`
       : null,
     snapshot?.cpu_usage_error,
+    snapshot?.host_cpu_usage_error,
     callbackTiming?.error,
     inspection?.error,
     timing.counts.dropped > 0
@@ -2133,6 +2134,7 @@ export function decorateCells(cells, taskMappings) {
 
 const CELL_WORKSPACE_TABS = [
   { id: "layout", label: "Layout" },
+  { id: "utilization", label: "Utilization" },
   { id: "changes", label: "Changes" },
 ];
 
@@ -2158,6 +2160,317 @@ export function nextCellWorkspaceTab(activeTab, key) {
     return tabs[(current - 1 + tabs.length) % tabs.length];
   }
   return tabs[current];
+}
+
+const HOST_UTILIZATION_FIELDS = [
+  ["total_ns", "totalNs"],
+  ["task_ns", "taskNs"],
+  ["snake_ns", "snakeNs"],
+  ["cell_ns", "cellNs"],
+  ["other_task_ns", "otherTaskNs"],
+  ["hardirq_ns", "hardirqNs"],
+  ["softirq_ns", "softirqNs"],
+  ["idle_ns", "idleNs"],
+  ["iowait_ns", "iowaitNs"],
+  ["steal_ns", "stealNs"],
+  ["unattributed_snake_ns", "unattributedSnakeNs"],
+  ["cell_overage_ns", "cellOverageNs"],
+  ["source_overage_ns", "sourceOverageNs"],
+];
+
+function utilizationTopology(topology) {
+  const cpus = new Map((topology?.cpus || []).map((cpu) => [Number(cpu.cpu), cpu]));
+  const order = (topology?.topology_order || topology?.numeric_order || [])
+    .map(Number)
+    .filter((cpu) => Number.isSafeInteger(cpu) && cpu >= 0);
+  const cpuOrder = new Map(order.map((cpu, index) => [cpu, index]));
+  const llcOrder = new Map();
+  for (const cpu of order) {
+    const llc = finiteValue(cpus.get(cpu)?.llc);
+    if (llc !== null && !llcOrder.has(llc)) {
+      llcOrder.set(llc, llcOrder.size);
+    }
+  }
+  return { cpus, cpuOrder, llcOrder };
+}
+
+function utilizationLlcSort(topology, left, right) {
+  const leftOrder = topology.llcOrder.get(left.llcId) ?? Number.MAX_SAFE_INTEGER;
+  const rightOrder = topology.llcOrder.get(right.llcId) ?? Number.MAX_SAFE_INTEGER;
+  return leftOrder - rightOrder
+    || (left.llcId ?? Number.MAX_SAFE_INTEGER) - (right.llcId ?? Number.MAX_SAFE_INTEGER);
+}
+
+function cellUtilizationRows(snapshot, inspection, topology, observedMs, host) {
+  const cells = snapshot?.cell_stats?.cells || [];
+  if (cells.some((cell) => cell?.runtime_ns_by_cpu == null)) {
+    return [];
+  }
+  const labels = new Map((inspection?.cells || []).map((cell) => [
+    Number(cell.id),
+    cell.name || cell.display_name || cell.managed_name || `Cell ${cell.id}`,
+  ]));
+  const observedNs = observedMs * 1_000_000;
+  return cells.map((cell) => {
+    const id = finiteValue(cell?.id);
+    const topologyCell = (inspection?.queue_topology?.cells || [])
+      .find((candidate) => finiteValue(candidate?.external_id) === id);
+    const ownedCpuIds = [...new Set((topologyCell?.primary_cpus || [])
+      .map(Number)
+      .filter((cpu) => Number.isSafeInteger(cpu) && cpu >= 0))];
+    const ownedCpuSet = new Set(ownedCpuIds);
+    const byLlc = new Map();
+    for (const [rawCpu, rawRuntime] of Object.entries(cell?.runtime_ns_by_cpu || {})) {
+      const cpu = Number(rawCpu);
+      const runtimeNs = Math.max(0, finiteValue(rawRuntime) ?? 0);
+      if (!Number.isSafeInteger(cpu) || cpu < 0 || runtimeNs <= 0) {
+        continue;
+      }
+      const cpuInfo = topology.cpus.get(cpu);
+      const llcId = finiteValue(cpuInfo?.llc);
+      const key = llcId === null ? "unknown" : String(llcId);
+      const group = byLlc.get(key) || { llcId, runtimeNs: 0, cpus: [] };
+      group.runtimeNs += runtimeNs;
+      group.cpus.push({
+        cpu,
+        core: finiteValue(cpuInfo?.core),
+        runtimeNs,
+        utilizationPct: observedNs > 0 ? runtimeNs * 100 / observedNs : null,
+        placement: ownedCpuSet.has(cpu) ? "primary" : "borrowed",
+      });
+      byLlc.set(key, group);
+    }
+    const llcs = [...byLlc.values()];
+    for (const llc of llcs) {
+      llc.cpus.sort((left, right) => (
+        (topology.cpuOrder.get(left.cpu) ?? Number.MAX_SAFE_INTEGER)
+        - (topology.cpuOrder.get(right.cpu) ?? Number.MAX_SAFE_INTEGER)
+        || left.cpu - right.cpu
+      ));
+      llc.topologyCpuCount = [...topology.cpus.values()]
+        .filter((cpu) => finiteValue(cpu.llc) === llc.llcId)
+        .length;
+      llc.serviceCores = observedNs > 0 ? llc.runtimeNs / observedNs : null;
+      llc.capacityPct = observedNs > 0 && llc.topologyCpuCount > 0
+        ? llc.runtimeNs * 100 / (observedNs * llc.topologyCpuCount)
+        : null;
+      llc.primaryRuntimeNs = llc.cpus
+        .filter((cpu) => cpu.placement === "primary")
+        .reduce((total, cpu) => total + cpu.runtimeNs, 0);
+      llc.borrowedRuntimeNs = llc.runtimeNs - llc.primaryRuntimeNs;
+    }
+    llcs.sort((left, right) => utilizationLlcSort(topology, left, right));
+    const runtimeNs = llcs.reduce((total, llc) => total + llc.runtimeNs, 0);
+    const reportedRuntimeNs = Math.max(0, finiteValue(cell?.runtime_ns) ?? 0);
+    const ownedCpus = host.cpus.filter((cpu) => ownedCpuSet.has(cpu.cpu));
+    return {
+      id,
+      label: labels.get(id) || `Cell ${id}`,
+      runtimeNs,
+      reportedRuntimeNs,
+      reconciliationNs: reportedRuntimeNs - runtimeNs,
+      serviceCores: observedNs > 0 ? runtimeNs / observedNs : null,
+      llcs,
+      owned: {
+        cpuCount: ownedCpuIds.length,
+        sampledCpuCount: ownedCpus.length,
+        missingCpus: ownedCpuIds.filter((cpu) => !host.cpus.some((sample) => sample.cpu === cpu)),
+        cpus: ownedCpus,
+        llcs: hostLlcRows(ownedCpus, topology, ownedCpuIds),
+        total: sumHostRows(ownedCpus),
+      },
+    };
+  }).filter((cell) => Number.isSafeInteger(cell.id) && cell.id >= 0)
+    .sort((left, right) => left.id - right.id);
+}
+
+function normalizeHostCpu(row, topology, snakeOverlayReady) {
+  const cpu = finiteValue(row?.cpu);
+  if (!Number.isSafeInteger(cpu) || cpu < 0) {
+    return null;
+  }
+  const normalized = { cpu };
+  for (const [source, target] of HOST_UTILIZATION_FIELDS) {
+    const value = finiteValue(row?.[source]);
+    normalized[target] = value === null ? null : Math.max(0, value);
+  }
+  const cpuInfo = topology.cpus.get(cpu);
+  normalized.llcId = finiteValue(cpuInfo?.llc);
+  normalized.core = finiteValue(cpuInfo?.core);
+  normalized.idleWaitNs = (normalized.idleNs ?? 0) + (normalized.iowaitNs ?? 0);
+  normalized.snakeCapacityNs = snakeOverlayReady
+    ? Math.min(normalized.snakeNs ?? 0, normalized.taskNs ?? 0)
+    : 0;
+  normalized.otherTaskCapacityNs = snakeOverlayReady
+    ? normalized.otherTaskNs ?? 0
+    : normalized.taskNs ?? 0;
+  const classified = normalized.snakeCapacityNs
+    + normalized.otherTaskCapacityNs
+    + (normalized.hardirqNs ?? 0)
+    + (normalized.softirqNs ?? 0)
+    + normalized.idleWaitNs
+    + (normalized.stealNs ?? 0);
+  normalized.unclassifiedNs = Math.max(0, (normalized.totalNs ?? 0) - classified);
+  normalized.taskCapacityLabel = snakeOverlayReady ? "Other task estimate" : "Task work";
+  return normalized;
+}
+
+function sumHostRows(rows) {
+  const total = {};
+  for (const [, field] of HOST_UTILIZATION_FIELDS) {
+    const values = rows.map((row) => row[field]).filter((value) => value !== null);
+    total[field] = values.length > 0 ? values.reduce((sum, value) => sum + value, 0) : null;
+  }
+  for (const field of [
+    "idleWaitNs",
+    "snakeCapacityNs",
+    "otherTaskCapacityNs",
+    "unclassifiedNs",
+  ]) {
+    total[field] = rows.reduce((sum, row) => sum + (row[field] ?? 0), 0);
+  }
+  return total;
+}
+
+function hostLlcRows(cpus, topology, expectedCpuIds = null) {
+  const byLlc = new Map();
+  for (const cpu of expectedCpuIds || []) {
+    const llcId = finiteValue(topology.cpus.get(cpu)?.llc);
+    const key = llcId === null ? "unknown" : String(llcId);
+    if (!byLlc.has(key)) {
+      byLlc.set(key, { llcId, cpus: [] });
+    }
+  }
+  for (const cpu of cpus) {
+    const key = cpu.llcId === null ? "unknown" : String(cpu.llcId);
+    const group = byLlc.get(key) || { llcId: cpu.llcId, cpus: [] };
+    group.cpus.push(cpu);
+    byLlc.set(key, group);
+  }
+  return [...byLlc.values()].map((llc) => ({
+    ...llc,
+    cpuCount: llc.cpus.length,
+    topologyCpuCount: expectedCpuIds === null
+      ? [...topology.cpus.values()]
+        .filter((cpu) => finiteValue(cpu.llc) === llc.llcId)
+        .length
+      : expectedCpuIds
+        .filter((cpu) => finiteValue(topology.cpus.get(cpu)?.llc) === llc.llcId)
+        .length,
+    wholeLlcCpuCount: [...topology.cpus.values()]
+      .filter((cpu) => finiteValue(cpu.llc) === llc.llcId)
+      .length,
+    taskCapacityLabel: llc.cpus[0]?.taskCapacityLabel || "Task work",
+    ...sumHostRows(llc.cpus),
+  })).sort((left, right) => utilizationLlcSort(topology, left, right));
+}
+
+function hostUtilizationRows(snapshot, topology) {
+  const cpuObservedMs = Math.max(0, finiteValue(snapshot?.cpu_usage_observed_ms) ?? 0);
+  const hostObservedMs = Math.max(0, finiteValue(snapshot?.host_cpu_usage_observed_ms) ?? 0);
+  const snakeOverlayReady = !snapshot?.cpu_usage_error
+    && cpuObservedMs > 0
+    && cpuObservedMs === hostObservedMs;
+  const cpus = (snapshot?.host_cpu_usage || [])
+    .map((row) => normalizeHostCpu(row, topology, snakeOverlayReady))
+    .filter(Boolean)
+    .sort((left, right) => (
+      (topology.cpuOrder.get(left.cpu) ?? Number.MAX_SAFE_INTEGER)
+      - (topology.cpuOrder.get(right.cpu) ?? Number.MAX_SAFE_INTEGER)
+      || left.cpu - right.cpu
+    ));
+  return {
+    cpus,
+    llcs: hostLlcRows(cpus, topology),
+    total: sumHostRows(cpus),
+    snakeOverlayReady,
+    taskCapacityLabel: snakeOverlayReady ? "Other tasks" : "Task work",
+  };
+}
+
+export function cellUtilizationModel({ snapshot, inspection, topology } = {}) {
+  const topologyModel = utilizationTopology(topology);
+  const observedMs = Math.max(0, finiteValue(snapshot?.cell_stats?.observed_ms) ?? 0);
+  const hostObservedMs = Math.max(0, finiteValue(snapshot?.host_cpu_usage_observed_ms) ?? 0);
+  const rawCellStatus = String(snapshot?.cell_stats?.status || "unavailable");
+  const rawCells = snapshot?.cell_stats?.cells || [];
+  const cellLanesAvailable = rawCells
+    .every((cell) => cell?.runtime_ns_by_cpu != null);
+  const cellStatus = rawCellStatus !== "ready"
+    ? rawCellStatus
+    : !cellLanesAvailable
+      ? "unsupported"
+      : observedMs <= 0
+        ? "warming"
+        : "ready";
+  const host = hostUtilizationRows(snapshot, topologyModel);
+  const hostStatus = snapshot?.host_cpu_usage_error
+    ? "unavailable"
+    : hostObservedMs <= 0 || host.cpus.length === 0
+      ? "warming"
+      : "ready";
+  const cells = cellStatus === "ready"
+    ? cellUtilizationRows(snapshot, inspection, topologyModel, observedMs, host)
+    : [];
+  const cellAttributionReady = cellStatus === "ready";
+  const aggregateCellRuntimeNs = rawCellStatus === "ready" && observedMs > 0
+    ? cellAttributionReady
+      ? cells.reduce((total, cell) => total + cell.runtimeNs, 0)
+      : rawCells.reduce(
+        (total, cell) => total + Math.max(0, finiteValue(cell?.runtime_ns) ?? 0),
+        0,
+      )
+    : null;
+  const sourceOverageNs = host.snakeOverlayReady ? host.total.sourceOverageNs ?? 0 : null;
+  const cellOverageNs = host.snakeOverlayReady && cellAttributionReady
+    ? host.total.cellOverageNs ?? 0
+    : null;
+  const warnings = [
+    snapshot?.host_cpu_usage_error,
+    cellStatus === "unsupported"
+      ? "This Snake attachment does not export per-cell CPU runtime."
+      : null,
+    !host.snakeOverlayReady && hostStatus === "ready"
+      ? "Snake service and host capacity windows are not aligned; task work is not split by scheduler."
+      : null,
+    sourceOverageNs > 0
+      ? `Snake runtime exceeds task-context capacity by ${sourceOverageNs} ns.`
+      : null,
+    cellOverageNs > 0
+      ? `Cell runtime exceeds Snake runtime by ${cellOverageNs} ns.`
+      : null,
+    ...cells
+      .filter((cell) => cell.reconciliationNs !== 0)
+      .map((cell) => `${cell.label} differs from its CPU lanes by ${cell.reconciliationNs} ns.`),
+  ].filter(Boolean);
+  return {
+    cellStatus,
+    cellStatusLabel: cellStatus === "ready"
+      ? "Cell service ready"
+      : cellStatus === "unsupported"
+        ? "Per-CPU cell service is unsupported by this Snake attachment."
+        : cellStatus === "warming"
+          ? "Collecting cell service samples."
+          : "Cell service is unavailable.",
+    hostStatus,
+    hostStatusLabel: hostStatus === "ready"
+      ? "Host capacity ready"
+      : hostStatus === "warming"
+        ? "Collecting host CPU samples."
+        : snapshot?.host_cpu_usage_error || "Host capacity is unavailable.",
+    observedMs,
+    hostObservedMs,
+    windowMs: Math.max(0, finiteValue(snapshot?.window_ms) ?? 0),
+    aggregateCellRuntimeNs,
+    cellAttributionReady,
+    cells,
+    host,
+    warnings,
+  };
+}
+
+export function cellUtilizationSignature(model) {
+  return JSON.stringify(model);
 }
 
 const TOPOLOGY_OUTCOME_LABELS = {
