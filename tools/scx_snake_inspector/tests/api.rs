@@ -357,6 +357,61 @@ fn utilization_reconciles_cell_service_with_host_cpu_capacity() {
 }
 
 #[test]
+fn host_cpu_sampling_failure_rebaselines_before_reporting_recovery() {
+    let dashboard = dashboard();
+    dashboard.ingest_host_cpu_times(
+        0,
+        100,
+        &BTreeMap::from([(0, HostCpuTimeCounters::default())]),
+    );
+    dashboard.ingest_host_cpu_times(
+        1_000,
+        100,
+        &BTreeMap::from([(
+            0,
+            HostCpuTimeCounters {
+                task_ticks: 20,
+                idle_ticks: 80,
+                ..Default::default()
+            },
+        )]),
+    );
+    dashboard.set_host_cpu_usage_error(Some("/proc/stat unavailable".into()));
+    dashboard.ingest_host_cpu_times(
+        10_000,
+        100,
+        &BTreeMap::from([(
+            0,
+            HostCpuTimeCounters {
+                task_ticks: 200,
+                idle_ticks: 800,
+                ..Default::default()
+            },
+        )]),
+    );
+    dashboard.set_host_cpu_usage_error(None);
+
+    let recovery = dashboard.snapshot(1_000).unwrap();
+    assert_eq!(recovery.host_cpu_usage_observed_ms, 0);
+    assert!(recovery.host_cpu_usage.is_empty());
+
+    dashboard.ingest_host_cpu_times(
+        11_000,
+        100,
+        &BTreeMap::from([(
+            0,
+            HostCpuTimeCounters {
+                task_ticks: 230,
+                idle_ticks: 870,
+                ..Default::default()
+            },
+        )]),
+    );
+    let stable = dashboard.snapshot(1_000).unwrap();
+    assert_eq!(stable.host_cpu_usage[0].total_ns, 1_000_000_000);
+}
+
+#[test]
 fn runtime_context_tracks_scheduler_attachment_and_policy_generation() {
     let dashboard = dashboard();
     dashboard.ingest(1_000, &BTreeMap::new());

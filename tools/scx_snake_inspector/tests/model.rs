@@ -270,6 +270,38 @@ fn host_cpu_time_history_baselines_new_or_reset_cpus_without_spikes() {
 }
 
 #[test]
+fn host_cpu_time_history_rebaselines_after_a_long_successful_poll_gap() {
+    let mut history = HostCpuTimeHistory::new(10_000);
+    history.ingest(0, &BTreeMap::from([(0, host_times(0, 0, 0, 0, 0, 0))]));
+    history.ingest(
+        1_000,
+        &BTreeMap::from([(0, host_times(20, 0, 0, 80, 0, 0))]),
+    );
+    history.ingest(
+        2_500,
+        &BTreeMap::from([(0, host_times(120, 0, 0, 480, 0, 0))]),
+    );
+
+    let recovery = history.view(2_500, 1_000).unwrap();
+
+    assert_eq!(recovery.observed_ms, 0);
+    assert!(recovery.cpus.is_empty());
+}
+
+#[test]
+fn snake_cpu_usage_rebaselines_after_a_long_successful_poll_gap() {
+    let mut history = CpuUsageHistory::new(10_000);
+    history.reset(0);
+    history.ingest(1_000, &BTreeMap::from([(0, 200_000_000)]));
+    history.ingest(2_500, &BTreeMap::from([(0, 300_000_000)]));
+
+    let recovery = history.view(2_500, 1_000).unwrap();
+
+    assert_eq!(recovery.observed_ms, 0);
+    assert!(recovery.runtime_ns.is_empty());
+}
+
+#[test]
 fn cell_metric_history_sums_top_deltas_inside_the_selected_window() {
     let mut history = CellMetricHistory::new(5_000);
     history.ingest(0, 4, 7, &BTreeMap::from([(2, cell_metrics(2, 0, 0))]));
@@ -337,4 +369,22 @@ fn cell_metric_history_rebases_on_attachment_or_policy_generation_change() {
     assert_eq!(attachment.scheduler_attach_seq, 5);
     assert_eq!(attachment.observed_ms, 0);
     assert_eq!(attachment.cells[&2].runtime_ns, 0);
+}
+
+#[test]
+fn cell_metric_history_rebaselines_after_a_long_successful_poll_gap() {
+    let mut history = CellMetricHistory::new(10_000);
+    history.ingest(0, 4, 7, &BTreeMap::from([(2, cell_metrics(2, 0, 0))]));
+    history.ingest(1_000, 4, 7, &BTreeMap::from([(2, cell_metrics(2, 100, 4))]));
+    history.ingest(
+        2_500,
+        4,
+        7,
+        &BTreeMap::from([(2, cell_metrics(2, 500, 20))]),
+    );
+
+    let recovery = history.view(2_500, 1_000).unwrap().unwrap();
+
+    assert_eq!(recovery.observed_ms, 0);
+    assert_eq!(recovery.cells[&2].runtime_ns, 0);
 }

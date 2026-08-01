@@ -637,6 +637,9 @@ impl Dashboard {
     pub fn set_host_cpu_usage_error(&self, error: Option<String>) {
         let sequence = {
             let mut live = self.live.write().expect("dashboard lock poisoned");
+            if error.is_some() {
+                live.host_cpu_history.clear();
+            }
             live.host_cpu_usage_error = error;
             live.sequence = live.sequence.wrapping_add(1);
             live.sequence

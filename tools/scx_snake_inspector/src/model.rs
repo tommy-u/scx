@@ -10,6 +10,7 @@ use std::fmt::{Display, Formatter};
 use serde::{Deserialize, Serialize};
 
 pub const CALLBACK_TIMING_BUCKETS: usize = 64;
+const MAX_ACCOUNTING_SAMPLE_GAP_MS: u64 = 1_000;
 pub const CALLBACK_NAMES: [&str; 7] = [
     "select_cpu",
     "enqueue",
@@ -231,6 +232,7 @@ pub struct CellMetricHistory {
     started_at_ms: Option<u64>,
     scheduler_attach_seq: Option<u64>,
     policy_generation: Option<u64>,
+    last_sample_at_ms: Option<u64>,
     latest_cells: BTreeMap<u32, CellMetricCounters>,
     bins: VecDeque<CellMetricBin>,
 }
@@ -243,6 +245,7 @@ impl CellMetricHistory {
             started_at_ms: None,
             scheduler_attach_seq: None,
             policy_generation: None,
+            last_sample_at_ms: None,
             latest_cells: BTreeMap::new(),
             bins: VecDeque::new(),
         }
@@ -266,6 +269,15 @@ impl CellMetricHistory {
             }
         }
 
+        if self
+            .last_sample_at_ms
+            .is_some_and(|previous| at_ms.saturating_sub(previous) > MAX_ACCOUNTING_SAMPLE_GAP_MS)
+        {
+            self.reset_epoch(at_ms, scheduler_attach_seq, policy_generation, cells);
+            return;
+        }
+        self.last_sample_at_ms = Some(at_ms);
+
         self.latest_cells = cells
             .iter()
             .map(|(&id, counters)| (id, counters.zero_like()))
@@ -288,6 +300,7 @@ impl CellMetricHistory {
         self.started_at_ms = None;
         self.scheduler_attach_seq = None;
         self.policy_generation = None;
+        self.last_sample_at_ms = None;
         self.latest_cells.clear();
         self.bins.clear();
     }
@@ -335,6 +348,7 @@ impl CellMetricHistory {
         self.started_at_ms = Some(at_ms);
         self.scheduler_attach_seq = Some(scheduler_attach_seq);
         self.policy_generation = Some(policy_generation);
+        self.last_sample_at_ms = Some(at_ms);
         self.latest_cells = cells
             .iter()
             .map(|(&id, counters)| (id, counters.zero_like()))
@@ -353,6 +367,7 @@ impl CellMetricHistory {
 pub struct CpuUsageHistory {
     max_window_ms: u64,
     started_at_ms: Option<u64>,
+    last_sample_at_ms: Option<u64>,
     bins: VecDeque<CpuUsageBin>,
 }
 
@@ -360,6 +375,7 @@ pub struct CpuUsageHistory {
 pub struct HostCpuTimeHistory {
     max_window_ms: u64,
     started_at_ms: Option<u64>,
+    last_sample_at_ms: Option<u64>,
     latest: BTreeMap<u32, HostCpuTimeCounters>,
     bins: VecDeque<HostCpuTimeBin>,
 }
@@ -370,6 +386,7 @@ impl HostCpuTimeHistory {
         Self {
             max_window_ms,
             started_at_ms: None,
+            last_sample_at_ms: None,
             latest: BTreeMap::new(),
             bins: VecDeque::new(),
         }
@@ -378,7 +395,18 @@ impl HostCpuTimeHistory {
     pub fn ingest(&mut self, at_ms: u64, current: &BTreeMap<u32, HostCpuTimeCounters>) {
         if self.started_at_ms.is_none() {
             self.started_at_ms = Some(at_ms);
+            self.last_sample_at_ms = Some(at_ms);
             self.latest.clone_from(current);
+            return;
+        }
+        if self
+            .last_sample_at_ms
+            .is_some_and(|previous| at_ms.saturating_sub(previous) > MAX_ACCOUNTING_SAMPLE_GAP_MS)
+        {
+            self.started_at_ms = Some(at_ms);
+            self.last_sample_at_ms = Some(at_ms);
+            self.latest.clone_from(current);
+            self.bins.clear();
             return;
         }
 
@@ -393,11 +421,13 @@ impl HostCpuTimeHistory {
             self.bins.push_back(HostCpuTimeBin { at_ms, cpus });
         }
         self.latest.clone_from(current);
+        self.last_sample_at_ms = Some(at_ms);
         self.expire(at_ms.saturating_sub(self.max_window_ms));
     }
 
     pub fn clear(&mut self) {
         self.started_at_ms = None;
+        self.last_sample_at_ms = None;
         self.latest.clear();
         self.bins.clear();
     }
@@ -431,6 +461,7 @@ impl CpuUsageHistory {
         Self {
             max_window_ms,
             started_at_ms: None,
+            last_sample_at_ms: None,
             bins: VecDeque::new(),
         }
     }
@@ -439,6 +470,14 @@ impl CpuUsageHistory {
         if self.started_at_ms.is_none() {
             self.reset(at_ms);
         }
+        if self
+            .last_sample_at_ms
+            .is_some_and(|previous| at_ms.saturating_sub(previous) > MAX_ACCOUNTING_SAMPLE_GAP_MS)
+        {
+            self.reset(at_ms);
+            return;
+        }
+        self.last_sample_at_ms = Some(at_ms);
         let runtime_ns = runtime_ns
             .iter()
             .filter_map(|(&cpu, &runtime_ns)| (runtime_ns > 0).then_some((cpu, runtime_ns)))
@@ -451,6 +490,7 @@ impl CpuUsageHistory {
 
     pub fn reset(&mut self, at_ms: u64) {
         self.started_at_ms = Some(at_ms);
+        self.last_sample_at_ms = Some(at_ms);
         self.bins.clear();
     }
 
