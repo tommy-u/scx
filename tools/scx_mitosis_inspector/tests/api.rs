@@ -64,6 +64,7 @@ fn snapshot() -> Snapshot {
             verified_insns: Some(100),
         }],
         dsq_metrics: Default::default(),
+        scheduler_events: Vec::new(),
     }
 }
 
@@ -190,6 +191,7 @@ async fn index_is_the_one_page_inspector() {
     assert!(html.contains("id=\"eventTimingSampleRate\""));
     assert!(html.contains("id=\"migrationRows\""));
     assert!(html.contains("id=\"dsqMetricRows\""));
+    assert!(html.contains("id=\"schedulerEventRows\""));
     assert!(html.contains("/assets/app.js"));
 }
 

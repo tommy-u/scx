@@ -5,6 +5,7 @@ const number = new Intl.NumberFormat("en-US");
 const rate = new Intl.NumberFormat("en-US", { maximumFractionDigits: 1 });
 const callbackTimingRows = document.querySelector("#callbackTimingRows");
 const schedulerTimingRows = document.querySelector("#schedulerTimingRows");
+const schedulerEventRows = document.querySelector("#schedulerEventRows");
 const migrationRows = document.querySelector("#migrationRows");
 const cpuUtilizationRows = document.querySelector("#cpuUtilizationRows");
 const llcUtilizationRows = document.querySelector("#llcUtilizationRows");
@@ -63,6 +64,14 @@ function renderTimings(snapshot) {
   const schedulerRows = snapshot.scheduler_timings.map((timing) =>
     timingRow(timing.metric.replaceAll("_", " "), timing));
   schedulerTimingRows.replaceChildren(...schedulerRows);
+}
+
+function renderSchedulerEvents(events) {
+  schedulerEventRows.replaceChildren(...events.map((event) => tableRow([
+    event.metric.replaceAll("_", " "),
+    number.format(event.count),
+    rate.format(event.rate_per_second),
+  ])));
 }
 
 function renderMigrations(migrations) {
@@ -188,6 +197,7 @@ function render(snapshot) {
   document.querySelector("#uptime").textContent = `${snapshot.uptime_seconds}s`;
   document.querySelector("#refreshed").textContent = new Date().toLocaleTimeString();
   renderTimings(snapshot);
+  renderSchedulerEvents(snapshot.scheduler_events);
   renderMigrations(snapshot.migrations);
   renderCpuBreakdown(snapshot);
   renderBpfPrograms(snapshot.bpf_program_stats);
