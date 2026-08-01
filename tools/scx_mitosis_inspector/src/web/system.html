@@ -46,6 +46,39 @@
           </dl>
         </section>
 
+        <section class="table-section" id="resourceHistory" aria-labelledby="resourceHistoryHeading">
+          <div class="section-heading">
+            <h2 id="resourceHistoryHeading">Resource history</h2>
+            <p>Rolling 10-minute host view</p>
+          </div>
+          <div class="chart-grid">
+            <figure class="chart-panel">
+              <figcaption>Pressure avg10</figcaption>
+              <canvas class="chart-canvas" id="pressureHistory" role="img" aria-label="CPU, memory, and I/O pressure over 10 minutes"></canvas>
+            </figure>
+            <figure class="chart-panel">
+              <figcaption>Average CPU frequency</figcaption>
+              <canvas class="chart-canvas" id="frequencyHistory" role="img" aria-label="Average CPU frequency over 10 minutes"></canvas>
+            </figure>
+            <figure class="chart-panel">
+              <figcaption>Network throughput</figcaption>
+              <canvas class="chart-canvas" id="networkHistory" role="img" aria-label="Network receive and transmit throughput over 10 minutes"></canvas>
+            </figure>
+            <figure class="chart-panel">
+              <figcaption>IRQ CPU utilization</figcaption>
+              <canvas class="chart-canvas" id="irqHistory" role="img" aria-label="Average IRQ CPU utilization over 10 minutes"></canvas>
+            </figure>
+            <figure class="chart-panel">
+              <figcaption>Block completions</figcaption>
+              <canvas class="chart-canvas" id="blockRateHistory" role="img" aria-label="Block I/O completion rate over 10 minutes"></canvas>
+            </figure>
+            <figure class="chart-panel">
+              <figcaption>Block throughput</figcaption>
+              <canvas class="chart-canvas" id="blockThroughputHistory" role="img" aria-label="Block I/O completion throughput over 10 minutes"></canvas>
+            </figure>
+          </div>
+        </section>
+
         <section class="table-section" aria-labelledby="systemCpuHeading">
           <h2 id="systemCpuHeading">CPU</h2>
           <div class="table-scroll"><table><tbody id="systemCpuRows"></tbody></table></div>
@@ -92,6 +125,7 @@
         </section>
       </main>
     </div>
+    <script src="/assets/charts.js" defer></script>
     <script src="/assets/system.js" defer></script>
   </body>
 </html>
