@@ -282,6 +282,12 @@ async fn index_is_the_one_page_inspector() {
     assert!(html.contains("id=\"hostname\""));
     assert!(html.contains("id=\"kernelRelease\""));
     assert!(html.contains("id=\"cpuCount\""));
+    let summary = html
+        .split("<section class=\"summary\"")
+        .nth(1)
+        .and_then(|section| section.split("</section>").next())
+        .unwrap();
+    assert!(summary.contains("id=\"overallCpuUtilization\""));
     assert!(html.contains("id=\"callbackTimingSampleRate\""));
     assert!(html.contains("id=\"callbackTimingRows\""));
     assert!(html.contains("id=\"schedulerTimingRows\""));
@@ -340,6 +346,31 @@ async fn shared_chart_library_is_served() {
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let javascript = std::str::from_utf8(&body).unwrap();
     assert!(javascript.contains("MitosisCharts"));
+}
+
+#[tokio::test]
+async fn heatmap_styles_show_the_complete_vertical_canvas() {
+    let response = app()
+        .oneshot(
+            Request::builder()
+                .uri("/assets/style.css")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let css = std::str::from_utf8(&body).unwrap();
+    let heatmap = css
+        .split(".heatmap-viewport {")
+        .nth(1)
+        .and_then(|rules| rules.split('}').next())
+        .unwrap();
+    assert!(heatmap.contains("overflow-x: auto"));
+    assert!(heatmap.contains("overflow-y: visible"));
+    assert!(!heatmap.contains("max-height"));
 }
 
 #[tokio::test]

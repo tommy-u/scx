@@ -611,8 +611,8 @@ code { color: #404b5e; }
   position: relative;
   width: 100%;
   min-height: 420px;
-  max-height: 720px;
-  overflow: auto;
+  overflow-x: auto;
+  overflow-y: visible;
   background: #f9fafb;
   border: 1px solid #d4dbe3;
 }
