@@ -24,8 +24,8 @@ use crate::{
     build_callback_timing_rows, build_counters, build_cpu_runtime_rows, build_scheduler_event_rows,
     build_timing_metric_row, program_name_matches, project_cpu_runtime, summarize_callback_timing,
     CallbackCounter, CallbackTimingCounters, CallbackTimingRow, CpuRuntimeRow, DsqMetricsView,
-    MigrationRow, SchedulerEventRow, TimingMetricRow, CALLBACK_NAMES, CALLBACK_TIMING_BUCKETS,
-    SCHEDULER_EVENT_NAMES,
+    MigrationRow, SchedulerEventRow, SoftirqRow, TimingMetricRow, CALLBACK_NAMES,
+    CALLBACK_TIMING_BUCKETS, SCHEDULER_EVENT_NAMES, SOFTIRQ_NAMES,
 };
 
 const TARGET_NAMES: [&str; 5] = [
@@ -39,6 +39,12 @@ const TARGET_NAMES: [&str; 5] = [
 struct TargetProgram {
     id: u32,
     fd: OwnedFd,
+}
+
+#[derive(Clone)]
+struct SoftirqMetrics {
+    count: u64,
+    timing: CallbackTimingCounters,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -56,6 +62,7 @@ pub struct Snapshot {
     pub bpf_program_stats: Vec<BpfProgramStatsRow>,
     pub dsq_metrics: DsqMetricsView,
     pub scheduler_events: Vec<SchedulerEventRow>,
+    pub softirqs: Vec<SoftirqRow>,
 }
 
 fn find_targets() -> Result<[TargetProgram; 5]> {
@@ -149,6 +156,8 @@ fn attach_programs(
         skel.progs.scheduler_event_fork.attach()?,
         skel.progs.scheduler_event_exec.attach()?,
         skel.progs.scheduler_event_exit.attach()?,
+        skel.progs.sirqo_entry.attach()?,
+        skel.progs.sirqo_exit.attach()?,
     ];
     if callback_timing_sample_rate > 0 {
         links.extend([
@@ -271,6 +280,75 @@ fn read_scheduler_events(skel: &BpfSkel<'_>) -> Result<[u64; 9]> {
         }
     }
     Ok(totals)
+}
+
+fn read_softirq_metrics(skel: &BpfSkel<'_>) -> Result<Vec<SoftirqMetrics>> {
+    const U64_BYTES: usize = std::mem::size_of::<u64>();
+    const FIELD_COUNT: usize = 2 + CALLBACK_TIMING_BUCKETS;
+
+    (0..SOFTIRQ_NAMES.len())
+        .map(|vector| {
+            let key = (vector as u32).to_ne_bytes();
+            let values = skel
+                .maps
+                .softirq_observer_metrics
+                .lookup_percpu(&key, MapFlags::ANY)?
+                .with_context(|| {
+                    format!("softirq metrics entry {} missing", SOFTIRQ_NAMES[vector])
+                })?;
+            let mut count = 0_u64;
+            let mut timing = CallbackTimingCounters::default();
+            for value in values {
+                if value.len() < FIELD_COUNT * U64_BYTES {
+                    bail!("short softirq metrics value for {}", SOFTIRQ_NAMES[vector]);
+                }
+                let field = |index: usize| -> Result<u64> {
+                    let start = index * U64_BYTES;
+                    Ok(u64::from_ne_bytes(
+                        value[start..start + U64_BYTES].try_into()?,
+                    ))
+                };
+                count = count.saturating_add(field(0)?);
+                timing.total_ns = timing.total_ns.saturating_add(field(1)?);
+                for bucket in 0..CALLBACK_TIMING_BUCKETS {
+                    timing.buckets[bucket] =
+                        timing.buckets[bucket].saturating_add(field(2 + bucket)?);
+                }
+            }
+            Ok(SoftirqMetrics { count, timing })
+        })
+        .collect()
+}
+
+fn build_softirq_rows(
+    current: &[SoftirqMetrics],
+    previous: &[SoftirqMetrics],
+    elapsed: Duration,
+) -> Vec<SoftirqRow> {
+    let seconds = elapsed.as_secs_f64();
+    current
+        .iter()
+        .zip(previous)
+        .enumerate()
+        .map(|(vector, (current, previous))| {
+            let summary = summarize_callback_timing(&current.timing);
+            SoftirqRow {
+                vector: vector as u32,
+                name: SOFTIRQ_NAMES[vector],
+                count: current.count,
+                rate_per_second: if seconds > 0.0 {
+                    current.count.saturating_sub(previous.count) as f64 / seconds
+                } else {
+                    0.0
+                },
+                samples: summary.samples,
+                mean_ns: summary.mean_ns,
+                p50_ns: summary.p50_ns,
+                p95_ns: summary.p95_ns,
+                p99_ns: summary.p99_ns,
+            }
+        })
+        .collect()
 }
 
 fn read_callback_timings(skel: &BpfSkel<'_>) -> Result<Vec<CallbackTimingCounters>> {
@@ -515,6 +593,7 @@ pub fn run(
     let started = Instant::now();
     let mut previous = read_counts(&skel)?;
     let mut previous_scheduler_events = read_scheduler_events(&skel)?;
+    let mut previous_softirqs = read_softirq_metrics(&skel)?;
     let callback_timings = read_callback_timings(&skel)?;
     let wakeup_latency = read_wakeup_latency(&skel)?;
     let cpu_slice_duration = read_cpu_slice_duration(&skel)?;
@@ -552,6 +631,7 @@ pub fn run(
                 previous_scheduler_events,
                 Duration::ZERO,
             ),
+            softirqs: build_softirq_rows(&previous_softirqs, &previous_softirqs, Duration::ZERO),
         };
     }
     ready
@@ -563,6 +643,7 @@ pub fn run(
         let now = Instant::now();
         let current = read_counts(&skel)?;
         let current_scheduler_events = read_scheduler_events(&skel)?;
+        let current_softirqs = read_softirq_metrics(&skel)?;
         let callback_timings = read_callback_timings(&skel)?;
         let wakeup_latency = read_wakeup_latency(&skel)?;
         let cpu_slice_duration = read_cpu_slice_duration(&skel)?;
@@ -595,6 +676,8 @@ pub fn run(
             elapsed,
         );
         previous_scheduler_events = current_scheduler_events;
+        snapshot.softirqs = build_softirq_rows(&current_softirqs, &previous_softirqs, elapsed);
+        previous_softirqs = current_softirqs;
         previous_at = now;
     }
     Ok(())

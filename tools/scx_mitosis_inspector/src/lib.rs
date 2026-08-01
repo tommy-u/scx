@@ -20,7 +20,8 @@ pub use model::{
     build_timing_metric_row, parse_callback_timing_sample_rate, project_cpu_runtime,
     summarize_callback_timing, CallbackCounter, CallbackTimingCounters, CallbackTimingRow,
     CallbackTimingSummary, CpuRuntimeRow, DsqMetricsView, MigrationRow, SchedulerEventRow,
-    TimingMetricRow, CALLBACK_NAMES, CALLBACK_TIMING_BUCKETS, SCHEDULER_EVENT_NAMES,
+    SoftirqRow, TimingMetricRow, CALLBACK_NAMES, CALLBACK_TIMING_BUCKETS, SCHEDULER_EVENT_NAMES,
+    SOFTIRQ_NAMES,
 };
 
 pub fn program_name_matches(loaded: &str, expected: &str) -> bool {
