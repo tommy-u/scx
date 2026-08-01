@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 use scx_snake_inspector::collector::{
     decode_counter_entry, decode_inspection_stats, decode_top_stats, find_symbol_address,
-    CollectorConfig,
+    parse_host_cpu_times, CollectorConfig,
 };
 use scx_snake_inspector::model::CpuPair;
 use scx_snake_inspector::scope::TaskScope;
@@ -76,6 +76,7 @@ fn snake_top_stats_decode_cpu_and_optional_cell_metrics_together() {
                 "id": 3,
                 "index": 1,
                 "runtime_ns": 1000,
+                "runtime_ns_by_cpu": {"0": 250, "7": 750},
                 "primary_runtime_ns": 700,
                 "borrowed_runtime_ns": 300,
                 "lent_runtime_ns": 200,
@@ -97,6 +98,10 @@ fn snake_top_stats_decode_cpu_and_optional_cell_metrics_together() {
     let cells = decoded.cells.unwrap();
     assert_eq!(cells[&3].id, 3);
     assert_eq!(cells[&3].runtime_ns, 1000);
+    assert_eq!(
+        cells[&3].runtime_ns_by_cpu,
+        Some(std::collections::BTreeMap::from([(0, 250), (7, 750)]))
+    );
 
     let absent = decode_top_stats(serde_json::json!({
         "policy_generation": 4,
@@ -111,6 +116,58 @@ fn snake_top_stats_decode_cpu_and_optional_cell_metrics_together() {
     }))
     .unwrap();
     assert_eq!(empty.cells, Some(std::collections::BTreeMap::new()));
+}
+
+#[test]
+fn snake_top_stats_distinguishes_older_cell_metrics_without_cpu_attribution() {
+    let decoded = decode_top_stats(serde_json::json!({
+        "policy_generation": 4,
+        "cpus": {"0": {"cpu": 0, "runtime_ns": 1}},
+        "cells": {"3": {
+            "id": 3,
+            "index": 1,
+            "runtime_ns": 1,
+            "primary_runtime_ns": 1,
+            "borrowed_runtime_ns": 0,
+            "lent_runtime_ns": 0,
+            "normal_enqueues": 0,
+            "affinity_enqueues": 0,
+            "normal_dispatches": 0,
+            "affinity_dispatches": 0,
+            "clock_transitions": 0
+        }}
+    }))
+    .unwrap();
+
+    assert_eq!(decoded.cells.unwrap()[&3].runtime_ns_by_cpu, None);
+}
+
+#[test]
+fn proc_stat_parser_keeps_sparse_cpu_ids_and_separate_capacity_categories() {
+    let parsed = parse_host_cpu_times(concat!(
+        "cpu  100 20 30 400 50 6 7 8 90 10\n",
+        "cpu2 100 20 30 400 50 6 7 8 90 10\n",
+        "cpu9 9 1 2 30 4 5 6 7\n",
+        "intr 1234\n",
+    ))
+    .unwrap();
+
+    assert_eq!(parsed.keys().copied().collect::<Vec<_>>(), vec![2, 9]);
+    assert_eq!(parsed[&2].task_ticks, 150);
+    assert_eq!(parsed[&2].irq_ticks, 6);
+    assert_eq!(parsed[&2].softirq_ticks, 7);
+    assert_eq!(parsed[&2].idle_ticks, 400);
+    assert_eq!(parsed[&2].iowait_ticks, 50);
+    assert_eq!(parsed[&2].steal_ticks, 8);
+    assert_eq!(parsed[&9].task_ticks, 12);
+}
+
+#[test]
+fn proc_stat_parser_rejects_duplicate_or_malformed_cpu_rows() {
+    assert!(parse_host_cpu_times("cpu2 1 2 3 4\ncpu2 5 6 7 8\n").is_err());
+    assert!(parse_host_cpu_times("cpuX 1 2 3 4\n").is_err());
+    assert!(parse_host_cpu_times("cpu2 1 nope 3 4\n").is_err());
+    assert!(parse_host_cpu_times("intr 1234\n").is_err());
 }
 
 #[test]

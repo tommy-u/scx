@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use scx_snake_inspector::model::{
     summarize_callback_timing, CallbackTimingCounters, CallbackTimingHistory,
     CallbackTimingSnapshot, CellMetricCounters, CellMetricHistory, CpuPair, CpuUsageHistory,
-    RollingHistory,
+    HostCpuTimeCounters, HostCpuTimeHistory, RollingHistory,
 };
 
 fn counters(entries: &[(CpuPair, u64)]) -> BTreeMap<CpuPair, u64> {
@@ -197,7 +197,76 @@ fn cell_metrics(id: u32, runtime_ns: u64, normal_dispatches: u64) -> CellMetricC
         normal_dispatches,
         affinity_dispatches: 2,
         clock_transitions: 3,
+        runtime_ns_by_cpu: Some(BTreeMap::new()),
     }
+}
+
+fn host_times(
+    task_ticks: u64,
+    irq_ticks: u64,
+    softirq_ticks: u64,
+    idle_ticks: u64,
+    iowait_ticks: u64,
+    steal_ticks: u64,
+) -> HostCpuTimeCounters {
+    HostCpuTimeCounters {
+        task_ticks,
+        irq_ticks,
+        softirq_ticks,
+        idle_ticks,
+        iowait_ticks,
+        steal_ticks,
+    }
+}
+
+#[test]
+fn host_cpu_time_history_sums_cumulative_tick_deltas_by_cpu() {
+    let mut history = HostCpuTimeHistory::new(5_000);
+    history.ingest(
+        0,
+        &BTreeMap::from([(2, host_times(100, 10, 20, 500, 30, 4))]),
+    );
+    history.ingest(
+        1_000,
+        &BTreeMap::from([(2, host_times(170, 12, 25, 520, 31, 4))]),
+    );
+    history.ingest(
+        2_000,
+        &BTreeMap::from([(2, host_times(220, 15, 29, 540, 30, 5))]),
+    );
+
+    let window = history.view(2_000, 2_000).unwrap();
+
+    assert_eq!(window.observed_ms, 2_000);
+    assert_eq!(window.cpus[&2], host_times(120, 5, 9, 40, 1, 1));
+}
+
+#[test]
+fn host_cpu_time_history_baselines_new_or_reset_cpus_without_spikes() {
+    let mut history = HostCpuTimeHistory::new(5_000);
+    history.ingest(
+        0,
+        &BTreeMap::from([(0, host_times(100, 10, 10, 500, 20, 0))]),
+    );
+    history.ingest(
+        1_000,
+        &BTreeMap::from([
+            (0, host_times(120, 11, 12, 510, 20, 0)),
+            (7, host_times(9_000, 700, 800, 20_000, 200, 0)),
+        ]),
+    );
+    history.ingest(
+        2_000,
+        &BTreeMap::from([
+            (0, host_times(3, 1, 1, 4, 0, 0)),
+            (7, host_times(9_010, 701, 802, 20_010, 201, 0)),
+        ]),
+    );
+
+    let window = history.view(2_000, 2_000).unwrap();
+
+    assert_eq!(window.cpus[&0], host_times(20, 1, 2, 10, 0, 0));
+    assert_eq!(window.cpus[&7], host_times(10, 1, 2, 10, 1, 0));
 }
 
 #[test]
@@ -228,6 +297,27 @@ fn cell_metric_history_sums_top_deltas_inside_the_selected_window() {
     assert_eq!(recent.observed_ms, 300);
     assert_eq!(recent.cells[&2].runtime_ns, 50_000_000);
     assert_eq!(recent.cells[&2].normal_dispatches, 6);
+}
+
+#[test]
+fn cell_metric_history_preserves_sparse_per_cpu_runtime() {
+    let mut history = CellMetricHistory::new(5_000);
+    let mut first = cell_metrics(2, 100, 1);
+    first.runtime_ns_by_cpu = Some(BTreeMap::from([(0, 25), (3, 75)]));
+    let mut second = cell_metrics(2, 60, 1);
+    second.runtime_ns_by_cpu = Some(BTreeMap::from([(0, 10), (7, 50)]));
+
+    history.ingest(0, 4, 7, &BTreeMap::from([(2, cell_metrics(2, 0, 0))]));
+    history.ingest(250, 4, 7, &BTreeMap::from([(2, first)]));
+    history.ingest(500, 4, 7, &BTreeMap::from([(2, second)]));
+
+    let window = history.view(500, 500).unwrap().unwrap();
+
+    assert_eq!(window.cells[&2].runtime_ns, 160);
+    assert_eq!(
+        window.cells[&2].runtime_ns_by_cpu,
+        Some(BTreeMap::from([(0, 35), (3, 75), (7, 50)]))
+    );
 }
 
 #[test]

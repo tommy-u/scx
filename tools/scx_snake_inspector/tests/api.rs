@@ -23,7 +23,7 @@ use scx_snake_inspector::host_context::{
     CommandRunner, HostContextService,
 };
 use scx_snake_inspector::launcher::SnakeLauncher;
-use scx_snake_inspector::model::{CellMetricCounters, CpuPair};
+use scx_snake_inspector::model::{CellMetricCounters, CpuPair, HostCpuTimeCounters};
 use scx_snake_inspector::policies::{InvalidPolicy, PolicyCatalog, PolicyChoice};
 use scx_snake_inspector::scope::TaskScope;
 use scx_snake_inspector::testing::{MatrixConfig, TestingController};
@@ -267,6 +267,7 @@ fn cell_metrics(runtime_ns: u64) -> CellMetricCounters {
         id: 3,
         index: 1,
         runtime_ns,
+        runtime_ns_by_cpu: None,
         primary_runtime_ns: runtime_ns * 3 / 4,
         borrowed_runtime_ns: runtime_ns / 4,
         lent_runtime_ns: runtime_ns / 4,
@@ -276,6 +277,83 @@ fn cell_metrics(runtime_ns: u64) -> CellMetricCounters {
         affinity_dispatches: if active { 50 } else { 0 },
         clock_transitions: if active { 10 } else { 0 },
     }
+}
+
+#[test]
+fn utilization_reconciles_cell_service_with_host_cpu_capacity() {
+    let dashboard = dashboard();
+    dashboard.set_scheduler("snake", true, 11);
+    dashboard.set_inspection_at(0, Some(queue_topology_snapshot(7)), None);
+    dashboard.reset_top_metrics(0);
+    dashboard.ingest_top_metrics(
+        0,
+        7,
+        &BTreeMap::from([(0, 0), (1, 0)]),
+        Some(&BTreeMap::from([(3, cell_metrics(0))])),
+    );
+    let mut cell = cell_metrics(450_000_000);
+    cell.runtime_ns_by_cpu = Some(BTreeMap::from([(0, 450_000_000)]));
+    dashboard.ingest_top_metrics(
+        1_000,
+        7,
+        &BTreeMap::from([(0, 500_000_000), (1, 100_000_000)]),
+        Some(&BTreeMap::from([(3, cell)])),
+    );
+    dashboard.ingest_host_cpu_times(
+        0,
+        100,
+        &BTreeMap::from([
+            (0, HostCpuTimeCounters::default()),
+            (1, HostCpuTimeCounters::default()),
+        ]),
+    );
+    dashboard.ingest_host_cpu_times(
+        1_000,
+        100,
+        &BTreeMap::from([
+            (
+                0,
+                HostCpuTimeCounters {
+                    task_ticks: 60,
+                    irq_ticks: 2,
+                    softirq_ticks: 3,
+                    idle_ticks: 34,
+                    iowait_ticks: 1,
+                    steal_ticks: 0,
+                },
+            ),
+            (
+                1,
+                HostCpuTimeCounters {
+                    task_ticks: 20,
+                    irq_ticks: 1,
+                    softirq_ticks: 1,
+                    idle_ticks: 78,
+                    iowait_ticks: 0,
+                    steal_ticks: 0,
+                },
+            ),
+        ]),
+    );
+
+    let snapshot = dashboard.snapshot(1_000).unwrap();
+
+    assert_eq!(
+        snapshot.cell_stats.cells[0].runtime_ns_by_cpu,
+        Some(BTreeMap::from([(0, 450_000_000)]))
+    );
+    assert_eq!(snapshot.host_cpu_usage_observed_ms, 1_000);
+    assert_eq!(snapshot.host_cpu_usage.len(), 2);
+    let cpu0 = &snapshot.host_cpu_usage[0];
+    assert_eq!(cpu0.total_ns, 1_000_000_000);
+    assert_eq!(cpu0.task_ns, 600_000_000);
+    assert_eq!(cpu0.snake_ns, 500_000_000);
+    assert_eq!(cpu0.cell_ns, Some(450_000_000));
+    assert_eq!(cpu0.other_task_ns, 100_000_000);
+    assert_eq!(cpu0.hardirq_ns, 20_000_000);
+    assert_eq!(cpu0.softirq_ns, 30_000_000);
+    assert_eq!(cpu0.unattributed_snake_ns, Some(50_000_000));
+    assert_eq!(cpu0.source_overage_ns, 0);
 }
 
 #[test]

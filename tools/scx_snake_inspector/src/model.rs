@@ -50,6 +50,8 @@ pub struct CellMetricCounters {
     pub id: u32,
     pub index: u32,
     pub runtime_ns: u64,
+    #[serde(default)]
+    pub runtime_ns_by_cpu: Option<BTreeMap<u32, u64>>,
     pub primary_runtime_ns: u64,
     pub borrowed_runtime_ns: u64,
     pub lent_runtime_ns: u64,
@@ -65,12 +67,20 @@ impl CellMetricCounters {
         Self {
             id: self.id,
             index: self.index,
+            runtime_ns_by_cpu: self.runtime_ns_by_cpu.as_ref().map(|_| BTreeMap::new()),
             ..Self::default()
         }
     }
 
     fn add_assign(&mut self, other: &Self) {
         self.runtime_ns = self.runtime_ns.saturating_add(other.runtime_ns);
+        if let Some(other_cpus) = &other.runtime_ns_by_cpu {
+            let cpus = self.runtime_ns_by_cpu.get_or_insert_default();
+            for (&cpu, &runtime_ns) in other_cpus {
+                let total = cpus.entry(cpu).or_default();
+                *total = total.saturating_add(runtime_ns);
+            }
+        }
         self.primary_runtime_ns = self
             .primary_runtime_ns
             .saturating_add(other.primary_runtime_ns);
@@ -95,6 +105,10 @@ impl CellMetricCounters {
 
     fn is_empty(&self) -> bool {
         self.runtime_ns == 0
+            && self
+                .runtime_ns_by_cpu
+                .as_ref()
+                .is_none_or(|cpus| cpus.values().all(|runtime_ns| *runtime_ns == 0))
             && self.primary_runtime_ns == 0
             && self.borrowed_runtime_ns == 0
             && self.lent_runtime_ns == 0
@@ -104,6 +118,56 @@ impl CellMetricCounters {
             && self.affinity_dispatches == 0
             && self.clock_transitions == 0
     }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct HostCpuTimeCounters {
+    pub task_ticks: u64,
+    pub irq_ticks: u64,
+    pub softirq_ticks: u64,
+    pub idle_ticks: u64,
+    pub iowait_ticks: u64,
+    pub steal_ticks: u64,
+}
+
+impl HostCpuTimeCounters {
+    fn delta(self, previous: Self) -> Option<Self> {
+        if self.task_ticks < previous.task_ticks
+            || self.irq_ticks < previous.irq_ticks
+            || self.softirq_ticks < previous.softirq_ticks
+            || self.idle_ticks < previous.idle_ticks
+            || self.steal_ticks < previous.steal_ticks
+        {
+            return None;
+        }
+        Some(Self {
+            task_ticks: self.task_ticks - previous.task_ticks,
+            irq_ticks: self.irq_ticks - previous.irq_ticks,
+            softirq_ticks: self.softirq_ticks - previous.softirq_ticks,
+            idle_ticks: self.idle_ticks - previous.idle_ticks,
+            iowait_ticks: self.iowait_ticks.saturating_sub(previous.iowait_ticks),
+            steal_ticks: self.steal_ticks - previous.steal_ticks,
+        })
+    }
+
+    fn add_assign(&mut self, other: Self) {
+        self.task_ticks = self.task_ticks.saturating_add(other.task_ticks);
+        self.irq_ticks = self.irq_ticks.saturating_add(other.irq_ticks);
+        self.softirq_ticks = self.softirq_ticks.saturating_add(other.softirq_ticks);
+        self.idle_ticks = self.idle_ticks.saturating_add(other.idle_ticks);
+        self.iowait_ticks = self.iowait_ticks.saturating_add(other.iowait_ticks);
+        self.steal_ticks = self.steal_ticks.saturating_add(other.steal_ticks);
+    }
+
+    fn is_empty(self) -> bool {
+        self == Self::default()
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HostCpuTimeWindow {
+    pub cpus: BTreeMap<u32, HostCpuTimeCounters>,
+    pub observed_ms: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -147,6 +211,12 @@ struct DeltaBin {
 struct CpuUsageBin {
     at_ms: u64,
     runtime_ns: BTreeMap<u32, u64>,
+}
+
+#[derive(Debug)]
+struct HostCpuTimeBin {
+    at_ms: u64,
+    cpus: BTreeMap<u32, HostCpuTimeCounters>,
 }
 
 #[derive(Debug)]
@@ -284,6 +354,75 @@ pub struct CpuUsageHistory {
     max_window_ms: u64,
     started_at_ms: Option<u64>,
     bins: VecDeque<CpuUsageBin>,
+}
+
+#[derive(Debug)]
+pub struct HostCpuTimeHistory {
+    max_window_ms: u64,
+    started_at_ms: Option<u64>,
+    latest: BTreeMap<u32, HostCpuTimeCounters>,
+    bins: VecDeque<HostCpuTimeBin>,
+}
+
+impl HostCpuTimeHistory {
+    pub fn new(max_window_ms: u64) -> Self {
+        assert!(max_window_ms > 0, "maximum window must be non-zero");
+        Self {
+            max_window_ms,
+            started_at_ms: None,
+            latest: BTreeMap::new(),
+            bins: VecDeque::new(),
+        }
+    }
+
+    pub fn ingest(&mut self, at_ms: u64, current: &BTreeMap<u32, HostCpuTimeCounters>) {
+        if self.started_at_ms.is_none() {
+            self.started_at_ms = Some(at_ms);
+            self.latest.clone_from(current);
+            return;
+        }
+
+        let cpus = current
+            .iter()
+            .filter_map(|(&cpu, &counters)| {
+                let delta = counters.delta(*self.latest.get(&cpu)?)?;
+                (!delta.is_empty()).then_some((cpu, delta))
+            })
+            .collect::<BTreeMap<_, _>>();
+        if !cpus.is_empty() {
+            self.bins.push_back(HostCpuTimeBin { at_ms, cpus });
+        }
+        self.latest.clone_from(current);
+        self.expire(at_ms.saturating_sub(self.max_window_ms));
+    }
+
+    pub fn clear(&mut self) {
+        self.started_at_ms = None;
+        self.latest.clear();
+        self.bins.clear();
+    }
+
+    pub fn view(&self, now_ms: u64, window_ms: u64) -> Result<HostCpuTimeWindow, WindowError> {
+        validate_window(window_ms, self.max_window_ms)?;
+        let cutoff_ms = now_ms.saturating_sub(window_ms);
+        let mut cpus = BTreeMap::<u32, HostCpuTimeCounters>::new();
+        for bin in self.bins.iter().filter(|bin| bin.at_ms > cutoff_ms) {
+            for (&cpu, &delta) in &bin.cpus {
+                cpus.entry(cpu).or_default().add_assign(delta);
+            }
+        }
+        let observed_ms = self
+            .started_at_ms
+            .map(|started| now_ms.saturating_sub(started).min(window_ms))
+            .unwrap_or(0);
+        Ok(HostCpuTimeWindow { cpus, observed_ms })
+    }
+
+    fn expire(&mut self, cutoff_ms: u64) {
+        while self.bins.front().is_some_and(|bin| bin.at_ms <= cutoff_ms) {
+            self.bins.pop_front();
+        }
+    }
 }
 
 impl CpuUsageHistory {

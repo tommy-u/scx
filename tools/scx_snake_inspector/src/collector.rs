@@ -27,7 +27,7 @@ use crate::scope::TaskScope;
 use crate::workload::{resolve_workload_target, WorkloadCellResponse, WorkloadTarget};
 use crate::{
     bpf_intf,
-    model::{CellMetricCounters, CpuPair},
+    model::{CellMetricCounters, CpuPair, HostCpuTimeCounters},
 };
 
 const DEFAULT_OPS_PATH: &str = "/sys/kernel/sched_ext/root/ops";
@@ -104,6 +104,64 @@ pub fn decode_counter_entry(key: &[u8], value: &[u8]) -> anyhow::Result<(CpuPair
     let to = u32::from_ne_bytes(key[4..8].try_into().unwrap());
     let count = u64::from_ne_bytes(value.try_into().unwrap());
     Ok((CpuPair::new(from, to), count))
+}
+
+pub fn parse_host_cpu_times(contents: &str) -> anyhow::Result<BTreeMap<u32, HostCpuTimeCounters>> {
+    let mut cpus = BTreeMap::new();
+    for line in contents.lines() {
+        let mut fields = line.split_whitespace();
+        let Some(label) = fields.next() else {
+            continue;
+        };
+        let Some(cpu_label) = label.strip_prefix("cpu") else {
+            continue;
+        };
+        if cpu_label.is_empty() {
+            continue;
+        }
+        let cpu = cpu_label
+            .parse::<u32>()
+            .with_context(|| format!("invalid /proc/stat CPU label {label}"))?;
+        let values = fields
+            .map(|value| {
+                value
+                    .parse::<u64>()
+                    .with_context(|| format!("invalid /proc/stat value {value:?} for CPU {cpu}"))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        if values.len() < 4 {
+            anyhow::bail!(
+                "/proc/stat CPU {cpu} has {} time fields, expected at least 4",
+                values.len()
+            );
+        }
+        let value = |index: usize| values.get(index).copied().unwrap_or(0);
+        let counters = HostCpuTimeCounters {
+            task_ticks: value(0)
+                .checked_add(value(1))
+                .and_then(|total| total.checked_add(value(2)))
+                .with_context(|| format!("/proc/stat task time overflowed for CPU {cpu}"))?,
+            idle_ticks: value(3),
+            iowait_ticks: value(4),
+            irq_ticks: value(5),
+            softirq_ticks: value(6),
+            steal_ticks: value(7),
+        };
+        if cpus.insert(cpu, counters).is_some() {
+            anyhow::bail!("/proc/stat contains duplicate CPU {cpu}");
+        }
+    }
+    if cpus.is_empty() {
+        anyhow::bail!("/proc/stat contains no per-CPU time rows");
+    }
+    Ok(cpus)
+}
+
+fn read_host_cpu_times(proc_root: &Path) -> Result<BTreeMap<u32, HostCpuTimeCounters>> {
+    let path = proc_root.join("stat");
+    let contents = fs::read_to_string(&path)
+        .with_context(|| format!("reading host CPU time from {}", path.display()))?;
+    parse_host_cpu_times(&contents)
 }
 
 #[derive(Debug, Deserialize)]
@@ -441,6 +499,18 @@ pub fn run_collector(
     let mut stats_client = None;
     let mut top_stats_connection = TopStatsConnectionState::default();
     let mut last_cpu_usage_error = None;
+    let mut last_host_cpu_usage_error = None;
+    let ticks_per_second = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+    let ticks_per_second = u64::try_from(ticks_per_second)
+        .ok()
+        .filter(|ticks| *ticks > 0);
+    if ticks_per_second.is_none() {
+        set_host_cpu_usage_error(
+            &dashboard,
+            &mut last_host_cpu_usage_error,
+            Some("Host utilization unavailable: sysconf(_SC_CLK_TCK) failed".into()),
+        );
+    }
     let mut next_inspection_at = started;
     let mut next_policy_scan_at = started;
     let mut last_policy_files = None;
@@ -648,6 +718,19 @@ pub fn run_collector(
                         &mut last_cpu_usage_error,
                         Some(format!("Snake utilization unavailable: {error:#}")),
                     );
+                }
+            }
+            if let Some(ticks_per_second) = ticks_per_second {
+                match read_host_cpu_times(&options.proc_root) {
+                    Ok(cpus) => {
+                        dashboard.ingest_host_cpu_times(now_ms, ticks_per_second, &cpus);
+                        set_host_cpu_usage_error(&dashboard, &mut last_host_cpu_usage_error, None);
+                    }
+                    Err(error) => set_host_cpu_usage_error(
+                        &dashboard,
+                        &mut last_host_cpu_usage_error,
+                        Some(format!("Host utilization unavailable: {error:#}")),
+                    ),
                 }
             }
             if Instant::now() >= next_inspection_at {
@@ -953,6 +1036,17 @@ fn set_cpu_usage_error(
 ) {
     if *previous != error {
         dashboard.set_cpu_usage_error(error.clone());
+        *previous = error;
+    }
+}
+
+fn set_host_cpu_usage_error(
+    dashboard: &Dashboard,
+    previous: &mut Option<String>,
+    error: Option<String>,
+) {
+    if *previous != error {
+        dashboard.set_host_cpu_usage_error(error.clone());
         *previous = error;
     }
 }

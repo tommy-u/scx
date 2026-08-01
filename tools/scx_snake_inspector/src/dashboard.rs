@@ -13,7 +13,8 @@ use tokio::sync::watch;
 use crate::model::{
     summarize_callback_timing, CallbackTimingCounters, CallbackTimingHistory,
     CallbackTimingSnapshot, CellMetricCounters, CellMetricHistory, CellMetricWindow, CpuPair,
-    CpuUsageHistory, RollingHistory, WindowError, CALLBACK_NAMES, CALLBACK_TIMING_BUCKETS,
+    CpuUsageHistory, HostCpuTimeCounters, HostCpuTimeHistory, HostCpuTimeWindow, RollingHistory,
+    WindowError, CALLBACK_NAMES, CALLBACK_TIMING_BUCKETS,
 };
 use crate::policies::PolicyCatalog;
 use crate::scope::TaskScope;
@@ -51,6 +52,24 @@ pub struct CpuUsageView {
     pub utilization_pct: f64,
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub struct HostCpuUsageView {
+    pub cpu: u32,
+    pub total_ns: u64,
+    pub task_ns: u64,
+    pub snake_ns: u64,
+    pub cell_ns: Option<u64>,
+    pub other_task_ns: u64,
+    pub hardirq_ns: u64,
+    pub softirq_ns: u64,
+    pub idle_ns: u64,
+    pub iowait_ns: u64,
+    pub steal_ns: u64,
+    pub unattributed_snake_ns: Option<u64>,
+    pub cell_overage_ns: Option<u64>,
+    pub source_overage_ns: u64,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CellStatsStatus {
@@ -67,6 +86,7 @@ pub struct CellStatsRowView {
     pub index: u32,
     pub primary_cpu_count: usize,
     pub runtime_ns: u64,
+    pub runtime_ns_by_cpu: Option<BTreeMap<u32, u64>>,
     pub primary_runtime_ns: u64,
     pub borrowed_runtime_ns: u64,
     pub lent_runtime_ns: u64,
@@ -300,6 +320,10 @@ pub struct SnapshotView {
     pub cpu_usage_scope: &'static str,
     pub cpu_usage_error: Option<String>,
     pub cpu_usage: Vec<CpuUsageView>,
+    pub host_cpu_usage_observed_ms: u64,
+    pub host_cpu_usage_scope: &'static str,
+    pub host_cpu_usage_error: Option<String>,
+    pub host_cpu_usage: Vec<HostCpuUsageView>,
     pub cell_stats: CellStatsView,
     pub cells: Vec<CellView>,
 }
@@ -307,9 +331,12 @@ pub struct SnapshotView {
 struct LiveData {
     history: RollingHistory,
     cpu_history: CpuUsageHistory,
+    host_cpu_history: HostCpuTimeHistory,
     cell_history: CellMetricHistory,
     now_ms: u64,
     cpu_now_ms: u64,
+    host_cpu_now_ms: u64,
+    host_ticks_per_second: Option<u64>,
     top_policy_generation: Option<u64>,
     top_cells_present: Option<bool>,
     sequence: u64,
@@ -319,6 +346,7 @@ struct LiveData {
     pair_map_failures: u64,
     task_storage_failures: u64,
     cpu_usage_error: Option<String>,
+    host_cpu_usage_error: Option<String>,
     inspection_sequence: u64,
     inspection_error: Option<String>,
     inspection: Option<serde_json::Value>,
@@ -347,9 +375,12 @@ impl Dashboard {
             live: Arc::new(RwLock::new(LiveData {
                 history: RollingHistory::new(max_window_ms),
                 cpu_history: CpuUsageHistory::new(max_window_ms),
+                host_cpu_history: HostCpuTimeHistory::new(max_window_ms),
                 cell_history: CellMetricHistory::new(max_window_ms),
                 now_ms: 0,
                 cpu_now_ms: 0,
+                host_cpu_now_ms: 0,
+                host_ticks_per_second: None,
                 top_policy_generation: None,
                 top_cells_present: None,
                 sequence: 0,
@@ -363,6 +394,7 @@ impl Dashboard {
                 pair_map_failures: 0,
                 task_storage_failures: 0,
                 cpu_usage_error: None,
+                host_cpu_usage_error: None,
                 inspection_sequence: 0,
                 inspection_error: None,
                 inspection: None,
@@ -408,9 +440,12 @@ impl Dashboard {
             let mut live = self.live.write().expect("dashboard lock poisoned");
             live.history.reset(at_ms, baseline);
             live.cpu_history.reset(at_ms);
+            live.host_cpu_history.clear();
             live.cell_history.clear();
             live.now_ms = at_ms;
             live.cpu_now_ms = at_ms;
+            live.host_cpu_now_ms = at_ms;
+            live.host_ticks_per_second = None;
             live.top_policy_generation = None;
             live.top_cells_present = None;
             live.sequence = live.sequence.wrapping_add(1);
@@ -424,9 +459,12 @@ impl Dashboard {
             let mut live = self.live.write().expect("dashboard lock poisoned");
             live.history.reset(at_ms, baseline);
             live.cpu_history.reset(at_ms);
+            live.host_cpu_history.clear();
             live.cell_history.clear();
             live.now_ms = at_ms;
             live.cpu_now_ms = at_ms;
+            live.host_cpu_now_ms = at_ms;
+            live.host_ticks_per_second = None;
             live.top_policy_generation = None;
             live.top_cells_present = None;
             live.inspection = None;
@@ -457,8 +495,11 @@ impl Dashboard {
         let sequence = {
             let mut live = self.live.write().expect("dashboard lock poisoned");
             live.cpu_history.reset(at_ms);
+            live.host_cpu_history.clear();
             live.cell_history.clear();
             live.cpu_now_ms = at_ms;
+            live.host_cpu_now_ms = at_ms;
+            live.host_ticks_per_second = None;
             live.top_policy_generation = None;
             live.top_cells_present = None;
             live.sequence = live.sequence.wrapping_add(1);
@@ -482,6 +523,32 @@ impl Dashboard {
         self.updates.send_replace(sequence);
     }
 
+    pub fn ingest_host_cpu_times(
+        &self,
+        at_ms: u64,
+        ticks_per_second: u64,
+        cpus: &BTreeMap<u32, HostCpuTimeCounters>,
+    ) {
+        if ticks_per_second == 0 {
+            return;
+        }
+        let sequence = {
+            let mut live = self.live.write().expect("dashboard lock poisoned");
+            if live
+                .host_ticks_per_second
+                .is_some_and(|previous| previous != ticks_per_second)
+            {
+                live.host_cpu_history.clear();
+            }
+            live.host_cpu_history.ingest(at_ms, cpus);
+            live.host_cpu_now_ms = at_ms;
+            live.host_ticks_per_second = Some(ticks_per_second);
+            live.sequence = live.sequence.wrapping_add(1);
+            live.sequence
+        };
+        self.updates.send_replace(sequence);
+    }
+
     pub fn ingest_top_metrics(
         &self,
         at_ms: u64,
@@ -496,6 +563,7 @@ impl Dashboard {
                 .is_some_and(|previous| previous != policy_generation);
             if generation_changed {
                 live.cpu_history.reset(at_ms);
+                live.host_cpu_history.clear();
             } else {
                 live.cpu_history.ingest(at_ms, runtime_ns);
             }
@@ -560,6 +628,16 @@ impl Dashboard {
         let sequence = {
             let mut live = self.live.write().expect("dashboard lock poisoned");
             live.cpu_usage_error = error;
+            live.sequence = live.sequence.wrapping_add(1);
+            live.sequence
+        };
+        self.updates.send_replace(sequence);
+    }
+
+    pub fn set_host_cpu_usage_error(&self, error: Option<String>) {
+        let sequence = {
+            let mut live = self.live.write().expect("dashboard lock poisoned");
+            live.host_cpu_usage_error = error;
             live.sequence = live.sequence.wrapping_add(1);
             live.sequence
         };
@@ -813,6 +891,9 @@ impl Dashboard {
         let live = self.live.read().expect("dashboard lock poisoned");
         let view = live.history.view(live.now_ms, window_ms)?;
         let cpu_view = live.cpu_history.view(live.cpu_now_ms, window_ms)?;
+        let host_cpu_view = live
+            .host_cpu_history
+            .view(live.host_cpu_now_ms, window_ms)?;
         let cell_window = live.cell_history.view(live.cpu_now_ms, window_ms)?;
         let cells = view
             .cells
@@ -830,8 +911,8 @@ impl Dashboard {
         };
         let cpu_usage = cpu_view
             .runtime_ns
-            .into_iter()
-            .map(|(cpu, runtime_ns)| {
+            .iter()
+            .map(|(&cpu, &runtime_ns)| {
                 let utilization_pct = if cpu_view.observed_ms == 0 {
                     0.0
                 } else {
@@ -844,6 +925,12 @@ impl Dashboard {
                 }
             })
             .collect();
+        let host_cpu_usage = host_cpu_usage_view(
+            &host_cpu_view,
+            live.host_ticks_per_second,
+            &cpu_view.runtime_ns,
+            cell_window.as_ref(),
+        );
         let cell_stats = cell_stats_view(&live, window_ms, cell_window.as_ref());
 
         Ok(SnapshotView {
@@ -863,6 +950,10 @@ impl Dashboard {
             cpu_usage_scope: "all_snake_tasks",
             cpu_usage_error: live.cpu_usage_error.clone(),
             cpu_usage,
+            host_cpu_usage_observed_ms: host_cpu_view.observed_ms,
+            host_cpu_usage_scope: "all_host_work",
+            host_cpu_usage_error: live.host_cpu_usage_error.clone(),
+            host_cpu_usage,
             cell_stats,
             cells,
         })
@@ -1066,6 +1157,7 @@ fn cell_stats_row(
         index: cell.index,
         primary_cpu_count,
         runtime_ns: cell.runtime_ns,
+        runtime_ns_by_cpu: cell.runtime_ns_by_cpu.clone(),
         primary_runtime_ns: cell.primary_runtime_ns,
         borrowed_runtime_ns: cell.borrowed_runtime_ns,
         lent_runtime_ns: cell.lent_runtime_ns,
@@ -1098,6 +1190,82 @@ fn percentage(numerator: u64, denominator: u64) -> Option<f64> {
 
 fn per_second(count: u64, observed_ms: u64) -> Option<f64> {
     (observed_ms > 0).then(|| count as f64 * 1_000.0 / observed_ms as f64)
+}
+
+fn host_cpu_usage_view(
+    window: &HostCpuTimeWindow,
+    ticks_per_second: Option<u64>,
+    snake_runtime_ns: &BTreeMap<u32, u64>,
+    cell_window: Option<&CellMetricWindow>,
+) -> Vec<HostCpuUsageView> {
+    let Some(ticks_per_second) = ticks_per_second.filter(|ticks| *ticks > 0) else {
+        return Vec::new();
+    };
+    let cell_runtime_ns = cell_window.and_then(|window| {
+        if window.cells.is_empty()
+            || window
+                .cells
+                .values()
+                .any(|cell| cell.runtime_ns_by_cpu.is_none())
+        {
+            return None;
+        }
+        let mut cpus = BTreeMap::<u32, u64>::new();
+        for cell in window.cells.values() {
+            for (&cpu, &runtime_ns) in cell
+                .runtime_ns_by_cpu
+                .as_ref()
+                .expect("cell attribution support was checked")
+            {
+                let total = cpus.entry(cpu).or_default();
+                *total = total.saturating_add(runtime_ns);
+            }
+        }
+        Some(cpus)
+    });
+
+    window
+        .cpus
+        .iter()
+        .map(|(&cpu, counters)| {
+            let task_ns = ticks_to_ns(counters.task_ticks, ticks_per_second);
+            let hardirq_ns = ticks_to_ns(counters.irq_ticks, ticks_per_second);
+            let softirq_ns = ticks_to_ns(counters.softirq_ticks, ticks_per_second);
+            let idle_ns = ticks_to_ns(counters.idle_ticks, ticks_per_second);
+            let iowait_ns = ticks_to_ns(counters.iowait_ticks, ticks_per_second);
+            let steal_ns = ticks_to_ns(counters.steal_ticks, ticks_per_second);
+            let snake_ns = snake_runtime_ns.get(&cpu).copied().unwrap_or(0);
+            let cell_ns = cell_runtime_ns
+                .as_ref()
+                .map(|runtime| runtime.get(&cpu).copied().unwrap_or(0));
+            HostCpuUsageView {
+                cpu,
+                total_ns: task_ns
+                    .saturating_add(hardirq_ns)
+                    .saturating_add(softirq_ns)
+                    .saturating_add(idle_ns)
+                    .saturating_add(iowait_ns)
+                    .saturating_add(steal_ns),
+                task_ns,
+                snake_ns,
+                cell_ns,
+                other_task_ns: task_ns.saturating_sub(snake_ns),
+                hardirq_ns,
+                softirq_ns,
+                idle_ns,
+                iowait_ns,
+                steal_ns,
+                unattributed_snake_ns: cell_ns.map(|cell_ns| snake_ns.saturating_sub(cell_ns)),
+                cell_overage_ns: cell_ns.map(|cell_ns| cell_ns.saturating_sub(snake_ns)),
+                source_overage_ns: snake_ns.saturating_sub(task_ns),
+            }
+        })
+        .collect()
+}
+
+fn ticks_to_ns(ticks: u64, ticks_per_second: u64) -> u64 {
+    ((u128::from(ticks) * 1_000_000_000_u128) / u128::from(ticks_per_second))
+        .min(u128::from(u64::MAX)) as u64
 }
 
 const QUEUE_RESIDENCE_BUCKETS: usize = 64;
