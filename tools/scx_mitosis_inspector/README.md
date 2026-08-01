@@ -20,8 +20,12 @@ sudo tools/scx_mitosis_inspector/target/release/scx_mitosis_inspector \
 The process needs permission to enumerate loaded BPF programs and load tracing
 BPF programs. The default listen address is `0.0.0.0:44105`.
 
-The callback view is served at `/`. `/system` reports host CPU, pressure,
-memory, frequency, and network data from procfs/sysfs. `/stats` is the third,
+The callback view is served at `/`. Its section explorer links to each table,
+and **Download snapshot** exports all four JSON APIs in one diagnostic file.
+The probe-status table reports which measurement groups are active, disabled,
+or unavailable and whether each group is exact or sampled. `/system` reports
+host CPU, pressure, memory, frequency, network, and sched_ext lifecycle data
+from procfs/sysfs. `/stats` is the third,
 scheduler-only page: it reads the existing Mitosis `top` stats operation from
 `/var/run/scx/root/stats` and renders every global and per-cell field without
 changing the scheduler. Override the socket with `--stats-path` when needed.
@@ -43,7 +47,8 @@ task lifecycle totals with per-second rates.
 Softirq entry and exit tracepoints provide per-vector counts, rates, and
 duration percentiles.
 Hard IRQ entry and exit tracepoints provide per-IRQ counts, rates, duration
-percentiles, and explicit correlation-loss counters.
+percentiles, explicit correlation-loss counters, and device/action names from
+`/proc/interrupts` when the host exposes them.
 The migration heatmap includes a per-CPU IRQ utilization band from kernel CPU
 accounting, split into hardirq and softirq time in its tooltip.
 When block request tracepoints are available, the inspector reports request

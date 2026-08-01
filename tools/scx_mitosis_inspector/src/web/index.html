@@ -28,6 +28,23 @@
           <a href="/system">System</a>
           <a href="/stats">Scheduler</a>
         </nav>
+        <nav class="section-navigation" id="sectionNavigation" aria-label="Callback page sections">
+          <span class="navigation-group-label">On this page</span>
+          <a href="#overview">Overview</a>
+          <a href="#probe-manifest">Probe status</a>
+          <a href="#counterGrid">Callback counters</a>
+          <a href="#callback-latency">Callback latency</a>
+          <a href="#bpf-runtime">BPF runtime</a>
+          <a href="#inspector-overhead">Inspector overhead</a>
+          <a href="#scheduler-activity">Scheduler activity</a>
+          <a href="#softirq-activity">Softirqs</a>
+          <a href="#hardirq-activity">Hard IRQs</a>
+          <a href="#block-io">Block I/O</a>
+          <a href="#scheduler-latency">Scheduler latency</a>
+          <a href="#dsq-performance">DSQ performance</a>
+          <a href="#cpu-utilization">CPU utilization</a>
+          <a href="#migration-locality">Migration locality</a>
+        </nav>
         <button class="workspace-feedback-button" id="openFeedback" type="button" aria-controls="feedbackDrawer">
           <span>Review feedback</span>
           <span class="feedback-count" id="feedbackCount" aria-label="0 feedback drafts">0</span>
@@ -35,10 +52,16 @@
       </aside>
 
       <main id="app" tabindex="-1" aria-label="Mitosis callback inspector">
-        <header class="view-heading">
+        <header class="view-heading" id="overview">
           <div>
             <h2>Callback counters</h2>
             <p>Primary scheduler callbacks</p>
+          </div>
+          <div class="view-actions">
+            <button class="snapshot-download-button" id="downloadSnapshot" type="button">
+              Download snapshot
+            </button>
+            <span class="snapshot-download-status" id="snapshotDownloadStatus" role="status" aria-live="polite"></span>
           </div>
         </header>
 
@@ -51,6 +74,26 @@
             <div><dt>Inspector uptime</dt><dd id="uptime">0s</dd></div>
             <div><dt>Last refresh</dt><dd id="refreshed">--</dd></div>
           </dl>
+        </section>
+
+        <section class="table-section" id="probe-manifest" aria-labelledby="probeManifestHeading" data-feedback-key="Callbacks:Probe-status">
+          <div class="table-section-heading">
+            <h2 id="probeManifestHeading">Probe status</h2>
+            <p>Loaded measurement groups and collection mode</p>
+          </div>
+          <div class="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">Probe group</th>
+                  <th scope="col">Status</th>
+                  <th scope="col">Mode</th>
+                  <th scope="col">Scope</th>
+                </tr>
+              </thead>
+              <tbody id="probeManifestRows"></tbody>
+            </table>
+          </div>
         </section>
 
         <section class="counter-grid" id="counterGrid" aria-label="Callback counters" data-feedback-key="Callbacks:Counters">
@@ -86,7 +129,7 @@
           </article>
         </section>
 
-        <section class="table-section" aria-labelledby="callbackTimingHeading" data-feedback-key="Callbacks:Latency">
+        <section class="table-section" id="callback-latency" aria-labelledby="callbackTimingHeading" data-feedback-key="Callbacks:Latency">
           <div class="table-section-heading">
             <h2 id="callbackTimingHeading">Callback latency</h2>
             <p>Sampling <strong id="callbackTimingSampleRate">--</strong></p>
@@ -108,7 +151,7 @@
           </div>
         </section>
 
-        <section class="table-section" aria-labelledby="bpfRuntimeHeading" data-feedback-key="Callbacks:BPF-runtime">
+        <section class="table-section" id="bpf-runtime" aria-labelledby="bpfRuntimeHeading" data-feedback-key="Callbacks:BPF-runtime">
           <div class="table-section-heading">
             <h2 id="bpfRuntimeHeading">BPF program runtime</h2>
             <p id="bpfRuntimeStatus">Checking kernel counters</p>
@@ -131,7 +174,7 @@
           </div>
         </section>
 
-        <section class="table-section" aria-labelledby="inspectorOverheadHeading" data-feedback-key="Callbacks:Inspector-overhead">
+        <section class="table-section" id="inspector-overhead" aria-labelledby="inspectorOverheadHeading" data-feedback-key="Callbacks:Inspector-overhead">
           <div class="table-section-heading">
             <h2 id="inspectorOverheadHeading">Inspector BPF overhead</h2>
             <p id="inspectorOverheadStatus">Checking kernel runtime counters</p>
@@ -158,7 +201,7 @@
           </div>
         </section>
 
-        <section class="table-section" aria-labelledby="schedulerEventsHeading" data-feedback-key="Callbacks:Scheduler-events">
+        <section class="table-section" id="scheduler-activity" aria-labelledby="schedulerEventsHeading" data-feedback-key="Callbacks:Scheduler-events">
           <div class="table-section-heading">
             <h2 id="schedulerEventsHeading">Scheduler activity</h2>
             <p>Exact tracepoint counters</p>
@@ -177,7 +220,7 @@
           </div>
         </section>
 
-        <section class="table-section" aria-labelledby="softirqHeading" data-feedback-key="Callbacks:Softirq-latency">
+        <section class="table-section" id="softirq-activity" aria-labelledby="softirqHeading" data-feedback-key="Callbacks:Softirq-latency">
           <div class="table-section-heading">
             <h2 id="softirqHeading">Softirq activity</h2>
             <p>Exact entry and duration counters</p>
@@ -201,7 +244,7 @@
           </div>
         </section>
 
-        <section class="table-section" aria-labelledby="hardirqHeading" data-feedback-key="Callbacks:Hardirq-latency">
+        <section class="table-section" id="hardirq-activity" aria-labelledby="hardirqHeading" data-feedback-key="Callbacks:Hardirq-latency">
           <div class="table-section-heading">
             <h2 id="hardirqHeading">Hard IRQ activity</h2>
             <p id="hardirqStatus">Checking kernel IRQ tracepoints</p>
@@ -211,6 +254,7 @@
               <thead>
                 <tr>
                   <th scope="col">IRQ</th>
+                  <th scope="col">Device / action</th>
                   <th scope="col">Total</th>
                   <th scope="col">Rate / second</th>
                   <th scope="col">Samples</th>
@@ -225,7 +269,7 @@
           </div>
         </section>
 
-        <section class="table-section" aria-labelledby="blockIoHeading" data-feedback-key="Callbacks:Block-IO">
+        <section class="table-section" id="block-io" aria-labelledby="blockIoHeading" data-feedback-key="Callbacks:Block-IO">
           <div class="table-section-heading">
             <h2 id="blockIoHeading">Block I/O</h2>
             <p id="blockIoStatus">Checking kernel block tracepoints</p>
@@ -243,7 +287,7 @@
           </div>
         </section>
 
-        <section class="table-section" aria-labelledby="schedulerTimingHeading" data-feedback-key="Callbacks:Scheduler-latency">
+        <section class="table-section" id="scheduler-latency" aria-labelledby="schedulerTimingHeading" data-feedback-key="Callbacks:Scheduler-latency">
           <div class="table-section-heading">
             <h2 id="schedulerTimingHeading">Scheduler latency</h2>
             <p>Sampling <strong id="eventTimingSampleRate">--</strong></p>
@@ -265,7 +309,7 @@
           </div>
         </section>
 
-        <section class="table-section" aria-labelledby="dsqHeading" data-feedback-key="Callbacks:DSQ-performance">
+        <section class="table-section" id="dsq-performance" aria-labelledby="dsqHeading" data-feedback-key="Callbacks:DSQ-performance">
           <div class="table-section-heading">
             <h2 id="dsqHeading">DSQ performance</h2>
             <p id="dsqStatus">Checking kernel DSQ probes</p>
@@ -283,7 +327,7 @@
           </div>
         </section>
 
-        <section class="table-section" aria-labelledby="cpuUtilizationHeading" data-feedback-key="Callbacks:CPU-utilization">
+        <section class="table-section" id="cpu-utilization" aria-labelledby="cpuUtilizationHeading" data-feedback-key="Callbacks:CPU-utilization">
           <div class="table-section-heading">
             <h2 id="cpuUtilizationHeading">CPU utilization</h2>
             <p>Whole host <strong id="overallCpuUtilization">--</strong></p>
@@ -319,7 +363,7 @@
           </div>
         </section>
 
-        <section class="table-section migration-section" aria-labelledby="migrationHeading" data-feedback-key="Callbacks:CPU-migration-matrix">
+        <section class="table-section migration-section" id="migration-locality" aria-labelledby="migrationHeading" data-feedback-key="Callbacks:CPU-migration-matrix">
           <div class="table-section-heading migration-heading">
             <div>
               <h2 id="migrationHeading">CPU migration matrix</h2>
