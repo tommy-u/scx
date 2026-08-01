@@ -10,6 +10,43 @@
 #include "queue_timing.h"
 #include "timing.h"
 
+static __always_inline int queue_try_direct_from_enqueue(
+	struct snake_ladder_ctx *ctx, struct task_struct *p, u64 enq_flags,
+	const struct snake_fine_timing_ctx *fine, u64 callback_started_at)
+{
+	struct snake_ladder_walk_args walk_args = {
+		.prev_cpu = scx_bpf_task_cpu(p),
+		.queue_cell_index = SNAKE_QUEUE_CELL_NONE,
+		.wake_flags = 0,
+		.dispatch_flags = 0,
+		.callback_started_at = callback_started_at,
+	};
+	s32 cpu, ret;
+
+	if (!queue_cell_mode_enabled() || !queue_direct_dispatch_enabled(ctx) ||
+	    __COMPAT_is_enq_cpu_selected(enq_flags))
+		return 0;
+	cpu = walk_policy_ladder(ctx, p, &walk_args);
+	if (cpu == -ENOENT)
+		return 0;
+	if (cpu < 0)
+		return cpu;
+	if (walk_args.dispatch_flags & SNAKE_SELECT_F_BORROWED)
+		ret = queue_fairness_direct_borrow(
+			ctx, p, cpu, walk_args.queue_cell_index, fine);
+	else if (walk_args.dispatch_flags & SNAKE_SELECT_F_AFFINITY)
+		ret = queue_fairness_direct_affinity(
+			ctx, p, cpu, walk_args.queue_cell_index, fine);
+	else
+		ret = queue_fairness_direct_primary(
+			ctx, p, cpu, walk_args.queue_cell_index, fine);
+	if (ret)
+		return ret;
+	stat_inc(ctx, SNAKE_STAT_DIRECT_DISPATCHES);
+	scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
+	return 1;
+}
+
 /* Route enqueue through the active queue topology or global fairness policy. */
 static __noinline int
 scheduler_mode_enqueue(struct snake_ladder_ctx *ctx, struct task_struct *p,
@@ -22,6 +59,12 @@ scheduler_mode_enqueue(struct snake_ladder_ctx *ctx, struct task_struct *p,
 	if (queue_topology_enabled()) {
 		if (queue_transition_active())
 			return queue_transition_enqueue(ctx, p, enq_flags, fine);
+		ret = queue_try_direct_from_enqueue(
+			ctx, p, enq_flags, fine, callback_started_at);
+		if (ret < 0)
+			return ret;
+		if (ret > 0)
+			return 0;
 		ret = queue_ladder_enqueue(ctx, p, enq_flags, fine,
 					   callback_started_at);
 		if (ret == -EAGAIN)

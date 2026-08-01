@@ -178,6 +178,12 @@ remain in the direct child's cell while their own narrower cpusets continue to
 constrain task execution. See
 [`examples/managed-cell-llc.toml`](examples/managed-cell-llc.toml).
 
+[`examples/mitosis-sim.toml`](examples/mitosis-sim.toml) is the Production
+managed-cell profile. It combines dynamic child-cgroup cells, cell/LLC queues,
+Mitosis-style preferred idle selection, cell-aware direct dispatch, borrowing,
+and combined `min_vtime` dispatch. Demand rebalancing, queued-work stealing,
+and slice shrinking are intentionally outside this profile.
+
 ### Queue policies
 
 The `llc` layout keeps one global VTIME clock while userspace creates one normal
@@ -251,9 +257,10 @@ already become table IDs and masks.
 
 The backend command set is deliberately small: `claim_idle`, `pick_idle`,
 `pick_idle_mask_table`, `pick_random_idle`, `pick_idle_queue_mask`,
-`kernel_default`, and `sync_wake_affine`. Inputs select a CPU, the task's
-allowed mask, a placement-only cell, or a dense queue cell. Flags refine the
-operation, and `data` carries table IDs or a primary/borrowable selector.
+`pick_idle_prefer_previous`, `kernel_default`, and `sync_wake_affine`. Inputs
+select a CPU, the task's allowed mask, a placement-only cell, a dense queue
+cell, or restricted affinity. Flags refine the operation, and `data` carries
+table IDs or a primary, borrowable, or local-LLC selector.
 Userspace writes the compiled ladder and masks into an inactive BPF map slot,
 asks BPF to validate it, then atomically makes that slot active.
 
@@ -266,8 +273,11 @@ uses one normal DSQ plus per-CPU affinity DSQs under one clock; EEVDF uses
 global future and eligible DSQs with an aggregate clock.
 
 With `[queues]`, an ordinary selection records a CPU hint and still flows
-through the configured enqueue ladder. Cell layouts choose a normal cell DSQ or
-a per-CPU affinity escape and dispatch them cyclically or by `min_vtime`. The
+through the configured enqueue ladder unless `direct_dispatch = true`. Cell
+direct dispatch routes primary, borrowed, and restricted-affinity hits to the
+correct local DSQ; `enqueue` retries the same ladder when sched_ext skipped
+`select_cpu`. Cell layouts otherwise choose a normal cell DSQ or a per-CPU
+affinity escape and dispatch them cyclically or by `min_vtime`. The
 global `llc` layout instead tries its local normal DSQ, falls back to a CPU DSQ,
 and compares CPU, local, and one remotely scanned head. A successful
 `task_cell_borrowable` rung is the cell-layout exception: it verifies the
@@ -292,9 +302,10 @@ sudo ./target/release/scx_snake \
   --stats 1
 ```
 
-FIFO is the default. The `--fairness vtime` and `--fairness eevdf` modes are
-experimental and should be used only in disposable VMs; changing fairness
-requires a restart. EEVDF's affinity-constrained forward-progress test passes,
+FIFO is the default. VTIME is required by queue profiles, including the
+Production `mitosis-sim.toml` profile. Other custom VTIME policies and the
+`--fairness eevdf` mode remain experimental; changing fairness requires a
+restart. EEVDF's affinity-constrained forward-progress test passes,
 but its nice-level weighted-share validation is not yet correct. See
 [Fairness in scx_snake](docs/FAIRNESS.md) for the clocks, queues, task
 accounting, placement interaction, and current limitations.

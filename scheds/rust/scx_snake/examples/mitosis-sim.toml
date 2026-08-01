@@ -1,0 +1,35 @@
+# Production profile that mirrors Mitosis placement and queueing semantics.
+# Direct children of the workload parent receive cells dynamically; descendants
+# inherit the direct child's cell while retaining narrower cpuset restrictions.
+fallback = "previous_cpu"
+
+[managed_cells]
+parent = "/workload.slice/workload-tw.slice"
+exclude_children = ["systemd-workaround.service"]
+max_children = 31
+reconcile_ms = 1000
+
+[queues]
+layout = "cell_llc"
+cell0_cpu_weight = 1
+direct_dispatch = true
+enqueue = [{ target = "cell" }, { target = "affinity" }]
+dispatch = [{ operation = "min_vtime" }]
+
+# Prefer the previous CPU at every locality level, then an idle core, the
+# previous idle CPU, and finally any idle CPU in that level.
+[[rung]]
+operation = "pick_idle_prefer_previous"
+scope = "task_cell_llc"
+
+[[rung]]
+operation = "pick_idle_prefer_previous"
+scope = "task_cell"
+
+[[rung]]
+operation = "pick_idle_prefer_previous"
+scope = "task_cell_borrowable"
+
+[[rung]]
+operation = "pick_idle_prefer_previous"
+scope = "task_allowed_restricted"

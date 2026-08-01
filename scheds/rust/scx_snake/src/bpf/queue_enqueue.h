@@ -68,14 +68,15 @@ queue_global_enqueue_cpu(struct snake_ladder_ctx *ctx, struct task_struct *p,
 	return 0;
 }
 
-static __always_inline int
-queue_fairness_direct_borrow(struct snake_ladder_ctx *ctx,
-			     struct task_struct *p, s32 cpu, u32 cell_index,
-			     const struct snake_fine_timing_ctx *fine)
+static __always_inline int queue_fairness_direct_insert(
+	struct snake_ladder_ctx *ctx, struct task_struct *p, s32 cpu,
+	u32 cell_index, u32 queue_class, u32 mask_kind,
+	const struct snake_fine_timing_ctx *fine)
 {
 	struct snake_task_runtime *runtime;
 	struct snake_queue_cell	  *cell;
 	struct snake_cpu_queue	  *cpuq;
+	const struct cpumask	  *mask;
 
 	runtime = queue_fairness_prepare_runnable_for_cell(ctx, p, cell_index,
 							   false, NULL);
@@ -84,11 +85,24 @@ queue_fairness_direct_borrow(struct snake_ladder_ctx *ctx,
 		return -EINVAL;
 	cell = queue_cell(ctx, cell_index);
 	cpuq = queue_cpu(ctx, cpu);
-	if (!cell || !cpuq || !queue_mask_contains(&cell->borrowable, cpu) ||
-	    cpuq->owner_cell_index == cell_index)
+	if (!cell || !cpuq)
 		return -EINVAL;
+	if (queue_class == SNAKE_QUEUE_CLASS_AFFINITY) {
+		if (queue_fairness_prepare_affinity(ctx, runtime,
+						    cpuq->owner_cell_index))
+			return -EINVAL;
+	} else {
+		mask = queue_cell_mask(ctx, cell_index, mask_kind);
+		if (!mask || !bpf_cpumask_test_cpu(cpu, mask))
+			return -EINVAL;
+		if ((mask_kind == SNAKE_QUEUE_MASK_PRIMARY &&
+		     cpuq->owner_cell_index != cell_index) ||
+		    (mask_kind == SNAKE_QUEUE_MASK_BORROWABLE &&
+		     cpuq->owner_cell_index == cell_index))
+			return -EINVAL;
+	}
 	task_route_clear_selected_cpu(runtime);
-	runtime->queue_class	   = SNAKE_QUEUE_CLASS_NORMAL;
+	runtime->queue_class	   = queue_class;
 	runtime->run_direct	   = 1;
 	runtime->direct_cell_index = cell_index;
 	runtime->direct_cell_valid = 1;
@@ -98,6 +112,36 @@ queue_fairness_direct_borrow(struct snake_ladder_ctx *ctx,
 		return -EINVAL;
 	queue_timing_record_insert(ctx, p, dsq_local_on(cpu), cell_index, fine);
 	return 0;
+}
+
+static __noinline int
+queue_fairness_direct_primary(struct snake_ladder_ctx *ctx,
+			      struct task_struct *p, s32 cpu, u32 cell_index,
+			      const struct snake_fine_timing_ctx *fine)
+{
+	return queue_fairness_direct_insert(
+		ctx, p, cpu, cell_index, SNAKE_QUEUE_CLASS_NORMAL,
+		SNAKE_QUEUE_MASK_PRIMARY, fine);
+}
+
+static __noinline int
+queue_fairness_direct_borrow(struct snake_ladder_ctx *ctx,
+			     struct task_struct *p, s32 cpu, u32 cell_index,
+			     const struct snake_fine_timing_ctx *fine)
+{
+	return queue_fairness_direct_insert(
+		ctx, p, cpu, cell_index, SNAKE_QUEUE_CLASS_NORMAL,
+		SNAKE_QUEUE_MASK_BORROWABLE, fine);
+}
+
+static __noinline int
+queue_fairness_direct_affinity(struct snake_ladder_ctx *ctx,
+			       struct task_struct *p, s32 cpu, u32 cell_index,
+			       const struct snake_fine_timing_ctx *fine)
+{
+	return queue_fairness_direct_insert(
+		ctx, p, cpu, cell_index, SNAKE_QUEUE_CLASS_AFFINITY,
+		SNAKE_QUEUE_MASK_INVALID, fine);
 }
 
 static __always_inline int

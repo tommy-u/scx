@@ -296,7 +296,7 @@ fn aggregate_view_turns_a_dead_shard_into_terminal_failures() {
 }
 
 #[test]
-fn repository_policy_library_expands_to_36_rows_and_144_cases() {
+fn repository_policy_library_expands_to_37_rows_and_148_cases() {
     let policy_dir =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../scheds/rust/scx_snake/examples");
     let files = discover_policy_files(&policy_dir).unwrap();
@@ -322,16 +322,16 @@ fn repository_policy_library_expands_to_36_rows_and_144_cases() {
 
     let matrix = build_matrix(&catalog, MatrixConfig::new(60, 0, 1).unwrap());
 
-    assert_eq!(catalog.policies.len(), 16);
+    assert_eq!(catalog.policies.len(), 17);
     assert_eq!(
         matrix
             .groups
             .iter()
             .map(|group| group.rows.len())
             .sum::<usize>(),
-        36
+        37
     );
-    assert_eq!(matrix.total_cases, 144);
+    assert_eq!(matrix.total_cases, 148);
     assert!(matrix.catalog_fingerprint.starts_with("fnv1a64:"));
 }
 

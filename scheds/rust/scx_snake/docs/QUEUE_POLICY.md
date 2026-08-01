@@ -3,13 +3,15 @@
 Queue policies replace Snake's default global VTIME storage with a fixed-pool
 custom-DSQ topology. The global `llc` layout shards one fairness
 domain by cache locality; `cell` and `cell_llc` add resource allocation to task
-cell annotations. All queue policies are experimental, require `--fairness
-vtime`, and leave FIFO as the scheduler default.
+cell annotations. Queue policies require `--fairness vtime` and leave FIFO as
+the scheduler default. `mitosis-sim.toml` is the Production profile; the other
+files are component and demonstration policies.
 
 See [`../examples/kernel-default-sim.toml`](../examples/kernel-default-sim.toml),
 [`../examples/cell-queues.toml`](../examples/cell-queues.toml),
 [`../examples/cell-llc-queues.toml`](../examples/cell-llc-queues.toml),
 [`../examples/managed-cell-llc.toml`](../examples/managed-cell-llc.toml),
+[`../examples/mitosis-sim.toml`](../examples/mitosis-sim.toml),
 [`../examples/cell-min-vtime.toml`](../examples/cell-min-vtime.toml), and
 [`../examples/cell-borrowing.toml`](../examples/cell-borrowing.toml) for
 complete policies.
@@ -174,6 +176,12 @@ The cell-layout enqueue ladder is also first-success:
 Targets cannot be duplicated. In cell layouts, `affinity` must be present and
 terminal, and a policy that enqueues to `cell` must dispatch from `cell`.
 
+With `direct_dispatch = true`, a successful cell-routed placement bypasses the
+custom enqueue ladder and inserts directly into the selected CPU's local DSQ.
+Primary, borrowable, and restricted-affinity rungs preserve their respective
+resource route. If sched_ext invokes `enqueue` without first invoking
+`select_cpu`, Snake retries the placement ladder there before queueing.
+
 ## Dispatch ladder
 
 The `llc` dispatch ladder first peeks candidates without moving them:
@@ -283,6 +291,20 @@ Consequently, borrowing does not make an underprovisioned cell safe. Once a
 burst is queued, only the cell's primary CPUs consume its normal DSQs. Assign
 enough primary capacity for sustained backlog, then use borrowing for transient
 idle capacity.
+
+## Mitosis selection ladder
+
+`mitosis-sim.toml` uses `pick_idle_prefer_previous` over four scopes in order:
+the task cell's previous-LLC shard, its complete primary mask, its borrowable
+mask, and the task's allowed mask only when affinity is restricted. Each rung
+tries the previous CPU when its whole SMT core is idle, any idle core, the
+previous idle CPU, and finally any idle CPU. Unrestricted tasks therefore stay
+local when possible, expand gently through their cell, and borrow only after
+primary capacity is busy. Restricted tasks use the terminal affinity route.
+
+This profile models Mitosis cell discovery, CPU ownership, placement, direct
+dispatch, borrowing, and one VTIME domain per cell. It does not implement demand
+rebalancing, queued-work stealing, or slice shrinking.
 
 ## Live updates
 

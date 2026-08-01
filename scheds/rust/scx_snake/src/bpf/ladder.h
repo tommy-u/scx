@@ -103,7 +103,15 @@ static __always_inline bool rung_is_valid(const struct snake_rung *rung,
 		 rung->flags == (SNAKE_RUNG_F_PICK_RANDOM |
 				 SNAKE_RUNG_F_PICK_IDLE_CORE)) &&
 		(rung->data == SNAKE_QUEUE_MASK_PRIMARY ||
-		 rung->data == SNAKE_QUEUE_MASK_BORROWABLE));
+		 rung->data == SNAKE_QUEUE_MASK_BORROWABLE)) ||
+	       (rung->opcode == SNAKE_OP_PICK_IDLE_PREFER_PREVIOUS &&
+		!rung->flags &&
+		((rung->input == SNAKE_INPUT_QUEUE_CELL &&
+		  (rung->data == SNAKE_QUEUE_MASK_PRIMARY ||
+		   rung->data == SNAKE_QUEUE_MASK_BORROWABLE ||
+		   rung->data == SNAKE_QUEUE_MASK_LOCAL_LLC)) ||
+		 (rung->input == SNAKE_INPUT_TASK_ALLOWED_RESTRICTED &&
+		  !rung->data)));
 }
 
 struct snake_rung_exec_args {
@@ -239,6 +247,23 @@ static __noinline s32 execute_rung(const struct snake_ladder_ctx *ctx,
 			queue_cell_index);
 		if (cpu >= 0 && rung->data == SNAKE_QUEUE_MASK_BORROWABLE)
 			*dispatch_flags |= SNAKE_SELECT_F_BORROWED;
+		return cpu;
+	}
+	case SNAKE_OP_PICK_IDLE_PREFER_PREVIOUS: {
+		s32 cpu;
+
+		if (rung->input == SNAKE_INPUT_QUEUE_CELL) {
+			cpu = queue_pick_task_cell_preferred_cpu(
+				ctx, p, rung->data, prev_cpu, queue_cell_index);
+			if (cpu >= 0 &&
+			    rung->data == SNAKE_QUEUE_MASK_BORROWABLE)
+				*dispatch_flags |= SNAKE_SELECT_F_BORROWED;
+			return cpu;
+		}
+		cpu = queue_pick_restricted_preferred_cpu(
+			ctx, p, prev_cpu, queue_cell_index);
+		if (cpu >= 0)
+			*dispatch_flags |= SNAKE_SELECT_F_AFFINITY;
 		return cpu;
 	}
 	default:

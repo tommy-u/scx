@@ -26,6 +26,7 @@ pub enum Opcode {
     KernelDefault = 5,
     SyncWakeAffine = 6,
     PickIdleQueueMask = 7,
+    PickIdlePreferPrevious = 8,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -35,6 +36,7 @@ pub enum InputSource {
     MaskTaskAllowed = 2,
     TaskCell = 3,
     QueueCell = 4,
+    TaskAllowedRestricted = 5,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -42,6 +44,7 @@ pub enum InputSource {
 pub enum QueueMaskKind {
     Primary = 1,
     Borrowable = 2,
+    LocalLlc = 3,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -371,6 +374,7 @@ impl Opcode {
             Self::KernelDefault => "kernel_default",
             Self::SyncWakeAffine => "sync_wake_affine",
             Self::PickIdleQueueMask => "pick_idle_queue_mask",
+            Self::PickIdlePreferPrevious => "pick_idle_prefer_previous",
         }
     }
 }
@@ -382,6 +386,7 @@ impl InputSource {
             Self::MaskTaskAllowed => "mask_task_allowed",
             Self::TaskCell => "task_cell",
             Self::QueueCell => "queue_cell",
+            Self::TaskAllowedRestricted => "task_allowed_restricted",
         }
     }
 }
@@ -579,6 +584,24 @@ pub fn compile_policy(source: &str) -> Result<CompiledPolicy, PolicyError> {
         )?);
     }
 
+    if matches!(
+        queues.as_ref(),
+        Some(queues)
+            if queues.direct_dispatch
+                && matches!(queues.layout, QueueLayout::Cell | QueueLayout::CellLlc)
+    ) {
+        for (index, rung) in rungs.iter().enumerate() {
+            if !matches!(
+                rung.input,
+                InputSource::QueueCell | InputSource::TaskAllowedRestricted
+            ) {
+                return Err(PolicyError(format!(
+                    "rung {index}: cell direct dispatch requires a cell-routed scope"
+                )));
+            }
+        }
+    }
+
     Ok(CompiledPolicy {
         fallback,
         rungs,
@@ -763,11 +786,6 @@ fn compile_queue_policy(
     if layout == QueueLayout::Llc && queues.cell0_cpu_weight.is_some() {
         return Err(PolicyError(
             "queue layout `llc` does not support cell0_cpu_weight".into(),
-        ));
-    }
-    if queues.direct_dispatch && layout != QueueLayout::Llc {
-        return Err(PolicyError(
-            "direct dispatch requires queue layout `llc`".into(),
         ));
     }
     if layout != QueueLayout::Llc && declared_cells >= MAX_QUEUE_CELLS {
@@ -1327,6 +1345,8 @@ fn compile_partitions(
                 | "task_allowed"
                 | "task_cell"
                 | "task_cell_borrowable"
+                | "task_cell_llc"
+                | "task_allowed_restricted"
         ) {
             return Err(PolicyError(format!(
                 "partition {index}: name `{}` is reserved",
@@ -1384,6 +1404,8 @@ fn compile_rung(
             | "task_allowed"
             | "task_cell"
             | "task_cell_borrowable"
+            | "task_cell_llc"
+            | "task_allowed_restricted"
     ) && !partitions.contains_key(&rung.scope)
     {
         return Err(PolicyError(format!(
@@ -1396,17 +1418,64 @@ fn compile_rung(
             "rung {index}: scope `task_cell` requires at least one cell"
         )));
     }
-    if rung.scope == "task_cell_borrowable" && !queue_mode {
+    if matches!(
+        rung.scope.as_str(),
+        "task_cell_borrowable" | "task_cell_llc" | "task_allowed_restricted"
+    ) && !queue_mode
+    {
         return Err(PolicyError(format!(
-            "rung {index}: scope `task_cell_borrowable` requires a [queues] policy"
+            "rung {index}: scope `{}` requires a [queues] policy",
+            rung.scope
         )));
     }
     if queue_layout == Some(QueueLayout::Llc)
-        && matches!(rung.scope.as_str(), "task_cell" | "task_cell_borrowable")
+        && matches!(
+            rung.scope.as_str(),
+            "task_cell" | "task_cell_borrowable" | "task_cell_llc"
+        )
     {
         return Err(PolicyError(
             "queue layout `llc` does not support task-cell scopes".into(),
         ));
+    }
+
+    if rung.operation == "pick_idle_prefer_previous" {
+        return match rung.scope.as_str() {
+            "task_cell_llc" if queue_layout == Some(QueueLayout::CellLlc) => Ok(CompiledRung {
+                opcode: Opcode::PickIdlePreferPrevious,
+                input: InputSource::QueueCell,
+                flags: 0,
+                data: QueueMaskKind::LocalLlc as u64,
+            }),
+            "task_cell" if queue_mode && queue_layout != Some(QueueLayout::Llc) => {
+                Ok(CompiledRung {
+                    opcode: Opcode::PickIdlePreferPrevious,
+                    input: InputSource::QueueCell,
+                    flags: 0,
+                    data: QueueMaskKind::Primary as u64,
+                })
+            }
+            "task_cell_borrowable" if queue_mode && queue_layout != Some(QueueLayout::Llc) => {
+                Ok(CompiledRung {
+                    opcode: Opcode::PickIdlePreferPrevious,
+                    input: InputSource::QueueCell,
+                    flags: 0,
+                    data: QueueMaskKind::Borrowable as u64,
+                })
+            }
+            "task_allowed_restricted" if queue_mode && queue_layout != Some(QueueLayout::Llc) => {
+                Ok(CompiledRung {
+                    opcode: Opcode::PickIdlePreferPrevious,
+                    input: InputSource::TaskAllowedRestricted,
+                    flags: 0,
+                    data: 0,
+                })
+            }
+            _ => Err(PolicyError(format!(
+                "rung {index}: operation `{}` is incompatible with scope `{}`",
+                rung.operation, rung.scope
+            ))),
+        };
     }
 
     if queue_mode
@@ -1652,6 +1721,7 @@ mod tests {
     use super::*;
 
     const KERNEL_DEFAULT_SIM_POLICY: &str = include_str!("../examples/kernel-default-sim.toml");
+    const MITOSIS_SIM_POLICY: &str = include_str!("../examples/mitosis-sim.toml");
 
     const TWO_RUNG_POLICY: &str = r#"
 [[rung]]
@@ -1855,6 +1925,40 @@ scope = "task_cell_borrowable"
     }
 
     #[test]
+    fn compiles_mitosis_selection_as_four_topology_blind_rungs() {
+        let policy =
+            compile_policy(MITOSIS_SIM_POLICY).expect("Mitosis selection policy should compile");
+
+        assert!(policy.mask_tables.is_empty());
+        assert_eq!(policy.rungs.len(), 4);
+        assert!(policy
+            .rungs
+            .iter()
+            .all(|rung| rung.opcode == Opcode::PickIdlePreferPrevious));
+        assert_eq!(policy.rungs[0].input, InputSource::QueueCell);
+        assert_eq!(policy.rungs[0].data, QueueMaskKind::LocalLlc as u64);
+        assert_eq!(policy.rungs[1].input, InputSource::QueueCell);
+        assert_eq!(policy.rungs[1].data, QueueMaskKind::Primary as u64);
+        assert_eq!(policy.rungs[2].input, InputSource::QueueCell);
+        assert_eq!(policy.rungs[2].data, QueueMaskKind::Borrowable as u64);
+        assert_eq!(policy.rungs[3].input, InputSource::TaskAllowedRestricted);
+        assert_eq!(policy.rungs[3].data, 0);
+        assert!(policy.dump().contains("pick_idle_prefer_previous"));
+        assert!(policy.dump().contains("queue_cell"));
+        assert!(policy.dump().contains("task_allowed_restricted"));
+
+        let queues = policy.queues.as_ref().unwrap();
+        assert!(queues.direct_dispatch);
+        assert_eq!(queues.layout, QueueLayout::CellLlc);
+        assert!(policy.managed_cells.is_some());
+        assert_eq!(queues.dispatch.len(), 1);
+        assert_eq!(
+            queues.dispatch[0].operation,
+            Some(QueueDispatchOperation::MinVtime)
+        );
+    }
+
+    #[test]
     fn borrowing_scope_requires_queue_mode() {
         let error = error_for(
             r#"
@@ -1953,7 +2057,7 @@ scope = "task_allowed"
     }
 
     #[test]
-    fn llc_queue_policy_can_enable_direct_dispatch() {
+    fn queue_policies_can_enable_direct_dispatch() {
         let policy = compile_policy(
             r#"
 [queues]
@@ -1969,7 +2073,7 @@ scope = "task_allowed"
 
         assert!(policy.dump().contains("direct_dispatch=true"));
 
-        let error = error_for(
+        let cell = compile_policy(
             r#"
 [queues]
 layout = "cell"
@@ -1983,11 +2087,26 @@ cpus = "0-3"
 operation = "pick_idle"
 scope = "task_cell"
 "#,
+        )
+        .expect("cell queue policy should support direct dispatch");
+        assert!(cell.dump().contains("direct_dispatch=true"));
+    }
+
+    #[test]
+    fn cell_direct_dispatch_rejects_rungs_without_a_cell_route() {
+        let error = error_for(
+            r#"
+[queues]
+layout = "cell"
+direct_dispatch = true
+
+[[rung]]
+operation = "pick_idle"
+scope = "task_allowed"
+"#,
         );
-        assert!(
-            error.contains("direct dispatch requires queue layout `llc`"),
-            "{error}"
-        );
+
+        assert!(error.contains("cell-routed scope"), "{error}");
     }
 
     #[test]

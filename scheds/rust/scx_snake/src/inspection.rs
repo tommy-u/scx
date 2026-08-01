@@ -729,6 +729,11 @@ fn opcode_reference(policy: &CompiledPolicy, rung: &CompiledRung) -> FieldRefere
             "Pick from queue cell",
             "Pick an idle CPU from the task cell's resolved primary or borrowable mask.",
         ),
+        (
+            Opcode::PickIdlePreferPrevious,
+            "Prefer previous idle CPU",
+            "Try the previous idle core, any idle core, the previous idle CPU, then any idle CPU.",
+        ),
     ];
     split_choices(
         rung.opcode,
@@ -759,6 +764,11 @@ fn input_reference(policy: &CompiledPolicy, rung: &CompiledRung) -> FieldReferen
             InputSource::QueueCell,
             "Resolved queue cell",
             "Use the dense queue cell resolved from the task annotation.",
+        ),
+        (
+            InputSource::TaskAllowedRestricted,
+            "Restricted task affinity",
+            "Use the task's allowed mask only when it cannot consume a complete cell mask.",
         ),
     ];
     split_choices(
@@ -856,6 +866,11 @@ fn data_reference(policy: &CompiledPolicy, rung: &CompiledRung) -> FieldReferenc
                     "Cell borrowable CPUs",
                     "Use claimed CPUs allocated to another cell.",
                 ),
+                Self::QueueMask(QueueMaskKind::LocalLlc) => choice(
+                    "queue_mask:3",
+                    "Cell-local LLC CPUs",
+                    "Use primary CPUs in the task cell's preferred LLC.",
+                ),
             }
         }
     }
@@ -863,6 +878,7 @@ fn data_reference(policy: &CompiledPolicy, rung: &CompiledRung) -> FieldReferenc
     let mut candidates = vec![DataChoice::Zero];
     candidates.push(DataChoice::QueueMask(QueueMaskKind::Primary));
     candidates.push(DataChoice::QueueMask(QueueMaskKind::Borrowable));
+    candidates.push(DataChoice::QueueMask(QueueMaskKind::LocalLlc));
     for table in &policy.mask_tables {
         candidates.push(DataChoice::Table(table.id, table.name.clone()));
     }
@@ -884,7 +900,11 @@ fn data_reference(policy: &CompiledPolicy, rung: &CompiledRung) -> FieldReferenc
         Opcode::SyncWakeAffine => {
             format!("tables:{},{}", rung.data as u32, (rung.data >> 32) as u32)
         }
-        Opcode::PickIdleQueueMask => format!("queue_mask:{}", rung.data),
+        Opcode::PickIdleQueueMask | Opcode::PickIdlePreferPrevious
+            if rung.input == InputSource::QueueCell =>
+        {
+            format!("queue_mask:{}", rung.data)
+        }
         _ => "0".into(),
     };
     let selected = candidates
@@ -903,6 +923,7 @@ fn data_reference(policy: &CompiledPolicy, rung: &CompiledRung) -> FieldReferenc
         Opcode::PickRandomIdle if rung.input != InputSource::MaskTaskAllowed => 1,
         Opcode::SyncWakeAffine => 2,
         Opcode::PickIdleQueueMask => 3,
+        Opcode::PickIdlePreferPrevious if rung.input == InputSource::QueueCell => 3,
         _ => 0,
     };
     let (valid, other): (Vec<_>, Vec<_>) = candidates.into_iter().partition(|candidate| {
@@ -987,6 +1008,16 @@ fn valid_rung(rung: CompiledRung, nr_mask_tables: usize) -> bool {
                 value if value == QueueMaskKind::Primary as u64
                     || value == QueueMaskKind::Borrowable as u64
             ))
+        || (rung.opcode == Opcode::PickIdlePreferPrevious
+            && rung.flags == 0
+            && ((rung.input == InputSource::QueueCell
+                && matches!(
+                    rung.data,
+                    value if value == QueueMaskKind::Primary as u64
+                        || value == QueueMaskKind::Borrowable as u64
+                        || value == QueueMaskKind::LocalLlc as u64
+                ))
+                || (rung.input == InputSource::TaskAllowedRestricted && rung.data == 0)))
 }
 
 fn operation_name(rung: &CompiledRung) -> &'static str {
@@ -1010,6 +1041,7 @@ fn operation_name(rung: &CompiledRung) -> &'static str {
         Opcode::PickRandomIdle => "pick_random_idle",
         Opcode::KernelDefault => "kernel_default",
         Opcode::SyncWakeAffine => "sync_wake_affine",
+        Opcode::PickIdlePreferPrevious => "pick_idle_prefer_previous",
     }
 }
 
@@ -1024,20 +1056,29 @@ fn scope_name(policy: &CompiledPolicy, rung: &CompiledRung) -> String {
             .find(|table| u64::from(table.id) == rung.data)
             .map(|table| table.name.clone())
             .unwrap_or_else(|| format!("mask_table_{}", rung.data)),
-        (Opcode::PickIdleQueueMask, InputSource::QueueCell)
+        (Opcode::PickIdleQueueMask | Opcode::PickIdlePreferPrevious, InputSource::QueueCell)
             if rung.data == QueueMaskKind::Primary as u64 =>
         {
             "task_cell".into()
         }
-        (Opcode::PickIdleQueueMask, InputSource::QueueCell)
+        (Opcode::PickIdleQueueMask | Opcode::PickIdlePreferPrevious, InputSource::QueueCell)
             if rung.data == QueueMaskKind::Borrowable as u64 =>
         {
             "task_cell_borrowable".into()
+        }
+        (Opcode::PickIdlePreferPrevious, InputSource::QueueCell)
+            if rung.data == QueueMaskKind::LocalLlc as u64 =>
+        {
+            "task_cell_llc".into()
+        }
+        (Opcode::PickIdlePreferPrevious, InputSource::TaskAllowedRestricted) => {
+            "task_allowed_restricted".into()
         }
         (_, InputSource::CpuPrev) => "previous_cpu".into(),
         (_, InputSource::MaskTaskAllowed) => "task_allowed".into(),
         (_, InputSource::TaskCell) => "task_cell".into(),
         (_, InputSource::QueueCell) => "queue_cell".into(),
+        (_, InputSource::TaskAllowedRestricted) => "task_allowed_restricted".into(),
     }
 }
 
@@ -1050,6 +1091,7 @@ fn opcode_name(opcode: Opcode) -> &'static str {
         Opcode::KernelDefault => "kernel_default",
         Opcode::SyncWakeAffine => "sync_wake_affine",
         Opcode::PickIdleQueueMask => "pick_idle_queue_mask",
+        Opcode::PickIdlePreferPrevious => "pick_idle_prefer_previous",
     }
 }
 
@@ -1059,6 +1101,7 @@ fn input_name(input: InputSource) -> &'static str {
         InputSource::MaskTaskAllowed => "mask_task_allowed",
         InputSource::TaskCell => "task_cell",
         InputSource::QueueCell => "queue_cell",
+        InputSource::TaskAllowedRestricted => "task_allowed_restricted",
     }
 }
 

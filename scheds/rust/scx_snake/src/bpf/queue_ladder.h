@@ -11,8 +11,7 @@ queue_direct_dispatch_enabled(const struct snake_ladder_ctx *ctx)
 {
 	const struct snake_queue_rung *first;
 
-	if (!queue_global_mode_enabled() || !ctx || !ctx->ladder ||
-	    !ctx->ladder->nr_enqueue_rungs)
+	if (!ctx || !ctx->ladder || !ctx->ladder->nr_enqueue_rungs)
 		return false;
 	first = MEMBER_VPTR(ctx->ladder->enqueue_rungs, [0]);
 	return first &&
@@ -121,7 +120,10 @@ validate_queue_ladders(const struct snake_compiled_ladder *ladder)
 		if (i >= ladder->nr_enqueue_rungs)
 			break;
 		rung = MEMBER_VPTR(ladder->enqueue_rungs, [i]);
-		if (!rung || rung->flags)
+		if (!rung ||
+		    (rung->flags &&
+		     (i != 0 || rung->flags !=
+				  SNAKE_QUEUE_RUNG_F_DIRECT_DISPATCH)))
 			return -EINVAL;
 		if (rung->opcode == SNAKE_ENQUEUE_OP_CELL) {
 			if (enqueue_cell)

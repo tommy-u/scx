@@ -183,6 +183,7 @@ table ID, or packed table IDs depending on the opcode.
 | `KERNEL_DEFAULT` | 5 | Call `scx_bpf_select_cpu_dfl()` and accept only an idle result. |
 | `SYNC_WAKE_AFFINE` | 6 | Apply synchronous wake-affine checks using previous-LLC and previous-NUMA-node tables. |
 | `PICK_IDLE_QUEUE_MASK` | 7 | Pick from a queue cell's active-bank primary or borrowable mask, intersected with live affinity. |
+| `PICK_IDLE_PREFER_PREVIOUS` | 8 | Apply the Mitosis idle-core/CPU preference order to an active queue-cell mask or restricted task affinity. |
 
 Opcode zero is invalid. BPF validates every opcode/input/flag/data combination
 while preparing a policy. The `select_cpu` ladder also rechecks each rung
@@ -196,6 +197,7 @@ before executing it.
 | `MASK_TASK_ALLOWED` | 2 | Use the task's live `p->cpus_ptr` affinity mask. |
 | `TASK_CELL` | 3 | Read the task-local cell ID and use it as a mask-table key. |
 | `QUEUE_CELL` | 4 | Translate the annotation to a dense queue cell and use the active bank's cell mask. |
+| `TASK_ALLOWED_RESTRICTED` | 5 | Use live task affinity only when it cannot consume the cell's complete primary or borrowable mask. |
 
 An input source is not a userspace callback. It selects data already available
 inside the BPF scheduling callback.
@@ -228,6 +230,10 @@ cell assignment.
 | `pick_random_idle[_core]` | queue-mode `task_cell` | `PICK_IDLE_QUEUE_MASK` | `QUEUE_CELL` | random, optional idle-core | 1: primary mask |
 | `pick_idle[_core]` | `task_cell_borrowable` | `PICK_IDLE_QUEUE_MASK` | `QUEUE_CELL` | optional idle-core | 2: borrowable mask |
 | `pick_random_idle[_core]` | `task_cell_borrowable` | `PICK_IDLE_QUEUE_MASK` | `QUEUE_CELL` | random, optional idle-core | 2: borrowable mask |
+| `pick_idle_prefer_previous` | `task_cell_llc` | `PICK_IDLE_PREFER_PREVIOUS` | `QUEUE_CELL` | none | 3: previous-LLC normal-queue consumers |
+| `pick_idle_prefer_previous` | queue-mode `task_cell` | `PICK_IDLE_PREFER_PREVIOUS` | `QUEUE_CELL` | none | 1: primary mask |
+| `pick_idle_prefer_previous` | `task_cell_borrowable` | `PICK_IDLE_PREFER_PREVIOUS` | `QUEUE_CELL` | none | 2: borrowable mask |
+| `pick_idle_prefer_previous` | `task_allowed_restricted` | `PICK_IDLE_PREFER_PREVIOUS` | `TASK_ALLOWED_RESTRICTED` | none | 0 |
 | `kernel_default` | `task_allowed` | `KERNEL_DEFAULT` | `MASK_TASK_ALLOWED` | none | 0 |
 | `sync_wake_affine` | `task_allowed` | `SYNC_WAKE_AFFINE` | `MASK_TASK_ALLOWED` | none | low 32 bits: LLC table; high 32 bits: node table |
 
@@ -301,7 +307,7 @@ Userspace encodes the lowered rungs into `snake_compiled_ladder` with:
 - at most nine fixed-size placement rungs;
 - enqueue and dispatch callback rung counts and arrays.
 
-ABI version 24 limits placement ladders to nine rungs and enqueue/dispatch
+ABI version 27 limits placement ladders to nine rungs and enqueue/dispatch
 ladders to eight rungs. It also limits generic placement to four mask tables,
 CPU and mask keys to 1024, queue cells to 32 including cell 0, and policy
 storage to two ladder slots. Userspace and BPF share definitions from

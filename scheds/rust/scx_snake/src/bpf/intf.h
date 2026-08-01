@@ -8,7 +8,7 @@ typedef unsigned int	   u32;
 typedef unsigned long long u64;
 #endif
 
-#define SNAKE_ABI_VERSION 26
+#define SNAKE_ABI_VERSION 27
 #define SNAKE_MAX_RUNGS 9
 #define SNAKE_MAX_QUEUE_RUNGS 8
 #define SNAKE_LADDER_SLOTS 2
@@ -220,6 +220,7 @@ enum snake_opcode {
 	SNAKE_OP_KERNEL_DEFAULT	      = 5,
 	SNAKE_OP_SYNC_WAKE_AFFINE     = 6,
 	SNAKE_OP_PICK_IDLE_QUEUE_MASK = 7,
+	SNAKE_OP_PICK_IDLE_PREFER_PREVIOUS = 8,
 };
 
 /* Exhaustion behavior applied when every select rung misses. */
@@ -236,12 +237,14 @@ enum snake_input_source {
 	SNAKE_INPUT_MASK_TASK_ALLOWED = 2,
 	SNAKE_INPUT_TASK_CELL	      = 3,
 	SNAKE_INPUT_QUEUE_CELL	      = 4,
+	SNAKE_INPUT_TASK_ALLOWED_RESTRICTED = 5,
 };
 
 enum snake_queue_mask_kind {
 	SNAKE_QUEUE_MASK_INVALID    = 0,
 	SNAKE_QUEUE_MASK_PRIMARY    = 1,
 	SNAKE_QUEUE_MASK_BORROWABLE = 2,
+	SNAKE_QUEUE_MASK_LOCAL_LLC  = 3,
 };
 
 enum snake_enqueue_opcode {

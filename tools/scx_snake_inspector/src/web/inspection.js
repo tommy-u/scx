@@ -28,6 +28,7 @@ const LEGACY_ROUTES = new Map([
 const PRODUCTION_POLICY_IDS = new Set([
   "kernel-default-sim.toml",
   "kernel-default.toml",
+  "mitosis-sim.toml",
 ]);
 const callbackDurationFormat = new Intl.NumberFormat("en-US", {
   maximumFractionDigits: 0,

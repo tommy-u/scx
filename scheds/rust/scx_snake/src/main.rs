@@ -1267,6 +1267,7 @@ fn operation_label(rung: &CompiledRung) -> &'static str {
         Opcode::PickRandomIdle => "pick_random_idle",
         Opcode::KernelDefault => "kernel_default",
         Opcode::SyncWakeAffine => "sync_wake_affine",
+        Opcode::PickIdlePreferPrevious => "pick_idle_prefer_previous",
     }
 }
 
@@ -1287,17 +1288,26 @@ fn scope_label<'policy>(
                 .map(|table| table.name.as_str())
                 .with_context(|| format!("compiled rung references missing mask table {table_id}"))
         }
-        (Opcode::PickIdleQueueMask, InputSource::QueueCell) => match rung.data {
-            value if value == policy::QueueMaskKind::Primary as u64 => Ok("task_cell"),
-            value if value == policy::QueueMaskKind::Borrowable as u64 => {
-                Ok("task_cell_borrowable")
+        (Opcode::PickIdleQueueMask | Opcode::PickIdlePreferPrevious, InputSource::QueueCell) => {
+            match rung.data {
+                value if value == policy::QueueMaskKind::Primary as u64 => Ok("task_cell"),
+                value if value == policy::QueueMaskKind::Borrowable as u64 => {
+                    Ok("task_cell_borrowable")
+                }
+                value if value == policy::QueueMaskKind::LocalLlc as u64 => Ok("task_cell_llc"),
+                _ => bail!("queue-mask rung references unknown mask kind {}", rung.data),
             }
-            _ => bail!("queue-mask rung references unknown mask kind {}", rung.data),
-        },
+        }
+        (Opcode::PickIdlePreferPrevious, InputSource::TaskAllowedRestricted) => {
+            Ok("task_allowed_restricted")
+        }
         (_, InputSource::CpuPrev) => Ok("previous_cpu"),
         (_, InputSource::MaskTaskAllowed) => Ok("task_allowed"),
         (_, InputSource::TaskCell) => bail!("operation cannot consume a task-cell input"),
         (_, InputSource::QueueCell) => bail!("operation cannot consume a queue-cell input"),
+        (_, InputSource::TaskAllowedRestricted) => {
+            bail!("operation cannot consume a restricted task-allowed input")
+        }
     }
 }
 
@@ -5370,7 +5380,7 @@ scope = "task_allowed"
         let policy = policy::compile_policy(policy_source()).expect("policy should compile");
         let encoded = encode_ladder(&policy, 42).expect("ladder should encode");
 
-        assert_eq!(bpf_intf::SNAKE_ABI_VERSION, 26);
+        assert_eq!(bpf_intf::SNAKE_ABI_VERSION, 27);
         assert_eq!(size_of::<bpf_intf::snake_callback_timing>(), 520);
         assert_eq!(offset_of!(bpf_intf::snake_callback_timing, total_ns), 0);
         assert_eq!(offset_of!(bpf_intf::snake_callback_timing, buckets), 8);
@@ -6211,6 +6221,101 @@ scope = "task_cell"
         assert!(queue_vtime.contains("runtime->cell_external_id != external_id"));
         assert!(queue_vtime.contains("runtime->cell_epoch != slot_epoch"));
         assert!(queue_vtime.contains("runtime->vruntime = new_now;"));
+    }
+
+    #[test]
+    fn mitosis_preferred_idle_rung_uses_the_kernel_style_claim_order() {
+        let intf = include_str!("bpf/intf.h");
+        let cpu_pick = include_str!("bpf/cpu_pick.h");
+        let ladder = include_str!("bpf/ladder.h");
+
+        assert!(intf.contains("#define SNAKE_ABI_VERSION 27"));
+        assert!(intf.contains("SNAKE_OP_PICK_IDLE_PREFER_PREVIOUS = 8"));
+        assert!(intf.contains("SNAKE_INPUT_TASK_ALLOWED_RESTRICTED = 5"));
+        assert!(intf.contains("SNAKE_QUEUE_MASK_LOCAL_LLC"));
+
+        let helper = cpu_pick
+            .split_once("cpu_pick_idle_prefer_previous(")
+            .and_then(|(_, body)| body.split_once("#endif"))
+            .map(|(body, _)| body)
+            .expect("preferred idle helper should exist");
+        let previous_core = helper
+            .find("whole_core_idle && scx_bpf_test_and_clear_cpu_idle(prev_cpu)")
+            .expect("previous whole-idle core should be first");
+        let any_core = helper
+            .find("scx_bpf_pick_idle_cpu(candidates, SCX_PICK_IDLE_CORE)")
+            .expect("any whole-idle core should be second");
+        let previous_thread = helper
+            .rfind("scx_bpf_test_and_clear_cpu_idle(prev_cpu)")
+            .expect("previous idle CPU should be third");
+        let any_thread = helper
+            .find("scx_bpf_pick_idle_cpu(candidates, 0)")
+            .expect("any idle CPU should be last");
+        assert!(previous_core < any_core);
+        assert!(any_core < previous_thread);
+        assert!(previous_thread < any_thread);
+
+        assert!(ladder.contains("case SNAKE_OP_PICK_IDLE_PREFER_PREVIOUS:"));
+        assert!(ladder.contains("SNAKE_QUEUE_MASK_LOCAL_LLC"));
+        assert!(ladder.contains("SNAKE_INPUT_TASK_ALLOWED_RESTRICTED"));
+    }
+
+    #[test]
+    fn cell_direct_dispatch_preserves_normal_borrowed_and_affinity_routes() {
+        let main = include_str!("bpf/main.bpf.c");
+        let queue_ladder = include_str!("bpf/queue_ladder.h");
+        let enqueue = include_str!("bpf/queue_enqueue.h");
+        let normalized_enqueue = enqueue.split_whitespace().collect::<Vec<_>>().join(" ");
+
+        assert!(!queue_ladder.contains("!queue_global_mode_enabled()"));
+        assert!(main.contains("SNAKE_SELECT_F_AFFINITY"));
+        assert!(main.contains("queue_fairness_direct_primary("));
+        assert!(main.contains("queue_fairness_direct_affinity("));
+        assert!(enqueue.contains("queue_fairness_direct_primary("));
+        assert!(enqueue.contains("queue_fairness_direct_borrow("));
+        assert!(enqueue.contains("queue_fairness_direct_affinity("));
+        assert!(enqueue.contains("SNAKE_QUEUE_CLASS_NORMAL"));
+        assert!(enqueue.contains("SNAKE_QUEUE_MASK_PRIMARY"));
+        assert!(enqueue.contains("SNAKE_QUEUE_MASK_BORROWABLE"));
+        assert!(enqueue.contains("SNAKE_QUEUE_CLASS_AFFINITY"));
+        for helper in [
+            "queue_fairness_direct_primary",
+            "queue_fairness_direct_borrow",
+            "queue_fairness_direct_affinity",
+        ] {
+            assert!(normalized_enqueue.contains(&format!("static __noinline int {helper}(")));
+        }
+    }
+
+    #[test]
+    fn mitosis_cell_enqueue_retries_idle_placement_when_select_was_skipped() {
+        let scheduler_mode = include_str!("bpf/scheduler_mode.h");
+        let normalized_mode = scheduler_mode
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        assert!(
+            normalized_mode.contains("static __always_inline int queue_try_direct_from_enqueue(")
+        );
+
+        let retry = scheduler_mode
+            .split_once("queue_try_direct_from_enqueue(")
+            .and_then(|(_, body)| body.split_once("scheduler_mode_enqueue("))
+            .map(|(body, _)| body)
+            .expect("cell enqueue should have one direct-placement retry helper");
+        assert!(retry.contains("__COMPAT_is_enq_cpu_selected(enq_flags)"));
+        assert!(retry.contains("walk_policy_ladder(ctx, p, &walk_args)"));
+        assert!(retry.contains("queue_fairness_direct_primary("));
+        assert!(retry.contains("queue_fairness_direct_borrow("));
+        assert!(retry.contains("queue_fairness_direct_affinity("));
+        assert!(retry.contains("scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE)"));
+
+        let enqueue = scheduler_mode
+            .split_once("scheduler_mode_enqueue(")
+            .map(|(_, body)| body)
+            .expect("scheduler mode enqueue should exist");
+        assert!(enqueue.contains("queue_try_direct_from_enqueue("));
     }
 
     #[test]

@@ -47,6 +47,78 @@ static __always_inline s32 queue_pick_task_cell_cpu(
 	return selected;
 }
 
+static __always_inline s32 queue_task_cell_affinity_restricted(
+	const struct snake_ladder_ctx *ctx, struct task_struct *p, u32 cell_index)
+{
+	const struct cpumask *primary, *borrowable;
+
+	primary = queue_cell_mask(ctx, cell_index, SNAKE_QUEUE_MASK_PRIMARY);
+	borrowable = queue_cell_mask(ctx, cell_index, SNAKE_QUEUE_MASK_BORROWABLE);
+	if (!primary || !borrowable)
+		return -EINVAL;
+	return !bpf_cpumask_subset(primary, p->cpus_ptr) ||
+	       !bpf_cpumask_subset(borrowable, p->cpus_ptr);
+}
+
+static __always_inline s32 queue_pick_task_cell_preferred_cpu(
+	const struct snake_ladder_ctx *ctx, struct task_struct *p, u32 kind,
+	s32 prev_cpu, u32 *cell_indexp)
+{
+	struct snake_task_runtime *runtime;
+	struct snake_cpu_queue	  *cpuq;
+	struct bpf_cpumask	  *scratch;
+	const struct cpumask	  *primary, *source;
+	u32 cell_index;
+	s32 restricted, route_cpu;
+
+	runtime = task_state_lookup(p);
+	cell_index = queue_task_cell_index(ctx, p);
+	primary = queue_cell_mask(ctx, cell_index, SNAKE_QUEUE_MASK_PRIMARY);
+	if (!runtime || !primary)
+		return -EINVAL;
+	restricted = queue_task_cell_affinity_restricted(ctx, p, cell_index);
+	if (restricted)
+		return restricted < 0 ? restricted : -ENOENT;
+
+	if (kind == SNAKE_QUEUE_MASK_LOCAL_LLC) {
+		route_cpu = prev_cpu >= 0 && prev_cpu < nr_cpu_ids &&
+				    bpf_cpumask_test_cpu(prev_cpu, primary) ?
+				    prev_cpu :
+				    bpf_cpumask_any_distribute(primary);
+		if (route_cpu < 0 || route_cpu >= nr_cpu_ids)
+			return -ENOENT;
+		cpuq = queue_cpu(ctx, route_cpu);
+		if (!cpuq || cpuq->owner_cell_index != cell_index)
+			return -EINVAL;
+		source = queue_normal_consumers(ctx, cpuq->normal_queue_index);
+	} else {
+		source = queue_cell_mask(ctx, cell_index, kind);
+	}
+	if (!source)
+		return -EINVAL;
+	scratch = runtime->queue_cpumask;
+	if (!scratch)
+		return -EINVAL;
+	if (!bpf_cpumask_and(scratch, source, p->cpus_ptr))
+		return -ENOENT;
+	*cell_indexp = cell_index;
+	return cpu_pick_idle_prefer_previous((const struct cpumask *)scratch,
+					     prev_cpu);
+}
+
+static __always_inline s32 queue_pick_restricted_preferred_cpu(
+	const struct snake_ladder_ctx *ctx, struct task_struct *p, s32 prev_cpu,
+	u32 *cell_indexp)
+{
+	u32 cell_index = queue_task_cell_index(ctx, p);
+	s32 restricted = queue_task_cell_affinity_restricted(ctx, p, cell_index);
+
+	if (restricted <= 0)
+		return restricted < 0 ? restricted : -ENOENT;
+	*cell_indexp = cell_index;
+	return cpu_pick_idle_prefer_previous(p->cpus_ptr, prev_cpu);
+}
+
 static __always_inline int
 queue_fairness_select_cpu(struct snake_ladder_ctx *ctx, struct task_struct *p,
 			  s32 cpu)
