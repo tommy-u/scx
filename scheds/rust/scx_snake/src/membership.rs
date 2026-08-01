@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
@@ -11,17 +11,38 @@ use libbpf_rs::MapCore;
 use log::warn;
 
 use crate::policy::MembershipPolicy;
-use crate::task_cells;
+use crate::task_cells::{self, CellRef};
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct CellDirectory {
+    assignments: BTreeMap<String, CellRef>,
+}
+
+impl CellDirectory {
+    pub(crate) fn new(assignments: BTreeMap<String, CellRef>) -> Self {
+        Self { assignments }
+    }
+
+    fn from_policy(policy: &MembershipPolicy) -> Self {
+        Self::new(
+            policy
+                .assignments
+                .iter()
+                .map(|(child, &cell_id)| (child.clone(), CellRef::static_cell(cell_id)))
+                .collect(),
+        )
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ManagedMembership {
-    Cell(u32),
+pub(crate) enum ManagedMembership {
+    Cell(CellRef),
 }
 
 impl ManagedMembership {
-    fn cell_id(self) -> u32 {
+    fn cell_ref(self) -> CellRef {
         match self {
-            Self::Cell(cell_id) => cell_id,
+            Self::Cell(cell) => cell,
         }
     }
 }
@@ -50,7 +71,7 @@ pub struct ReconcileReport {
 
 pub struct MembershipManager {
     parent: PathBuf,
-    assignments: BTreeMap<String, u32>,
+    directory: CellDirectory,
     interval: Duration,
     next_reconcile: Instant,
     known: HashMap<i32, KnownTask>,
@@ -66,20 +87,27 @@ impl MembershipManager {
         if !metadata.is_dir() {
             bail!("membership parent {} is not a directory", parent.display());
         }
-        Ok(Self {
+        let mut manager = Self {
             parent,
-            assignments: policy.assignments.clone(),
+            directory: CellDirectory::new(BTreeMap::new()),
             interval: Duration::from_millis(policy.reconcile_ms),
             next_reconcile: Instant::now(),
             known: HashMap::new(),
             pidfds: HashMap::new(),
             proc_root: PathBuf::from("/proc"),
-        })
+        };
+        manager.replace_directory(CellDirectory::from_policy(policy));
+        Ok(manager)
     }
 
     pub fn time_until_reconcile(&self) -> Duration {
         self.next_reconcile
             .saturating_duration_since(Instant::now())
+    }
+
+    pub(crate) fn replace_directory(&mut self, directory: CellDirectory) {
+        self.directory = directory;
+        self.next_reconcile = Instant::now();
     }
 
     pub fn reconcile_if_due(&mut self, map: &impl MapCore) -> Result<Option<ReconcileReport>> {
@@ -92,12 +120,8 @@ impl MembershipManager {
     pub fn reconcile(&mut self, map: &impl MapCore) -> Result<ReconcileReport> {
         self.next_reconcile = Instant::now() + self.interval;
         self.prune_exited_tasks()?;
-        let desired = scan_assigned_tasks(
-            &self.parent,
-            &self.proc_root,
-            &self.assignments,
-            &self.known,
-        )?;
+        let desired =
+            scan_assigned_tasks(&self.parent, &self.proc_root, &self.directory, &self.known)?;
         let mut report = ReconcileReport {
             discovered: desired.len(),
             ..Default::default()
@@ -124,8 +148,8 @@ impl MembershipManager {
             let task = desired
                 .get(&tid)
                 .expect("reconciliation update must have a desired task");
-            let cell_id = task.membership.cell_id();
-            match task_cells::set_managed_task_cell(map, tid, cell_id) {
+            let cell = task.membership.cell_ref();
+            match task_cells::set_managed_task_cell(map, tid, cell) {
                 Ok(pidfd) => {
                     self.pidfds.insert(tid, pidfd);
                     applied.insert(tid, *task);
@@ -209,12 +233,25 @@ fn reconciliation_removals(
 fn scan_assigned_tasks(
     parent: &Path,
     proc_root: &Path,
-    assignments: &BTreeMap<String, u32>,
+    directory: &CellDirectory,
     known: &HashMap<i32, KnownTask>,
 ) -> Result<HashMap<i32, KnownTask>> {
     let mut tasks = HashMap::new();
-    for (child, &cell_id) in assignments {
-        scan_cgroup_tree(&parent.join(child), proc_root, cell_id, known, &mut tasks)?;
+    let mut ambiguous = HashSet::new();
+    for (child, &cell) in &directory.assignments {
+        scan_cgroup_tree(
+            &parent.join(child),
+            proc_root,
+            cell,
+            known,
+            &mut tasks,
+            &mut ambiguous,
+        )?;
+    }
+    for tid in ambiguous {
+        if let Some(task) = known.get(&tid) {
+            tasks.insert(tid, *task);
+        }
     }
     Ok(tasks)
 }
@@ -222,9 +259,10 @@ fn scan_assigned_tasks(
 fn scan_cgroup_tree(
     root: &Path,
     proc_root: &Path,
-    cell_id: u32,
+    cell: CellRef,
     known: &HashMap<i32, KnownTask>,
     tasks: &mut HashMap<i32, KnownTask>,
+    ambiguous: &mut HashSet<i32>,
 ) -> Result<()> {
     if !root.exists() {
         return Ok(());
@@ -244,18 +282,29 @@ fn scan_cgroup_tree(
             .filter_map(|tid| tid.trim().parse::<i32>().ok())
             .filter(|tid| *tid > 0)
         {
-            if let Some(task) = known
-                .get(&tid)
-                .filter(|task| task.membership == ManagedMembership::Cell(cell_id))
-            {
-                tasks.insert(tid, *task);
+            if ambiguous.contains(&tid) {
                 continue;
             }
-            if let Some(start_time) = read_task_start_time(proc_root, tid)? {
-                tasks.insert(
-                    tid,
-                    KnownTask::new(start_time, ManagedMembership::Cell(cell_id)),
-                );
+            let task = if let Some(task) = known
+                .get(&tid)
+                .filter(|task| task.membership == ManagedMembership::Cell(cell))
+            {
+                Some(*task)
+            } else {
+                read_task_start_time(proc_root, tid)?
+                    .map(|start_time| KnownTask::new(start_time, ManagedMembership::Cell(cell)))
+            };
+            let Some(task) = task else {
+                continue;
+            };
+            if tasks
+                .get(&tid)
+                .is_some_and(|existing| existing.membership != task.membership)
+            {
+                tasks.remove(&tid);
+                ambiguous.insert(tid);
+            } else {
+                tasks.insert(tid, task);
             }
         }
 
@@ -308,6 +357,19 @@ mod tests {
         format!("{tid} (worker pool 1) {}", fields.join(" "))
     }
 
+    fn cell(cell_id: u32) -> ManagedMembership {
+        ManagedMembership::Cell(CellRef::static_cell(cell_id))
+    }
+
+    fn directory(assignments: impl IntoIterator<Item = (&'static str, u32)>) -> CellDirectory {
+        CellDirectory::new(
+            assignments
+                .into_iter()
+                .map(|(child, cell_id)| (child.into(), CellRef::static_cell(cell_id)))
+                .collect(),
+        )
+    }
+
     #[test]
     fn scans_only_assigned_child_trees_and_their_descendants() {
         let nonce = SystemTime::now()
@@ -337,31 +399,97 @@ mod tests {
         let tasks = scan_assigned_tasks(
             &parent,
             &proc_root,
-            &BTreeMap::from([("batch".into(), 1), ("latency".into(), 2)]),
+            &directory([("batch", 1), ("latency", 2)]),
             &HashMap::new(),
         )
         .unwrap();
 
         assert_eq!(tasks.len(), 3);
-        assert_eq!(tasks[&10].membership, ManagedMembership::Cell(1));
-        assert_eq!(tasks[&11].membership, ManagedMembership::Cell(1));
-        assert_eq!(tasks[&12].membership, ManagedMembership::Cell(2));
+        assert_eq!(tasks[&10].membership, cell(1));
+        assert_eq!(tasks[&11].membership, cell(1));
+        assert_eq!(tasks[&12].membership, cell(2));
         assert!(!tasks.contains_key(&13));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn racing_duplicate_membership_is_deferred() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "snake-membership-race-{}-{nonce}",
+            std::process::id()
+        ));
+        let parent = root.join("cgroup/workloads");
+        let proc_root = root.join("proc");
+        fs::create_dir_all(parent.join("batch")).unwrap();
+        fs::create_dir_all(parent.join("latency")).unwrap();
+        fs::write(parent.join("batch/cgroup.threads"), "10\n").unwrap();
+        fs::write(parent.join("latency/cgroup.threads"), "10\n").unwrap();
+        fs::create_dir_all(proc_root.join("10")).unwrap();
+        fs::write(proc_root.join("10/stat"), task_stat(10, 100)).unwrap();
+
+        let tasks = scan_assigned_tasks(
+            &parent,
+            &proc_root,
+            &directory([("batch", 1), ("latency", 2)]),
+            &HashMap::new(),
+        )
+        .unwrap();
+
+        assert!(
+            !tasks.contains_key(&10),
+            "a TID observed in two cells must be retried on the next reconciliation"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn racing_duplicate_preserves_the_last_valid_membership() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "snake-membership-known-race-{}-{nonce}",
+            std::process::id()
+        ));
+        let parent = root.join("cgroup/workloads");
+        let proc_root = root.join("proc");
+        fs::create_dir_all(parent.join("batch")).unwrap();
+        fs::create_dir_all(parent.join("latency")).unwrap();
+        fs::write(parent.join("batch/cgroup.threads"), "10\n").unwrap();
+        fs::write(parent.join("latency/cgroup.threads"), "10\n").unwrap();
+        fs::create_dir_all(proc_root.join("10")).unwrap();
+        fs::write(proc_root.join("10/stat"), task_stat(10, 100)).unwrap();
+        let known = HashMap::from([(10, KnownTask::new(100, cell(1)))]);
+
+        let tasks = scan_assigned_tasks(
+            &parent,
+            &proc_root,
+            &directory([("batch", 1), ("latency", 2)]),
+            &known,
+        )
+        .unwrap();
+
+        assert_eq!(tasks.get(&10), known.get(&10));
         fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
     fn reconciliation_tracks_updates_and_removals_separately() {
         let known = HashMap::from([
-            (10, KnownTask::new(100, ManagedMembership::Cell(1))),
-            (11, KnownTask::new(200, ManagedMembership::Cell(1))),
-            (12, KnownTask::new(300, ManagedMembership::Cell(1))),
+            (10, KnownTask::new(100, cell(1))),
+            (11, KnownTask::new(200, cell(1))),
+            (12, KnownTask::new(300, cell(1))),
         ]);
         let desired = HashMap::from([
-            (10, KnownTask::new(100, ManagedMembership::Cell(1))),
-            (11, KnownTask::new(201, ManagedMembership::Cell(1))),
-            (12, KnownTask::new(300, ManagedMembership::Cell(2))),
-            (13, KnownTask::new(400, ManagedMembership::Cell(2))),
+            (10, KnownTask::new(100, cell(1))),
+            (11, KnownTask::new(201, cell(1))),
+            (12, KnownTask::new(300, cell(2))),
+            (13, KnownTask::new(400, cell(2))),
         ]);
 
         assert_eq!(reconciliation_updates(&known, &desired), vec![11, 12, 13]);
@@ -370,6 +498,57 @@ mod tests {
             reconciliation_removals(&known, &HashMap::from([(10, desired[&10])])),
             vec![11, 12]
         );
+    }
+
+    #[test]
+    fn slot_epoch_change_is_a_membership_update() {
+        let known = HashMap::from([(
+            10,
+            KnownTask::new(
+                100,
+                ManagedMembership::Cell(CellRef {
+                    cell_id: 3,
+                    slot_epoch: 7,
+                }),
+            ),
+        )]);
+        let desired = HashMap::from([(
+            10,
+            KnownTask::new(
+                100,
+                ManagedMembership::Cell(CellRef {
+                    cell_id: 3,
+                    slot_epoch: 8,
+                }),
+            ),
+        )]);
+
+        assert_eq!(reconciliation_updates(&known, &desired), vec![10]);
+    }
+
+    #[test]
+    fn replacing_the_cell_directory_schedules_an_immediate_reconciliation() {
+        let mut manager = MembershipManager {
+            parent: PathBuf::from("/unused"),
+            directory: directory([("batch", 1)]),
+            interval: Duration::from_secs(1),
+            next_reconcile: Instant::now() + Duration::from_secs(60),
+            known: HashMap::new(),
+            pidfds: HashMap::new(),
+            proc_root: PathBuf::from("/unused-proc"),
+        };
+        let replacement = CellDirectory::new(BTreeMap::from([(
+            "batch".into(),
+            CellRef {
+                cell_id: 1,
+                slot_epoch: 2,
+            },
+        )]));
+
+        manager.replace_directory(replacement.clone());
+
+        assert_eq!(manager.directory, replacement);
+        assert_eq!(manager.time_until_reconcile(), Duration::ZERO);
     }
 
     #[test]

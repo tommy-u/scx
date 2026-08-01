@@ -147,6 +147,7 @@ pub struct TaskMappingInspectionView {
     pub state: String,
     pub current_cpu: Option<u32>,
     pub cell_id: u32,
+    pub cell_epoch: u32,
     pub cell_defined: bool,
     pub allowed_cpus: String,
     pub cgroup: String,

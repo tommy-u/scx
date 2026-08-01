@@ -12,6 +12,21 @@ use serde::{Deserialize, Serialize};
 use crate::bpf_intf;
 use crate::policy::MAX_CELL_IDS;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct CellRef {
+    pub cell_id: u32,
+    pub slot_epoch: u32,
+}
+
+impl CellRef {
+    pub const fn static_cell(cell_id: u32) -> Self {
+        Self {
+            cell_id,
+            slot_epoch: 0,
+        }
+    }
+}
+
 /// One CLI request assigning a live thread to a userspace-defined cell.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ThreadCellAssignment {
@@ -66,6 +81,7 @@ pub struct ThreadCellSnapshot {
     pub state: String,
     pub current_cpu: Option<u32>,
     pub cell_id: u32,
+    pub cell_epoch: u32,
     pub allowed_cpus: String,
     pub cgroup: String,
     pub needs_rehome: bool,
@@ -114,9 +130,13 @@ pub fn set_thread_cell(map: &impl MapCore, assignment: ThreadCellAssignment) -> 
     })
 }
 
-pub(crate) fn set_managed_task_cell(map: &impl MapCore, tid: i32, cell_id: u32) -> Result<OwnedFd> {
+pub(crate) fn set_managed_task_cell(
+    map: &impl MapCore,
+    tid: i32,
+    cell: CellRef,
+) -> Result<OwnedFd> {
     let pidfd = open_thread(tid)?;
-    update_task_cell_with_pidfd(map, tid, &pidfd, |value| apply_managed_cell(value, cell_id))?;
+    update_task_cell_with_pidfd(map, tid, &pidfd, |value| apply_managed_cell(value, cell))?;
     Ok(pidfd)
 }
 
@@ -140,31 +160,36 @@ pub(crate) fn clear_managed_task_cell(map: &impl MapCore, tid: i32, pidfd: &Owne
 fn empty_task_cell() -> bpf_intf::snake_task_cell {
     bpf_intf::snake_task_cell {
         cell_id: 0,
+        cell_epoch: 0,
         needs_rehome: 0,
         managed_cell_id: 0,
+        managed_cell_epoch: 0,
         flags: 0,
     }
 }
 
 fn apply_manual_cell(value: &mut bpf_intf::snake_task_cell, cell_id: u32) -> bool {
-    let previous = value.cell_id;
+    let previous = (value.cell_id, value.cell_epoch);
     value.cell_id = cell_id;
+    value.cell_epoch = 0;
     value.flags |= bpf_intf::SNAKE_TASK_CELL_F_MANUAL;
-    let changed = previous != value.cell_id;
+    let changed = previous != (value.cell_id, value.cell_epoch);
     if changed {
         value.needs_rehome = 1;
     }
     changed
 }
 
-fn apply_managed_cell(value: &mut bpf_intf::snake_task_cell, cell_id: u32) -> bool {
-    let previous = value.cell_id;
-    value.managed_cell_id = cell_id;
+fn apply_managed_cell(value: &mut bpf_intf::snake_task_cell, cell: CellRef) -> bool {
+    let previous = (value.cell_id, value.cell_epoch);
+    value.managed_cell_id = cell.cell_id;
+    value.managed_cell_epoch = cell.slot_epoch;
     value.flags |= bpf_intf::SNAKE_TASK_CELL_F_MANAGED;
     if value.flags & bpf_intf::SNAKE_TASK_CELL_F_MANUAL == 0 {
-        value.cell_id = cell_id;
+        value.cell_id = cell.cell_id;
+        value.cell_epoch = cell.slot_epoch;
     }
-    let changed = previous != value.cell_id;
+    let changed = previous != (value.cell_id, value.cell_epoch);
     if changed {
         value.needs_rehome = 1;
     }
@@ -172,13 +197,14 @@ fn apply_managed_cell(value: &mut bpf_intf::snake_task_cell, cell_id: u32) -> bo
 }
 
 fn clear_manual_cell(value: &mut bpf_intf::snake_task_cell) -> bool {
-    let previous = value.cell_id;
+    let previous = (value.cell_id, value.cell_epoch);
     value.flags &= !bpf_intf::SNAKE_TASK_CELL_F_MANUAL;
     if value.flags & bpf_intf::SNAKE_TASK_CELL_F_MANAGED == 0 {
         return false;
     }
     value.cell_id = value.managed_cell_id;
-    if previous != value.cell_id {
+    value.cell_epoch = value.managed_cell_epoch;
+    if previous != (value.cell_id, value.cell_epoch) {
         value.needs_rehome = 1;
     }
     true
@@ -187,6 +213,7 @@ fn clear_manual_cell(value: &mut bpf_intf::snake_task_cell) -> bool {
 fn clear_managed_cell(value: &mut bpf_intf::snake_task_cell) -> bool {
     value.flags &= !bpf_intf::SNAKE_TASK_CELL_F_MANAGED;
     value.managed_cell_id = 0;
+    value.managed_cell_epoch = 0;
     value.flags & bpf_intf::SNAKE_TASK_CELL_F_MANUAL != 0
 }
 
@@ -276,12 +303,18 @@ pub fn inspect_thread_cell(map: &impl MapCore, tid: i32) -> Result<Option<Thread
     let Some(value) = lookup_task_cell(map, &pidfd, tid)? else {
         return Ok(None);
     };
-    inspect_thread(tid, value.cell_id, value.needs_rehome != 0)
+    inspect_thread(
+        tid,
+        value.cell_id,
+        value.cell_epoch,
+        value.needs_rehome != 0,
+    )
 }
 
 pub(crate) fn inspect_thread(
     tid: i32,
     cell_id: u32,
+    cell_epoch: u32,
     needs_rehome: bool,
 ) -> Result<Option<ThreadCellSnapshot>> {
     let status = match fs::read_to_string(format!("/proc/{tid}/status")) {
@@ -305,6 +338,7 @@ pub(crate) fn inspect_thread(
         state: status.state,
         current_cpu,
         cell_id,
+        cell_epoch,
         allowed_cpus: status.allowed_cpus,
         cgroup,
         needs_rehome,
@@ -440,7 +474,7 @@ mod tests {
     fn explicit_no_cell_does_not_rehome_implicit_cell_zero() {
         let mut value = empty_task_cell();
 
-        apply_managed_cell(&mut value, 0);
+        apply_managed_cell(&mut value, CellRef::static_cell(0));
 
         assert_eq!(value.cell_id, 0);
         assert_eq!(value.needs_rehome, 0);
@@ -450,7 +484,7 @@ mod tests {
     #[test]
     fn managed_updates_rehome_only_when_the_effective_cell_changes() {
         let mut value = empty_task_cell();
-        apply_managed_cell(&mut value, 1);
+        apply_managed_cell(&mut value, CellRef::static_cell(1));
         assert_eq!(value.needs_rehome, 1);
 
         value.needs_rehome = 0;
@@ -458,7 +492,7 @@ mod tests {
         assert_eq!(value.needs_rehome, 1);
 
         value.needs_rehome = 0;
-        apply_managed_cell(&mut value, 3);
+        apply_managed_cell(&mut value, CellRef::static_cell(3));
         assert_eq!(value.cell_id, 2);
         assert_eq!(value.needs_rehome, 0);
 
@@ -468,13 +502,33 @@ mod tests {
     }
 
     #[test]
+    fn managed_slot_epoch_change_requests_rehome() {
+        let mut value = empty_task_cell();
+        let original = CellRef {
+            cell_id: 3,
+            slot_epoch: 7,
+        };
+        let replacement = CellRef {
+            cell_id: 3,
+            slot_epoch: 8,
+        };
+
+        assert!(apply_managed_cell(&mut value, original));
+        value.needs_rehome = 0;
+        assert!(apply_managed_cell(&mut value, replacement));
+        assert_eq!(value.needs_rehome, 1);
+        assert_eq!(value.cell_epoch, 8);
+        assert_eq!(value.managed_cell_epoch, 8);
+    }
+
+    #[test]
     fn clearing_managed_membership_preserves_only_a_manual_override() {
         let mut managed_only = empty_task_cell();
-        apply_managed_cell(&mut managed_only, 1);
+        apply_managed_cell(&mut managed_only, CellRef::static_cell(1));
         assert!(!clear_managed_cell(&mut managed_only));
 
         let mut overridden = empty_task_cell();
-        apply_managed_cell(&mut overridden, 1);
+        apply_managed_cell(&mut overridden, CellRef::static_cell(1));
         apply_manual_cell(&mut overridden, 2);
         overridden.needs_rehome = 0;
         assert!(clear_managed_cell(&mut overridden));

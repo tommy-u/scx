@@ -13,34 +13,66 @@ enum snake_membership_kind {
 	SNAKE_MEMBERSHIP_INVALID,
 };
 
-static __always_inline u32 queue_task_cell_index(struct task_struct *p)
+static __always_inline struct snake_queue_cell *
+queue_task_cell(struct task_struct *p, u32 *indexp)
 {
 	struct snake_queue_header *header = queue_config();
+	struct snake_queue_cell	  *cell;
 	struct snake_task_cell	  *annotation;
 	u32			  *encoded;
 	u32			   cell_id, index;
 
-	if (!header || !header->nr_cells)
-		return 0;
+	if (!header || !header->nr_cells || !indexp)
+		return NULL;
 	annotation = task_annotation(p);
 	if (!annotation)
-		return 0;
+		return NULL;
 	cell_id = READ_ONCE(annotation->cell_id);
 	if (cell_id >= SNAKE_MAX_CPUS)
-		return 0;
+		return NULL;
 	encoded = bpf_map_lookup_elem(&queue_cell_lookup, &cell_id);
 	if (!encoded || !*encoded)
-		return 0;
+		return NULL;
 	index = *encoded - 1;
-	return index < header->nr_cells ? index : 0;
+	if (index >= header->nr_cells)
+		return NULL;
+	cell = queue_cell(index);
+	if (!cell || !READ_ONCE(cell->valid) ||
+	    READ_ONCE(cell->external_id) != cell_id ||
+	    READ_ONCE(cell->slot_epoch) != READ_ONCE(annotation->cell_epoch))
+		return NULL;
+	*indexp = index;
+	return cell;
+}
+
+static __always_inline u32 queue_task_cell_index(struct task_struct *p)
+{
+	u32 index = 0;
+
+	return queue_task_cell(p, &index) ? index : 0;
+}
+
+static __always_inline s32 queue_task_cell_id(struct task_struct *p,
+					      u32		 *cell_idp)
+{
+	struct snake_task_cell *annotation;
+	u32			index;
+
+	if (!cell_idp)
+		return -EINVAL;
+	annotation = task_annotation(p);
+	if (!annotation)
+		return -ENOENT;
+	if (queue_cell_mode_enabled() && !queue_task_cell(p, &index))
+		return -ENOENT;
+	*cell_idp = READ_ONCE(annotation->cell_id);
+	return 0;
 }
 
 static __always_inline u32 queue_task_membership_kind(struct task_struct *p)
 {
-	struct snake_queue_header *header = queue_config();
-	struct snake_task_cell	  *annotation;
-	u32			  *encoded;
-	u32			   cell_id;
+	struct snake_task_cell *annotation;
+	u32			cell_id, index;
 
 	annotation = task_annotation(p);
 	if (!annotation)
@@ -48,10 +80,7 @@ static __always_inline u32 queue_task_membership_kind(struct task_struct *p)
 	cell_id = READ_ONCE(annotation->cell_id);
 	if (!cell_id)
 		return SNAKE_MEMBERSHIP_NO_CELL;
-	if (!header || !header->nr_cells || cell_id >= SNAKE_MAX_CPUS)
-		return SNAKE_MEMBERSHIP_INVALID;
-	encoded = bpf_map_lookup_elem(&queue_cell_lookup, &cell_id);
-	if (!encoded || !*encoded || *encoded - 1 >= header->nr_cells)
+	if (!queue_task_cell(p, &index))
 		return SNAKE_MEMBERSHIP_INVALID;
 	return SNAKE_MEMBERSHIP_CELL;
 }

@@ -809,7 +809,8 @@ fn encode_queue_topology(topology: &queue_topology::QueueTopology) -> Result<Enc
             clock_index: 0,
             first_normal_queue: 0,
             nr_normal_queues: 0,
-            reserved: [0; 2],
+            slot_epoch: 0,
+            reserved: 0,
             primary: bpf_intf::snake_mask_data {
                 valid: 0,
                 bits: [0; bpf_intf::SNAKE_MASK_BYTES as usize],
@@ -863,7 +864,8 @@ fn encode_queue_topology(topology: &queue_topology::QueueTopology) -> Result<Enc
             clock_index: cell.index,
             first_normal_queue: cell.normal_queues.first().copied().unwrap_or(0),
             nr_normal_queues: cell.normal_queues.len().try_into()?,
-            reserved: [0; 2],
+            slot_epoch: 0,
+            reserved: 0,
             primary: mask_tables::serialize_entry(&cell.primary)?,
             borrowable: mask_tables::serialize_entry(&cell.borrowable)?,
         };
@@ -2413,6 +2415,7 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
                     state: task.state,
                     current_cpu: task.current_cpu,
                     cell_id: task.cell_id,
+                    cell_epoch: task.cell_epoch,
                     cell_defined: task.cell_id == 0
                         || self.runtime.compiled.cells.contains_key(&task.cell_id),
                     allowed_cpus: task.allowed_cpus,
@@ -2443,6 +2446,7 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
                     state: task.state,
                     current_cpu: task.current_cpu,
                     cell_id: task.cell_id,
+                    cell_epoch: task.cell_epoch,
                     cell_defined: task.cell_id == 0
                         || self.runtime.compiled.cells.contains_key(&task.cell_id),
                     allowed_cpus: task.allowed_cpus,
@@ -5018,7 +5022,7 @@ scope = "task_allowed"
         let policy = policy::compile_policy(policy_source()).expect("policy should compile");
         let encoded = encode_ladder(&policy, 42).expect("ladder should encode");
 
-        assert_eq!(bpf_intf::SNAKE_ABI_VERSION, 24);
+        assert_eq!(bpf_intf::SNAKE_ABI_VERSION, 25);
         assert_eq!(size_of::<bpf_intf::snake_callback_timing>(), 520);
         assert_eq!(offset_of!(bpf_intf::snake_callback_timing, total_ns), 0);
         assert_eq!(offset_of!(bpf_intf::snake_callback_timing, buckets), 8);
@@ -5446,6 +5450,11 @@ scope = "task_cell"
         assert_eq!(encoded.header.nr_cpus, 4);
         assert_eq!(encoded.cell_lookup[0], 1);
         assert_eq!(encoded.cell_lookup[7], 2);
+        assert!(encoded
+            .cells
+            .iter()
+            .take(encoded.header.nr_cells as usize)
+            .all(|cell| cell.slot_epoch == 0));
         for queue in encoded
             .normal_queues
             .iter()
@@ -5797,8 +5806,46 @@ scope = "task_cell"
         );
         assert_eq!(encoded.flags, bpf_intf::SNAKE_RUNG_F_INTERSECT_TASK_ALLOWED);
         assert_eq!(encoded.data, 0);
-        assert_eq!(size_of::<bpf_intf::snake_task_cell>(), 16);
+        assert_eq!(size_of::<bpf_intf::snake_task_cell>(), 24);
+        assert_eq!(offset_of!(bpf_intf::snake_task_cell, cell_id), 0);
+        assert_eq!(offset_of!(bpf_intf::snake_task_cell, cell_epoch), 4);
+        assert_eq!(offset_of!(bpf_intf::snake_task_cell, managed_cell_id), 12);
+        assert_eq!(
+            offset_of!(bpf_intf::snake_task_cell, managed_cell_epoch),
+            16
+        );
         assert_eq!(policy::MAX_CELL_IDS, bpf_intf::SNAKE_MAX_CPUS);
+    }
+
+    #[test]
+    fn queue_task_mapping_validates_the_annotated_slot_epoch() {
+        let queue =
+            fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bpf/queue.h"))
+                .unwrap();
+        let resolver = queue
+            .split_once("queue_task_cell(struct task_struct *p, u32 *indexp)")
+            .and_then(|(_, body)| body.split_once("queue_task_cell_index("))
+            .map(|(body, _)| body)
+            .expect("task-cell resolver should have one definition");
+
+        assert!(resolver.contains("READ_ONCE(annotation->cell_epoch)"));
+        assert!(resolver.contains("READ_ONCE(cell->slot_epoch)"));
+    }
+
+    #[test]
+    fn task_cell_placement_and_rehome_clearing_validate_slot_epochs() {
+        let bpf_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bpf");
+        let ladder = fs::read_to_string(bpf_dir.join("ladder.h")).unwrap();
+        let vtime = fs::read_to_string(bpf_dir.join("queue_vtime.h")).unwrap();
+        let clear = vtime
+            .split_once("queue_clear_rehome_if_cell(")
+            .and_then(|(_, body)| body.split_once("queue_fairness_prepare_task_for_cell("))
+            .map(|(body, _)| body)
+            .expect("queue rehome clearer should have one definition");
+
+        assert_eq!(ladder.matches("queue_task_cell_id(").count(), 2);
+        assert!(clear.contains("READ_ONCE(annotation->cell_epoch)"));
+        assert!(clear.contains("READ_ONCE(cell->slot_epoch)"));
     }
 
     #[test]

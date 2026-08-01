@@ -2,7 +2,7 @@
 
 Snake can derive task-to-cell assignments from a cgroup-v2 subtree without
 putting cgroup policy in BPF. Userspace owns paths, lifecycle, and validation;
-BPF receives only the resolved numeric cell for assigned threads.
+BPF receives the resolved cell slot and slot epoch for assigned threads.
 
 ```mermaid
 flowchart TB
@@ -14,6 +14,7 @@ flowchart TB
 
     subgraph Userspace["Snake userspace"]
         VALIDATE["Validate absolute parent,<br/>direct-child names, target cells"]
+        DIRECTORY["Snapshot child name to<br/>cell slot and slot epoch"]
         SCAN["Scan configured child trees only<br/>including descendants"]
         IDENTITY["Retain pidfds<br/>poll once for exited identities"]
         DIFF["Diff assigned TIDs and cells<br/>new, moved, removed"]
@@ -21,13 +22,13 @@ flowchart TB
         INSPECT["Publish assignments and<br/>membership counters"]
     end
 
-    TOML --> VALIDATE
+    TOML --> VALIDATE --> DIRECTORY
     CELLS --> VALIDATE
     TREE --> SCAN
-    VALIDATE --> SCAN --> IDENTITY --> DIFF --> WRITE --> INSPECT
+    DIRECTORY --> SCAN --> IDENTITY --> DIFF --> WRITE --> INSPECT
 
     subgraph Boundary["Userspace to BPF boundary"]
-        STORE["One task-storage record<br/>effective cell, managed cell,<br/>manual flag, rehome flag"]
+        STORE["One task-storage record<br/>effective and managed cell/epoch,<br/>manual flag, rehome flag"]
         ABSENT["No record = NoCell<br/>synthetic cell 0"]
     end
 
@@ -88,6 +89,8 @@ ladders but must not change membership paths or assignments.
 ## Semantics
 
 - A managed cell assignment creates the task-storage record consumed by BPF.
+- Static policy assignments use slot epoch zero. A dynamic cell controller can
+  provide nonzero epochs without changing the walker.
 - A task outside every assigned child is `NoCell`. It has no managed record and
   therefore schedules in synthetic cell 0.
 - `membership_no_cell_runs` counts actual running callbacks for this policy;
@@ -95,8 +98,10 @@ ladders but must not change membership paths or assignments.
 - A manual `--set-thread-cell` override takes precedence over the managed
   layer. Clearing it reveals the current managed assignment, or `NoCell` when
   there is none. Manual cell 0 is an explicit `NoCell` override.
-- Rehoming is requested only when the effective numeric cell changes. Merely
-  confirming the same membership does not perturb queue state.
+- Rehoming is requested only when the effective `(cell, epoch)` reference
+  changes. Merely confirming the same membership does not perturb queue state.
+  Reusing the same numeric slot with a new epoch is an effective change and
+  requests rehome.
 
 ## Lifecycle
 
@@ -111,8 +116,15 @@ Task storage is removed automatically at exit. When a live thread leaves an
 assigned subtree, userspace clears only the managed layer. Any manual override
 remains intact; otherwise absence immediately selects the `NoCell` policy.
 
+A reconciliation can observe a moving TID in both its old and new cgroups. A
+previously unknown duplicate remains unannotated until the next pass. A known
+duplicate retains its last valid assignment instead of choosing a cell based on
+directory traversal order.
+
 ## Boundary
 
 Paths, cgroup IDs, and hierarchy operations never enter the BPF ABI. BPF does
-one task-storage lookup and uses the same cell clocks, DSQs, affinity fallback,
-borrowing, and rehome mechanics as manual assignments.
+one task-storage lookup, validates the annotated epoch against the active cell
+descriptor, and uses the same cell clocks, DSQs, affinity fallback, borrowing,
+and rehome mechanics as manual assignments. A stale epoch is invalid and routes
+through synthetic cell 0 rather than a reused slot.

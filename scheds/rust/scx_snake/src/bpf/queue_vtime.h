@@ -49,17 +49,20 @@ static __noinline void queue_clear_rehome_if_cell(struct task_struct *p,
 {
 	struct snake_queue_cell *cell;
 	struct snake_task_cell	*annotation;
-	u32			 external_id;
+	u32			 external_id, slot_epoch;
 
 	cell = queue_cell(cell_index);
 	if (!cell)
 		return;
 	external_id = READ_ONCE(cell->external_id);
+	slot_epoch  = READ_ONCE(cell->slot_epoch);
 	annotation  = task_annotation(p);
-	if (!annotation || READ_ONCE(annotation->cell_id) != external_id)
+	if (!annotation || READ_ONCE(annotation->cell_id) != external_id ||
+	    READ_ONCE(annotation->cell_epoch) != slot_epoch)
 		return;
 	WRITE_ONCE(annotation->needs_rehome, 0);
-	if (READ_ONCE(annotation->cell_id) != external_id)
+	if (READ_ONCE(annotation->cell_id) != external_id ||
+	    READ_ONCE(annotation->cell_epoch) != slot_epoch)
 		WRITE_ONCE(annotation->needs_rehome, 1);
 }
 

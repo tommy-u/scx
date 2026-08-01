@@ -1,8 +1,9 @@
 # Task Cell Annotations
 
-This interface lets userspace assign an integer cell to an individual thread.
+This interface lets userspace assign a cell reference to an individual thread.
 A policy separately maps each cell ID to an arbitrary CPU set; cell CPU sets
-may overlap. BPF sees only a task-local integer and generic CPU masks.
+may overlap. Static assignments use epoch zero; managed assignments additionally
+carry a reusable slot epoch.
 
 Cell annotations have two policy interpretations:
 
@@ -108,8 +109,10 @@ rehome flag used to converge live updates:
 ```c
 struct snake_task_cell {
     __u32 cell_id;
+    __u32 cell_epoch;
     __u32 needs_rehome;
     __u32 managed_cell_id;
+    __u32 managed_cell_epoch;
     __u32 flags;
 };
 
@@ -125,8 +128,11 @@ The cell rung receives `struct task_struct *p` and reads `task_cells` with
 `bpf_task_storage_get(&task_cells, p, NULL, 0)`. Placement-only mode uses
 `cell_id` directly as a generic mask-table key. Cell queue mode translates it
 to a dense queue-cell index; a missing annotation is the `NoCell` marker and
-resolves to synthetic cell 0. In both modes, BPF intersects the chosen mask
-with live `p->cpus_ptr` before selecting an idle CPU.
+resolves to synthetic cell 0. Cell queue mode also requires the annotation epoch
+to match the resolved queue-cell descriptor. A mismatch is invalid and falls
+back to cell 0, preventing a stale task from entering a reused slot. In both
+modes, BPF intersects the chosen mask with live `p->cpus_ptr` before selecting
+an idle CPU.
 
 Missing placement-only annotations, missing definitions, no idle CPU, and empty
 intersections are normal rung misses, so later policy rungs remain

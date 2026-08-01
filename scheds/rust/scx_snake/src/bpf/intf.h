@@ -8,7 +8,7 @@ typedef unsigned int	   u32;
 typedef unsigned long long u64;
 #endif
 
-#define SNAKE_ABI_VERSION 24
+#define SNAKE_ABI_VERSION 25
 #define SNAKE_MAX_RUNGS 9
 #define SNAKE_MAX_QUEUE_RUNGS 8
 #define SNAKE_LADDER_SLOTS 2
@@ -284,8 +284,10 @@ enum snake_dispatch_fallback {
 /* Userspace annotation attached to one thread through BPF task storage. */
 struct snake_task_cell {
 	u32 cell_id;
+	u32 cell_epoch;
 	u32 needs_rehome;
 	u32 managed_cell_id;
+	u32 managed_cell_epoch;
 	u32 flags;
 };
 
@@ -309,7 +311,8 @@ struct snake_queue_cell {
 	u32 clock_index;
 	u32 first_normal_queue;
 	u32 nr_normal_queues;
-	u32 reserved[2];
+	u32 slot_epoch;
+	u32 reserved;
 	struct snake_mask_data primary;
 	struct snake_mask_data borrowable;
 };

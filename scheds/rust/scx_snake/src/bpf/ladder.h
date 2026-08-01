@@ -163,17 +163,20 @@ static __noinline s32 execute_rung(const struct snake_ladder_ctx *ctx,
 	case SNAKE_OP_PICK_RANDOM_IDLE:
 		if (rung->input == SNAKE_INPUT_TASK_CELL) {
 			struct snake_task_cell *cell;
+			u32			cell_id;
 			s32			exists, cpu;
 
 			cell = task_annotation(p);
 			if (!cell)
 				return -ENOENT;
-			exists = mask_table_has_key(ctx, rung->data,
-						    READ_ONCE(cell->cell_id));
+			exists = queue_task_cell_id(p, &cell_id);
+			if (exists)
+				return exists;
+			exists = mask_table_has_key(ctx, rung->data, cell_id);
 			if (exists <= 0)
 				return exists < 0 ? exists : -ENOENT;
 			cpu = pick_random_idle_from_mask_table(
-				ctx, p, rung->data, READ_ONCE(cell->cell_id),
+				ctx, p, rung->data, cell_id,
 				rung->flags & SNAKE_RUNG_F_PICK_IDLE_CORE);
 			if (cpu >= 0) {
 				if (READ_ONCE(cell->needs_rehome))
@@ -201,17 +204,20 @@ static __noinline s32 execute_rung(const struct snake_ladder_ctx *ctx,
 	case SNAKE_OP_PICK_IDLE_MASK_TABLE:
 		if (rung->input == SNAKE_INPUT_TASK_CELL) {
 			struct snake_task_cell *cell;
+			u32			cell_id;
 			s32			exists, cpu;
 
 			cell = task_annotation(p);
 			if (!cell)
 				return -ENOENT;
-			exists = mask_table_has_key(ctx, rung->data,
-						    READ_ONCE(cell->cell_id));
+			exists = queue_task_cell_id(p, &cell_id);
+			if (exists)
+				return exists;
+			exists = mask_table_has_key(ctx, rung->data, cell_id);
 			if (exists <= 0)
 				return exists < 0 ? exists : -ENOENT;
 			cpu = pick_idle_from_mask_table(
-				ctx, p, rung->data, READ_ONCE(cell->cell_id),
+				ctx, p, rung->data, cell_id,
 				rung->flags & SNAKE_RUNG_F_PICK_IDLE_CORE);
 			if (cpu >= 0) {
 				if (READ_ONCE(cell->needs_rehome))

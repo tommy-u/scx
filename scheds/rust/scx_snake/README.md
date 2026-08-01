@@ -165,7 +165,10 @@ cell = 7
 
 Only assigned child trees are scanned. Threads outside them use synthetic cell
 0 without a task-storage record. Manual thread assignments override managed
-membership. See [Userspace Cgroup Cell Membership](docs/CGROUP_MEMBERSHIP_PROPOSAL.md).
+membership. The default one-second reconciliation retains thread pidfds and
+defers ambiguous move observations; task annotations include a slot epoch so a
+stale assignment cannot enter a reused managed cell. See
+[Userspace Cgroup Cell Membership](docs/CGROUP_MEMBERSHIP_PROPOSAL.md).
 
 ### Queue policies
 
