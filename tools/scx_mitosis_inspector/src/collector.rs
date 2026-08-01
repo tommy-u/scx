@@ -3,6 +3,8 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 
+use std::collections::HashSet;
+use std::fs;
 use std::mem::MaybeUninit;
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -20,9 +22,9 @@ use crate::bpf_program_stats::{query_bpf_program_stats, BpfProgramStatsRow};
 use crate::bpf_skel::{BpfSkel, BpfSkelBuilder};
 use crate::{
     build_callback_timing_rows, build_counters, build_cpu_runtime_rows, build_timing_metric_row,
-    program_name_matches, project_cpu_runtime, CallbackCounter, CallbackTimingCounters,
-    CallbackTimingRow, CpuRuntimeRow, MigrationRow, TimingMetricRow, CALLBACK_NAMES,
-    CALLBACK_TIMING_BUCKETS,
+    program_name_matches, project_cpu_runtime, summarize_callback_timing, CallbackCounter,
+    CallbackTimingCounters, CallbackTimingRow, CpuRuntimeRow, DsqMetricsView, MigrationRow,
+    TimingMetricRow, CALLBACK_NAMES, CALLBACK_TIMING_BUCKETS,
 };
 
 const TARGET_NAMES: [&str; 5] = [
@@ -51,6 +53,7 @@ pub struct Snapshot {
     pub migrations: Vec<MigrationRow>,
     pub cpu_runtime: Vec<CpuRuntimeRow>,
     pub bpf_program_stats: Vec<BpfProgramStatsRow>,
+    pub dsq_metrics: DsqMetricsView,
 }
 
 fn find_targets() -> Result<[TargetProgram; 5]> {
@@ -130,7 +133,7 @@ fn attach_programs(
     skel: &BpfSkel<'_>,
     callback_timing_sample_rate: u32,
     event_timing_sample_rate: u32,
-) -> Result<Vec<Link>> {
+) -> Result<(Vec<Link>, bool)> {
     let mut links = vec![
         skel.progs.observe_select_cpu.attach_trace()?,
         skel.progs.observe_enqueue.attach_trace()?,
@@ -155,7 +158,65 @@ fn attach_programs(
             skel.progs.on_sched_switch.attach()?,
         ]);
     }
-    Ok(links)
+    let dsq_available = attach_dsq_programs(skel, &mut links);
+    Ok((links, dsq_available))
+}
+
+fn kernel_symbols() -> HashSet<String> {
+    fs::read_to_string("/proc/kallsyms")
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| line.split_whitespace().nth(2))
+        .map(str::to_owned)
+        .collect()
+}
+
+fn attach_dsq_programs(skel: &BpfSkel<'_>, links: &mut Vec<Link>) -> bool {
+    let symbols = kernel_symbols();
+    let mut attached = false;
+
+    macro_rules! attach_if_present {
+        ($symbol:literal, $program:ident) => {
+            if symbols.contains($symbol) {
+                match skel.progs.$program.attach() {
+                    Ok(link) => {
+                        links.push(link);
+                        attached = true;
+                    }
+                    Err(error) => {
+                        eprintln!("DSQ observer could not attach to {}: {error}", $symbol)
+                    }
+                }
+            }
+        };
+    }
+
+    let has_new_insert = symbols.contains("scx_bpf_dsq_insert")
+        || symbols.contains("scx_bpf_dsq_insert_vtime")
+        || symbols.contains("scx_bpf_dsq_insert___v2")
+        || symbols.contains("__scx_bpf_dsq_insert_vtime");
+    if has_new_insert {
+        attach_if_present!("scx_bpf_dsq_insert", dsqo_insert);
+        attach_if_present!("scx_bpf_dsq_insert___v2", dsqo_insert_v2);
+        attach_if_present!("scx_bpf_dsq_insert_vtime", dsqo_insert_vtime);
+        attach_if_present!("__scx_bpf_dsq_insert_vtime", dsqo_insert_vtime_args);
+    } else {
+        attach_if_present!("scx_bpf_dispatch", dsqo_dispatch);
+        attach_if_present!("scx_bpf_dispatch_vtime", dsqo_dispatch_vtime);
+    }
+
+    if symbols.contains("scx_bpf_dsq_move_to_local") {
+        attach_if_present!("scx_bpf_dsq_move_to_local", dsqo_move_local_ret);
+    } else {
+        attach_if_present!("scx_bpf_consume", dsqo_consume_ret);
+    }
+    if attached {
+        match skel.progs.dsqo_sched_switch.attach() {
+            Ok(link) => links.push(link),
+            Err(error) => eprintln!("DSQ observer could not attach sched_switch: {error}"),
+        }
+    }
+    attached
 }
 
 fn read_counts(skel: &BpfSkel<'_>) -> Result<[u64; 5]> {
@@ -326,6 +387,64 @@ fn monotonic_time_ns() -> Result<u64> {
         .saturating_add(nanoseconds))
 }
 
+fn read_dsq_metrics(skel: &BpfSkel<'_>, available: bool) -> Result<DsqMetricsView> {
+    const FIELD_COUNT: usize = 3 + CALLBACK_TIMING_BUCKETS + 4;
+    const U64_BYTES: usize = std::mem::size_of::<u64>();
+
+    let key = 0_u32.to_ne_bytes();
+    let values = skel
+        .maps
+        .dsq_observer_metrics
+        .lookup_percpu(&key, MapFlags::ANY)?
+        .context("DSQ metrics entry missing")?;
+    let mut insert_count = 0_u64;
+    let mut move_count = 0_u64;
+    let mut residence = CallbackTimingCounters::default();
+    let mut depth_samples = 0_u64;
+    let mut depth_total = 0_u64;
+    let mut depth_latest_max = 0_u64;
+    let mut depth_max = 0_u64;
+
+    for value in values {
+        if value.len() < FIELD_COUNT * U64_BYTES {
+            bail!("short DSQ metrics value");
+        }
+        let field = |index: usize| -> Result<u64> {
+            let start = index * U64_BYTES;
+            Ok(u64::from_ne_bytes(
+                value[start..start + U64_BYTES].try_into()?,
+            ))
+        };
+        insert_count = insert_count.saturating_add(field(0)?);
+        move_count = move_count.saturating_add(field(1)?);
+        residence.total_ns = residence.total_ns.saturating_add(field(2)?);
+        for bucket in 0..CALLBACK_TIMING_BUCKETS {
+            residence.buckets[bucket] =
+                residence.buckets[bucket].saturating_add(field(3 + bucket)?);
+        }
+        depth_samples = depth_samples.saturating_add(field(67)?);
+        depth_total = depth_total.saturating_add(field(68)?);
+        depth_latest_max = depth_latest_max.max(field(69)?);
+        depth_max = depth_max.max(field(70)?);
+    }
+
+    let summary = summarize_callback_timing(&residence);
+    Ok(DsqMetricsView {
+        available,
+        insert_count,
+        move_count,
+        residence_samples: summary.samples,
+        residence_mean_ns: summary.mean_ns,
+        residence_p50_ns: summary.p50_ns,
+        residence_p95_ns: summary.p95_ns,
+        residence_p99_ns: summary.p99_ns,
+        depth_samples,
+        depth_average: (depth_samples > 0).then(|| depth_total as f64 / depth_samples as f64),
+        depth_latest_max,
+        depth_max,
+    })
+}
+
 pub fn run(
     state: Arc<RwLock<Snapshot>>,
     shutdown: Arc<AtomicBool>,
@@ -358,8 +477,9 @@ pub fn run(
     let skel = open_skel
         .load()
         .context("loading callback collector BPF object")?;
-    let _links = attach_programs(&skel, callback_timing_sample_rate, event_timing_sample_rate)
-        .context("attaching callback observer programs")?;
+    let (_links, dsq_available) =
+        attach_programs(&skel, callback_timing_sample_rate, event_timing_sample_rate)
+            .context("attaching callback observer programs")?;
 
     let started = Instant::now();
     let mut previous = read_counts(&skel)?;
@@ -370,6 +490,7 @@ pub fn run(
     let migrations = read_migrations(&skel)?;
     let mut previous_cpu_runtime = read_cpu_runtime(&skel)?;
     let bpf_program_stats = query_bpf_program_stats(&target_program_ids);
+    let dsq_metrics = read_dsq_metrics(&skel, dsq_available)?;
     let mut previous_at = Instant::now();
     {
         let mut snapshot = state.write().expect("snapshot lock poisoned");
@@ -393,6 +514,7 @@ pub fn run(
                 Duration::ZERO,
             ),
             bpf_program_stats,
+            dsq_metrics,
         };
     }
     ready
@@ -410,6 +532,7 @@ pub fn run(
         let migrations = read_migrations(&skel)?;
         let current_cpu_runtime = read_cpu_runtime(&skel)?;
         let bpf_program_stats = query_bpf_program_stats(&target_program_ids);
+        let dsq_metrics = read_dsq_metrics(&skel, dsq_available)?;
         let elapsed = now.duration_since(previous_at);
         let counters = build_counters(current, previous, elapsed);
         previous = current;
@@ -427,6 +550,7 @@ pub fn run(
             build_cpu_runtime_rows(&current_cpu_runtime, &previous_cpu_runtime, elapsed);
         previous_cpu_runtime = current_cpu_runtime;
         snapshot.bpf_program_stats = bpf_program_stats;
+        snapshot.dsq_metrics = dsq_metrics;
         previous_at = now;
     }
     Ok(())

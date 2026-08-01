@@ -9,6 +9,7 @@ const migrationRows = document.querySelector("#migrationRows");
 const cpuUtilizationRows = document.querySelector("#cpuUtilizationRows");
 const llcUtilizationRows = document.querySelector("#llcUtilizationRows");
 const bpfProgramRows = document.querySelector("#bpfProgramRows");
+const dsqMetricRows = document.querySelector("#dsqMetricRows");
 const FEEDBACK_STORAGE_KEY = "scx-mitosis-inspector-feedback-v1";
 const feedbackElements = {
   clear: document.querySelector("#clearFeedback"),
@@ -86,6 +87,29 @@ function tableRow(values) {
     row.append(cell);
   });
   return row;
+}
+
+function renderDsqMetrics(metrics) {
+  document.querySelector("#dsqStatus").textContent = metrics.available
+    ? "Exact aggregate probes active"
+    : "No compatible DSQ kernel symbols attached";
+  const value = (entry) => entry == null ? "--" : number.format(entry);
+  const averageDepth = metrics.depth_average == null
+    ? "--"
+    : rate.format(metrics.depth_average);
+  dsqMetricRows.replaceChildren(...[
+    ["Insert calls", value(metrics.insert_count)],
+    ["Successful moves", value(metrics.move_count)],
+    ["Residence samples", value(metrics.residence_samples)],
+    ["Residence mean (ns)", value(metrics.residence_mean_ns)],
+    ["Residence p50 approx. (ns)", value(metrics.residence_p50_ns)],
+    ["Residence p95 approx. (ns)", value(metrics.residence_p95_ns)],
+    ["Residence p99 approx. (ns)", value(metrics.residence_p99_ns)],
+    ["Queue-depth samples", value(metrics.depth_samples)],
+    ["Average remaining depth", averageDepth],
+    ["Largest latest per-CPU depth", value(metrics.depth_latest_max)],
+    ["Maximum remaining depth", value(metrics.depth_max)],
+  ].map(tableRow));
 }
 
 function renderCpuBreakdown(snapshot) {
@@ -167,6 +191,7 @@ function render(snapshot) {
   renderMigrations(snapshot.migrations);
   renderCpuBreakdown(snapshot);
   renderBpfPrograms(snapshot.bpf_program_stats);
+  renderDsqMetrics(snapshot.dsq_metrics);
   MitosisHeatmap.update({ ...snapshot, topology });
 
   const counters = new Map(snapshot.counters.map((counter) => [counter.name, counter]));

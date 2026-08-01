@@ -7,6 +7,7 @@
 #include <bpf/bpf_tracing.h>
 
 #include "intf.h"
+#include "dsq_observer.bpf.h"
 
 char _license[] SEC("license") = "GPL";
 
