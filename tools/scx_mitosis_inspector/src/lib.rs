@@ -11,6 +11,7 @@ pub mod bpf_program_stats;
 pub mod collector;
 pub mod host_context;
 pub mod model;
+pub mod probe_manifest;
 pub mod stats;
 pub mod system_stats;
 pub mod topology;
@@ -20,8 +21,8 @@ pub use model::{
     build_timing_metric_row, parse_callback_timing_sample_rate, project_cpu_runtime,
     summarize_callback_timing, BlockIoMetricsView, CallbackCounter, CallbackTimingCounters,
     CallbackTimingRow, CallbackTimingSummary, CpuRuntimeRow, DsqMetricsView, HardirqMetricsView,
-    HardirqRow, InterruptCpuRow, MigrationRow, SchedulerEventRow, SoftirqRow, TimingMetricRow,
-    CALLBACK_NAMES, CALLBACK_TIMING_BUCKETS, SCHEDULER_EVENT_NAMES, SOFTIRQ_NAMES,
+    HardirqRow, InterruptCpuRow, MigrationRow, ProbeManifestRow, SchedulerEventRow, SoftirqRow,
+    TimingMetricRow, CALLBACK_NAMES, CALLBACK_TIMING_BUCKETS, SCHEDULER_EVENT_NAMES, SOFTIRQ_NAMES,
 };
 
 pub fn program_name_matches(loaded: &str, expected: &str) -> bool {

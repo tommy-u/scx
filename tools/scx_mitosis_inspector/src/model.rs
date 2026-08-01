@@ -83,6 +83,7 @@ pub struct InterruptCpuRow {
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct HardirqRow {
     pub irq: u32,
+    pub name: Option<String>,
     pub count: u64,
     pub rate_per_second: f64,
     pub samples: u64,
@@ -99,6 +100,14 @@ pub struct HardirqMetricsView {
     pub starts_map_full: u64,
     pub unmatched_exits: u64,
     pub rows: Vec<HardirqRow>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct ProbeManifestRow {
+    pub group: &'static str,
+    pub status: &'static str,
+    pub mode: String,
+    pub scope: &'static str,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
