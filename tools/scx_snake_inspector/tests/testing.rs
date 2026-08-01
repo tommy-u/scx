@@ -575,9 +575,10 @@ fn testing_catalog_keeps_rejected_policies_in_the_matrix() {
         .filter(|case| serde_json::to_value(case.status).unwrap() == "skipped")
         .collect::<Vec<_>>();
     assert_eq!(skipped.len(), 12);
-    assert!(skipped
-        .iter()
-        .all(|case| case.failure.as_deref().is_some_and(|reason| reason.contains("rejected"))));
+    assert!(skipped.iter().all(|case| case
+        .failure
+        .as_deref()
+        .is_some_and(|reason| reason.contains("rejected"))));
     assert_eq!(TestRun::new(matrix).assigned_jobs().len(), 16);
 }
 
