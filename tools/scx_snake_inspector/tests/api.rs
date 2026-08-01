@@ -854,6 +854,7 @@ async fn scheduler_control_distinguishes_dynamic_restart_and_invalid_policies() 
         "enqueue.toml",
         "dispatch.toml",
         "legacy-queue.toml",
+        "managed.toml",
     ] {
         fs::write(root.path().join("policies").join(name), "candidate").unwrap();
     }
@@ -911,6 +912,13 @@ async fn scheduler_control_distinguishes_dynamic_restart_and_invalid_policies() 
                     error: "cannot remove active queue dispatch source `affinity` during live replacement"
                         .into(),
                 },
+                InvalidPolicy {
+                    id: "managed.toml".into(),
+                    name: "managed".into(),
+                    source: "[managed_cells]".into(),
+                    error: "Invalid argument (os error 22): \"managed cells are attachment-time configuration; restart Snake to apply a policy update\""
+                        .into(),
+                },
             ],
         }),
         None,
@@ -949,6 +957,7 @@ async fn scheduler_control_distinguishes_dynamic_restart_and_invalid_policies() 
     assert_eq!(modes["broken.toml"], "invalid");
     assert_eq!(modes["enqueue.toml"], "reload");
     assert_eq!(modes["dispatch.toml"], "reload");
+    assert_eq!(modes["managed.toml"], "reload");
     let policy = |id| {
         body["policies"]
             .as_array()
@@ -981,6 +990,7 @@ async fn scheduler_control_distinguishes_dynamic_restart_and_invalid_policies() 
         policy("dispatch.toml")["reasons"][0]["code"],
         "dispatch_sources"
     );
+    assert_eq!(policy("managed.toml")["apply_mode"], "restart");
 
     let rejected = router(context.clone())
         .oneshot(

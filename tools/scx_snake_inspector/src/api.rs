@@ -993,7 +993,7 @@ fn scheduler_control_response(context: &ApiContext) -> Result<SchedulerControl, 
 }
 
 fn policy_requires_restart(error: &str) -> bool {
-    error.contains("restart Snake to apply it")
+    error.contains("restart Snake to apply")
         || error.contains("cannot remove active queue enqueue target")
         || error.contains("cannot remove active queue dispatch source")
 }
