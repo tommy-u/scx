@@ -4,6 +4,10 @@
 activity, installed policy state, cells, and task mappings in one local web
 application instead of splitting them across separate tools.
 
+The workspace theme can follow the operating system or be pinned to Light or
+Dark. The browser stores this display-only preference locally and applies it
+before first paint; it never changes scheduler state.
+
 The embedded interface is organized by purpose rather than a fixed view count:
 
 - **Overview** summarizes host pressure, scheduler outcomes, workload context,

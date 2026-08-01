@@ -1,11 +1,29 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="system" data-resolved-theme="light">
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
+    <script data-theme-bootstrap>
+      (() => {
+        const root = document.documentElement;
+        let preference = "system";
+        try {
+          const stored = localStorage.getItem("scx-snake-inspector-theme-v1");
+          if (["light", "system", "dark"].includes(stored)) preference = stored;
+        } catch (_error) {
+          // The system preference remains available when storage is blocked.
+        }
+        const systemDark = window.matchMedia?.("(prefers-color-scheme: dark)").matches ?? false;
+        root.dataset.theme = preference;
+        root.dataset.resolvedTheme = preference === "system"
+          ? (systemDark ? "dark" : "light")
+          : preference;
+      })();
+    </script>
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath fill='%2316836b' d='M5 7h18a4 4 0 0 1 0 8H11a2 2 0 0 0 0 4h16v6H11a8 8 0 0 1 0-16h12a2 2 0 0 0 0-4H5z'/%3E%3C/svg%3E">
     <meta name="snake-session-token" content="__SESSION_TOKEN__">
     <title>Snake inspector</title>
+    <link rel="modulepreload" href="/assets/theme.js">
     <link rel="stylesheet" href="/assets/style.css">
   </head>
   <body data-initial-window-ms="__INITIAL_WINDOW_MS__" data-max-window-ms="__MAX_WINDOW_MS__">
@@ -74,10 +92,20 @@
             <a href="#/debugging/vtime" data-route="debugging/vtime">VTIME</a>
           </div>
         </nav>
-        <button class="workspace-feedback-button" id="openFeedback" type="button" data-open-feedback aria-controls="feedbackDrawer">
-          <span>Feedback</span>
-          <span class="feedback-count" id="feedbackCount" aria-label="0 feedback drafts">0</span>
-        </button>
+        <div class="workspace-sidebar-footer">
+          <fieldset class="theme-switcher" aria-label="Color theme">
+            <legend>Theme</legend>
+            <div class="theme-options">
+              <label title="Use the light theme"><input id="themeLight" type="radio" name="theme-desktop" data-theme-preference="light"><span>Light</span></label>
+              <label title="Follow the operating system theme"><input id="themeSystem" type="radio" name="theme-desktop" data-theme-preference="system"><span>System</span></label>
+              <label title="Use the dark theme"><input id="themeDark" type="radio" name="theme-desktop" data-theme-preference="dark"><span>Dark</span></label>
+            </div>
+          </fieldset>
+          <button class="workspace-feedback-button" id="openFeedback" type="button" data-open-feedback aria-controls="feedbackDrawer">
+            <span>Feedback</span>
+            <span class="feedback-count" id="feedbackCount" aria-label="0 feedback drafts">0</span>
+          </button>
+        </div>
       </aside>
 
       <main id="app" tabindex="-1" aria-label="Snake scheduler inspector">
@@ -1115,6 +1143,14 @@
             <a href="#/debugging/vtime" data-route="debugging/vtime">VTIME</a>
           </div>
         </nav>
+        <fieldset class="theme-switcher mobile-theme-switcher" aria-label="Color theme">
+          <legend>Theme</legend>
+          <div class="theme-options">
+            <label title="Use the light theme"><input id="mobileThemeLight" type="radio" name="theme-mobile" data-theme-preference="light"><span>Light</span></label>
+            <label title="Follow the operating system theme"><input id="mobileThemeSystem" type="radio" name="theme-mobile" data-theme-preference="system"><span>System</span></label>
+            <label title="Use the dark theme"><input id="mobileThemeDark" type="radio" name="theme-mobile" data-theme-preference="dark"><span>Dark</span></label>
+          </div>
+        </fieldset>
       </div>
     </dialog>
 

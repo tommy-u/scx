@@ -318,6 +318,57 @@ export function infernoColor(position) {
   return rgbToHex(channel("red"), channel("green"), channel("blue"));
 }
 
+export function contrastTextColor(background, darkText, lightText) {
+  const backgroundLuminance = relativeLuminance(background);
+  const darkContrast = contrastRatio(backgroundLuminance, relativeLuminance(darkText));
+  const lightContrast = contrastRatio(backgroundLuminance, relativeLuminance(lightText));
+  return darkContrast >= lightContrast ? darkText : lightText;
+}
+
+export function mixHexColors(foreground, background, amount) {
+  const clamped = Math.max(0, Math.min(1, amount));
+  const front = hexToRgb(foreground);
+  const back = hexToRgb(background);
+  const channel = (name) => Math.round(
+    front[name] * clamped + back[name] * (1 - clamped),
+  );
+  return rgbToHex(channel("red"), channel("green"), channel("blue"));
+}
+
+export function heatmapTextColor(heatColor, surfaceColor, intensity) {
+  const background = mixHexColors(heatColor, surfaceColor, intensity);
+  return contrastTextColor(background, "#000000", "#ffffff");
+}
+
+export function drawContrastingOutline(context, {
+  color,
+  contrastColor,
+  lineWidth,
+  rectangle,
+}) {
+  context.strokeStyle = contrastColor;
+  context.lineWidth = lineWidth + 2;
+  context.strokeRect(...rectangle);
+  context.strokeStyle = color;
+  context.lineWidth = lineWidth;
+  context.strokeRect(...rectangle);
+}
+
+function relativeLuminance(color) {
+  const { red, green, blue } = hexToRgb(color);
+  const channel = (value) => {
+    const normalized = value / 255;
+    return normalized <= 0.04045
+      ? normalized / 12.92
+      : ((normalized + 0.055) / 1.055) ** 2.4;
+  };
+  return 0.2126 * channel(red) + 0.7152 * channel(green) + 0.0722 * channel(blue);
+}
+
+function contrastRatio(left, right) {
+  return (Math.max(left, right) + 0.05) / (Math.min(left, right) + 0.05);
+}
+
 function hexToRgb(color) {
   return {
     red: Number.parseInt(color.slice(1, 3), 16),

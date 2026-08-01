@@ -37,6 +37,7 @@ const INDEX_HTML: &str = include_str!("web/index.html");
 const APP_JS: &str = include_str!("web/app.js");
 const HEATMAP_JS: &str = include_str!("web/heatmap.js");
 const INSPECTION_JS: &str = include_str!("web/inspection.js");
+const THEME_JS: &str = include_str!("web/theme.js");
 const STYLE_CSS: &str = include_str!("web/style.css");
 const WEB_CACHE_CONTROL: &str = "no-store";
 
@@ -114,6 +115,7 @@ pub fn router(context: ApiContext) -> Router {
         .route("/assets/app.js", get(app_script))
         .route("/assets/heatmap.js", get(heatmap_script))
         .route("/assets/inspection.js", get(inspection_script))
+        .route("/assets/theme.js", get(theme_script))
         .route("/assets/style.css", get(stylesheet))
         .route("/api/topology", get(topology))
         .route("/api/host-context", get(host_context))
@@ -336,6 +338,16 @@ async fn inspection_script() -> impl IntoResponse {
             (header::CACHE_CONTROL, WEB_CACHE_CONTROL),
         ],
         INSPECTION_JS,
+    )
+}
+
+async fn theme_script() -> impl IntoResponse {
+    (
+        [
+            (header::CONTENT_TYPE, "text/javascript; charset=utf-8"),
+            (header::CACHE_CONTROL, WEB_CACHE_CONTROL),
+        ],
+        THEME_JS,
     )
 }
 

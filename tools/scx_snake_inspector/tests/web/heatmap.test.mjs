@@ -289,6 +289,70 @@ test("infernoColor is deterministic and clamps its input", () => {
   assert.match(infernoColor(0.5), /^#[0-9a-f]{6}$/);
 });
 
+test("canvas labels choose the higher-contrast inferno foreground", () => {
+  assert.equal(typeof heatmapModule.contrastTextColor, "function");
+  if (typeof heatmapModule.contrastTextColor !== "function") return;
+  assert.equal(
+    heatmapModule.contrastTextColor("#000004", "#000000", "#ffffff"),
+    "#ffffff",
+  );
+  assert.equal(
+    heatmapModule.contrastTextColor(infernoColor(0.6), "#000000", "#ffffff"),
+    "#000000",
+  );
+  assert.equal(
+    heatmapModule.contrastTextColor("#fcffa4", "#000000", "#ffffff"),
+    "#000000",
+  );
+});
+
+test("canvas label contrast stays above 4.5 across the full inferno ramp", () => {
+  const luminance = (hex) => {
+    const channels = hex.match(/[0-9a-f]{2}/gi).map((channel) => parseInt(channel, 16) / 255);
+    const [red, green, blue] = channels.map((channel) => (
+      channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4
+    ));
+    return 0.2126 * red + 0.7152 * green + 0.0722 * blue;
+  };
+  const contrast = (left, right) => {
+    const lighter = Math.max(luminance(left), luminance(right));
+    const darker = Math.min(luminance(left), luminance(right));
+    return (lighter + 0.05) / (darker + 0.05);
+  };
+  for (let step = 0; step <= 1_000; step += 1) {
+    const background = infernoColor(step / 1_000);
+    const foreground = heatmapModule.contrastTextColor(
+      background,
+      "#000000",
+      "#ffffff",
+    );
+    assert.ok(contrast(background, foreground) >= 4.5);
+  }
+});
+
+test("pinned canvas cells receive a two-tone contrast outline", () => {
+  assert.equal(typeof heatmapModule.drawContrastingOutline, "function");
+  if (typeof heatmapModule.drawContrastingOutline !== "function") return;
+  const strokes = [];
+  const context = {
+    strokeStyle: null,
+    lineWidth: 0,
+    strokeRect(...rectangle) {
+      strokes.push({ color: this.strokeStyle, lineWidth: this.lineWidth, rectangle });
+    },
+  };
+  heatmapModule.drawContrastingOutline(context, {
+    color: "#42d3ad",
+    contrastColor: "#11161c",
+    lineWidth: 2,
+    rectangle: [4, 5, 6, 7],
+  });
+  assert.deepEqual(strokes, [
+    { color: "#11161c", lineWidth: 4, rectangle: [4, 5, 6, 7] },
+    { color: "#42d3ad", lineWidth: 2, rectangle: [4, 5, 6, 7] },
+  ]);
+});
+
 test("axis labels sample the full CPU order without omitting either end", () => {
   assert.equal(typeof heatmapModule.axisLabelIndices, "function");
   const indices = heatmapModule.axisLabelIndices(316, 24);

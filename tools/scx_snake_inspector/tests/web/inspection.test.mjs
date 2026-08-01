@@ -1199,12 +1199,12 @@ test("policy library reserves green cards for active policies and blue for Appli
   );
   assert.match(
     stylesheet,
-    /\.policy-choice\.active\s*\{[^}]*background:\s*#e4f5ef;/s,
+    /\.policy-choice\.active\s*\{[^}]*background:\s*var\(--success-bg\);/s,
   );
   assert.match(stylesheet, /\.policy-choice\.active\.selected\s*\{/);
   assert.match(
     stylesheet,
-    /\.change-mode\.applies-live\s*\{[^}]*background:\s*#e0eff8;[^}]*border-color:\s*#6b9dbc;/s,
+    /\.change-mode\.applies-live\s*\{[^}]*background:\s*var\(--info-bg\);[^}]*border-color:\s*var\(--info-border\);/s,
   );
 });
 
@@ -1254,7 +1254,7 @@ test("duration severity styles distinguish warning and critical values", () => {
     "utf8",
   );
 
-  assert.match(stylesheet, /\.duration-warning\s*\{[^}]*color:\s*#805000;/s);
+  assert.match(stylesheet, /\.duration-warning\s*\{[^}]*color:\s*var\(--warning-ink\);/s);
   assert.match(stylesheet, /\.duration-critical\s*\{[^}]*color:\s*var\(--danger\);/s);
 });
 

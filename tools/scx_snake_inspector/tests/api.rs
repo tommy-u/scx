@@ -2492,6 +2492,7 @@ async fn root_page_embeds_session_configuration_and_local_assets() {
     assert!(page.contains("data-initial-window-ms=\"2000\""));
     assert!(page.contains("data-max-window-ms=\"5000\""));
     assert!(page.contains("/assets/app.js"));
+    assert!(page.contains("/assets/theme.js"));
     assert!(!page.contains("https://"));
     for control in [
         "id=\"liveStatus\"",
@@ -2531,6 +2532,7 @@ async fn root_page_embeds_session_configuration_and_local_assets() {
     assert!(page.contains("id=\"zoomControl\" type=\"range\" min=\"0.25\" max=\"3\" step=\"0.25\""));
 
     let script = app
+        .clone()
         .oneshot(
             Request::builder()
                 .uri("/assets/app.js")
@@ -2543,6 +2545,22 @@ async fn root_page_embeds_session_configuration_and_local_assets() {
     assert_eq!(script.status(), StatusCode::OK);
     assert_eq!(
         script.headers()["content-type"],
+        "text/javascript; charset=utf-8"
+    );
+
+    let theme = app
+        .oneshot(
+            Request::builder()
+                .uri("/assets/theme.js")
+                .header("host", "127.0.0.1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(theme.status(), StatusCode::OK);
+    assert_eq!(
+        theme.headers()["content-type"],
         "text/javascript; charset=utf-8"
     );
 }
@@ -2563,6 +2581,7 @@ async fn web_shell_disables_browser_caching() {
         "/assets/app.js",
         "/assets/heatmap.js",
         "/assets/inspection.js",
+        "/assets/theme.js",
         "/assets/style.css",
     ] {
         let response = app

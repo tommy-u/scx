@@ -24,6 +24,10 @@ const styles = readFileSync(
   new URL("../../src/web/style.css", import.meta.url),
   "utf8",
 );
+const themeScript = readFileSync(
+  new URL("../../src/web/theme.js", import.meta.url),
+  "utf8",
+);
 const reviewIndex = readFileSync(
   new URL("../../../../docs/snake-review/README.md", import.meta.url),
   "utf8",
@@ -72,6 +76,51 @@ test("workspace reorganization preserves control and feedback behavior", () => {
   ]) {
     assert.match(script, new RegExp(`function ${behavior}\\(`), `missing ${behavior}`);
   }
+});
+
+test("workspace offers a persistent theme choice before first paint", () => {
+  assert.match(page, /<html lang="en" data-theme="system" data-resolved-theme="light">/);
+  assert.match(page, /id="themeLight"[^>]+data-theme-preference="light"/);
+  assert.match(page, /id="themeSystem"[^>]+data-theme-preference="system"/);
+  assert.match(page, /id="themeDark"[^>]+data-theme-preference="dark"/);
+  assert.match(page, /id="mobileThemeLight"[^>]+data-theme-preference="light"/);
+  assert.match(page, /id="mobileThemeSystem"[^>]+data-theme-preference="system"/);
+  assert.match(page, /id="mobileThemeDark"[^>]+data-theme-preference="dark"/);
+  assert.ok(
+    page.indexOf("data-theme-bootstrap") < page.indexOf("/assets/style.css"),
+    "stored theme must be applied before the stylesheet loads",
+  );
+  assert.match(script, /from "\/assets\/theme\.js"/);
+  assert.match(script, /data-theme-preference/);
+  assert.match(themeScript, /scx-snake-inspector-theme-v1/);
+});
+
+test("dark mode has a complete semantic palette and repaints the canvas", () => {
+  assert.match(styles, /:root\[data-resolved-theme="dark"\]\s*{/);
+  for (const token of [
+    "--background",
+    "--surface",
+    "--surface-muted",
+    "--ink",
+    "--muted",
+    "--border",
+    "--accent",
+    "--success-bg",
+    "--warning-bg",
+    "--danger-bg",
+    "--info-bg",
+    "--canvas-surface",
+    "--canvas-label",
+  ]) {
+    assert.match(styles, new RegExp(`${token}:`), `missing ${token}`);
+  }
+  assert.match(script, /function canvasPalette\(/);
+  assert.match(script, /getComputedStyle\(document\.documentElement\)/);
+  assert.match(script, /drawContrastingOutline\(context,/);
+  assert.match(script, /function dsqHeatmapInk\(/);
+  assert.match(script, /--heat-ink:\$\{ink\}/);
+  assert.doesNotMatch(script, /context\.fillStyle = "#ffffff"/);
+  assert.doesNotMatch(script, /context\.fillStyle = "#11161c"/);
 });
 
 test("nested workspace routes are canonical and legacy hashes remain compatible", () => {

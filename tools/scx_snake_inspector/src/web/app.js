@@ -9,6 +9,9 @@ import {
   buildCpuUsage,
   buildLlcUsage,
   buildMatrix,
+  contrastTextColor,
+  drawContrastingOutline,
+  heatmapTextColor,
   heatmapLayout,
   infernoColor,
   llcAnnotations,
@@ -87,6 +90,11 @@ import {
   vtimeDebugModel,
   workloadAssignmentRequest,
 } from "/assets/inspection.js";
+import {
+  applyThemeToDocument,
+  createThemeController,
+  saveThemePreference,
+} from "/assets/theme.js";
 
 const numberFormat = new Intl.NumberFormat();
 const FEEDBACK_STORAGE_KEY = "scx-snake-inspector-feedback-v1";
@@ -261,6 +269,7 @@ const elements = {
   tgidField: document.querySelector("#tgidField"),
   tgidInput: document.querySelector("#tgidInput"),
   tooltip: document.querySelector("#heatmapTooltip"),
+  themeControls: document.querySelectorAll("[data-theme-preference]"),
   totalMigrations: document.querySelector("#totalMigrations"),
   activityView: document.querySelector("#activityView"),
   overviewView: document.querySelector("#overviewView"),
@@ -391,6 +400,25 @@ const state = {
 
 let queueTopologyRenderTimer = null;
 let cellUtilizationRenderTimer = null;
+let dsqHeatmapPaletteCache = null;
+const themeMedia = window.matchMedia("(prefers-color-scheme: dark)");
+const themeController = createThemeController({
+  preference: document.documentElement.dataset.theme,
+  systemDark: themeMedia.matches,
+  onApply: (theme) => applyThemeToDocument({
+    root: document.documentElement,
+    controls: elements.themeControls,
+    theme,
+    repaint: renderThemeVisualizations,
+  }),
+  onPersist: (preference) => saveThemePreference(window.localStorage, preference),
+});
+
+if (themeMedia.addEventListener) {
+  themeMedia.addEventListener("change", (event) => themeController.systemChanged(event.matches));
+} else {
+  themeMedia.addListener((event) => themeController.systemChanged(event.matches));
+}
 
 configureWindowSelector();
 configureCallbackRangeSelector();
@@ -433,6 +461,13 @@ async function start() {
   window.setInterval(loadTestingMatrix, 1_000);
   window.setInterval(renderSchedulerUptime, 1_000);
   window.setInterval(loadHostContext, 30_000);
+}
+
+function renderThemeVisualizations() {
+  renderHeatmap();
+  if (state.route === "inspect/queue-topology" && state.inspection) {
+    renderQueueTopologyView();
+  }
 }
 
 function configureWindowSelector() {
@@ -495,6 +530,13 @@ function configureCallbackSampleRateSelector() {
 }
 
 function bindControls() {
+  for (const control of elements.themeControls) {
+    control.addEventListener("change", () => {
+      if (control.checked) {
+        themeController.select(control.dataset.themePreference);
+      }
+    });
+  }
   elements.overviewWindowSelect.addEventListener("change", () => {
     setWindow(elements.overviewWindowSelect.value);
   });
@@ -1391,6 +1433,7 @@ function renderHeatmap() {
     width,
   } = heatmapLayout(cpuCount, viewportWidth, state.zoom);
   const pixelRatio = Math.min(2, window.devicePixelRatio || 1);
+  const palette = canvasPalette();
 
   elements.legendLow.textContent = numberFormat.format(matrix.minPositive);
   elements.legendHigh.textContent = numberFormat.format(matrix.max);
@@ -1406,9 +1449,9 @@ function renderHeatmap() {
   elements.canvas.height = Math.ceil(height * pixelRatio);
   const context = elements.canvas.getContext("2d");
   context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
-  context.fillStyle = "#ffffff";
+  context.fillStyle = palette.surface;
   context.fillRect(0, 0, width, height);
-  context.fillStyle = "#11161c";
+  context.fillStyle = palette.matrix;
   context.fillRect(margins.left, margins.top, matrixSize, matrixSize);
 
   for (let row = 0; row < cpuCount; row += 1) {
@@ -1427,13 +1470,13 @@ function renderHeatmap() {
     }
   }
 
-  drawBoundaries(context, matrix, margins, matrixSize, cellSize);
-  drawPinnedMigrationPair(context, matrix, margins, cellSize);
-  drawAxes(context, matrix.order, margins, matrixSize, cellSize);
-  drawCpuUsage(context, usage, margins, matrixSize, cellSize, usageTop, usageHeight);
-  drawCoreUsage(context, coreUsage, margins, cellSize, coreTop, coreHeight);
-  drawLlcUsage(context, llcUsage, margins, cellSize, llcTop, llcHeight);
-  drawLlcAnnotations(context, matrix.order, margins, cellSize);
+  drawBoundaries(context, matrix, margins, matrixSize, cellSize, palette);
+  drawPinnedMigrationPair(context, matrix, margins, cellSize, palette);
+  drawAxes(context, matrix.order, margins, matrixSize, cellSize, palette);
+  drawCpuUsage(context, usage, margins, matrixSize, cellSize, usageTop, usageHeight, palette);
+  drawCoreUsage(context, coreUsage, margins, cellSize, coreTop, coreHeight, palette);
+  drawLlcUsage(context, llcUsage, margins, cellSize, llcTop, llcHeight, palette);
+  drawLlcAnnotations(context, matrix.order, margins, cellSize, palette);
   state.geometry = {
     cellSize,
     coreHeight,
@@ -1453,6 +1496,25 @@ function renderHeatmap() {
     "aria-label",
     `CPU migration heatmap with ${numberFormat.format(matrix.total)} transitions, LLC annotations, logical CPU utilization across ${cpuCount} CPUs, capacity-normalized utilization across ${coreUsage.groups.length} whole cores, and capacity-normalized utilization across ${llcUsage.groups.length} LLCs`,
   );
+}
+
+function canvasPalette() {
+  const styles = getComputedStyle(document.documentElement);
+  const color = (name) => styles.getPropertyValue(name).trim();
+  return {
+    surface: color("--canvas-surface"),
+    matrix: color("--canvas-matrix"),
+    label: color("--canvas-label"),
+    axis: color("--canvas-axis"),
+    boundary: color("--canvas-boundary"),
+    boundaryPackage: color("--canvas-boundary-package"),
+    boundaryLlc: color("--canvas-boundary-llc"),
+    boundaryCore: color("--canvas-boundary-core"),
+    selected: color("--canvas-selected"),
+    selectedContrast: color("--canvas-selected-contrast"),
+    darkText: color("--canvas-dark-text"),
+    lightText: color("--canvas-light-text"),
+  };
 }
 
 function renderMigrationPairInspection(matrix) {
@@ -1516,7 +1578,7 @@ function topMigrationPair(matrix) {
   };
 }
 
-function drawPinnedMigrationPair(context, matrix, margins, cellSize) {
+function drawPinnedMigrationPair(context, matrix, margins, cellSize, palette) {
   const pinned = state.pinnedMigrationPair;
   if (!pinned) {
     return;
@@ -1526,18 +1588,22 @@ function drawPinnedMigrationPair(context, matrix, margins, cellSize) {
   if (row == null || column == null) {
     return;
   }
-  context.strokeStyle = "#00d6a3";
-  context.lineWidth = Math.max(2, Math.min(4, cellSize / 2));
-  context.strokeRect(
-    margins.left + column * cellSize + 1,
-    margins.top + row * cellSize + 1,
-    Math.max(1, cellSize - 2),
-    Math.max(1, cellSize - 2),
-  );
+  const lineWidth = Math.max(2, Math.min(4, cellSize / 2));
+  drawContrastingOutline(context, {
+    color: palette.selected,
+    contrastColor: palette.selectedContrast,
+    lineWidth,
+    rectangle: [
+      margins.left + column * cellSize + 2,
+      margins.top + row * cellSize + 2,
+      Math.max(1, cellSize - 4),
+      Math.max(1, cellSize - 4),
+    ],
+  });
 }
 
-function drawCpuUsage(context, usage, margins, matrixSize, cellSize, top, height) {
-  context.fillStyle = "#11161c";
+function drawCpuUsage(context, usage, margins, matrixSize, cellSize, top, height, palette) {
+  context.fillStyle = palette.matrix;
   context.fillRect(margins.left, top, matrixSize, height);
   for (let index = 0; index < usage.order.length; index += 1) {
     const utilization = usage.utilizationPct[index];
@@ -1553,7 +1619,7 @@ function drawCpuUsage(context, usage, margins, matrixSize, cellSize, top, height
     );
   }
 
-  context.fillStyle = "#25313b";
+  context.fillStyle = palette.label;
   context.font = "600 10px ui-sans-serif, system-ui, sans-serif";
   context.textAlign = "right";
   context.textBaseline = "middle";
@@ -1564,29 +1630,30 @@ function drawCpuUsage(context, usage, margins, matrixSize, cellSize, top, height
     const x = margins.left + boundary.index * cellSize;
     context.beginPath();
     context.lineWidth = boundary.level === "llc" ? 2 : 1;
-    context.strokeStyle = boundary.level === "llc" ? "#ffffff" : "#6f7f8b";
+    context.strokeStyle = boundary.level === "llc" ? palette.boundary : palette.boundaryLlc;
     context.moveTo(x, top);
     context.lineTo(x, top + height);
     context.stroke();
   }
 }
 
-function drawCoreUsage(context, coreUsage, margins, cellSize, top, height) {
+function drawCoreUsage(context, coreUsage, margins, cellSize, top, height, palette) {
   for (const span of coreUsage.spans) {
     const group = coreUsage.groups[span.groupIndex];
     const left = margins.left + span.start * cellSize;
     const width = (span.end - span.start) * cellSize;
     const intensity = normalizeUtilization(group.utilizationPct, state.scale);
-    context.fillStyle = infernoColor(intensity);
+    const background = infernoColor(intensity);
+    context.fillStyle = background;
     context.fillRect(left, top, Math.ceil(width), height);
-    context.strokeStyle = "#ffffff";
+    context.strokeStyle = palette.boundary;
     context.lineWidth = 1;
     context.strokeRect(left, top, Math.ceil(width), height);
 
     context.font = "600 9px ui-sans-serif, system-ui, sans-serif";
     context.textAlign = "center";
     context.textBaseline = "middle";
-    context.fillStyle = intensity > 0.72 ? "#11161c" : "#ffffff";
+    context.fillStyle = contrastTextColor(background, palette.darkText, palette.lightText);
     const labels = [
       `Core ${group.core} · ${group.utilizationPct.toFixed(1)}%`,
       `${group.core} · ${group.utilizationPct.toFixed(0)}%`,
@@ -1597,29 +1664,30 @@ function drawCoreUsage(context, coreUsage, margins, cellSize, top, height) {
     }
   }
 
-  context.fillStyle = "#25313b";
+  context.fillStyle = palette.label;
   context.font = "600 10px ui-sans-serif, system-ui, sans-serif";
   context.textAlign = "right";
   context.textBaseline = "middle";
   context.fillText("Core util", margins.left - 7, top + height / 2);
 }
 
-function drawLlcUsage(context, llcUsage, margins, cellSize, top, height) {
+function drawLlcUsage(context, llcUsage, margins, cellSize, top, height, palette) {
   for (const span of llcUsage.spans) {
     const group = llcUsage.groups[span.groupIndex];
     const left = margins.left + span.start * cellSize;
     const width = (span.end - span.start) * cellSize;
     const intensity = normalizeUtilization(group.utilizationPct, state.scale);
-    context.fillStyle = infernoColor(intensity);
+    const background = infernoColor(intensity);
+    context.fillStyle = background;
     context.fillRect(left, top, Math.ceil(width), height);
-    context.strokeStyle = "#ffffff";
+    context.strokeStyle = palette.boundary;
     context.lineWidth = 2;
     context.strokeRect(left, top, Math.ceil(width), height);
 
     context.font = "600 9px ui-sans-serif, system-ui, sans-serif";
     context.textAlign = "center";
     context.textBaseline = "middle";
-    context.fillStyle = intensity > 0.72 ? "#11161c" : "#ffffff";
+    context.fillStyle = contrastTextColor(background, palette.darkText, palette.lightText);
     const labels = [
       `LLC ${group.llc} · ${group.utilizationPct.toFixed(1)}%`,
       `${group.llc} · ${group.utilizationPct.toFixed(0)}%`,
@@ -1630,16 +1698,21 @@ function drawLlcUsage(context, llcUsage, margins, cellSize, top, height) {
     }
   }
 
-  context.fillStyle = "#25313b";
+  context.fillStyle = palette.label;
   context.font = "600 10px ui-sans-serif, system-ui, sans-serif";
   context.textAlign = "right";
   context.textBaseline = "middle";
   context.fillText("LLC util", margins.left - 7, top + height / 2);
 }
 
-function drawBoundaries(context, matrix, margins, matrixSize, cellSize) {
+function drawBoundaries(context, matrix, margins, matrixSize, cellSize, palette) {
   const widths = { node: 3, package: 2.5, llc: 2, core: 1 };
-  const colors = { node: "#ffffff", package: "#d7dee4", llc: "#98a8b5", core: "#536471" };
+  const colors = {
+    node: palette.boundary,
+    package: palette.boundaryPackage,
+    llc: palette.boundaryLlc,
+    core: palette.boundaryCore,
+  };
   for (const boundary of topologyBoundaries(state.topology, matrix.order)) {
     const offset = boundary.index * cellSize;
     context.beginPath();
@@ -1653,10 +1726,10 @@ function drawBoundaries(context, matrix, margins, matrixSize, cellSize) {
   }
 }
 
-function drawLlcAnnotations(context, order, margins, cellSize) {
+function drawLlcAnnotations(context, order, margins, cellSize, palette) {
   const annotations = llcAnnotations(state.topology, order);
-  context.fillStyle = "#43515d";
-  context.strokeStyle = "#98a8b5";
+  context.fillStyle = palette.axis;
+  context.strokeStyle = palette.boundaryLlc;
   context.lineWidth = 1;
   context.font = "600 9px ui-sans-serif, system-ui, sans-serif";
   context.textAlign = "center";
@@ -1686,8 +1759,8 @@ function drawLlcAnnotations(context, order, margins, cellSize) {
   }
 }
 
-function drawAxes(context, order, margins, matrixSize, cellSize) {
-  context.fillStyle = "#43515d";
+function drawAxes(context, order, margins, matrixSize, cellSize, palette) {
+  context.fillStyle = palette.axis;
   context.font = "10px ui-monospace, SFMono-Regular, Menlo, monospace";
   context.textBaseline = "middle";
   for (const index of axisLabelIndices(order.length)) {
@@ -1702,7 +1775,7 @@ function drawAxes(context, order, margins, matrixSize, cellSize) {
     context.restore();
   }
 
-  context.fillStyle = "#25313b";
+  context.fillStyle = palette.label;
   context.font = "600 11px ui-sans-serif, system-ui, sans-serif";
   context.textAlign = "center";
   context.fillText("Destination CPU", margins.left + matrixSize / 2, margins.top + matrixSize + 40);
@@ -3677,13 +3750,31 @@ function dsqTrafficTooltip(dsq, metric, label, rateAvailable) {
 function renderDsqTrafficCell(dsq, metric, kind, label, rateAvailable) {
   const high = metric.intensity >= 0.68 ? " high" : "";
   const tooltip = dsqTrafficTooltip(dsq, metric, label, rateAvailable);
+  const ink = dsqHeatmapInk(kind, metric.intensity);
   return `
     <td class="dsq-traffic-cell ${kind}${high}" tabindex="0"
-      style="--heat:${metric.intensity.toFixed(3)}"
+      style="--heat:${metric.intensity.toFixed(3)};--heat-ink:${ink}"
       aria-label="${escapeHtml(tooltip)}" title="${escapeHtml(tooltip)}">
       <strong>${escapeHtml(formatTrafficMetric(metric, rateAvailable))}</strong>
       <small>${formatCount(metric.samples)} samples</small>
     </td>`;
+}
+
+function dsqHeatmapInk(kind, intensity) {
+  const theme = document.documentElement.dataset.resolvedTheme;
+  if (dsqHeatmapPaletteCache?.theme !== theme) {
+    const styles = getComputedStyle(document.documentElement);
+    const color = (name) => styles.getPropertyValue(name).trim();
+    dsqHeatmapPaletteCache = {
+      theme,
+      surface: color("--surface-muted"),
+      insert: color("--active"),
+      remove: color("--accent"),
+      failed: color("--warning-strong"),
+    };
+  }
+  const heatColor = dsqHeatmapPaletteCache[kind] || dsqHeatmapPaletteCache.remove;
+  return heatmapTextColor(heatColor, dsqHeatmapPaletteCache.surface, intensity);
 }
 
 function renderTrafficScale(rateAvailable, maxRatePerSecond, maxSamples) {
@@ -3756,9 +3847,10 @@ function renderDsqTransferHeatmap(model) {
         const value = formatTrafficMetric(cell, model.rateAvailable);
         const tooltip = `${source.label} → ${target.label} · ${value}${model.rateAvailable ? " estimated" : ""} · ${formatCount(cell.samples)} sampled moves · ${formatPercentage(cell.share)} of transfers`;
         const high = cell.intensity >= 0.68 ? " high" : "";
+        const ink = dsqHeatmapInk("remove", cell.intensity);
         return `<td class="dsq-transfer-cell${high}" tabindex="0"
           data-transfer-row="${row}" data-transfer-column="${column}"
-          style="--heat:${cell.intensity.toFixed(3)}"
+          style="--heat:${cell.intensity.toFixed(3)};--heat-ink:${ink}"
           aria-label="${escapeHtml(tooltip)}" title="${escapeHtml(tooltip)}">
           <strong>${escapeHtml(value)}</strong>
         </td>`;
