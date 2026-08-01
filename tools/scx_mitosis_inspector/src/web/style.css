@@ -28,6 +28,7 @@ body {
   padding: 18px 12px;
   display: flex;
   flex-direction: column;
+  overflow: hidden;
   background: #ffffff;
   border-right: 1px solid #d4dbe3;
 }
@@ -67,10 +68,50 @@ body {
   outline-offset: 2px;
 }
 
+.section-navigation {
+  min-height: 0;
+  margin-top: 22px;
+  padding-top: 14px;
+  display: grid;
+  align-content: start;
+  gap: 1px;
+  overflow-y: auto;
+  border-top: 1px solid #e2e7ed;
+}
+
+.section-navigation a {
+  min-height: 27px;
+  padding: 5px 10px;
+  display: flex;
+  align-items: center;
+  color: #637083;
+  border-left: 2px solid transparent;
+  text-decoration: none;
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.section-navigation a:hover {
+  color: #172033;
+  background: #f6f8fa;
+}
+
+.section-navigation a[aria-current="location"] {
+  color: #176b55;
+  background: #edf6f2;
+  border-left-color: #27a37a;
+}
+
+.section-navigation a:focus-visible {
+  outline: 2px solid #176b55;
+  outline-offset: -2px;
+}
+
 .workspace-feedback-button {
   width: 100%;
   min-height: 38px;
   margin-top: auto;
+  flex: 0 0 auto;
   padding: 7px 9px 7px 12px;
   display: flex;
   align-items: center;
@@ -169,7 +210,13 @@ main {
   margin: 26px auto 40px;
 }
 
-.view-heading { margin-bottom: 22px; }
+.view-heading {
+  margin-bottom: 22px;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20px;
+}
 
 .view-heading h2 {
   font-size: 18px;
@@ -181,6 +228,48 @@ main {
   color: #637083;
   font-size: 13px;
 }
+
+.view-actions {
+  min-height: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.snapshot-download-button {
+  min-height: 34px;
+  padding: 7px 11px;
+  color: #172033;
+  background: #ffffff;
+  border: 1px solid #b8c2ce;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.snapshot-download-button:hover { background: #f2f5f7; }
+
+.snapshot-download-button:focus-visible {
+  outline: 2px solid #176b55;
+  outline-offset: 2px;
+}
+
+.snapshot-download-button:disabled {
+  color: #7a8595;
+  cursor: wait;
+}
+
+.snapshot-download-status {
+  min-width: 76px;
+  color: #637083;
+  font-size: 11px;
+}
+
+#overview,
+#counterGrid,
+.table-section[id] { scroll-margin-top: 20px; }
 
 .summary {
   padding: 0 0 18px;
@@ -681,6 +770,16 @@ tbody th {
 tbody tr:last-child th,
 tbody tr:last-child td { border-bottom: 0; }
 
+.probe-status {
+  text-align: left;
+  font-weight: 800;
+  text-transform: capitalize;
+}
+
+.probe-status-active { color: #176b55; }
+.probe-status-disabled { color: #7a8595; }
+.probe-status-unavailable { color: #a44a42; }
+
 @media (max-width: 900px) {
   .counter-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .breakdown-grid { grid-template-columns: 1fr; }
@@ -698,6 +797,7 @@ tbody tr:last-child td { border-bottom: 0; }
     padding: 8px 14px;
     border-right: 0;
     border-bottom: 1px solid #d4dbe3;
+    overflow: visible;
   }
 
   .workspace-navigation {
@@ -707,6 +807,27 @@ tbody tr:last-child td { border-bottom: 0; }
   }
 
   .navigation-group-label { padding-bottom: 0; }
+  .section-navigation {
+    min-width: 0;
+    margin-top: 8px;
+    padding: 8px 0 0;
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    overflow-x: auto;
+    overflow-y: hidden;
+  }
+  .section-navigation .navigation-group-label { flex: 0 0 auto; }
+  .section-navigation a {
+    min-height: 30px;
+    flex: 0 0 auto;
+    border-bottom: 2px solid transparent;
+    border-left: 0;
+  }
+  .section-navigation a[aria-current="location"] {
+    border-bottom-color: #27a37a;
+    border-left: 0;
+  }
   .workspace-feedback-button { width: auto; margin-top: 8px; }
   .migration-pair-inspection { grid-template-columns: 1fr; }
 }
@@ -718,6 +839,8 @@ tbody tr:last-child td { border-bottom: 0; }
   .summary dl { grid-template-columns: 1fr; gap: 12px; }
   .counter-grid { grid-template-columns: 1fr; }
   .counter-card { min-height: 160px; }
+  .view-heading { flex-direction: column; }
+  .view-actions { width: 100%; justify-content: flex-start; flex-wrap: wrap; }
   .table-section-heading { align-items: flex-start; flex-direction: column; }
   .heatmap-viewport { min-height: 320px; }
   .heatmap-heading-tools { align-items: flex-start; flex-direction: column; }

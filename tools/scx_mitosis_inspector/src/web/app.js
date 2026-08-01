@@ -15,6 +15,13 @@ const llcUtilizationRows = document.querySelector("#llcUtilizationRows");
 const bpfProgramRows = document.querySelector("#bpfProgramRows");
 const inspectorBpfProgramRows = document.querySelector("#inspectorBpfProgramRows");
 const dsqMetricRows = document.querySelector("#dsqMetricRows");
+const probeManifestRows = document.querySelector("#probeManifestRows");
+const downloadSnapshotButton = document.querySelector("#downloadSnapshot");
+const snapshotDownloadStatus = document.querySelector("#snapshotDownloadStatus");
+const sectionLinks = [...document.querySelectorAll("#sectionNavigation a[href^='#']")];
+const sectionTargets = sectionLinks
+  .map((link) => ({ link, target: document.querySelector(link.hash) }))
+  .filter((entry) => entry.target);
 const FEEDBACK_STORAGE_KEY = "scx-mitosis-inspector-feedback-v1";
 const feedbackElements = {
   clear: document.querySelector("#clearFeedback"),
@@ -32,6 +39,106 @@ const feedbackState = {
 };
 let topology = null;
 let latestSnapshot = null;
+let sectionUpdatePending = false;
+
+function setActiveSection(activeLink) {
+  sectionLinks.forEach((link) => {
+    if (link === activeLink) link.setAttribute("aria-current", "location");
+    else link.removeAttribute("aria-current");
+  });
+}
+
+function updateActiveSection() {
+  sectionUpdatePending = false;
+  if (sectionTargets.length === 0) return;
+  const atPageBottom = window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 4;
+  let active = sectionTargets[0];
+  if (atPageBottom) {
+    active = sectionTargets.at(-1);
+  } else {
+    const threshold = Math.min(160, window.innerHeight * 0.25);
+    sectionTargets.forEach((entry) => {
+      if (entry.target.getBoundingClientRect().top <= threshold) active = entry;
+    });
+  }
+  setActiveSection(active.link);
+}
+
+function scheduleSectionUpdate() {
+  if (sectionUpdatePending) return;
+  sectionUpdatePending = true;
+  requestAnimationFrame(updateActiveSection);
+}
+
+async function fetchDiagnosticPart(name, path) {
+  try {
+    const response = await fetch(path, { cache: "no-store" });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return { name, data: await response.json(), error: null };
+  } catch (error) {
+    return {
+      name,
+      data: null,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+function diagnosticFilename(hostname, generatedAt) {
+  const host = String(hostname || "host")
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "") || "host";
+  const timestamp = generatedAt.replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
+  return `scx-mitosis-inspector-${host}-${timestamp}.json`;
+}
+
+async function downloadDiagnosticSnapshot() {
+  const endpoints = [
+    ["counters", "/api/counters"],
+    ["system", "/api/system"],
+    ["scheduler", "/api/stats"],
+    ["host_context", "/api/host-context"],
+  ];
+  downloadSnapshotButton.disabled = true;
+  snapshotDownloadStatus.textContent = "Collecting";
+  try {
+    const generatedAt = new Date().toISOString();
+    const parts = await Promise.all(
+      endpoints.map(([name, path]) => fetchDiagnosticPart(name, path)),
+    );
+    const api = Object.fromEntries(parts.map((part) => [part.name, part.data]));
+    const errors = Object.fromEntries(
+      parts.filter((part) => part.error).map((part) => [part.name, part.error]),
+    );
+    const diagnostic = {
+      schema_version: 1,
+      generated_at: generatedAt,
+      source: window.location.origin,
+      api,
+      errors,
+    };
+    const blob = new Blob([`${JSON.stringify(diagnostic, null, 2)}\n`], {
+      type: "application/json",
+    });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = diagnosticFilename(api.host_context?.identity?.hostname, generatedAt);
+    document.body.append(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 0);
+    const unavailable = Object.keys(errors).length;
+    snapshotDownloadStatus.textContent = unavailable
+      ? `Downloaded; ${unavailable} unavailable`
+      : "Downloaded";
+  } catch {
+    snapshotDownloadStatus.textContent = "Download failed";
+  } finally {
+    downloadSnapshotButton.disabled = false;
+  }
+}
 
 function timingValue(value) {
   return value == null ? "--" : number.format(value);
@@ -123,6 +230,7 @@ function renderHardirqs(metrics) {
     : "Hard IRQ tracepoints unavailable";
   hardirqRows.replaceChildren(...metrics.rows.map((row) => tableRow([
     number.format(row.irq),
+    row.name || "--",
     number.format(row.count),
     rate.format(row.rate_per_second),
     number.format(row.samples),
@@ -131,6 +239,14 @@ function renderHardirqs(metrics) {
     timingValue(row.p95_ns),
     timingValue(row.p99_ns),
   ])));
+}
+
+function renderProbeManifest(rows) {
+  probeManifestRows.replaceChildren(...rows.map((entry) => {
+    const row = tableRow([entry.group, entry.status, entry.mode, entry.scope]);
+    row.children[1].classList.add("probe-status", `probe-status-${entry.status}`);
+    return row;
+  }));
 }
 
 function renderMigrations(migrations) {
@@ -285,6 +401,7 @@ function render(snapshot) {
   renderBpfPrograms(snapshot.bpf_program_stats);
   renderInspectorBpfPrograms(snapshot);
   renderDsqMetrics(snapshot.dsq_metrics);
+  renderProbeManifest(snapshot.probe_manifest || []);
   MitosisHeatmap.update({ ...snapshot, topology });
 
   const counters = new Map(snapshot.counters.map((counter) => [counter.name, counter]));
@@ -548,7 +665,12 @@ feedbackElements.open.addEventListener("click", openFeedback);
 feedbackElements.close.addEventListener("click", closeFeedback);
 feedbackElements.copy.addEventListener("click", copyFeedback);
 feedbackElements.clear.addEventListener("click", clearFeedback);
+downloadSnapshotButton.addEventListener("click", downloadDiagnosticSnapshot);
+window.addEventListener("scroll", scheduleSectionUpdate, { passive: true });
+window.addEventListener("resize", scheduleSectionUpdate);
+window.addEventListener("hashchange", scheduleSectionUpdate);
 renderFeedback();
+updateActiveSection();
 refreshHostContext().catch(() => {});
 refresh();
 setInterval(refresh, 1000);
