@@ -2745,6 +2745,39 @@ test("Cell rows reserve task and overlap details for the detail panel", () => {
   assert.match(stylesheet, /\.cell-order-mode\s*\{[^}]*width:\s*100%/s);
 });
 
+test("Cells page renders a live cell and DSQ layout diagram", () => {
+  const page = readFileSync(
+    new URL("../../src/web/index.html", import.meta.url),
+    "utf8",
+  );
+  const script = readFileSync(
+    new URL("../../src/web/app.js", import.meta.url),
+    "utf8",
+  );
+  const stylesheet = readFileSync(
+    new URL("../../src/web/style.css", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(page, /<h2 id="cellsTitle">Cells &amp; DSQs<\/h2>/);
+  assert.match(page, /<h3>Live cell layout<\/h3>/);
+  assert.match(script, /cellLayoutDiagramModel/);
+  assert.match(script, /class="cell-layout-summary"/);
+  assert.match(script, /class="cell-lane/);
+  assert.match(script, /data-render-key="cell:/);
+  assert.match(script, /class="cell-dsq-node normal/);
+  assert.match(script, /class="cell-affinity-group/);
+  assert.match(script, /<details[^>]*class="cell-affinity-group/s);
+  assert.match(script, /data-cell-role="primary"/);
+  assert.match(script, /data-cell-role="borrowable"/);
+  assert.match(script, /Mapped tasks/);
+  assert.match(script, /Primary CPUs/);
+  assert.match(script, /Borrowable/);
+  assert.match(stylesheet, /\.cell-layout-summary/);
+  assert.match(stylesheet, /\.cell-dsq-node/);
+  assert.match(stylesheet, /\.cell-affinity-group/);
+});
+
 test("current scheduler command formats exact argv and unavailable states", () => {
   assert.equal(typeof inspectionState.schedulerCurrentCommand, "function");
   assert.equal(

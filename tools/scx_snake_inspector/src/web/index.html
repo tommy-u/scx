@@ -57,7 +57,7 @@
             <span class="navigation-group-label">Inspect</span>
             <a href="#/inspect/policy-slots" data-route="inspect/policy-slots">Policy ladders</a>
             <a href="#/inspect/queue-topology" data-route="inspect/queue-topology">Queue topology</a>
-            <a href="#/inspect/cells" data-route="inspect/cells">Cells &amp; tasks</a>
+            <a href="#/inspect/cells" data-route="inspect/cells">Cells &amp; DSQs</a>
           </div>
           <div class="navigation-group">
             <span class="navigation-group-label">Validate</span>
@@ -340,8 +340,8 @@
       <section class="view-panel hidden" id="cellsView" data-view="inspect/cells" aria-labelledby="cellsTitle">
         <header class="view-heading">
           <div>
-            <h2 id="cellsTitle">Cells &amp; tasks</h2>
-            <p>Active policy CPU membership with current task annotations</p>
+            <h2 id="cellsTitle">Cells &amp; DSQs</h2>
+            <p>Live workload, CPU ownership, and queue routing by cell</p>
           </div>
           <div class="cell-heading-actions">
             <label class="control-field compact-window-field">
@@ -375,7 +375,7 @@
         <div class="cells-layout">
           <section class="cell-browser" aria-label="Configured cells" data-feedback-key="Cells:Cell-browser">
             <header class="cell-browser-heading">
-              <h3>Cell CPU membership</h3>
+              <h3>Live cell layout</h3>
               <fieldset class="control-field segmented cell-order-mode" id="cellOrderMode">
                 <legend>CPU order</legend>
                 <label><input type="radio" name="cellCpuOrder" value="llc" checked><span>LLC</span></label>

@@ -21,11 +21,11 @@ import {
 import {
   callbackSampleRateOptions,
   captureKeyedRenderState,
+  cellLayoutDiagramModel,
   cellQueueFacts,
   cellCpuOrder,
   cellStatsModel,
   compactCpuList,
-  decorateCells,
   dsqActivityHeatmapModel,
   dsqActivityModels,
   dsqTransferHeatmapModel,
@@ -605,7 +605,7 @@ function bindControls() {
   });
   window.addEventListener("hashchange", () => renderRoute({ focusHeading: true }));
   elements.cellList.addEventListener("click", (event) => {
-    const control = event.target.closest("[data-cell-id]");
+    const control = event.target.closest("[data-cell-select]");
     if (!control) {
       return;
     }
@@ -4385,47 +4385,66 @@ function renderCells() {
     elements.cellDetail.replaceChildren();
     return;
   }
-  const definitions = [...state.inspection.cells];
-  const definedIds = new Set(definitions.map((cell) => cell.id));
-  const orphanIds = [...new Set(
-    state.inspection.task_mappings
-      .filter((task) => !definedIds.has(task.cell_id))
-      .map((task) => task.cell_id),
-  )].sort((left, right) => left - right);
-  for (const id of orphanIds) {
-    definitions.push({ id, cpus: [], task_count: 0, undefined: true });
-  }
-  const statsByCell = new Map(
-    statsModel.status === "ready"
-      ? statsModel.cells.map((cell) => [cell.id, cell])
-      : [],
-  );
-  const cells = decorateCells(definitions, state.inspection.task_mappings)
-    .map((cell) => ({ ...cell, stats: statsByCell.get(cell.id) || null }))
-    .sort((left, right) => left.id - right.id);
-  if (cells.length === 0) {
-    elements.cellList.innerHTML = '<p class="empty-state">The active policy defines no cells.</p>';
-    elements.cellDetail.replaceChildren();
-    return;
-  }
-  if (!cells.some((cell) => cell.id === state.selectedCellId)) {
-    state.selectedCellId = cells[0].id;
-  }
-  replaceKeyedHtml(
-    elements.cellList,
-    `<div class="cell-axis">${renderCpuAxis()}</div>
-    ${cells.map(renderCellRow).join("")}`,
-  );
-  const selected = cells.find((cell) => cell.id === state.selectedCellId);
   const topology = queueTopologyModel(
     state.inspection.fairness,
     state.inspection.queue_topology,
     state.topology.numeric_order || [],
   );
+  const timing = queueTimingModel(state.queueTiming, {
+    context: state.inspectionContext,
+    pending: state.queueTimingPending,
+  });
+  const diagram = cellLayoutDiagramModel({
+    cells: state.inspection.cells,
+    taskMappings: state.inspection.task_mappings,
+    topology,
+    timing,
+    stats: statsModel,
+  });
+  const hasGlobalQueues = diagram.unownedNormalQueues.length > 0
+    || diagram.unownedAffinityGroups.length > 0;
+  if (diagram.cells.length === 0 && !hasGlobalQueues) {
+    elements.cellList.innerHTML = '<p class="empty-state">The active policy defines no cells or resolved queues.</p>';
+    elements.cellDetail.replaceChildren();
+    return;
+  }
+  if (!diagram.cells.some((cell) => cell.id === state.selectedCellId)) {
+    state.selectedCellId = diagram.cells[0]?.id ?? null;
+  }
   replaceKeyedHtml(
-    elements.cellDetail,
-    renderCellDetail(selected, cellQueueFacts(topology, selected.id), statsModel),
+    elements.cellList,
+    `${renderCellLayoutSummary(diagram.summary)}
+    <div class="cell-diagram-axis" aria-hidden="true">
+      <span class="cell-axis-group"><strong>CPU allocation</strong><span class="cell-axis">${renderCpuAxis()}</span></span>
+      <span></span>
+      <span>Queue paths</span>
+    </div>
+    ${diagram.cells.map(renderCellLane).join("")}
+    ${hasGlobalQueues ? renderGlobalQueueLane(diagram) : ""}`,
   );
+  const selected = diagram.cells.find((cell) => cell.id === state.selectedCellId);
+  if (selected) {
+    replaceKeyedHtml(
+      elements.cellDetail,
+      renderCellDetail(selected, cellQueueFacts(topology, selected.id), statsModel),
+    );
+  } else {
+    elements.cellDetail.replaceChildren();
+  }
+}
+
+function renderCellLayoutSummary(summary) {
+  const layout = summary.layout == null ? "Placement only" : summary.layout.replaceAll("_", " + ");
+  return `
+    <dl class="cell-layout-summary" aria-label="Cell layout summary">
+      <div><dt>Cells</dt><dd>${formatCount(summary.cellCount)}</dd></div>
+      <div><dt>Mapped tasks</dt><dd>${formatCount(summary.taskCount)}</dd></div>
+      <div><dt>Primary CPUs</dt><dd>${formatCount(summary.primaryCpuCount)}</dd></div>
+      <div><dt>Normal DSQs</dt><dd>${formatCount(summary.normalDsqCount)}</dd></div>
+      <div><dt>Affinity DSQs</dt><dd>${formatCount(summary.affinityDsqCount)}</dd></div>
+      <div><dt>Layout</dt><dd>${escapeHtml(layout)}</dd></div>
+      <div class="cell-capture-state"><dt>Queue samples</dt><dd>${escapeHtml(summary.captureState)}</dd></div>
+    </dl>`;
 }
 
 function renderCellStatsStatus(model) {
@@ -4458,11 +4477,16 @@ function renderWorkloadTargetField() {
 
 function renderWorkloadCellOptions() {
   const cells = state.inspection?.cells || [];
-  const signature = cells.map((cell) => cell.id).join(",");
+  const signature = cells
+    .map((cell) => `${cell.id}:${cell.slot_epoch || 0}:${cell.name || cell.display_name || ""}`)
+    .join(",");
   if (elements.workloadCellId.dataset.signature !== signature) {
     const selected = elements.workloadCellId.value;
     elements.workloadCellId.innerHTML = cells
-      .map((cell) => `<option value="${cell.id}">Cell ${cell.id}</option>`)
+      .map((cell) => {
+        const name = cell.name || cell.display_name || cell.managed_name;
+        return `<option value="${cell.id}">${escapeHtml(name ? `${name} · Cell ${cell.id}` : `Cell ${cell.id}`)}</option>`;
+      })
       .join("");
     if ([...elements.workloadCellId.options].some((option) => option.value === selected)) {
       elements.workloadCellId.value = selected;
@@ -4528,29 +4552,52 @@ async function setWorkloadCell(clear, tidOverride = null) {
   }
 }
 
-function renderCellRow(cell) {
+function renderCellLane(cell) {
   const selected = cell.id === state.selectedCellId;
-  const definition = cell.undefined ? "Undefined by active policy" : `${cell.cpus.length} CPUs`;
-  const stats = cell.stats;
-  const affinity = stats
-    ? `${formatCellMetric(stats.affinityEnqueuePct, "percentage")} enq · ${formatCellMetric(stats.affinityDispatchPct, "percentage")} dispatch`
-    : "—";
+  const identity = cell.name
+    ? `Cell ${cell.id}${cell.epoch > 0 ? ` · epoch ${cell.epoch}` : ""}`
+    : cell.undefined
+      ? "Not defined by the active policy"
+      : cell.synthetic
+        ? "Synthetic fallback"
+        : cell.epoch > 0
+          ? `Epoch ${cell.epoch}`
+          : "Configured cell";
   return `
-    <button class="cell-row${selected ? " selected" : ""}" type="button"
-      data-cell-id="${cell.id}" aria-pressed="${selected}">
-      <span class="cell-identity"><strong>Cell ${cell.id}</strong><small>${definition}</small></span>
-      ${renderCpuStrip(cell)}
-      <span class="cell-row-stats">
-        <span><small>Service</small><strong>${formatCellMetric(stats?.serviceCores, "cores")} cores · ${formatCellMetric(stats?.serviceSharePct, "percentage")}</strong></span>
-        <span><small>Borrowed</small><strong>${formatCellMetric(stats?.borrowedPct, "percentage")}</strong></span>
-        <span><small>Lent runtime</small><strong>${formatCellMetric(stats?.raw.lent_runtime_ns, "duration")}</strong></span>
-        <span><small>Affinity path</small><strong>${affinity}</strong></span>
-      </span>
-    </button>`;
+    <article class="cell-lane${selected ? " selected" : ""}${cell.undefined ? " unresolved" : ""}"
+      data-cell-id="${cell.id}" data-render-key="cell:${escapeHtml(cell.key)}">
+      <header class="cell-lane-header">
+        <button class="cell-lane-select" type="button" data-cell-select data-cell-id="${cell.id}"
+          aria-pressed="${selected}">
+          <strong>${escapeHtml(cell.label)}</strong>
+          <small>${escapeHtml(identity)}</small>
+        </button>
+        <dl class="cell-lane-counts">
+          <div><dt>Mapped tasks</dt><dd>${formatCount(cell.taskCount)}</dd></div>
+          <div><dt>Primary CPUs</dt><dd>${formatCount(cell.primaryCpuCount)}</dd></div>
+          <div><dt>Borrowable</dt><dd>${formatCount(cell.borrowableCpuCount)}</dd></div>
+          <div><dt>Dispatch / sec</dt><dd>${formatCellMetric(cell.stats?.normalDispatchRate, "rate")} normal · ${formatCellMetric(cell.stats?.affinityDispatchRate, "rate")} affinity</dd></div>
+        </dl>
+      </header>
+      <div class="cell-lane-flow">
+        <section class="cell-cpu-resource" aria-label="${escapeHtml(cell.label)} CPU allocation">
+          <header>
+            <span><i class="cell-role-swatch primary"></i>Primary ${formatCount(cell.primaryCpuCount)}</span>
+            <span><i class="cell-role-swatch borrowable"></i>Borrowable ${formatCount(cell.borrowableCpuCount)}</span>
+          </header>
+          ${renderCpuStrip(cell)}
+        </section>
+        <span class="cell-flow-connector" aria-hidden="true"></span>
+        <section class="cell-queue-resource" aria-label="${escapeHtml(cell.label)} dispatch queues">
+          ${renderCellQueueRail(cell)}
+        </section>
+      </div>
+    </article>`;
 }
 
 function renderCpuStrip(cell) {
-  const members = new Set(cell.cpus);
+  const primary = new Set(cell.primaryCpus || cell.cpus || []);
+  const borrowable = new Set(cell.borrowableCpus || []);
   const order = cellCpuOrder(state.topology, state.cellOrderMode);
   const cpuInfo = new Map(state.topology.cpus.map((cpu) => [cpu.cpu, cpu]));
   return `
@@ -4559,12 +4606,88 @@ function renderCpuStrip(cell) {
         const previous = index > 0 ? cpuInfo.get(order[index - 1]) : null;
         const current = cpuInfo.get(cpu);
         const boundary = previous && current && previous.llc !== current.llc ? " llc-boundary" : "";
-        const member = members.has(cpu);
-        return `<i class="cpu-pixel${member ? " member" : ""}${boundary}"
-          data-cell-cpu="${cpu}" data-cell-llc="${current?.llc ?? "?"}" data-cell-member="${member}"
-          title="CPU ${cpu} · LLC ${current?.llc ?? "?"}"></i>`;
+        const role = primary.has(cpu) ? "primary" : borrowable.has(cpu) ? "borrowable" : "outside";
+        const roleAttribute = role === "primary"
+          ? 'data-cell-role="primary"'
+          : role === "borrowable"
+            ? 'data-cell-role="borrowable"'
+            : 'data-cell-role="outside"';
+        return `<i class="cpu-pixel ${role}${boundary}"
+          data-cell-cpu="${cpu}" data-cell-llc="${current?.llc ?? "?"}" ${roleAttribute}
+          title="CPU ${cpu} · LLC ${current?.llc ?? "?"} · ${role}"></i>`;
       }).join("")}
     </span>`;
+}
+
+function dsqDepthLabel(timing) {
+  return timing?.depth?.latest == null
+    ? "No depth sample"
+    : `Depth ${formatCount(timing.depth.latest)}`;
+}
+
+function renderNormalDsq(queue) {
+  const measured = queue.timing?.depth?.latest != null;
+  const scope = queue.llc_id == null ? "Cell-wide" : `LLC ${queue.llc_id}`;
+  const consumers = compactCpuList(queue.consumer_cpus);
+  const title = `${queue.dsq} · ${scope} · CPUs ${consumers} · ${dsqDepthLabel(queue.timing)}`;
+  return `
+    <span class="cell-dsq-node normal${measured ? " measured" : ""}" tabindex="0"
+      title="${escapeHtml(title)}" aria-label="${escapeHtml(title)}">
+      <small>Normal · ${escapeHtml(scope)}</small>
+      <code>${escapeHtml(queue.dsq)}</code>
+      <span>${escapeHtml(dsqDepthLabel(queue.timing))}</span>
+    </span>`;
+}
+
+function renderAffinityGroup(cell, group) {
+  const llc = group.llcId === "unknown" ? "Unknown LLC" : `LLC ${group.llcId}`;
+  const depth = group.latestDepth == null ? "No depth sample" : `Depth ${formatCount(group.latestDepth)}`;
+  return `
+    <details class="cell-affinity-group" data-render-key="affinity:${escapeHtml(cell.key)}:${escapeHtml(group.llcId)}">
+      <summary>
+        <span><small>Affinity · ${escapeHtml(llc)}</small><strong>${formatCount(group.queueCount)} DSQs</strong></span>
+        <span>${escapeHtml(depth)}</span>
+      </summary>
+      <div class="cell-affinity-dsqs" role="list">
+        ${group.routes.map((route) => `
+          <span role="listitem">
+            <strong>CPU ${formatCount(route.cpu)}</strong>
+            <code>${escapeHtml(route.affinityDsq)}</code>
+            <small>${escapeHtml(dsqDepthLabel(route.affinityTiming))}</small>
+          </span>`).join("")}
+      </div>
+    </details>`;
+}
+
+function renderCellQueueRail(cell) {
+  if (cell.normalQueues.length === 0 && cell.affinityGroups.length === 0) {
+    return '<p class="cell-queue-empty">No resolved DSQs for this cell.</p>';
+  }
+  return `
+    <div class="cell-normal-dsqs">
+      ${cell.normalQueues.map(renderNormalDsq).join("")}
+    </div>
+    <div class="cell-affinity-groups">
+      ${cell.affinityGroups.map((group) => renderAffinityGroup(cell, group)).join("")}
+    </div>`;
+}
+
+function renderGlobalQueueLane(diagram) {
+  const globalCell = { key: "global", affinityGroups: diagram.unownedAffinityGroups };
+  return `
+    <article class="cell-lane global" data-render-key="cell:global">
+      <header class="cell-lane-header">
+        <span class="cell-lane-select static"><strong>Global queues</strong><small>No cell owner</small></span>
+        <dl class="cell-lane-counts">
+          <div><dt>Normal DSQs</dt><dd>${formatCount(diagram.unownedNormalQueues.length)}</dd></div>
+          <div><dt>Affinity DSQs</dt><dd>${formatCount(diagram.unownedAffinityGroups.reduce((total, group) => total + group.queueCount, 0))}</dd></div>
+        </dl>
+      </header>
+      <div class="cell-global-queues">
+        <div class="cell-normal-dsqs">${diagram.unownedNormalQueues.map(renderNormalDsq).join("")}</div>
+        <div class="cell-affinity-groups">${diagram.unownedAffinityGroups.map((group) => renderAffinityGroup(globalCell, group)).join("")}</div>
+      </div>
+    </article>`;
 }
 
 function renderCpuAxis() {
@@ -4597,8 +4720,12 @@ function showCellBarTooltip(event) {
     return;
   }
   const cellId = pixel.closest("[data-cell-id]")?.dataset.cellId || "?";
-  const membership = pixel.dataset.cellMember === "true" ? "Member" : "Not a member";
-  elements.cellBarTooltip.textContent = `Cell ${cellId} · CPU ${pixel.dataset.cellCpu} · LLC ${pixel.dataset.cellLlc} · ${membership}`;
+  const role = pixel.dataset.cellRole === "primary"
+    ? "Primary CPU"
+    : pixel.dataset.cellRole === "borrowable"
+      ? "Borrowable CPU"
+      : "Outside cell";
+  elements.cellBarTooltip.textContent = `Cell ${cellId} · CPU ${pixel.dataset.cellCpu} · LLC ${pixel.dataset.cellLlc} · ${role}`;
   elements.cellBarTooltip.style.left = `${Math.min(event.clientX + 12, window.innerWidth - 260)}px`;
   elements.cellBarTooltip.style.top = `${Math.min(event.clientY + 12, window.innerHeight - 48)}px`;
   elements.cellBarTooltip.classList.remove("hidden");
@@ -4624,9 +4751,10 @@ function renderCellDetail(cell, queueFacts, statsModel) {
     : statsModel.observedMs == null || statsModel.windowMs == null
     ? statsModel.statusLabel
     : `${formatDuration(statsModel.observedMs)} observed of ${formatDuration(statsModel.windowMs)}`;
+  const cellReference = cell.label === `Cell ${cell.id}` ? "" : `Cell ${cell.id} · `;
   return `
     <header class="cell-detail-heading">
-      <div><h3>Cell ${cell.id}</h3><p>${numberFormat.format(cell.tasks.length)} mapped tasks · ${escapeHtml(coverage)}</p></div>
+      <div><h3>${escapeHtml(cell.label)}</h3><p>${escapeHtml(cellReference)}${numberFormat.format(cell.tasks.length)} mapped tasks · ${escapeHtml(coverage)}</p></div>
       ${cell.undefined ? '<span class="slot-state warning">Undefined</span>' : ""}
     </header>
     <dl class="cell-facts cell-identity-facts">
