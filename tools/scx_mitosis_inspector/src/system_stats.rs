@@ -20,6 +20,7 @@ const PROC_MEMINFO: &str = "/proc/meminfo";
 const PROC_NET_DEV: &str = "/proc/net/dev";
 const PROC_PRESSURE: &str = "/proc/pressure";
 const SYS_CPU: &str = "/sys/devices/system/cpu";
+const SYS_SCHED_EXT: &str = "/sys/kernel/sched_ext";
 
 #[derive(Clone, Debug, Serialize)]
 pub struct MetricSource<T> {
@@ -54,6 +55,7 @@ pub struct SystemStatsSnapshot {
     pub pressure: PressureStats,
     pub network: MetricSource<NetworkStats>,
     pub frequencies: MetricSource<FrequencyStats>,
+    pub sched_ext: MetricSource<SchedExtStats>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -143,6 +145,15 @@ pub struct CpuFrequency {
     pub error: Option<String>,
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub struct SchedExtStats {
+    pub state: String,
+    pub enable_seq: u64,
+    pub hotplug_seq: u64,
+    pub nr_rejected: u64,
+    pub switch_all: bool,
+}
+
 #[derive(Debug, Default)]
 pub struct SystemStatsCollector {
     previous_collection: Option<Instant>,
@@ -180,6 +191,7 @@ impl SystemStatsCollector {
             },
             network,
             frequencies: MetricSource::from_result(collect_frequencies(Path::new(SYS_CPU))),
+            sched_ext: MetricSource::from_result(collect_sched_ext(Path::new(SYS_SCHED_EXT))),
         }
     }
 
@@ -599,6 +611,47 @@ fn read_frequency_file(path: &PathBuf) -> Result<u64, String> {
         .map_err(|error| format!("{}: invalid frequency: {error}", path.display()))
 }
 
+fn collect_sched_ext(root: &Path) -> Result<SchedExtStats, String> {
+    let read = |name: &str| -> Result<String, String> {
+        let path = root.join(name);
+        let value = fs::read_to_string(&path)
+            .map_err(|error| format!("reading {}: {error}", path.display()))?;
+        let value = value.trim();
+        if value.is_empty() {
+            return Err(format!("reading {}: value is empty", path.display()));
+        }
+        Ok(value.to_owned())
+    };
+    let integer = |name: &str| -> Result<u64, String> {
+        let value = read(name)?;
+        value
+            .parse::<u64>()
+            .map_err(|error| format!("parsing {}: {error}", root.join(name).display()))
+    };
+    let state = read("state")?;
+    let enable_seq = integer("enable_seq")?;
+    let hotplug_seq = integer("hotplug_seq")?;
+    let nr_rejected = integer("nr_rejected")?;
+    let switch_all = match integer("switch_all")? {
+        0 => false,
+        1 => true,
+        value => {
+            return Err(format!(
+                "parsing {}: expected 0 or 1, got {value}",
+                root.join("switch_all").display()
+            ));
+        }
+    };
+
+    Ok(SchedExtStats {
+        state,
+        enable_seq,
+        hotplug_seq,
+        nr_rejected,
+        switch_all,
+    })
+}
+
 fn counter_delta(current: u64, previous: u64) -> u64 {
     if current >= previous {
         current - previous
@@ -664,5 +717,56 @@ mod tests {
         assert!(snapshot.memory.available || snapshot.memory.error.is_some());
         assert!(snapshot.network.available || snapshot.network.error.is_some());
         assert!(snapshot.frequencies.available || snapshot.frequencies.error.is_some());
+        assert!(snapshot.sched_ext.available || snapshot.sched_ext.error.is_some());
+    }
+
+    #[test]
+    fn reads_sched_ext_lifecycle_health() {
+        let root = std::env::temp_dir().join(format!(
+            "scx-mitosis-inspector-sched-ext-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        for (name, value) in [
+            ("state", "enabled\n"),
+            ("enable_seq", "72\n"),
+            ("hotplug_seq", "315\n"),
+            ("nr_rejected", "2\n"),
+            ("switch_all", "1\n"),
+        ] {
+            fs::write(root.join(name), value).unwrap();
+        }
+
+        let stats = collect_sched_ext(&root).unwrap();
+        assert_eq!(stats.state, "enabled");
+        assert_eq!(stats.enable_seq, 72);
+        assert_eq!(stats.hotplug_seq, 315);
+        assert_eq!(stats.nr_rejected, 2);
+        assert!(stats.switch_all);
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn sched_ext_reports_missing_and_invalid_fields() {
+        let root = std::env::temp_dir().join(format!(
+            "scx-mitosis-inspector-sched-ext-errors-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        assert!(collect_sched_ext(&root).unwrap_err().contains("state"));
+
+        for (name, value) in [
+            ("state", "disabled\n"),
+            ("enable_seq", "1\n"),
+            ("hotplug_seq", "2\n"),
+            ("nr_rejected", "0\n"),
+            ("switch_all", "sometimes\n"),
+        ] {
+            fs::write(root.join(name), value).unwrap();
+        }
+        assert!(collect_sched_ext(&root).unwrap_err().contains("switch_all"));
+
+        fs::remove_dir_all(root).unwrap();
     }
 }
