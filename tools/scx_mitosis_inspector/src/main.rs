@@ -70,6 +70,7 @@ async fn main() -> Result<()> {
         migrations: Vec::new(),
         cpu_runtime: Vec::new(),
         bpf_program_stats: Vec::new(),
+        dsq_metrics: Default::default(),
     }));
     let (ready_tx, ready_rx) = mpsc::channel();
     let collector_state = state.clone();
