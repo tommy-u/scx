@@ -1,9 +1,10 @@
 use std::time::Duration;
 
 use scx_mitosis_inspector::{
-    build_counters, build_cpu_runtime_rows, build_scheduler_event_rows,
-    parse_callback_timing_sample_rate, program_name_matches, project_cpu_runtime,
-    summarize_callback_timing, CallbackCounter, CallbackTimingCounters,
+    build_callback_timing_rows, build_counters, build_cpu_runtime_rows, build_scheduler_event_rows,
+    build_timing_metric_row, parse_callback_timing_sample_rate, program_name_matches,
+    project_cpu_runtime, summarize_callback_timing, BlockIoMetricsView, CallbackCounter,
+    CallbackTimingCounters, DsqMetricsView, HardirqRow, SoftirqRow,
 };
 
 fn timing(total_ns: u64, buckets: &[(usize, u64)]) -> CallbackTimingCounters {
@@ -86,6 +87,60 @@ fn callback_timing_reports_sampled_mean_and_percentiles() {
     assert_eq!(summary.p50_ns, Some(15));
     assert_eq!(summary.p95_ns, Some(63));
     assert_eq!(summary.p99_ns, Some(63));
+}
+
+#[test]
+fn timing_rows_preserve_histogram_buckets_for_visualization() {
+    let timing = timing(2_000, &[(3, 50), (5, 50)]);
+
+    let callback = build_callback_timing_rows(std::slice::from_ref(&timing));
+    let scheduler = build_timing_metric_row("wakeup_to_running", &timing);
+
+    assert_eq!(callback[0].buckets[3], 50);
+    assert_eq!(callback[0].buckets[5], 50);
+    assert_eq!(scheduler.buckets, timing.buckets);
+}
+
+#[test]
+fn observer_views_expose_their_latency_histograms() {
+    let buckets = vec![1, 2, 3];
+    let softirq = SoftirqRow {
+        vector: 1,
+        name: "TIMER",
+        count: 3,
+        rate_per_second: 1.0,
+        samples: 3,
+        timing_buckets: buckets.clone(),
+        mean_ns: Some(2),
+        p50_ns: Some(1),
+        p95_ns: None,
+        p99_ns: None,
+    };
+    let hardirq = HardirqRow {
+        irq: 4,
+        name: Some("timer".into()),
+        count: 3,
+        rate_per_second: 1.0,
+        samples: 3,
+        timing_buckets: buckets.clone(),
+        mean_ns: Some(2),
+        p50_ns: Some(1),
+        p95_ns: None,
+        p99_ns: None,
+    };
+    let block = BlockIoMetricsView {
+        latency_buckets: buckets.clone(),
+        ..Default::default()
+    };
+    let dsq = DsqMetricsView {
+        residence_buckets: buckets.clone(),
+        ..Default::default()
+    };
+
+    assert_eq!(softirq.timing_buckets, buckets);
+    assert_eq!(hardirq.timing_buckets, buckets);
+    assert_eq!(block.latency_buckets, buckets);
+    assert_eq!(dsq.residence_buckets, buckets);
 }
 
 #[test]

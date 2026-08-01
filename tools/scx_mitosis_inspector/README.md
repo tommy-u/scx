@@ -30,6 +30,14 @@ scheduler-only page: it reads the existing Mitosis `top` stats operation from
 `/var/run/scx/root/stats` and renders every global and per-cell field without
 changing the scheduler. Override the socket with `--stats-path` when needed.
 
+Each page keeps a browser-local 10-minute history: the callback page correlates
+CPU and IRQ utilization, callback rate, wakeup latency, DSQ depth, migration
+locality, and inspector runtime; the system page trends pressure, frequency,
+network, IRQ, and block I/O; and the scheduler page trends per-cell utilization
+and borrowing. Refreshing the page clears this history. Latency histograms and
+estimated callback-cost bars reuse counters already collected by the inspector
+and do not attach additional BPF programs.
+
 Callback latency is sampled by separate fentry/fexit BPF programs and shown as
 mean and approximate p50/p95/p99 values. The default samples one in 1024 calls;
 set `--callback-timing-sample-rate 1` to measure every call or `0` to disable

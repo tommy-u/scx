@@ -45,6 +45,7 @@ pub struct SoftirqRow {
     pub count: u64,
     pub rate_per_second: f64,
     pub samples: u64,
+    pub timing_buckets: Vec<u64>,
     pub mean_ns: Option<u64>,
     pub p50_ns: Option<u64>,
     pub p95_ns: Option<u64>,
@@ -66,6 +67,7 @@ pub struct BlockIoMetricsView {
     pub unmatched_completions: u64,
     pub tracking_failures: u64,
     pub latency_samples: u64,
+    pub latency_buckets: Vec<u64>,
     pub latency_mean_ns: Option<u64>,
     pub latency_p50_ns: Option<u64>,
     pub latency_p95_ns: Option<u64>,
@@ -87,6 +89,7 @@ pub struct HardirqRow {
     pub count: u64,
     pub rate_per_second: f64,
     pub samples: u64,
+    pub timing_buckets: Vec<u64>,
     pub mean_ns: Option<u64>,
     pub p50_ns: Option<u64>,
     pub p95_ns: Option<u64>,
@@ -138,6 +141,7 @@ pub struct CallbackTimingSummary {
 pub struct CallbackTimingRow {
     pub callback: &'static str,
     pub samples: u64,
+    pub buckets: Vec<u64>,
     pub mean_ns: Option<u64>,
     pub p50_ns: Option<u64>,
     pub p95_ns: Option<u64>,
@@ -148,6 +152,7 @@ pub struct CallbackTimingRow {
 pub struct TimingMetricRow {
     pub metric: &'static str,
     pub samples: u64,
+    pub buckets: Vec<u64>,
     pub mean_ns: Option<u64>,
     pub p50_ns: Option<u64>,
     pub p95_ns: Option<u64>,
@@ -174,6 +179,7 @@ pub struct DsqMetricsView {
     pub insert_count: u64,
     pub move_count: u64,
     pub residence_samples: u64,
+    pub residence_buckets: Vec<u64>,
     pub residence_mean_ns: Option<u64>,
     pub residence_p50_ns: Option<u64>,
     pub residence_p95_ns: Option<u64>,
@@ -273,6 +279,7 @@ pub fn build_callback_timing_rows(timings: &[CallbackTimingCounters]) -> Vec<Cal
             CallbackTimingRow {
                 callback,
                 samples: summary.samples,
+                buckets: timing.buckets.clone(),
                 mean_ns: summary.mean_ns,
                 p50_ns: summary.p50_ns,
                 p95_ns: summary.p95_ns,
@@ -304,6 +311,7 @@ pub fn build_timing_metric_row(
     TimingMetricRow {
         metric,
         samples: summary.samples,
+        buckets: timing.buckets.clone(),
         mean_ns: summary.mean_ns,
         p50_ns: summary.p50_ns,
         p95_ns: summary.p95_ns,
