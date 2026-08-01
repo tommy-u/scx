@@ -10,6 +10,7 @@ pub mod api;
 pub mod bpf_program_stats;
 pub mod collector;
 pub mod host_context;
+pub mod migration_history;
 pub mod model;
 pub mod probe_manifest;
 pub mod stats;
@@ -17,10 +18,11 @@ pub mod system_stats;
 pub mod topology;
 
 pub use model::{
-    build_callback_timing_rows, build_counters, build_cpu_runtime_rows, build_scheduler_event_rows,
-    build_timing_metric_row, parse_callback_timing_sample_rate, project_cpu_runtime,
-    summarize_callback_timing, BlockIoMetricsView, CallbackCounter, CallbackTimingCounters,
-    CallbackTimingRow, CallbackTimingSummary, CpuRuntimeRow, DsqMetricsView, HardirqMetricsView,
+    build_callback_timing_rows, build_counters, build_cpu_capacity_loss_rows,
+    build_cpu_runtime_rows, build_scheduler_event_rows, build_timing_metric_row,
+    parse_callback_timing_sample_rate, project_cpu_runtime, summarize_callback_timing,
+    BlockIoMetricsView, CallbackCounter, CallbackTimingCounters, CallbackTimingRow,
+    CallbackTimingSummary, CpuCapacityLossRow, CpuRuntimeRow, DsqMetricsView, HardirqMetricsView,
     HardirqRow, InterruptCpuRow, MigrationRow, ProbeManifestRow, SchedulerEventRow, SoftirqRow,
     TimingMetricRow, CALLBACK_NAMES, CALLBACK_TIMING_BUCKETS, SCHEDULER_EVENT_NAMES, SOFTIRQ_NAMES,
 };

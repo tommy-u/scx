@@ -284,17 +284,30 @@ int BPF_PROG(on_sched_switch, bool preempt, struct task_struct *prev,
 	struct mitosis_cpu_runtime *runtime;
 	struct task_observation *observation;
 	u32 key = 0;
-	u64 now;
+	u64 elapsed, now, policy;
 
 	if (!next)
 		return 0;
 	now = bpf_ktime_get_ns();
 	runtime = bpf_map_lookup_elem(&cpu_runtime, &key);
 	if (runtime) {
-		if (runtime->last_switch_ns && runtime->current_busy)
-			runtime->busy_ns += now - runtime->last_switch_ns;
+		elapsed = now - runtime->last_switch_ns;
+		if (runtime->last_switch_ns && runtime->current_busy) {
+			runtime->busy_ns += elapsed;
+			if (runtime->current_class == 1)
+				runtime->rt_stop_ns += elapsed;
+			else if (runtime->current_class == 2)
+				runtime->deadline_ns += elapsed;
+		}
 		runtime->last_switch_ns = now;
 		runtime->current_busy = BPF_CORE_READ(next, pid) != 0;
+		policy = BPF_CORE_READ(next, policy) & 7;
+		if (policy == 1 || policy == 2)
+			runtime->current_class = 1;
+		else if (policy == 6)
+			runtime->current_class = 2;
+		else
+			runtime->current_class = 0;
 	}
 	if (prev) {
 		observation = bpf_task_storage_get(&task_observations, prev, 0, 0);

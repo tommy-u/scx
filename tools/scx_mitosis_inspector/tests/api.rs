@@ -1,3 +1,4 @@
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, RwLock};
 
 use axum::body::Body;
@@ -7,6 +8,7 @@ use scx_mitosis_inspector::api::{router, ApiContext};
 use scx_mitosis_inspector::bpf_program_stats::BpfProgramStatsRow;
 use scx_mitosis_inspector::collector::Snapshot;
 use scx_mitosis_inspector::host_context::{HostContextView, HostIdentityView};
+use scx_mitosis_inspector::migration_history::MigrationHistory;
 use scx_mitosis_inspector::stats::StatsSnapshot;
 use scx_mitosis_inspector::system_stats::SystemStatsCollector;
 use scx_mitosis_inspector::topology::{CpuInfo, TopologyView};
@@ -57,6 +59,7 @@ fn snapshot() -> Snapshot {
             runtime_ns: 1234,
             utilization_pct: 72.5,
         }],
+        cpu_capacity_loss: Vec::new(),
         bpf_program_stats: vec![BpfProgramStatsRow {
             id: 11,
             name: "mitosis_select_".into(),
@@ -134,6 +137,32 @@ fn stats_snapshot() -> StatsSnapshot {
 }
 
 fn app() -> axum::Router {
+    let mut migration_history = MigrationHistory::new(5_000);
+    migration_history.ingest(0, &[]);
+    migration_history.ingest(
+        250,
+        &[MigrationRow {
+            from_cpu: 2,
+            to_cpu: 7,
+            count: 3,
+        }],
+    );
+    migration_history.ingest(
+        500,
+        &[MigrationRow {
+            from_cpu: 2,
+            to_cpu: 7,
+            count: 5,
+        }],
+    );
+    migration_history.ingest(
+        600,
+        &[MigrationRow {
+            from_cpu: 2,
+            to_cpu: 7,
+            count: 5,
+        }],
+    );
     router(ApiContext::new(
         Arc::new(RwLock::new(snapshot())),
         Arc::new(RwLock::new(stats_snapshot())),
@@ -153,6 +182,9 @@ fn app() -> axum::Router {
             }])
             .unwrap(),
         },
+        Arc::new(RwLock::new(migration_history)),
+        1_000,
+        Arc::new(AtomicBool::new(false)),
     ))
 }
 
@@ -188,6 +220,47 @@ async fn counters_endpoint_returns_the_current_snapshot() {
 }
 
 #[tokio::test]
+async fn migration_endpoint_returns_the_selected_rolling_window() {
+    let response = app()
+        .oneshot(
+            Request::builder()
+                .uri("/api/migrations?window_ms=300")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["window_ms"], 300);
+    assert_eq!(value["max_window_ms"], 5_000);
+    assert_eq!(value["total"], 2);
+    assert_eq!(value["rows"][0]["from_cpu"], 2);
+    assert_eq!(value["rows"][0]["to_cpu"], 7);
+}
+
+#[tokio::test]
+async fn reset_endpoint_accepts_a_new_inspector_epoch() {
+    let response = app()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/reset")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["scope"], "inspector");
+}
+
+#[tokio::test]
 async fn index_is_the_one_page_inspector() {
     let response = app()
         .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
@@ -204,6 +277,8 @@ async fn index_is_the_one_page_inspector() {
     assert!(html.contains("href=\"#probe-manifest\""));
     assert!(html.contains("href=\"#migration-locality\""));
     assert!(html.contains("id=\"downloadSnapshot\""));
+    assert!(html.contains("id=\"resetAllStats\""));
+    assert!(html.contains("id=\"resetStatsStatus\""));
     assert!(html.contains("id=\"hostname\""));
     assert!(html.contains("id=\"kernelRelease\""));
     assert!(html.contains("id=\"cpuCount\""));
@@ -211,6 +286,8 @@ async fn index_is_the_one_page_inspector() {
     assert!(html.contains("id=\"callbackTimingRows\""));
     assert!(html.contains("id=\"schedulerTimingRows\""));
     assert!(html.contains("id=\"eventTimingSampleRate\""));
+    assert!(html.contains("id=\"migrationWindow\""));
+    assert!(html.contains("id=\"migrationWindowCoverage\""));
     assert!(html.contains("id=\"migrationRows\""));
     assert!(html.contains("id=\"dsqMetricRows\""));
     assert!(html.contains("id=\"schedulerEventRows\""));
@@ -239,6 +316,10 @@ async fn index_is_the_one_page_inspector() {
     }
     assert!(html.contains("/assets/charts.js"));
     assert!(html.contains("/assets/app.js"));
+    assert!(
+        html.find("id=\"migration-locality\"").unwrap()
+            < html.find("id=\"probe-manifest\"").unwrap()
+    );
 }
 
 #[tokio::test]

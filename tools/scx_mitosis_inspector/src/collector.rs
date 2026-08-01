@@ -15,17 +15,18 @@ use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use libbpf_rs::query::ProgInfoIter;
-use libbpf_rs::skel::{OpenSkel, SkelBuilder};
-use libbpf_rs::{Link, MapCore, MapFlags, OpenObject, Program, ProgramType};
+use libbpf_rs::skel::{OpenSkel, Skel, SkelBuilder};
+use libbpf_rs::{Link, MapCore, MapFlags, MapType, OpenObject, Program, ProgramType};
 use serde::Serialize;
 
 use crate::bpf_program_stats::{query_bpf_program_stats, BpfProgramStatsRow};
 use crate::bpf_skel::{BpfSkel, BpfSkelBuilder};
 use crate::probe_manifest::{build_probe_manifest, ProbeManifestInputs};
 use crate::{
-    build_callback_timing_rows, build_counters, build_cpu_runtime_rows, build_scheduler_event_rows,
-    build_timing_metric_row, program_name_matches, project_cpu_runtime, summarize_callback_timing,
-    BlockIoMetricsView, CallbackCounter, CallbackTimingCounters, CallbackTimingRow, CpuRuntimeRow,
+    build_callback_timing_rows, build_counters, build_cpu_capacity_loss_rows,
+    build_cpu_runtime_rows, build_scheduler_event_rows, build_timing_metric_row,
+    program_name_matches, project_cpu_runtime, summarize_callback_timing, BlockIoMetricsView,
+    CallbackCounter, CallbackTimingCounters, CallbackTimingRow, CpuCapacityLossRow, CpuRuntimeRow,
     DsqMetricsView, HardirqMetricsView, HardirqRow, InterruptCpuRow, MigrationRow,
     ProbeManifestRow, SchedulerEventRow, SoftirqRow, TimingMetricRow, CALLBACK_NAMES,
     CALLBACK_TIMING_BUCKETS, SCHEDULER_EVENT_NAMES, SOFTIRQ_NAMES,
@@ -67,6 +68,13 @@ struct SoftirqMetricsSnapshot {
 }
 
 #[derive(Clone, Default)]
+struct CpuRuntimeSnapshot {
+    busy_ns: Vec<u64>,
+    rt_stop_ns: Vec<u64>,
+    deadline_ns: Vec<u64>,
+}
+
+#[derive(Clone, Default)]
 struct BlockIoMetrics {
     issue_events: u64,
     completion_events: u64,
@@ -100,6 +108,7 @@ pub struct Snapshot {
     pub scheduler_timings: Vec<TimingMetricRow>,
     pub migrations: Vec<MigrationRow>,
     pub cpu_runtime: Vec<CpuRuntimeRow>,
+    pub cpu_capacity_loss: Vec<CpuCapacityLossRow>,
     pub bpf_program_stats: Vec<BpfProgramStatsRow>,
     pub inspector_bpf_program_stats: Vec<BpfProgramStatsRow>,
     pub inspector_bpf_cpu_equivalent_pct: Option<f64>,
@@ -719,6 +728,72 @@ fn read_irq_names() -> BTreeMap<u32, String> {
         .unwrap_or_default()
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct RawPerCpuStat {
+    total_ticks: u64,
+    steal_ticks: u64,
+}
+
+fn parse_per_cpu_stat(contents: &str) -> std::result::Result<Vec<RawPerCpuStat>, String> {
+    let mut cpus = Vec::new();
+    for line in contents.lines() {
+        let mut fields = line.split_whitespace();
+        let Some(name) = fields.next() else {
+            continue;
+        };
+        let Some(cpu) = name
+            .strip_prefix("cpu")
+            .filter(|suffix| !suffix.is_empty())
+            .and_then(|suffix| suffix.parse::<usize>().ok())
+        else {
+            continue;
+        };
+        let counters = fields
+            .take(8)
+            .map(|value| {
+                value
+                    .parse::<u64>()
+                    .map_err(|error| format!("invalid {name} counter `{value}`: {error}"))
+            })
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        if counters.len() < 8 {
+            return Err(format!("{name} has fewer than eight CPU counters"));
+        }
+        cpus.resize(cpus.len().max(cpu + 1), RawPerCpuStat::default());
+        cpus[cpu] = RawPerCpuStat {
+            total_ticks: counters.iter().copied().fold(0_u64, u64::saturating_add),
+            steal_ticks: counters[7],
+        };
+    }
+    (!cpus.is_empty())
+        .then_some(cpus)
+        .ok_or_else(|| "no per-CPU counters in /proc/stat".to_owned())
+}
+
+fn read_per_cpu_stat() -> std::result::Result<Vec<RawPerCpuStat>, String> {
+    let contents =
+        fs::read_to_string("/proc/stat").map_err(|error| format!("reading /proc/stat: {error}"))?;
+    parse_per_cpu_stat(&contents)
+}
+
+fn build_steal_utilization(current: &[RawPerCpuStat], previous: &[RawPerCpuStat]) -> Vec<f64> {
+    current
+        .iter()
+        .enumerate()
+        .map(|(cpu, current)| {
+            let previous = previous.get(cpu).copied().unwrap_or_default();
+            let total = current.total_ticks.saturating_sub(previous.total_ticks);
+            if total == 0 {
+                0.0
+            } else {
+                (current.steal_ticks.saturating_sub(previous.steal_ticks) as f64 / total as f64
+                    * 100.0)
+                    .clamp(0.0, 100.0)
+            }
+        })
+        .collect()
+}
+
 fn build_hardirq_view(
     current: &HardirqMetrics,
     previous: &HardirqMetrics,
@@ -900,7 +975,7 @@ fn read_migrations(skel: &BpfSkel<'_>) -> Result<Vec<MigrationRow>> {
     Ok(rows)
 }
 
-fn read_cpu_runtime(skel: &BpfSkel<'_>) -> Result<Vec<u64>> {
+fn read_cpu_runtime(skel: &BpfSkel<'_>) -> Result<CpuRuntimeSnapshot> {
     let key = 0_u32.to_ne_bytes();
     let values = skel
         .maps
@@ -910,7 +985,7 @@ fn read_cpu_runtime(skel: &BpfSkel<'_>) -> Result<Vec<u64>> {
     let now_ns = monotonic_time_ns()?;
     values
         .into_iter()
-        .map(|value| {
+        .try_fold(CpuRuntimeSnapshot::default(), |mut snapshot, value| {
             let last_switch_ns = u64::from_ne_bytes(
                 value
                     .get(..8)
@@ -929,14 +1004,82 @@ fn read_cpu_runtime(skel: &BpfSkel<'_>) -> Result<Vec<u64>> {
                     .context("short CPU runtime value")?
                     .try_into()?,
             ) != 0;
-            Ok(project_cpu_runtime(
+            let rt_stop_ns = u64::from_ne_bytes(
+                value
+                    .get(24..32)
+                    .context("short RT/stop runtime value")?
+                    .try_into()?,
+            );
+            let deadline_ns = u64::from_ne_bytes(
+                value
+                    .get(32..40)
+                    .context("short deadline runtime value")?
+                    .try_into()?,
+            );
+            let current_class = u64::from_ne_bytes(
+                value
+                    .get(40..48)
+                    .context("short current scheduling class value")?
+                    .try_into()?,
+            );
+            snapshot.busy_ns.push(project_cpu_runtime(
                 busy_ns,
                 last_switch_ns,
                 current_busy,
                 now_ns,
-            ))
+            ));
+            snapshot.rt_stop_ns.push(project_cpu_runtime(
+                rt_stop_ns,
+                last_switch_ns,
+                current_class == 1,
+                now_ns,
+            ));
+            snapshot.deadline_ns.push(project_cpu_runtime(
+                deadline_ns,
+                last_switch_ns,
+                current_class == 2,
+                now_ns,
+            ));
+            Ok(snapshot)
         })
-        .collect()
+}
+
+fn reset_inspector_maps(skel: &mut BpfSkel<'_>) -> Result<()> {
+    let cpu_count = libbpf_rs::num_possible_cpus().context("counting possible CPUs")?;
+    for map in skel.object_mut().maps_mut() {
+        let name = map.name().to_string_lossy();
+        if [".rodata", ".data", ".bss", ".kconfig"]
+            .iter()
+            .any(|suffix| name.contains(suffix))
+        {
+            continue;
+        }
+        let keys = map.keys().collect::<Vec<_>>();
+        match map.map_type() {
+            MapType::Array => {
+                let zero = vec![0; map.value_size() as usize];
+                for key in keys {
+                    map.update(&key, &zero, MapFlags::ANY)
+                        .with_context(|| format!("resetting {name}"))?;
+                }
+            }
+            MapType::PercpuArray => {
+                let zeros = vec![vec![0; map.value_size() as usize]; cpu_count];
+                for key in keys {
+                    map.update_percpu(&key, &zeros, MapFlags::ANY)
+                        .with_context(|| format!("resetting {name}"))?;
+                }
+            }
+            MapType::Hash | MapType::PercpuHash | MapType::LruHash | MapType::LruPercpuHash => {
+                for key in keys {
+                    map.delete(&key)
+                        .with_context(|| format!("resetting {name}"))?;
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 fn monotonic_time_ns() -> Result<u64> {
@@ -1014,7 +1157,9 @@ fn read_dsq_metrics(skel: &BpfSkel<'_>, available: bool) -> Result<DsqMetricsVie
 
 pub fn run(
     state: Arc<RwLock<Snapshot>>,
+    migration_history: Arc<RwLock<crate::migration_history::MigrationHistory>>,
     shutdown: Arc<AtomicBool>,
+    reset_requested: Arc<AtomicBool>,
     ready: Sender<Result<()>>,
     config: CollectorConfig,
 ) -> Result<()> {
@@ -1045,7 +1190,7 @@ pub fn run(
         .context("callback collector rodata is unavailable")?;
     rodata.callback_timing_sample_rate = config.callback_timing_sample_rate;
     rodata.event_timing_sample_rate = config.event_timing_sample_rate;
-    let skel = open_skel
+    let mut skel = open_skel
         .load()
         .context("loading callback collector BPF object")?;
     let inspector_program_ids = ProgInfoIter::default()
@@ -1056,7 +1201,7 @@ pub fn run(
         attach_programs(&skel, config, block_io_supported, hardirq_supported)
             .context("attaching callback observer programs")?;
 
-    let started = Instant::now();
+    let mut started = Instant::now();
     let mut previous = read_counts(&skel)?;
     let mut previous_scheduler_events = read_scheduler_events(&skel)?;
     let mut previous_softirqs = read_softirq_metrics(&skel)?;
@@ -1068,7 +1213,12 @@ pub fn run(
     let cpu_slice_duration = read_cpu_slice_duration(&skel)?;
     let blocked_duration = read_blocked_duration(&skel)?;
     let migrations = read_migrations(&skel)?;
+    migration_history
+        .write()
+        .expect("migration history lock poisoned")
+        .ingest(0, &migrations);
     let mut previous_cpu_runtime = read_cpu_runtime(&skel)?;
+    let mut previous_cpu_stat = read_per_cpu_stat().unwrap_or_default();
     let bpf_program_stats = query_bpf_program_stats(&target_program_ids);
     let inspector_bpf_program_stats = query_bpf_program_stats(&inspector_program_ids);
     let inspector_stats_enabled = inspector_bpf_program_stats
@@ -1097,8 +1247,16 @@ pub fn run(
             ],
             migrations,
             cpu_runtime: build_cpu_runtime_rows(
-                &previous_cpu_runtime,
-                &previous_cpu_runtime,
+                &previous_cpu_runtime.busy_ns,
+                &previous_cpu_runtime.busy_ns,
+                Duration::ZERO,
+            ),
+            cpu_capacity_loss: build_cpu_capacity_loss_rows(
+                &previous_cpu_runtime.rt_stop_ns,
+                &previous_cpu_runtime.rt_stop_ns,
+                &previous_cpu_runtime.deadline_ns,
+                &previous_cpu_runtime.deadline_ns,
+                &vec![0.0; previous_cpu_runtime.busy_ns.len()],
                 Duration::ZERO,
             ),
             bpf_program_stats,
@@ -1151,6 +1309,15 @@ pub fn run(
 
     while !shutdown.load(Ordering::Relaxed) {
         thread::sleep(Duration::from_secs(1));
+        if reset_requested.swap(false, Ordering::AcqRel) {
+            if let Err(error) = reset_inspector_maps(&mut skel) {
+                eprintln!("Inspector stats reset failed: {error:#}");
+            } else {
+                started = Instant::now();
+                previous_at = started;
+                previous_cpu_stat = read_per_cpu_stat().unwrap_or_default();
+            }
+        }
         let now = Instant::now();
         let current = read_counts(&skel)?;
         let current_scheduler_events = read_scheduler_events(&skel)?;
@@ -1162,7 +1329,15 @@ pub fn run(
         let cpu_slice_duration = read_cpu_slice_duration(&skel)?;
         let blocked_duration = read_blocked_duration(&skel)?;
         let migrations = read_migrations(&skel)?;
+        migration_history
+            .write()
+            .expect("migration history lock poisoned")
+            .ingest(
+                u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                &migrations,
+            );
         let current_cpu_runtime = read_cpu_runtime(&skel)?;
+        let current_cpu_stat = read_per_cpu_stat().unwrap_or_else(|_| previous_cpu_stat.clone());
         let bpf_program_stats = query_bpf_program_stats(&target_program_ids);
         let inspector_bpf_program_stats = query_bpf_program_stats(&inspector_program_ids);
         let dsq_metrics = read_dsq_metrics(&skel, dsq_available)?;
@@ -1191,14 +1366,31 @@ pub fn run(
             build_timing_metric_row("blocked_off_cpu", &blocked_duration),
         ];
         snapshot.migrations = migrations;
-        snapshot.cpu_runtime =
-            build_cpu_runtime_rows(&current_cpu_runtime, &previous_cpu_runtime, elapsed);
+        snapshot.cpu_runtime = build_cpu_runtime_rows(
+            &current_cpu_runtime.busy_ns,
+            &previous_cpu_runtime.busy_ns,
+            elapsed,
+        );
+        let steal_utilization = if previous_cpu_stat.is_empty() {
+            vec![0.0; current_cpu_stat.len()]
+        } else {
+            build_steal_utilization(&current_cpu_stat, &previous_cpu_stat)
+        };
+        snapshot.cpu_capacity_loss = build_cpu_capacity_loss_rows(
+            &current_cpu_runtime.rt_stop_ns,
+            &previous_cpu_runtime.rt_stop_ns,
+            &current_cpu_runtime.deadline_ns,
+            &previous_cpu_runtime.deadline_ns,
+            &steal_utilization,
+            elapsed,
+        );
         previous_cpu_runtime = current_cpu_runtime;
+        previous_cpu_stat = current_cpu_stat;
         snapshot.bpf_program_stats = bpf_program_stats;
         snapshot.inspector_bpf_program_stats = inspector_bpf_program_stats;
         snapshot.inspector_bpf_cpu_equivalent_pct = inspector_cpu_equivalent_pct;
         snapshot.inspector_bpf_host_capacity_pct = inspector_cpu_equivalent_pct
-            .map(|percentage| percentage / previous_cpu_runtime.len().max(1) as f64);
+            .map(|percentage| percentage / previous_cpu_runtime.busy_ns.len().max(1) as f64);
         previous_inspector_runtime_ns = inspector_runtime_ns;
         snapshot.dsq_metrics = dsq_metrics;
         snapshot.scheduler_events = build_scheduler_event_rows(
@@ -1246,7 +1438,7 @@ pub fn run(
 
 #[cfg(test)]
 mod tests {
-    use super::parse_irq_names;
+    use super::{build_steal_utilization, parse_irq_names, parse_per_cpu_stat};
 
     #[test]
     fn parses_irq_action_names_after_per_cpu_counts() {
@@ -1274,5 +1466,22 @@ abc:          1          2  IR-IO-APIC  8-edge bogus
 "#;
 
         assert!(parse_irq_names(interrupts).is_empty());
+    }
+
+    #[test]
+    fn parses_per_cpu_hypervisor_steal_utilization() {
+        let previous = parse_per_cpu_stat(
+            "cpu  0 0 0 0 0 0 0 0\ncpu0 10 0 10 70 0 0 0 10\ncpu1 20 0 10 70 0 0 0 0\n",
+        )
+        .unwrap();
+        let current = parse_per_cpu_stat(
+            "cpu  0 0 0 0 0 0 0 0\ncpu0 20 0 20 140 0 0 0 20\ncpu1 40 0 20 140 0 0 0 0\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            build_steal_utilization(&current, &previous),
+            vec![10.0, 0.0]
+        );
     }
 }
