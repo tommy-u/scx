@@ -63,6 +63,9 @@ fn snapshot() -> Snapshot {
             recursion_misses: 0,
             verified_insns: Some(100),
         }],
+        inspector_bpf_program_stats: Vec::new(),
+        inspector_bpf_cpu_equivalent_pct: None,
+        inspector_bpf_host_capacity_pct: None,
         dsq_metrics: Default::default(),
         scheduler_events: Vec::new(),
         softirqs: Vec::new(),
@@ -199,6 +202,7 @@ async fn index_is_the_one_page_inspector() {
     assert!(html.contains("id=\"softirqRows\""));
     assert!(html.contains("id=\"blockIoRows\""));
     assert!(html.contains("id=\"hardirqRows\""));
+    assert!(html.contains("id=\"inspectorBpfProgramRows\""));
     assert!(html.contains("/assets/app.js"));
 }
 

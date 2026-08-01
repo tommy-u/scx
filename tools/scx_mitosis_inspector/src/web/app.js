@@ -13,6 +13,7 @@ const migrationRows = document.querySelector("#migrationRows");
 const cpuUtilizationRows = document.querySelector("#cpuUtilizationRows");
 const llcUtilizationRows = document.querySelector("#llcUtilizationRows");
 const bpfProgramRows = document.querySelector("#bpfProgramRows");
+const inspectorBpfProgramRows = document.querySelector("#inspectorBpfProgramRows");
 const dsqMetricRows = document.querySelector("#dsqMetricRows");
 const FEEDBACK_STORAGE_KEY = "scx-mitosis-inspector-feedback-v1";
 const feedbackElements = {
@@ -238,6 +239,26 @@ function renderBpfPrograms(programs) {
   ])));
 }
 
+function renderInspectorBpfPrograms(snapshot) {
+  const programs = snapshot.inspector_bpf_program_stats || [];
+  const enabled = programs.some((program) => program.run_count > 0 || program.run_time_ns > 0);
+  document.querySelector("#inspectorOverheadStatus").textContent = enabled
+    ? "Kernel runtime counters enabled"
+    : "Enable kernel.bpf_stats_enabled temporarily to measure";
+  const percentage = (value) => value == null ? "--" : `${rate.format(value)}%`;
+  document.querySelector("#inspectorCpuEquivalent").textContent =
+    percentage(snapshot.inspector_bpf_cpu_equivalent_pct);
+  document.querySelector("#inspectorHostCapacity").textContent =
+    percentage(snapshot.inspector_bpf_host_capacity_pct);
+  inspectorBpfProgramRows.replaceChildren(...programs.map((program) => tableRow([
+    program.name,
+    number.format(program.id),
+    number.format(program.run_count),
+    number.format(program.run_time_ns),
+    program.average_runtime_ns == null ? "--" : number.format(program.average_runtime_ns),
+  ])));
+}
+
 function renderHostContext(context) {
   document.querySelector("#hostname").textContent = context.identity.hostname;
   document.querySelector("#kernelRelease").textContent = context.identity.kernel_release;
@@ -262,6 +283,7 @@ function render(snapshot) {
   renderMigrations(snapshot.migrations);
   renderCpuBreakdown(snapshot);
   renderBpfPrograms(snapshot.bpf_program_stats);
+  renderInspectorBpfPrograms(snapshot);
   renderDsqMetrics(snapshot.dsq_metrics);
   MitosisHeatmap.update({ ...snapshot, topology });
 

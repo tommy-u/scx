@@ -50,6 +50,21 @@ When block request tracepoints are available, the inspector reports request
 rates, bytes, errors, correlation losses, and completion latency percentiles.
 The callback page also reads kernel BPF program run counts and runtime totals;
 these fields are populated only when the host has `kernel.bpf_stats_enabled=1`.
+It reports the inspector programs separately, including one-CPU-equivalent and
+whole-host capacity percentages. Enable kernel runtime accounting temporarily
+for an A/B test; the inspector never changes that sysctl.
+
+For staged production attachment, use `--disable-dsq`,
+`--disable-scheduler-events`, `--disable-irqs`, and `--disable-block-io` to
+exclude exact probe groups. Set either timing sample rate to zero to disable
+that sampled timing group.
+
+On a performance-sensitive host, start with all optional groups disabled and
+enable them one at a time while comparing the same workload. For a short
+measurement window, enable `kernel.bpf_stats_enabled`, use the inspector BPF
+overhead table, then restore the host's original sysctl value. Kernel BPF
+runtime accounting itself has a cost and should not be left enabled solely for
+the inspector.
 
 For the 16-vCPU development guest, expose the guest port with QEMU user-mode
 networking and run `run-in-vm.sh` as the guest command. The script owns the

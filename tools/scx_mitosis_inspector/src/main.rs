@@ -12,7 +12,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use clap::Parser;
 use scx_mitosis_inspector::api::{router, ApiContext};
-use scx_mitosis_inspector::collector::{self, Snapshot};
+use scx_mitosis_inspector::collector::{self, CollectorConfig, Snapshot};
 use scx_mitosis_inspector::host_context::HostContextView;
 use scx_mitosis_inspector::stats::{self, StatsSnapshot, DEFAULT_STATS_PATH};
 use scx_mitosis_inspector::system_stats::SystemStatsCollector;
@@ -48,6 +48,22 @@ struct Opts {
         value_name = "N"
     )]
     event_timing_sample_rate: u32,
+
+    /// Do not attach DSQ insert, move, residence, or depth probes.
+    #[clap(long)]
+    disable_dsq: bool,
+
+    /// Do not attach exact scheduler event counters.
+    #[clap(long)]
+    disable_scheduler_events: bool,
+
+    /// Do not attach hardirq or softirq probes.
+    #[clap(long)]
+    disable_irqs: bool,
+
+    /// Do not attach block request issue or completion probes.
+    #[clap(long)]
+    disable_block_io: bool,
 }
 
 #[tokio::main]
@@ -70,6 +86,9 @@ async fn main() -> Result<()> {
         migrations: Vec::new(),
         cpu_runtime: Vec::new(),
         bpf_program_stats: Vec::new(),
+        inspector_bpf_program_stats: Vec::new(),
+        inspector_bpf_cpu_equivalent_pct: None,
+        inspector_bpf_host_capacity_pct: None,
         dsq_metrics: Default::default(),
         scheduler_events: Vec::new(),
         softirqs: Vec::new(),
@@ -80,15 +99,20 @@ async fn main() -> Result<()> {
     let (ready_tx, ready_rx) = mpsc::channel();
     let collector_state = state.clone();
     let collector_shutdown = shutdown.clone();
-    let callback_timing_sample_rate = opts.callback_timing_sample_rate;
-    let event_timing_sample_rate = opts.event_timing_sample_rate;
+    let collector_config = CollectorConfig {
+        callback_timing_sample_rate: opts.callback_timing_sample_rate,
+        event_timing_sample_rate: opts.event_timing_sample_rate,
+        enable_dsq: !opts.disable_dsq,
+        enable_scheduler_events: !opts.disable_scheduler_events,
+        enable_irqs: !opts.disable_irqs,
+        enable_block_io: !opts.disable_block_io,
+    };
     let collector = std::thread::spawn(move || {
         collector::run(
             collector_state,
             collector_shutdown,
             ready_tx,
-            callback_timing_sample_rate,
-            event_timing_sample_rate,
+            collector_config,
         )
     });
 

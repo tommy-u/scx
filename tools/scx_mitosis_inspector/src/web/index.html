@@ -131,6 +131,33 @@
           </div>
         </section>
 
+        <section class="table-section" aria-labelledby="inspectorOverheadHeading" data-feedback-key="Callbacks:Inspector-overhead">
+          <div class="table-section-heading">
+            <h2 id="inspectorOverheadHeading">Inspector BPF overhead</h2>
+            <p id="inspectorOverheadStatus">Checking kernel runtime counters</p>
+          </div>
+          <section class="summary compact-summary" aria-label="Inspector overhead summary">
+            <dl>
+              <div><dt>One-CPU equivalent</dt><dd id="inspectorCpuEquivalent">--</dd></div>
+              <div><dt>Host capacity</dt><dd id="inspectorHostCapacity">--</dd></div>
+            </dl>
+          </section>
+          <div class="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">Program</th>
+                  <th scope="col">ID</th>
+                  <th scope="col">Runs</th>
+                  <th scope="col">Runtime (ns)</th>
+                  <th scope="col">Average (ns)</th>
+                </tr>
+              </thead>
+              <tbody id="inspectorBpfProgramRows"></tbody>
+            </table>
+          </div>
+        </section>
+
         <section class="table-section" aria-labelledby="schedulerEventsHeading" data-feedback-key="Callbacks:Scheduler-events">
           <div class="table-section-heading">
             <h2 id="schedulerEventsHeading">Scheduler activity</h2>
