@@ -25,7 +25,9 @@ const STATS_HTML: &str = include_str!("web/stats.html");
 const SYSTEM_HTML: &str = include_str!("web/system.html");
 const APP_JS: &str = include_str!("web/app.js");
 const CHARTS_JS: &str = include_str!("web/charts.js");
+const FEEDBACK_JS: &str = include_str!("web/feedback.js");
 const HEATMAP_JS: &str = include_str!("web/heatmap.js");
+const RESET_JS: &str = include_str!("web/reset.js");
 const STATS_JS: &str = include_str!("web/stats.js");
 const SYSTEM_JS: &str = include_str!("web/system.js");
 const STYLE_CSS: &str = include_str!("web/style.css");
@@ -71,7 +73,9 @@ pub fn router(context: ApiContext) -> Router {
         .route("/system", get(system_page))
         .route("/assets/app.js", get(app_script))
         .route("/assets/charts.js", get(charts_script))
+        .route("/assets/feedback.js", get(feedback_script))
         .route("/assets/heatmap.js", get(heatmap_script))
+        .route("/assets/reset.js", get(reset_script))
         .route("/assets/stats.js", get(stats_script))
         .route("/assets/system.js", get(system_script))
         .route("/assets/style.css", get(stylesheet))
@@ -104,8 +108,16 @@ async fn charts_script() -> (HeaderMap, &'static str) {
     content("application/javascript; charset=utf-8", CHARTS_JS)
 }
 
+async fn feedback_script() -> (HeaderMap, &'static str) {
+    content("application/javascript; charset=utf-8", FEEDBACK_JS)
+}
+
 async fn heatmap_script() -> (HeaderMap, &'static str) {
     content("application/javascript; charset=utf-8", HEATMAP_JS)
+}
+
+async fn reset_script() -> (HeaderMap, &'static str) {
+    content("application/javascript; charset=utf-8", RESET_JS)
 }
 
 async fn stats_script() -> (HeaderMap, &'static str) {

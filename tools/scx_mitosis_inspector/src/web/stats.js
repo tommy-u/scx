@@ -148,5 +148,20 @@ async function refresh() {
   }
 }
 
+window.addEventListener("mitosis:stats-reset", () => {
+  statsHistory.clear();
+  trackedCells.clear();
+  MitosisCharts.drawLineChart(
+    document.querySelector("#cellUtilizationChart"),
+    [],
+    { unit: "%", minY: 0, maxY: 100 },
+  );
+  MitosisCharts.drawLineChart(
+    document.querySelector("#cellBalanceChart"),
+    [],
+    { unit: "%", minY: 0, maxY: 100 },
+  );
+});
+
 refresh();
 setInterval(refresh, 2000);
