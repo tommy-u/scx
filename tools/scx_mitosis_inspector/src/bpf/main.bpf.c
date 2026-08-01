@@ -10,6 +10,7 @@
 #include "dsq_observer.bpf.h"
 #include "scheduler_events.bpf.h"
 #include "softirq_observer.bpf.h"
+#include "block_io_observer.bpf.h"
 
 char _license[] SEC("license") = "GPL";
 

@@ -42,6 +42,8 @@ Scheduler tracepoints provide exact switch, preemption, blocking, wakeup, and
 task lifecycle totals with per-second rates.
 Softirq entry and exit tracepoints provide per-vector counts, rates, and
 duration percentiles.
+When block request tracepoints are available, the inspector reports request
+rates, bytes, errors, correlation losses, and completion latency percentiles.
 The callback page also reads kernel BPF program run counts and runtime totals;
 these fields are populated only when the host has `kernel.bpf_stats_enabled=1`.
 

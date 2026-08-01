@@ -51,6 +51,27 @@ pub struct SoftirqRow {
     pub p99_ns: Option<u64>,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct BlockIoMetricsView {
+    pub available: bool,
+    pub issue_events: u64,
+    pub issue_rate_per_second: f64,
+    pub completion_events: u64,
+    pub completion_rate_per_second: f64,
+    pub completed_requests: u64,
+    pub error_events: u64,
+    pub issued_bytes: u64,
+    pub completed_bytes: u64,
+    pub completed_bytes_per_second: f64,
+    pub unmatched_completions: u64,
+    pub tracking_failures: u64,
+    pub latency_samples: u64,
+    pub latency_mean_ns: Option<u64>,
+    pub latency_p50_ns: Option<u64>,
+    pub latency_p95_ns: Option<u64>,
+    pub latency_p99_ns: Option<u64>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CallbackTimingCounters {
     pub total_ns: u64,

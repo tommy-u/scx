@@ -7,6 +7,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::mem::MaybeUninit;
 use std::os::fd::{AsRawFd, OwnedFd};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc::Sender, Arc, RwLock};
 use std::thread;
@@ -23,8 +24,8 @@ use crate::bpf_skel::{BpfSkel, BpfSkelBuilder};
 use crate::{
     build_callback_timing_rows, build_counters, build_cpu_runtime_rows, build_scheduler_event_rows,
     build_timing_metric_row, program_name_matches, project_cpu_runtime, summarize_callback_timing,
-    CallbackCounter, CallbackTimingCounters, CallbackTimingRow, CpuRuntimeRow, DsqMetricsView,
-    MigrationRow, SchedulerEventRow, SoftirqRow, TimingMetricRow, CALLBACK_NAMES,
+    BlockIoMetricsView, CallbackCounter, CallbackTimingCounters, CallbackTimingRow, CpuRuntimeRow,
+    DsqMetricsView, MigrationRow, SchedulerEventRow, SoftirqRow, TimingMetricRow, CALLBACK_NAMES,
     CALLBACK_TIMING_BUCKETS, SCHEDULER_EVENT_NAMES, SOFTIRQ_NAMES,
 };
 
@@ -47,6 +48,19 @@ struct SoftirqMetrics {
     timing: CallbackTimingCounters,
 }
 
+#[derive(Clone, Default)]
+struct BlockIoMetrics {
+    issue_events: u64,
+    completion_events: u64,
+    completed_requests: u64,
+    error_events: u64,
+    issued_bytes: u64,
+    completed_bytes: u64,
+    unmatched_completions: u64,
+    tracking_failures: u64,
+    latency: CallbackTimingCounters,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct Snapshot {
     pub scheduler: &'static str,
@@ -63,6 +77,7 @@ pub struct Snapshot {
     pub dsq_metrics: DsqMetricsView,
     pub scheduler_events: Vec<SchedulerEventRow>,
     pub softirqs: Vec<SoftirqRow>,
+    pub block_io: BlockIoMetricsView,
 }
 
 fn find_targets() -> Result<[TargetProgram; 5]> {
@@ -142,7 +157,8 @@ fn attach_programs(
     skel: &BpfSkel<'_>,
     callback_timing_sample_rate: u32,
     event_timing_sample_rate: u32,
-) -> Result<(Vec<Link>, bool)> {
+    block_io_supported: bool,
+) -> Result<(Vec<Link>, bool, bool)> {
     let mut links = vec![
         skel.progs.observe_select_cpu.attach_trace()?,
         skel.progs.observe_enqueue.attach_trace()?,
@@ -176,7 +192,49 @@ fn attach_programs(
         ]);
     }
     let dsq_available = attach_dsq_programs(skel, &mut links);
-    Ok((links, dsq_available))
+    let block_io_available = block_io_supported && attach_block_io_programs(skel, &mut links);
+    Ok((links, dsq_available, block_io_available))
+}
+
+fn tracepoint_available(group: &str, event: &str) -> bool {
+    [
+        "/sys/kernel/tracing/events",
+        "/sys/kernel/debug/tracing/events",
+    ]
+    .into_iter()
+    .any(|root| Path::new(root).join(group).join(event).exists())
+}
+
+fn configure_block_io_programs(open_skel: &mut crate::bpf_skel::OpenBpfSkel<'_>) -> bool {
+    let supported = tracepoint_available("block", "block_rq_issue")
+        && tracepoint_available("block", "block_rq_complete");
+    if !supported {
+        open_skel.progs.block_io_observer_issue.set_autoload(false);
+        open_skel
+            .progs
+            .block_io_observer_complete
+            .set_autoload(false);
+    }
+    supported
+}
+
+fn attach_block_io_programs(skel: &BpfSkel<'_>, links: &mut Vec<Link>) -> bool {
+    let issue = match skel.progs.block_io_observer_issue.attach() {
+        Ok(link) => link,
+        Err(error) => {
+            eprintln!("block I/O observer could not attach issue tracepoint: {error}");
+            return false;
+        }
+    };
+    let complete = match skel.progs.block_io_observer_complete.attach() {
+        Ok(link) => link,
+        Err(error) => {
+            eprintln!("block I/O observer could not attach completion tracepoint: {error}");
+            return false;
+        }
+    };
+    links.extend([issue, complete]);
+    true
 }
 
 fn kernel_symbols() -> HashSet<String> {
@@ -349,6 +407,83 @@ fn build_softirq_rows(
             }
         })
         .collect()
+}
+
+fn read_block_io_metrics(skel: &BpfSkel<'_>, available: bool) -> Result<BlockIoMetrics> {
+    const U64_BYTES: usize = std::mem::size_of::<u64>();
+    const FIELD_COUNT: usize = 9 + CALLBACK_TIMING_BUCKETS;
+
+    if !available {
+        return Ok(BlockIoMetrics::default());
+    }
+    let key = 0_u32.to_ne_bytes();
+    let values = skel
+        .maps
+        .block_io_observer_metrics
+        .lookup_percpu(&key, MapFlags::ANY)?
+        .context("block I/O metrics entry missing")?;
+    let mut metrics = BlockIoMetrics::default();
+    for value in values {
+        if value.len() < FIELD_COUNT * U64_BYTES {
+            bail!("short block I/O metrics value");
+        }
+        let field = |index: usize| -> Result<u64> {
+            let start = index * U64_BYTES;
+            Ok(u64::from_ne_bytes(
+                value[start..start + U64_BYTES].try_into()?,
+            ))
+        };
+        metrics.issue_events = metrics.issue_events.saturating_add(field(0)?);
+        metrics.completion_events = metrics.completion_events.saturating_add(field(1)?);
+        metrics.completed_requests = metrics.completed_requests.saturating_add(field(2)?);
+        metrics.error_events = metrics.error_events.saturating_add(field(3)?);
+        metrics.issued_bytes = metrics.issued_bytes.saturating_add(field(4)?);
+        metrics.completed_bytes = metrics.completed_bytes.saturating_add(field(5)?);
+        metrics.unmatched_completions = metrics.unmatched_completions.saturating_add(field(6)?);
+        metrics.tracking_failures = metrics.tracking_failures.saturating_add(field(7)?);
+        metrics.latency.total_ns = metrics.latency.total_ns.saturating_add(field(8)?);
+        for bucket in 0..CALLBACK_TIMING_BUCKETS {
+            metrics.latency.buckets[bucket] =
+                metrics.latency.buckets[bucket].saturating_add(field(9 + bucket)?);
+        }
+    }
+    Ok(metrics)
+}
+
+fn build_block_io_view(
+    current: &BlockIoMetrics,
+    previous: &BlockIoMetrics,
+    elapsed: Duration,
+    available: bool,
+) -> BlockIoMetricsView {
+    let seconds = elapsed.as_secs_f64();
+    let rate = |current: u64, previous: u64| {
+        if seconds > 0.0 {
+            current.saturating_sub(previous) as f64 / seconds
+        } else {
+            0.0
+        }
+    };
+    let latency = summarize_callback_timing(&current.latency);
+    BlockIoMetricsView {
+        available,
+        issue_events: current.issue_events,
+        issue_rate_per_second: rate(current.issue_events, previous.issue_events),
+        completion_events: current.completion_events,
+        completion_rate_per_second: rate(current.completion_events, previous.completion_events),
+        completed_requests: current.completed_requests,
+        error_events: current.error_events,
+        issued_bytes: current.issued_bytes,
+        completed_bytes: current.completed_bytes,
+        completed_bytes_per_second: rate(current.completed_bytes, previous.completed_bytes),
+        unmatched_completions: current.unmatched_completions,
+        tracking_failures: current.tracking_failures,
+        latency_samples: latency.samples,
+        latency_mean_ns: latency.mean_ns,
+        latency_p50_ns: latency.p50_ns,
+        latency_p95_ns: latency.p95_ns,
+        latency_p99_ns: latency.p99_ns,
+    }
 }
 
 fn read_callback_timings(skel: &BpfSkel<'_>) -> Result<Vec<CallbackTimingCounters>> {
@@ -576,6 +711,7 @@ pub fn run(
         .open(&mut open_object)
         .context("opening callback collector BPF object")?;
     set_targets(&mut open_skel, &targets).context("setting callback attach targets")?;
+    let block_io_supported = configure_block_io_programs(&mut open_skel);
     let rodata = open_skel
         .maps
         .rodata_data
@@ -586,14 +722,19 @@ pub fn run(
     let skel = open_skel
         .load()
         .context("loading callback collector BPF object")?;
-    let (_links, dsq_available) =
-        attach_programs(&skel, callback_timing_sample_rate, event_timing_sample_rate)
-            .context("attaching callback observer programs")?;
+    let (_links, dsq_available, block_io_available) = attach_programs(
+        &skel,
+        callback_timing_sample_rate,
+        event_timing_sample_rate,
+        block_io_supported,
+    )
+    .context("attaching callback observer programs")?;
 
     let started = Instant::now();
     let mut previous = read_counts(&skel)?;
     let mut previous_scheduler_events = read_scheduler_events(&skel)?;
     let mut previous_softirqs = read_softirq_metrics(&skel)?;
+    let mut previous_block_io = read_block_io_metrics(&skel, block_io_available)?;
     let callback_timings = read_callback_timings(&skel)?;
     let wakeup_latency = read_wakeup_latency(&skel)?;
     let cpu_slice_duration = read_cpu_slice_duration(&skel)?;
@@ -632,6 +773,12 @@ pub fn run(
                 Duration::ZERO,
             ),
             softirqs: build_softirq_rows(&previous_softirqs, &previous_softirqs, Duration::ZERO),
+            block_io: build_block_io_view(
+                &previous_block_io,
+                &previous_block_io,
+                Duration::ZERO,
+                block_io_available,
+            ),
         };
     }
     ready
@@ -644,6 +791,7 @@ pub fn run(
         let current = read_counts(&skel)?;
         let current_scheduler_events = read_scheduler_events(&skel)?;
         let current_softirqs = read_softirq_metrics(&skel)?;
+        let current_block_io = read_block_io_metrics(&skel, block_io_available)?;
         let callback_timings = read_callback_timings(&skel)?;
         let wakeup_latency = read_wakeup_latency(&skel)?;
         let cpu_slice_duration = read_cpu_slice_duration(&skel)?;
@@ -678,6 +826,13 @@ pub fn run(
         previous_scheduler_events = current_scheduler_events;
         snapshot.softirqs = build_softirq_rows(&current_softirqs, &previous_softirqs, elapsed);
         previous_softirqs = current_softirqs;
+        snapshot.block_io = build_block_io_view(
+            &current_block_io,
+            &previous_block_io,
+            elapsed,
+            block_io_available,
+        );
+        previous_block_io = current_block_io;
         previous_at = now;
     }
     Ok(())
