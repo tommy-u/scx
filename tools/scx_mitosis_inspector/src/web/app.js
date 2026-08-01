@@ -514,11 +514,6 @@ function renderCpuBreakdown(snapshot) {
   }));
   const ordered = topology?.topology_order || cpus.map((cpu) => cpu.cpu);
   const cpuById = new Map(cpus.map((cpu) => [cpu.cpu, cpu]));
-  const utilization = runtime.reduce((sum, row) => sum + row.utilization_pct, 0);
-  document.querySelector("#overallCpuUtilization").textContent = runtime.length
-    ? `${rate.format(utilization / runtime.length)}%`
-    : "--";
-
   cpuUtilizationRows.replaceChildren(...ordered.flatMap((cpuId) => {
     const cpu = cpuById.get(cpuId);
     const row = runtimeByCpu.get(cpuId);
@@ -601,7 +596,20 @@ function renderHostContext(context) {
   }
 }
 
-function render(snapshot) {
+function renderTopUtilization(systemSnapshot, statsSnapshot) {
+  const systemUtilization = systemSnapshot?.cpu?.available
+    ? systemSnapshot.cpu.value?.busy_pct
+    : null;
+  const mitosisUtilization = statsSnapshot?.metrics?.util_pct;
+  document.querySelector("#systemCpuUtilization").textContent = Number.isFinite(systemUtilization)
+    ? `${rate.format(systemUtilization)}%`
+    : "--";
+  document.querySelector("#mitosisCpuUtilization").textContent = Number.isFinite(mitosisUtilization)
+    ? `${rate.format(mitosisUtilization)}%`
+    : "--";
+}
+
+function render(snapshot, systemSnapshot, statsSnapshot) {
   latestSnapshot = snapshot;
   document.querySelector("#scheduler").textContent = snapshot.scheduler;
   document.querySelector("#uptime").textContent = `${snapshot.uptime_seconds}s`;
@@ -617,6 +625,7 @@ function render(snapshot) {
   renderInspectorBpfPrograms(snapshot);
   renderDsqMetrics(snapshot.dsq_metrics);
   renderProbeManifest(snapshot.probe_manifest || []);
+  renderTopUtilization(systemSnapshot, statsSnapshot);
   renderVisualizations(snapshot, true);
   MitosisHeatmap.update({ ...snapshot, topology });
 
@@ -639,14 +648,26 @@ async function refreshHostContext() {
   renderHostContext(await response.json());
 }
 
+async function fetchOptionalSnapshot(path) {
+  try {
+    const response = await fetch(path, { cache: "no-store" });
+    if (!response.ok) return null;
+    return response.json();
+  } catch {
+    return null;
+  }
+}
+
 async function refresh() {
   try {
     const migrationPath = migrationWindowMs == null
       ? "/api/migrations"
       : `/api/migrations?window_ms=${migrationWindowMs}`;
-    const [counterResponse, migrationResponse] = await Promise.all([
+    const [counterResponse, migrationResponse, systemSnapshot, statsSnapshot] = await Promise.all([
       fetch("/api/counters", { cache: "no-store" }),
       fetch(migrationPath, { cache: "no-store" }),
+      fetchOptionalSnapshot("/api/system"),
+      fetchOptionalSnapshot("/api/stats"),
     ]);
     if (!counterResponse.ok) throw new Error(`HTTP ${counterResponse.status}`);
     if (!migrationResponse.ok) throw new Error(`HTTP ${migrationResponse.status}`);
@@ -657,7 +678,7 @@ async function refresh() {
     configureMigrationWindow(migrationView);
     snapshot.migrations = migrationView.rows;
     snapshot.migration_window = migrationView;
-    render(snapshot);
+    render(snapshot, systemSnapshot, statsSnapshot);
   } catch (error) {
     status.classList.remove("live");
     statusText.textContent = "Disconnected";

@@ -287,7 +287,8 @@ async fn index_is_the_one_page_inspector() {
         .nth(1)
         .and_then(|section| section.split("</section>").next())
         .unwrap();
-    assert!(summary.contains("id=\"overallCpuUtilization\""));
+    assert!(summary.contains("id=\"systemCpuUtilization\""));
+    assert!(summary.contains("id=\"mitosisCpuUtilization\""));
     assert!(html.contains("id=\"callbackTimingSampleRate\""));
     assert!(html.contains("id=\"callbackTimingRows\""));
     assert!(html.contains("id=\"schedulerTimingRows\""));
@@ -346,6 +347,25 @@ async fn shared_chart_library_is_served() {
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let javascript = std::str::from_utf8(&body).unwrap();
     assert!(javascript.contains("MitosisCharts"));
+}
+
+#[tokio::test]
+async fn callback_script_renders_system_and_mitosis_utilization() {
+    let response = app()
+        .oneshot(
+            Request::builder()
+                .uri("/assets/app.js")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let javascript = std::str::from_utf8(&body).unwrap();
+    assert!(javascript.contains("systemCpuUtilization"));
+    assert!(javascript.contains("mitosisCpuUtilization"));
 }
 
 #[tokio::test]
