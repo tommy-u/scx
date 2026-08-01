@@ -59,6 +59,7 @@ run_host() {
     local label=$1 artifact_root=$2
     local snake_bin=${3:-${repo}/target/release/scx_snake}
     local inspector_bin=${4:-${repo}/tools/scx_snake_inspector/target/release/scx_snake_inspector}
+    local source_id=${SNAKE_CLOCK_SOURCE_ID:-unattributed}
     local run_dir=${artifact_root}/${label}
     local input_dir=${run_dir}/inputs
     local snapshot_script=${input_dir}/vtime_clock_latency_vm.sh
@@ -67,13 +68,17 @@ run_host() {
     local guest_command host_state_before host_state_after
 
     inside_vm && fail "host mode must run outside a VM"
-    command -v vng >/dev/null || fail "vng is required"
+    command -v jq >/dev/null || fail "jq is required"
+    command -v pgrep >/dev/null || fail "pgrep is required"
     command -v taskset >/dev/null || fail "taskset is required"
     command -v timeout >/dev/null || fail "timeout is required"
+    command -v vng >/dev/null || fail "vng is required"
     [[ -r /dev/kvm && -w /dev/kvm ]] || fail "/dev/kvm is not usable"
     [[ -x ${snake_bin} ]] || fail "Snake binary is not executable: ${snake_bin}"
     [[ -x ${inspector_bin} ]] || fail "Inspector binary is not executable: ${inspector_bin}"
     [[ ! -e ${run_dir} ]] || fail "run directory already exists: ${run_dir}"
+    ! pgrep -f '[q]emu-system-x86_64.*-fsdev.*virtfs' >/dev/null ||
+        fail "another virtme/QEMU guest is running; benchmark isolation is required"
 
     mkdir -p "${input_dir}"
     cp "${snake_bin}" "${snapshot_snake}"
@@ -81,6 +86,13 @@ run_host() {
     cp "$0" "${snapshot_script}"
     chmod a+rx "${snapshot_script}" "${snapshot_snake}" "${snapshot_inspector}"
     sha256sum "${snapshot_snake}" "${snapshot_inspector}" >"${run_dir}/binary-sha256.txt"
+    jq -n \
+        --arg source_id "${source_id}" \
+        --arg snake_source_path "$(readlink -f "${snake_bin}")" \
+        --arg inspector_source_path "$(readlink -f "${inspector_bin}")" \
+        --arg note "repo state describes the harness invocation; binary hashes identify supplied artifacts" \
+        '{source_id: $source_id, snake_source_path: $snake_source_path, inspector_source_path: $inspector_source_path, note: $note}' \
+        >"${run_dir}/binary-provenance.json"
     git -C "${repo}" rev-parse HEAD >"${run_dir}/git-head.txt"
     git -C "${repo}" status --short >"${run_dir}/git-status.txt"
     git -C "${repo}" diff --binary >"${run_dir}/working-tree.patch"
@@ -117,7 +129,7 @@ run_guest() {
     local label=$1 run_dir=$2 snake_bin=$3 inspector_bin=$4
     local tmpdir policy cgroup_root workload_cgroup base_url token
     local snake_pid= inspector_pid= workload_pid= dmesg_lines
-    local callback stage_count llc_count
+    local callback stage_count llc_count freeze_ns
 
     ((EUID == 0)) || fail "guest mode requires root"
     inside_vm || fail "guest mode refuses to run outside a VM"
@@ -147,6 +159,7 @@ run_guest() {
             curl -sS "${base_url}/api/fine-timing" \
                 >"${run_dir}/failure-fine-timing.json" 2>/dev/null
         fi
+        [[ -n ${workload_pid} ]] && kill -CONT -- "-${workload_pid}" 2>/dev/null
         [[ -n ${workload_pid} ]] && kill -TERM -- "-${workload_pid}" 2>/dev/null
         [[ -n ${inspector_pid} ]] && kill -INT "${inspector_pid}" 2>/dev/null
         [[ -n ${snake_pid} ]] && kill -INT "${snake_pid}" 2>/dev/null
@@ -290,8 +303,6 @@ EOF
     sleep "${warmup_secs}"
     kill -0 "${workload_pid}" 2>/dev/null || fail "workload exited during warmup"
 
-    curl -fsS -X POST "${base_url}/api/stats/reset" \
-        -H "x-snake-token: ${token}" >"${run_dir}/stats-reset.json"
     for callback in select_cpu enqueue runnable running; do
         curl -fsS -X POST "${base_url}/api/fine-timing" \
             -H 'content-type: application/json' \
@@ -299,12 +310,12 @@ EOF
             --data "{\"callback\":\"${callback}\",\"enabled\":true}" \
             >"${run_dir}/fine-start-${callback}.json"
     done
+    curl -fsS -X POST "${base_url}/api/stats/reset" \
+        -H "x-snake-token: ${token}" >"${run_dir}/stats-reset.json"
     printf '%s\n' "$(date +%s%N)" >"${run_dir}/measurement-start-ns.txt"
     sleep "${measure_secs}"
+    kill -STOP -- "-${workload_pid}"
     printf '%s\n' "$(date +%s%N)" >"${run_dir}/measurement-end-ns.txt"
-    kill -TERM -- "-${workload_pid}" 2>/dev/null || true
-    wait "${workload_pid}" 2>/dev/null || true
-    workload_pid=
     for callback in select_cpu enqueue runnable running; do
         curl -fsS -X POST "${base_url}/api/fine-timing" \
             -H 'content-type: application/json' \
@@ -312,6 +323,13 @@ EOF
             --data "{\"callback\":\"${callback}\",\"enabled\":false}" \
             >"${run_dir}/fine-stop-${callback}.json"
     done
+    printf '%s\n' "$(date +%s%N)" >"${run_dir}/measurement-freeze-end-ns.txt"
+    freeze_ns=$(($(<"${run_dir}/measurement-freeze-end-ns.txt") - $(<"${run_dir}/measurement-end-ns.txt")))
+    ((freeze_ns <= 2000000000)) || fail "fine-timing shutdown froze the workload for ${freeze_ns}ns"
+    kill -CONT -- "-${workload_pid}"
+    kill -TERM -- "-${workload_pid}" 2>/dev/null || true
+    wait "${workload_pid}" 2>/dev/null || true
+    workload_pid=
     wait_for "historical fine-timing captures" 100 0.1 sh -c \
         "curl -fsS '${base_url}/api/fine-timing' | jq -e '(.captures | map(select(.callback == \"select_cpu\" or .callback == \"enqueue\" or .callback == \"runnable\" or .callback == \"running\"))) as \$captures | .status == \"ready\" and (\$captures | length) == 4 and (\$captures | all(.state == \"historical\"))' >/dev/null"
 
