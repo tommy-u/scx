@@ -2,24 +2,25 @@
 
 ## Executive assessment
 
-Snake already contains most of the static mechanisms needed to model a Mitosis
-host. It does not yet contain Mitosis's defining dynamic control loop.
+Snake contains the scheduling data plane and a transactional direct-child cell
+lifecycle needed to model a Mitosis host. It does not yet contain Mitosis's
+demand-driven CPU control loop.
 
 | Dimension | Snake parity | Meaning |
 | --- | ---: | --- |
 | Static scheduling data plane | **73%** | Cells, cell/LLC queues, affinity queues, VTIME, borrowing, and accounting exist. |
-| Dynamic cell/resource control | **33%** | Static allocation and polling membership exist; dynamic lifecycle and ownership do not. |
-| Operations and diagnostics | **67%** | Snake's inspector is stronger in several areas, but managed-cell allocation/rebalance/dump state is absent. |
-| Weighted end-to-end behavior | **55% ±5%** | A static policy can resemble Mitosis, but it cannot adapt like Mitosis. |
+| Dynamic cell/resource control | **58%** | Direct-child lifecycle and cpuset topology publication exist; demand allocation and rebalancing do not. |
+| Operations and diagnostics | **70%** | Inspector topology and transition errors exist, but managed allocation/rebalance/dump state is absent. |
+| Weighted end-to-end behavior | **70% ±5%** | Snake can simulate managed Mitosis cells, but it cannot adapt CPU ownership to demand. |
 
 The missing dependency chain is:
 
 ```text
-automatic cgroup cells
-  -> cgroup-native inherited identity
-  -> live cpuset-aware allocation
-  -> safe CPU-owner and queue-route changes
-  -> demand feedback and controlled rebalancing
+automatic cgroup cells                         DONE (userspace polling)
+  -> inherited task identity                  DONE (userspace polling)
+  -> live cpuset topology publication         DONE
+  -> demand-aware CPU ownership               MISSING
+  -> feedback and controlled rebalancing      MISSING
 ```
 
 ## What Mitosis actually implements
@@ -55,15 +56,15 @@ Snake should not copy that property.
 
 | Mitosis behavior | Snake status | Gap |
 | --- | --- | --- |
-| Direct-child cgroup becomes a cell | Partial | Snake can synthesize cells from direct children at attach; live child lifecycle is still absent. |
-| Descendants inherit and live moves refresh | Partial | Recursive userspace polling eventually writes per-thread storage. |
-| Excluded children remain in cell 0 | Partial | Attach-time managed mode supports exact exclusions; it has no live identity reuse. |
-| Cell create/delete and ID reuse | Missing | Queue cells are attachment-time objects. |
-| Cpuset-aware resource claims | Partial | Attach-time discovery reads effective cpusets into the deterministic allocator; live mutation and holdout are absent. |
+| Direct-child cgroup becomes a cell | Present | Reconciliation discovers additions and atomically publishes their queue topology. |
+| Descendants inherit and live moves refresh | Partial | Recursive userspace polling eventually writes per-thread storage; Mitosis refreshes identity in BPF. |
+| Excluded children remain in cell 0 | Present | Exact exclusions are omitted from managed identity and queue allocation. |
+| Cell create/delete and ID reuse | Present | Stable IDs are retained; freed slots advance an epoch before reuse. |
+| Cpuset-aware resource claims | Partial | Live discovery reads effective cpusets into the deterministic allocator; demand sizing and configurable holdout are absent. |
 | Configurable cell-0 holdout | Partial | Snake guarantees cell 0 capacity but has no configurable minimum or diagnostic. |
 | Demand measurement | Partial | Runtime, primary, borrowed, and lent counters exist; utilization/EWMA does not. |
 | Demand-driven CPU allocation | Missing | No resource controller updates ownership. |
-| Live cell/CPU topology | Missing | Topology changes are rejected during policy replacement. |
+| Live cell/CPU topology | Partial | Managed changes use complete configuration banks; arbitrary policy topology mutation and CPU hotplug remain unsupported. |
 | Cell and cell/LLC DSQs | Present | One cell clock is shared across a cell's LLC shards. |
 | Per-CPU affinity queues | Present | One escape DSQ per configured CPU. |
 | Weighted VTIME | Present | Bounded weight-scaled slices and inverse-weight service. |
@@ -72,19 +73,19 @@ Snake should not copy that property.
 | Enqueue-time borrowing | Partial/missing | Direct borrowing occurs from `select_cpu`; queued backlog cannot borrow. |
 | Cell intersect previous LLC placement | Missing | `previous_llc` and `task_cell` are separate sources. |
 | Same-cell sibling-shard recovery | Present | Earliest remote shard head is scanned. |
-| Orphaned shard drain after owner move | Missing | Ownership cannot currently move. |
+| Orphaned shard drain after owner move | Partial | Managed transitions drain the fixed DSQ pool; no demand controller initiates owner moves. |
 | Pinned-waiter slice shrinking | Missing | Snake's slice is shorter, but no waiter-aware mechanism exists. |
 | Task rehome across clocks | Present | One stale run is preserved, then bounded-lag translation converges. |
 | Detailed metrics/inspection | Present or stronger | Managed allocation and rebalance fields are missing. |
 | Exit and task dumps | Partial | Exit buffer exists; `.dump` and `.dump_task` callbacks do not. |
 | Queued-wakeup optimization | Missing | Mitosis conditionally enables it; Snake does not. |
 
-The static queue evidence is in
+The queue evidence is in
 [queue_topology.rs](../../scheds/rust/scx_snake/src/queue_topology.rs#L131-L230),
 borrowing in
 [queue_fairness.h](../../scheds/rust/scx_snake/src/bpf/queue_fairness.h#L367-L393),
-and Snake's live-topology rejection in
-[main.rs](../../scheds/rust/scx_snake/src/main.rs#L1563-L1582).
+and managed topology publication in
+[main.rs](../../scheds/rust/scx_snake/src/main.rs).
 
 ```mermaid
 flowchart LR
@@ -100,8 +101,8 @@ flowchart LR
     end
 
     subgraph S[Snake today]
-        MP[Explicit polling membership<br/>PARTIAL]
-        SA[Static weighted allocation<br/>PARTIAL]
+        MP[Live polling lifecycle<br/>PRESENT]
+        SA[Live cpuset claims<br/>PARTIAL]
         NM[No resource controller<br/>MISSING]
         SQ[Cell/cell-LLC queues<br/>PRESENT]
         AQ[Per-CPU affinity queues<br/>PRESENT]
@@ -120,22 +121,22 @@ flowchart LR
     O --> SO
 ```
 
-## How the 55% end-to-end estimate is derived
+## How the 70% end-to-end estimate is derived
 
-The 73% static-data-plane, 33% dynamic-control, and 67% operations figures are
+The 73% static-data-plane, 58% dynamic-control, and 70% operations figures are
 rounded expert bands using the rubric in
-[Feature completeness](feature-completeness.md). The 55% figure is additionally
+[Feature completeness](feature-completeness.md). The 70% figure is additionally
 cross-checked with the following explicit 100-point behavior model. “Snake
 points” credit complete behavior, not merely a related primitive.
 
 | Behavior | Weight | Snake points |
 | --- | ---: | ---: |
-| Automatic direct-child lifecycle | 8 | 2 |
-| Descendant membership and live moves | 7 | 4 |
-| Stable IDs, exclusions, and cell 0 | 5 | 2 |
-| Cpuset allocation and holdout | 10 | 4 |
-| Demand controller | 8 | 2 |
-| Safe live resource publication | 4 | 0 |
+| Automatic direct-child lifecycle | 8 | 8 |
+| Descendant membership and live moves | 7 | 6 |
+| Stable IDs, exclusions, and cell 0 | 5 | 5 |
+| Cpuset allocation and holdout | 10 | 5 |
+| Demand controller | 8 | 0 |
+| Safe live resource publication | 4 | 4 |
 | Cell/LLC and affinity DSQs | 8 | 8 |
 | Weighted VTIME and clocks | 8 | 8 |
 | Affinity-safe primary placement | 6 | 5 |
@@ -145,23 +146,23 @@ points” credit complete behavior, not merely a related primitive.
 | Metrics and monitoring | 6 | 6 |
 | Exit and debug diagnostics | 4 | 2 |
 | Scale and compatibility | 4 | 2 |
-| End-to-end acceptance evidence | 4 | 2 |
-| **Total** | **100** | **55** |
+| End-to-end acceptance evidence | 4 | 3 |
+| **Total** | **100** | **70** |
 
 The ±5 range reflects unmeasured live-kernel behavior, especially borrowing,
 fairness, churn, and scale. It is not statistical confidence.
 
 ## Managed-mode v1 contract
 
-The attachment-time subset now implements `parent`, `exclude_children`,
-`max_children`, and `reconcile_ms`. It assigns sorted direct children to
-epoch-bearing slots, reads `cpuset.cpus.effective`, and keeps descendants flat
-inside the direct child's cell. It pins the discovered cgroup inode and detaches
-on deletion or same-name replacement. It does not watch direct-child lifecycle
-or cpuset changes, preserve logical identity across slot reuse, protect a
-configurable cell-0 holdout, or rebalance CPUs.
+The current implementation supports `parent`, `exclude_children`,
+`max_children`, and `reconcile_ms`. It polls direct children, retains their
+numeric IDs while their names and inodes remain stable, reads
+`cpuset.cpus.effective`, and keeps descendants flat inside the direct child's
+cell. Deletion frees a slot; reuse or same-name inode replacement increments its
+epoch. Policy, masks, and queue topology are published together through the
+inactive configuration bank.
 
-The following remains the recommended contract for the live managed mode.
+The following fields remain proposed for the demand controller:
 
 An illustrative configuration shape is:
 
@@ -170,6 +171,7 @@ An illustrative configuration shape is:
 parent = "/sys/fs/cgroup/workloads"
 exclude_children = ["system.slice"]
 max_children = 31
+reconcile_ms = 1000
 cell0_min_cpus = 1
 overflow = "cell0"
 allocation = "equal_then_demand"
@@ -181,47 +183,36 @@ demand_ewma_alpha = 0.30
 layout = "cell_llc"
 ```
 
-The controller and rebalance fields are proposed syntax; the attachment-time
-fields described above are current. The target live semantics are:
+The controller, holdout, and rebalance fields are proposed syntax; the first
+four fields described above are current. Current live semantics are:
 
 - `[managed_cells]` enables the mode at attachment. It requires VTIME and a
   queue layout; changing the parent, maximum, layout, or fairness mode requires
   restart because it changes the fixed resource envelope.
-- Each non-excluded direct child of `parent` gets a stable logical identity key
-  derived from cgroup ID plus a userspace birth epoch. Descendants inherit only
-  that key in BPF cgroup storage. The active configuration bank maps the key to
-  an ephemeral `(cell_slot, slot_epoch)`; cgroup storage never contains a
-  reusable cell slot. Exact-basename exclusions remain in cell 0.
-- A child claims its successfully read `cpuset.cpus.effective` mask. If the
-  cpuset controller is deliberately unavailable for the managed parent, that is
-  detected once and every child is unconstrained over online CPUs. A successful
-  empty effective mask means zero available capacity. Track the BPF cpuset-change
-  generation with every successful read. A transient read failure may retain an
-  existing plan only when that independent generation is unchanged. A new child
-  with no valid read stays unbound in cell 0; a failed read after a generation
-  change, or when the generation cannot be proven, causes controlled detach.
-  Missing-file, parse, permission, and I/O errors are never converted into an
-  unconstrained claim.
-- Initial allocation is equal within cpuset constraints. The later demand
-  controller changes desired CPU quantity, not identity or policy. Cell 0 keeps
-  at least `cell0_min_cpus` when capacity permits.
+- Each non-excluded direct child gets a stable numeric ID while its identity is
+  retained. Descendants receive the same `(cell_id, slot_epoch)` through task
+  storage. Exact-basename exclusions and children without an admitted slot
+  remain in cell 0.
+- A child claims its successfully read `cpuset.cpus.effective` mask. Missing,
+  invalid, and empty masks reject the candidate rather than becoming an
+  unconstrained claim. Nested cpuset restrictions remain authoritative through
+  each task's live allowed-CPU mask.
+- Allocation is deterministic within those cpuset constraints. Cell 0 has its
+  configured weight, but no `cell0_min_cpus` guarantee or demand sizing exists.
 - The first release supports at most 31 active managed children plus cell 0, but
   pool space alone does not admit a child. A new child becomes active only if a
   complete feasible plan gives every active normal queue at least one eligible,
   online consumer and preserves the cell-0 contract. Otherwise its logical key
   remains unbound, its tasks resolve to cell 0, an admission/capacity health
   error is emitted, and admission is retried after resources change.
-- If an existing active child's effective cpuset changes, immediately revalidate
-  the current plan. When it is still valid, keep it while computing and draining
-  toward a replacement. When it is already invalid—including an empty effective
-  mask—v1 performs a controlled scheduler exit to the kernel scheduler. It never
-  retains an affinity-invalid owner or publishes an active normal queue with no
-  consumer. A later coordinated cpuset mutation API can provide a no-detach path.
+- If a child set or effective cpuset changes, Snake resolves a complete
+  candidate. An infeasible allocation is not published and is retried on the
+  next interval. A feasible candidate enables transition routing, drains custom
+  DSQs, prepares the inactive bank, atomically switches it, waits for old
+  readers, and then updates membership.
 - Managed mode is mutually exclusive with static `[[cell]]` and `[membership]`
-  configuration in v1. The attachment-time subset resolves a manual numeric
-  assignment to the slot's active epoch. Live slot reuse still needs an
-  explicit manual namespace and precedence contract before that API can remain
-  enabled safely.
+  configuration. A manual numeric assignment resolves to the slot's active
+  epoch; stale task storage cannot resolve into a later occupant of that slot.
 - Policies may use generic task-cell placement, enqueue, and dispatch semantics,
   but may not embed managed slot IDs. A policy candidate is compiled against the
   resource sub-epoch in the active configuration bank, then the coordinator
@@ -229,8 +220,8 @@ fields described above are current. The target live semantics are:
   causes a retry, never publication of a policy validated against stale cells or
   masks.
 - Threshold, cooldown, and EWMA constants can become live tunables once the
-  controller exists. Identity, pool size, fairness, and queue layout remain
-  attachment-time settings in the first release.
+  controller exists. Parent, pool size, fairness, and queue layout remain
+  attachment-time settings.
 
 Static and managed cells should not be mixed until ID namespaces, manual
 override precedence, and cross-mode queue retirement have independent tests.
@@ -242,52 +233,40 @@ These decisions must be explicit before implementation.
 ### 1. Managed identity and manual overrides
 
 Mitosis has only managed cgroup identity. Snake also has per-thread manual
-annotations. A possible future precedence rule is:
+annotations. Snake uses this precedence rule:
 
 ```text
 effective cell = manual task override ?? managed cgroup cell ?? cell 0
 ```
 
-However, a numeric managed slot cannot be reused safely while a stale manual
-annotation or queued task refers to it. Choose one initial rule:
-
-- use separate manual and managed ID namespaces;
-- attach an epoch to every managed cell reference; or
-- forbid manual targeting of managed cells until safe epoching exists.
-
-The managed-mode v1 contract above forbids manual targeting. A later release can
-add separate namespaces or epoch every reference. This is less flexible but
-removes cross-tenant slot-reuse risk from the first implementation.
+Every managed reference carries both the numeric ID and its slot epoch. Clearing
+a manual override reveals the current managed assignment. A sleeping task or
+manual reference from an older epoch cannot resolve into a later occupant of the
+same numeric slot.
 
 ### 2. Queue pool and cell deletion
 
-Snake creates only populated cell/LLC DSQs. Dynamic cells require stable DSQ
-existence even as descriptors change. Precreate a fixed pool of normal DSQs at
-attachment, then assign pool slots to active cell/LLC shards. A retired pool slot
-must remain quarantined until:
+Snake precreates a fixed pool of normal DSQs at attachment, then assigns pool
+slots to active cell/LLC shards. Before rebinding descriptors it diverts new work
+to CPU-local DSQs and drains the pool. A retired binding is not reused until:
 
 - readers of the old configuration bank are gone;
 - no task remains queued on it;
-- any running task charged to the retired route has stopped;
 - a drain target has observed it empty.
 
 Do not encode cgroup identity directly into a reusable DSQ ID.
 
 ### 3. Affinity clocks during CPU-owner changes
 
-This is the hardest incompatibility. Today a CPU affinity DSQ is ordered in its
-owner cell's clock. If ownership changes while tasks remain queued, their VTIME
-values belong to the old clock.
+A CPU affinity DSQ is ordered in its owner cell's clock. Snake therefore does
+not rewrite `owner_cell_index` under queued work. Managed transitions divert new
+enqueues to CPU-local DSQs and wait for every normal and affinity DSQ in the pool
+to become empty before publishing new ownership. A task that next enqueues under
+a different topology generation validates the destination identity and rebases
+to its clock before ordered insertion.
 
-Safe choices are:
-
-1. use a stable per-CPU affinity clock in managed mode and use cyclic class
-   dispatch rather than comparing that head directly with a cell clock; or
-2. defer CPU ownership change until its affinity DSQ and running state are
-   quiescent.
-
-Simply rewriting `owner_cell_index` is unsafe. This decision needs a targeted
-prototype and benchmark before broad controller work.
+The future demand controller must use this same transaction; independently
+rewriting ownership remains unsafe.
 
 ### 4. Clock and task-cache epochs
 
@@ -297,27 +276,18 @@ model for normal work unless benchmarks demonstrate a need to change its fairnes
 semantics. Mitosis parity should mean operational behavior, not byte-for-byte
 algorithm identity.
 
-Mutable clocks, DSQs, and task state cannot be copied into a configuration bank.
-They live in a fixed attachment-time pool and are referenced by `(slot,
-slot_epoch)`. Each clock object carries the same epoch. Task storage caches the
-logical cgroup key, configuration epoch, resolved slot/epoch, and VTIME epoch.
-Every callback validates those epochs before reading a clock or queue route.
+Mutable clocks, DSQs, and task state are not copied into a configuration bank.
+They live in fixed pools. Banked cell descriptors carry an external ID and slot
+epoch, while each task runtime caches the topology generation, dense index,
+external ID, and epoch used for its normal and affinity VTIME coordinates.
 
-On mismatch, the task resolves its logical key through the pinned bank. If the
-source clock still carries the expected epoch, rehome by translating bounded lag
-relative to the two frontiers. If that epoch has already retired or the clock was
-reset, the old lag is unknowable: initialize the task at the destination frontier
-with neutral lag, reset its slice baseline, and increment a
-`stale_epoch_neutral_rehomes` counter. It must never read a clock whose epoch no
-longer matches. A missing identity binding falls back to cell 0 and increments a
-stale-identity counter.
-
-A cell slot and its clock cannot be rebound until old-bank readers are gone,
-normal and affinity queues are empty, and no running task is charged to the old
-epoch. Sleeping task caches do not block reuse: their stale epoch forces the
-neutral-lag initialization path before they can observe the reset clock. Reset
-the clock, install its new epoch, and only then publish the bank that binds the
-new logical identity.
+On a generation mismatch, an unchanged identity retains its coordinate. A
+different dense index, external ID, or epoch initializes at the destination
+frontier with neutral lag; ordinary task moves within one generation retain the
+existing bounded-lag translation. Old-bank readers and queued work must drain
+before slot publication. Sleeping task caches do not block reuse because their
+stale generation and identity force neutral initialization before a new ordered
+insert.
 
 ### 5. Complete configuration publication
 

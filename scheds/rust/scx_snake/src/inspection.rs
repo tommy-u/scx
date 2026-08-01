@@ -303,6 +303,10 @@ impl Inspector {
         self.callback_timing_sample_rate = sample_rate;
     }
 
+    pub fn set_queue_topology(&mut self, topology: Option<QueueTopology>) {
+        self.queue_topology = topology.as_ref().map(queue_topology_view);
+    }
+
     pub fn activate(&mut self, next: SlotPolicy, frozen_metrics: Metrics, at_ms: u64) {
         if let Some(previous) = self.slots[self.active_slot as usize].as_mut() {
             previous.deactivated_at_ms = Some(at_ms);

@@ -43,7 +43,7 @@ data flow, [`QUEUE_POLICY.md`](QUEUE_POLICY.md) for queue semantics, and
 | Task state | `task_state.h` | the single task-storage adapter, generated BTF runtime layout, and runtime-state lifetime. |
 | Fairness facade | `fairness.h`, `fairness_common.h` | mode selection, shared task/weight helpers, and the callback-facing fairness API. |
 | Fairness policies | `fairness_fifo.h`, `fairness_vtime.h`, `fairness_eevdf.h` | policy-specific runnable ordering and accounting. |
-| Queue state | `queue_state.h`, `queue.h` | queue maps, immutable routing lookup, queue masks, and allowed-CPU selection. |
+| Queue state | `queue_state.h`, `queue.h` | banked routing maps, queue masks, and allowed-CPU selection. |
 | Queue initialization | `queue_init.h`, `queue_ladder.h` | queue topology validation, DSQ creation, and callback-ladder validation. |
 | Queue enqueue | `queue_enqueue.h` | first-success queue target selection and ordered insertion. |
 | Queue dispatch | `queue_dispatch.h` | legacy cyclic sources, bounded global peek/consume arbitration, and replenishment. |

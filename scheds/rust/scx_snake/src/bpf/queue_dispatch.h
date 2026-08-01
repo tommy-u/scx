@@ -67,7 +67,8 @@ struct snake_queue_candidate {
 };
 
 static __always_inline int
-queue_fairness_normal_candidate(struct snake_cpu_queue		   *cpuq,
+queue_fairness_normal_candidate(struct snake_ladder_ctx		   *ctx,
+				struct snake_cpu_queue		   *cpuq,
 				struct snake_queue_candidate	   *candidate,
 				const struct snake_fine_timing_ctx *fine)
 {
@@ -79,7 +80,7 @@ queue_fairness_normal_candidate(struct snake_cpu_queue		   *cpuq,
 	if (!cpuq || !candidate)
 		return -EINVAL;
 	candidate->valid = 0;
-	cell		 = queue_cell(cpuq->owner_cell_index);
+	cell		 = queue_cell(ctx, cpuq->owner_cell_index);
 	if (!cell)
 		return -EINVAL;
 	normal_index	 = cpuq->normal_queue_index;
@@ -138,7 +139,7 @@ static __noinline s32 queue_fairness_keep_running(struct snake_ladder_ctx *ctx,
 		stat_inc(ctx, SNAKE_STAT_QUEUE_BORROW_YIELDS);
 		return 0;
 	}
-	if (queue_fairness_rehome_pending(prev, runtime)) {
+	if (queue_fairness_rehome_pending(ctx, prev, runtime)) {
 		stat_inc(ctx, SNAKE_STAT_QUEUE_REHOME_PREEMPTIONS);
 		return 0;
 	}
@@ -190,7 +191,7 @@ static __always_inline s32 queue_fairness_keep_running_min(
 		stat_inc(ctx, SNAKE_STAT_QUEUE_BORROW_YIELDS);
 		return 0;
 	}
-	if (queue_fairness_rehome_pending(prev, runtime)) {
+	if (queue_fairness_rehome_pending(ctx, prev, runtime)) {
 		stat_inc(ctx, SNAKE_STAT_QUEUE_REHOME_PREEMPTIONS);
 		return 0;
 	}
@@ -248,7 +249,7 @@ static __noinline s32 queue_fairness_dispatch_min(
 
 	if (!equal_preference)
 		return -EINVAL;
-	ret = queue_fairness_normal_candidate(cpuq, &normal, fine);
+	ret = queue_fairness_normal_candidate(ctx, cpuq, &normal, fine);
 	if (ret)
 		return ret;
 	stage_started_at = fine_timing_start(fine);
@@ -326,7 +327,7 @@ static __always_inline s32 queue_fairness_dispatch_source(
 	if (!cpuq)
 		return -EINVAL;
 	if (opcode == SNAKE_DISPATCH_OP_CELL) {
-		cell = queue_cell(cpuq->owner_cell_index);
+		cell = queue_cell(ctx, cpuq->owner_cell_index);
 		if (!cell)
 			return -EINVAL;
 		normal_index	 = cpuq->normal_queue_index;
@@ -468,11 +469,12 @@ static long queue_dispatch_remote_scan_callback(
 }
 
 static __always_inline int
-queue_dispatch_peek_remote(struct snake_cpu_queue	*cpuq,
+queue_dispatch_peek_remote(struct snake_ladder_ctx	*ctx,
+			   struct snake_cpu_queue	*cpuq,
 			   struct snake_queue_cpu_state *state, s32 cpu,
 			   struct snake_queue_candidate *candidate)
 {
-	struct snake_queue_header	 *header = queue_config();
+	struct snake_queue_header	 *header = queue_config(ctx);
 	struct snake_remote_scan_loop_ctx loop_ctx;
 	u32				  nr_queues, start;
 	long				  nr_loops;
@@ -887,7 +889,7 @@ static __noinline s32 queue_global_dispatch_peek_rung(
 			ret = -EINVAL;
 		} else {
 			ret = queue_dispatch_peek_remote(
-				loop_ctx->cpuq, loop_ctx->state, loop_ctx->cpu,
+				ctx, loop_ctx->cpuq, loop_ctx->state, loop_ctx->cpu,
 				&loop_ctx->remote_candidate);
 			hit = loop_ctx->remote_candidate.valid;
 		}
@@ -957,7 +959,7 @@ static __noinline int queue_global_ladder_dispatch(
 	struct snake_queue_cpu_state *state,
 	u64 callback_started_at)
 {
-	struct snake_cpu_queue *cpuq = queue_cpu(cpu);
+	struct snake_cpu_queue *cpuq = queue_cpu(ctx, cpu);
 	struct snake_global_dispatch_loop_ctx loop_ctx = {
 		.prev = prev,
 		.state = state,
@@ -1018,7 +1020,7 @@ queue_ladder_dispatch_callback(u32				     step,
 	if (step >= SNAKE_MAX_QUEUE_RUNGS ||
 	    step >= loop_ctx->ladder_ctx.ladder->nr_dispatch_rungs)
 		return 1;
-	cpuq = queue_cpu(loop_ctx->cpu);
+	cpuq = queue_cpu(&loop_ctx->ladder_ctx, loop_ctx->cpu);
 	if (!cpuq) {
 		loop_ctx->result = -EINVAL;
 		return 1;
@@ -1079,7 +1081,7 @@ static __always_inline int queue_ladder_dispatch(
 	long				     nr_loops;
 
 	stage_started_at = fine_timing_start(fine);
-	cpuq		 = queue_cpu(cpu);
+	cpuq		 = queue_cpu(ctx, cpu);
 	fine_timing_finish(fine, SNAKE_FINE_TIMING_DISPATCH_ROUTE_LOOKUP,
 			   stage_started_at);
 	if (!cpuq)

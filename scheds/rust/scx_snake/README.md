@@ -171,9 +171,11 @@ stale assignment cannot enter a reused managed cell. See
 [Userspace Cgroup Cell Membership](docs/CGROUP_MEMBERSHIP_PROPOSAL.md).
 
 Alternatively, `[managed_cells]` discovers every non-excluded direct child at
-attachment, reads its `cpuset.cpus.effective`, and synthesizes both the cell and
-membership assignment. Descendants remain in the direct child's cell while
-their own narrower cpusets continue to constrain task execution. See
+attachment and on each reconciliation interval, reads its
+`cpuset.cpus.effective`, and synthesizes both the cell and membership assignment.
+Existing children keep stable IDs; a reused slot advances its epoch. Descendants
+remain in the direct child's cell while their own narrower cpusets continue to
+constrain task execution. See
 [`examples/managed-cell-llc.toml`](examples/managed-cell-llc.toml).
 
 ### Queue policies
@@ -386,10 +388,15 @@ sudo ./target/release/scx_snake \
 
 The running process compiles and resolves the new file, prepares it in an
 inactive ladder slot, then publishes it with one atomic switch. A rejected
-update leaves the current ladder running. Queue topology is attachment-time
-state; a live update may reorder dispatch sources or add the cell callback pair,
-but may not change the resolved topology or remove a target/source that may
-still contain queued work.
+update leaves the current ladder running. An explicit policy update may reorder
+dispatch sources or add the cell callback pair, but may not change the resolved
+topology or remove a target/source that may still contain queued work.
+
+Managed-cell reconciliation is the topology-changing exception. Snake routes
+new work through CPU-local DSQs while it drains the fixed custom-DSQ pool,
+prepares policy and topology together in the inactive bank, atomically switches
+banks, waits for old readers, and only then publishes the new membership
+directory. A failed candidate leaves the active bank running.
 
 The interactive cell demo generates three cells from the host's online CPUs,
 including one overlapping cell, and moves two bursty tasks between them. Run

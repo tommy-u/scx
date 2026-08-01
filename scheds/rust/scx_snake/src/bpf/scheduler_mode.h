@@ -20,8 +20,12 @@ scheduler_mode_enqueue(struct snake_ladder_ctx *ctx, struct task_struct *p,
 	u64 slice, stage_started_at;
 
 	if (queue_topology_enabled()) {
+		if (queue_transition_active())
+			return queue_transition_enqueue(ctx, p, enq_flags, fine);
 		ret = queue_ladder_enqueue(ctx, p, enq_flags, fine,
 					   callback_started_at);
+		if (ret == -EAGAIN)
+			return queue_transition_enqueue(ctx, p, enq_flags, fine);
 		if (ret)
 			return ret;
 		stage_started_at = fine_timing_start(fine);

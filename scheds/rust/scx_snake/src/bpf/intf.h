@@ -8,7 +8,7 @@ typedef unsigned int	   u32;
 typedef unsigned long long u64;
 #endif
 
-#define SNAKE_ABI_VERSION 25
+#define SNAKE_ABI_VERSION 26
 #define SNAKE_MAX_RUNGS 9
 #define SNAKE_MAX_QUEUE_RUNGS 8
 #define SNAKE_LADDER_SLOTS 2
@@ -302,6 +302,7 @@ struct snake_queue_header {
 	u32 nr_cells;
 	u32 nr_normal_queues;
 	u32 nr_cpus;
+	u64 topology_generation;
 };
 
 struct snake_queue_cell {

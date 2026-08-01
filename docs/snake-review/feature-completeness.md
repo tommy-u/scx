@@ -74,8 +74,8 @@ the share invariant is fixed and tested.
 
 | Feature | Complete | Confidence | Principal gap |
 | --- | ---: | --- | --- |
-| Weighted disjoint primary CPU allocation | 84% | High | Static attachment-time capacity |
-| `cell`, `cell_llc`, and global `llc` layouts | 92% | High | No topology mutation |
+| Weighted disjoint primary CPU allocation | 86% | High | No demand sizing or configurable cell-0 holdout |
+| `cell`, `cell_llc`, and global `llc` layouts | 94% | High | Managed topology mutation only |
 | Per-CPU affinity escape queues | 85% | Medium | One DSQ and descriptor per configured CPU |
 | Enqueue callback ladder | 90% | High | Only `cell` and terminal `affinity` targets |
 | Cyclic dispatch ladder | 90% | High | Only normal and affinity source classes |
@@ -83,14 +83,13 @@ the share invariant is fixed and tested.
 | Direct idle placement and dispatch | 88% | High | Applies to newly selected work, not queued backlog |
 | Queued cross-cell borrowing or stealing | 5% | High | Explicitly absent |
 | Live task rehome across clocks | 78% | Medium | One unavoidable old-normal-queue run |
-| Live queue-topology mutation | 5% | High | Restart required |
+| Live queue-topology mutation | 70% | Medium | Managed cells only; policy-driven mutation and hotplug remain absent |
 
 The core allocator is isolated and tested
 ([cell_allocation.rs](../../scheds/rust/scx_snake/src/cell_allocation.rs#L24-L136)).
-The decisive work-conservation limit is documented at
-[QUEUE_POLICY.md](../../scheds/rust/scx_snake/docs/QUEUE_POLICY.md#L83-L90), and live
-topology is explicitly attachment-time state
-([QUEUE_POLICY.md](../../scheds/rust/scx_snake/docs/QUEUE_POLICY.md#L223-L256)).
+The decisive work-conservation limit and the managed topology transaction are
+documented in
+[QUEUE_POLICY.md](../../scheds/rust/scx_snake/docs/QUEUE_POLICY.md).
 
 Category estimate: **82% for implemented queue features**, but only **35–45% for
 general resource elasticity**.
@@ -102,7 +101,7 @@ general resource elasticity**.
 | Strict TOML parse and semantic validation | 95% | High | Experimental ABI remains a moving target |
 | Operation/scope lowering and mask interning | 95% | High | Fixed opcode vocabulary |
 | Independent BPF validation | 94% | High | Documentation and protocol fixtures can still drift |
-| Atomic double-buffered policy replacement | 90% | High | Queue and membership state are immutable |
+| Atomic double-buffered policy replacement | 95% | High | Explicit policy updates still cannot mutate topology |
 | Offline policy validation and compiled-policy dump | 98% | High | JSON validation summarizes rather than serializing the full lowered ladder |
 | Live candidate validation | 94% | High | Validation still returns human-oriented errors |
 | LLC/NUMA/core topology discovery | 90% | High | Static snapshot and no distance model |
@@ -113,11 +112,11 @@ general resource elasticity**.
 Atomic slot publication is implemented in
 [runtime_policy.rs](../../scheds/rust/scx_snake/src/runtime_policy.rs#L112-L167) and
 [main.h](../../scheds/rust/scx_snake/src/bpf/main.h#L170-L212). Current
-`intf.h` and `POLICY_LOWERING.md` now agree on ABI 24, nine placement rungs, and
+`intf.h` and `POLICY_LOWERING.md` now agree on ABI 26, nine placement rungs, and
 eight enqueue/dispatch rungs. The versioned `--validate-policy` JSON record exposes
 those limits to automation without loading BPF.
 
-Category estimate: **95% policy engine**, **76% topology support**.
+Category estimate: **95% policy engine**, **82% topology support**.
 
 ## Task identity and cgroups
 
@@ -129,17 +128,17 @@ Category estimate: **95% policy engine**, **76% topology support**.
 | Explicit cgroup-tree membership mapping | 72% | High | Static assignment table |
 | Membership reconciliation | 78% | Medium | Recursive polling and per-thread writes |
 | Thread inheritance | 10% | High | New threads start unannotated until reconciliation |
-| Automatic direct-child cell lifecycle | 10% | High | Absent; Mitosis behavior is different |
+| Automatic direct-child cell lifecycle | 85% | High | Polling rather than inotify/BPF-native identity |
 | BPF cgroup identity propagation | 5% | High | Absent |
 
 Snake's membership manager is at
 [membership.rs](../../scheds/rust/scx_snake/src/membership.rs#L51-L149) and its tree
 scan at [membership.rs](../../scheds/rust/scx_snake/src/membership.rs#L209-L275).
 
-Category estimate: **68% for Snake's declared static membership scope**, **22% for
-Mitosis-style dynamic identity and lifecycle**. The latter is only the identity
-subset; the broader Mitosis dynamic-control score is 33% because it also credits
-Snake's static allocator, resource counters, and queue primitives.
+Category estimate: **78% for Snake's declared membership scope**, **70% for
+Mitosis-style dynamic identity and lifecycle**. The broader Mitosis
+dynamic-control score is lower because demand allocation and rebalancing remain
+absent.
 
 ## Observability
 

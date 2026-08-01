@@ -43,7 +43,7 @@ static __always_inline s32 active_ladder_slot(void)
 	return READ_ONCE(*slot);
 }
 
-/* Pin one complete ladder slot for the duration of a scheduler callback. */
+/* Pin one complete policy and topology slot for a scheduler callback. */
 static __always_inline int acquire_active_ladder(struct snake_ladder_ctx *ctx)
 {
 	u32 attempt;

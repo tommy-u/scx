@@ -1,6 +1,6 @@
-# Discover one attachment-time cell for each direct child of the workload
-# parent. Descendants inherit their direct child's cell while retaining any
-# narrower effective cpuset restriction.
+# Discover and maintain one cell for each direct child of the workload parent.
+# Descendants inherit their direct child's cell while retaining any narrower
+# effective cpuset restriction.
 fallback = "any_allowed"
 
 [managed_cells]

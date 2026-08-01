@@ -11,6 +11,8 @@ struct snake_task_runtime {
 	u64			   service_budget;
 	u64			   vruntime;
 	u64			   affinity_vruntime;
+	u64			   topology_generation;
+	u64			   affinity_topology_generation;
 	u64			   deadline;
 	u64			   request_remaining_ns;
 	u64			   queue_timing_session_id;
@@ -20,7 +22,11 @@ struct snake_task_runtime {
 	u32			   active_weight;
 	u32			   pending_weight;
 	u32			   cell_index;
+	u32			   cell_external_id;
+	u32			   cell_epoch;
 	u32			   affinity_cell_index;
+	u32			   affinity_cell_external_id;
+	u32			   affinity_cell_epoch;
 	u32			   run_cell_index;
 	u32			   run_owner_cell_index;
 	u32			   selected_cpu;

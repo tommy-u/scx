@@ -4,7 +4,7 @@ Snake policy files are semantic userspace configuration. The BPF scheduler does
 not parse TOML, know topology names such as `previous_llc`, or interpret the
 application-specific meaning of a cell ID. Userspace lowers those concepts into
 a small mechanical instruction ABI, generic CPU-mask tables, and optional
-attachment-time queue descriptors.
+banked queue descriptors.
 
 This document describes that boundary, the opcode encoding, the data available
 to the BPF hot path, and the information returned to userspace.
@@ -47,8 +47,8 @@ The boundary follows five rules:
   atomic publication.
 - BPF owns decisions that depend on the current task, CPU, runtime, idle state,
   or DSQ contents and therefore cannot tolerate a userspace round trip.
-- Userspace resolves queue and clock domains; BPF creates and operates the
-  corresponding custom DSQs when the scheduler attaches.
+- Userspace resolves queue and clock domains; BPF creates a fixed custom-DSQ
+  pool when the scheduler attaches and operates the active bank's bindings.
 - Queue storage and fairness clocks are separate concepts. For example,
   cell/LLC shards and per-CPU affinity queues can use the same owner-cell clock.
 - BPF still enforces live affinity, idle claims, fallbacks, and forward progress
@@ -182,7 +182,7 @@ table ID, or packed table IDs depending on the opcode.
 | `PICK_RANDOM_IDLE` | 4 | Uniformly choose and claim an eligible idle CPU, either globally or from a table mask. |
 | `KERNEL_DEFAULT` | 5 | Call `scx_bpf_select_cpu_dfl()` and accept only an idle result. |
 | `SYNC_WAKE_AFFINE` | 6 | Apply synchronous wake-affine checks using previous-LLC and previous-NUMA-node tables. |
-| `PICK_IDLE_QUEUE_MASK` | 7 | Pick from a queue cell's attachment-time primary or borrowable mask, intersected with live affinity. |
+| `PICK_IDLE_QUEUE_MASK` | 7 | Pick from a queue cell's active-bank primary or borrowable mask, intersected with live affinity. |
 
 Opcode zero is invalid. BPF validates every opcode/input/flag/data combination
 while preparing a policy. The `select_cpu` ladder also rechecks each rung
@@ -195,7 +195,7 @@ before executing it.
 | `CPU_PREV` | 1 | Use the hook's `prev_cpu`, directly or as a mask-table key. |
 | `MASK_TASK_ALLOWED` | 2 | Use the task's live `p->cpus_ptr` affinity mask. |
 | `TASK_CELL` | 3 | Read the task-local cell ID and use it as a mask-table key. |
-| `QUEUE_CELL` | 4 | Translate the annotation to a dense queue cell and use an attachment-time cell mask. |
+| `QUEUE_CELL` | 4 | Translate the annotation to a dense queue cell and use the active bank's cell mask. |
 
 An input source is not a userspace callback. It selects data already available
 inside the BPF scheduling callback.
@@ -286,8 +286,9 @@ one global clock domain. No cell record or LLC identifier is required by the
 BPF routing mechanism. For cell layouts, userspace adds cell 0, resolves all
 online CPUs to one primary owner, derives each cell's borrowable mask, assigns
 dense indices, and builds one normal queue per cell or populated cell/LLC pair.
-Every layout also emits one per-CPU escape route. BPF materializes the immutable
-consumer, primary, and borrowable masks during attachment.
+Every layout also emits one per-CPU escape route. BPF materializes consumer,
+primary, and borrowable masks while preparing each bank; the selected bank is
+immutable for the lifetime of one pinned callback reader.
 
 ## Stage 4: encode the shared ABI
 
@@ -335,9 +336,10 @@ Runtime replacement is an ordered transaction:
 1. Compile the new source and resolve all tables in userspace.
 2. Choose the inactive slot (`active_slot ^ 1`).
 3. Wait until that slot's per-CPU reader counts are zero.
-4. Write its compiled ladder and serialized mask data.
+4. Write its compiled ladder, serialized mask data, and queue descriptors.
 5. Run the BPF `prepare_ladder` syscall program with `test_run()`.
-6. BPF validates the ABI and materializes every valid mask.
+6. BPF validates the ABI and complete topology, then materializes every valid
+   generic and queue mask.
 7. Clear the inactive slot's statistics.
 8. Publish one new value in the `active_ladder` map.
 
@@ -346,15 +348,21 @@ slot active. Each scheduling callback increments the chosen slot's per-CPU
 reader count, verifies the active slot did not change, uses the ladder, and
 decrements the count. Userspace therefore never rebuilds a slot still in use.
 
-Queue topology follows a different lifetime. Userspace installs the queue mode,
-normal queues, CPU routes, consumer masks, and optional cell descriptors before
-BPF attachment; BPF validates them, materializes masks, and creates DSQs from
-`init()`. A live replacement must resolve to exactly the same topology. The
-callback arrays still publish through the inactive ladder slot, but an active
-enqueue target or represented dispatch source cannot be removed because an old
-generation may have left work there. Legacy cell `MIN_VTIME` represents both
-cell and affinity classes; global `CONSUME` represents its declared peek and
-fallback sources.
+Queue topology is pinned by the same slot as the policy. BPF creates a fixed DSQ
+pool from the initial envelope in `init()`; later banks rebind descriptors and
+masks but never create or destroy DSQs. An explicit policy replacement must
+still resolve to the same topology, and it cannot remove an active enqueue
+target or represented dispatch source because an old generation may have left
+work there. Legacy cell `MIN_VTIME` represents both cell and affinity classes;
+global `CONSUME` represents its declared peek and fallback sources.
+
+Managed-cell reconciliation can change the banked topology. It first enables a
+transition path that routes new work to CPU-local DSQs and waits for every custom
+DSQ to empty. Userspace then stages the candidate policy, topology, and masks in
+the inactive slot, prepares them as one unit, publishes the slot, waits for old
+readers, disables the transition path, and finally updates task membership. A
+failure before publication disables the transition path and leaves the old bank
+active.
 
 ## Map ownership and data direction
 
@@ -368,10 +376,10 @@ fallback sources.
 | `stats` | BPF callbacks | Userspace | Per-CPU scheduler and per-rung counters. |
 | `task_cells` | Userspace through pidfd updates; BPF clears/restores `needs_rehome` | BPF hot path | Optional live cell assignment for one thread. |
 | `task_runtimes` | BPF task lifecycle and scheduling callbacks | BPF callbacks | Per-task placement and execution accounting state. |
-| `queue_header`, `queue_cells` | Userspace before attach | BPF | Immutable global/cell mode plus optional dense cells and clocks. |
-| `queue_cell_masks`, `normal_queue_masks` | BPF `init()` | BPF hot path | Materialized cell and normal-consumer `bpf_cpumask` pointers. |
-| `normal_queues`, `cpu_queues` | Userspace before attach | BPF | Normal DSQ descriptors and topology-neutral CPU routing. |
-| `queue_cell_lookup` | Userspace before attach | BPF | External cell ID to dense queue-cell index. |
+| `queue_header`, `queue_cells` | Userspace before attach and into inactive banks | BPF | Banked global/cell mode, topology generation, and optional dense cells and clocks. |
+| `queue_cell_masks`, `normal_queue_masks` | BPF preparation program | BPF hot path | Banked materialized cell and normal-consumer `bpf_cpumask` pointers. |
+| `normal_queues`, `cpu_queues` | Userspace before attach and into inactive banks | BPF | Banked normal DSQ descriptors and topology-neutral CPU routing. |
+| `queue_cell_lookup` | Userspace before attach and into inactive banks | BPF | Banked external cell ID to dense queue-cell index. |
 | `vtime_domain` | BPF callbacks | BPF callbacks | One global VTIME clock shared by unsharded and LLC-sharded global modes. |
 | `cell_vtime_domains` | BPF callbacks | BPF callbacks | One VTIME clock per queue cell, shared by its normal and affinity queues. |
 | `cell_stats` | BPF callbacks | Userspace | Runtime, borrowing/lending, queue, and clock-transition counters. |
@@ -420,8 +428,8 @@ and then one terminal consume rung when the CPU's local DSQ is empty.
 - the active compiled ladder and generation;
 - materialized generic mask tables;
 - optional task-local `cell_id` and `needs_rehome` annotation;
-- attachment-time queue mode, normal consumer masks, CPU routes, and optional
-  dense cell ownership descriptors;
+- active-bank queue mode, topology generation, normal consumer masks, CPU routes,
+  and optional dense cell ownership descriptors;
 - per-task global or cell/affinity vruntime coordinates;
 - per-slot reader counters and per-CPU statistics.
 
@@ -528,7 +536,7 @@ scope = "task_cell_borrowable"
 ```
 
 This becomes `PICK_IDLE_QUEUE_MASK / QUEUE_CELL` with `PICK_RANDOM` and
-`PICK_IDLE_CORE`; `data=2` selects the attachment-time borrowable mask. BPF
+`PICK_IDLE_CORE`; `data=2` selects the active bank's borrowable mask. BPF
 translates the task annotation to a dense index, intersects the mask with live
 affinity, and claims a wholly idle core. A hit directly dispatches only after
 confirming that another cell owns the CPU.

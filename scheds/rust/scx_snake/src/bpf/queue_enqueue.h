@@ -16,19 +16,21 @@ queue_global_enqueue_local(struct snake_ladder_ctx *ctx, struct task_struct *p,
 	s32			target_cpu;
 	u64			flags = enq_flags & ~SCX_ENQ_PREEMPT;
 
-	target_cpu = queue_pick_allowed_cpu(p, selected_cpu);
+	target_cpu = queue_pick_allowed_cpu(ctx, p, selected_cpu);
 	if (target_cpu < 0)
 		return target_cpu;
-	cpuq = queue_cpu(target_cpu);
+	cpuq = queue_cpu(ctx, target_cpu);
 	if (!cpuq)
 		return -EINVAL;
-	consumers = queue_normal_consumers(cpuq->normal_queue_index);
+	consumers = queue_normal_consumers(ctx, cpuq->normal_queue_index);
 	if (!consumers)
 		return -EINVAL;
 	if (!bpf_cpumask_subset(consumers, p->cpus_ptr))
 		return -ENOENT;
 	dsq = dsq_normal(cpuq->normal_queue_index);
 	runtime->run_direct = 0;
+	if (queue_transition_active())
+		return -EAGAIN;
 	if (!dsq_insert_vtime(p, dsq,
 			      fairness_vtime_slice(runtime->active_weight),
 			      runtime->vruntime, flags, fine))
@@ -45,7 +47,7 @@ queue_global_enqueue_cpu(struct snake_ladder_ctx *ctx, struct task_struct *p,
 			 u64 enq_flags,
 			 const struct snake_fine_timing_ctx *fine)
 {
-	s32 target_cpu = queue_pick_allowed_cpu(p, selected_cpu);
+	s32 target_cpu = queue_pick_allowed_cpu(ctx, p, selected_cpu);
 	u64 flags      = enq_flags & ~SCX_ENQ_PREEMPT;
 	dsq_id_t dsq;
 
@@ -53,6 +55,8 @@ queue_global_enqueue_cpu(struct snake_ladder_ctx *ctx, struct task_struct *p,
 		return target_cpu;
 	dsq = dsq_affinity(target_cpu);
 	runtime->run_direct = 0;
+	if (queue_transition_active())
+		return -EAGAIN;
 	if (!dsq_insert_vtime(p, dsq,
 			      fairness_vtime_slice(runtime->active_weight),
 			      runtime->vruntime, flags, fine))
@@ -78,8 +82,8 @@ queue_fairness_direct_borrow(struct snake_ladder_ctx *ctx,
 	if (!runtime || cpu < 0 || cpu >= nr_cpu_ids ||
 	    !bpf_cpumask_test_cpu(cpu, p->cpus_ptr))
 		return -EINVAL;
-	cell = queue_cell(cell_index);
-	cpuq = queue_cpu(cpu);
+	cell = queue_cell(ctx, cell_index);
+	cpuq = queue_cpu(ctx, cpu);
 	if (!cell || !cpuq || !queue_mask_contains(&cell->borrowable, cpu) ||
 	    cpuq->owner_cell_index == cell_index)
 		return -EINVAL;
@@ -112,9 +116,10 @@ queue_fairness_enqueue_cell(struct snake_ladder_ctx *ctx, struct task_struct *p,
 	dsq_id_t		 dsq;
 
 	stage_started_at = fine_timing_start(fine);
-	cell		 = queue_cell(runtime->cell_index);
+	cell		 = queue_cell(ctx, runtime->cell_index);
 	primary =
-		queue_cell_mask(runtime->cell_index, SNAKE_QUEUE_MASK_PRIMARY);
+		queue_cell_mask(ctx, runtime->cell_index,
+				SNAKE_QUEUE_MASK_PRIMARY);
 	if (!cell || !primary)
 		ret = -EINVAL;
 	else if (!queue_primary_subset(primary, p))
@@ -125,7 +130,7 @@ queue_fairness_enqueue_cell(struct snake_ladder_ctx *ctx, struct task_struct *p,
 		return ret;
 
 	stage_started_at = fine_timing_start(fine);
-	cpuq		 = target_cpu >= 0 ? queue_cpu(target_cpu) : NULL;
+	cpuq		 = target_cpu >= 0 ? queue_cpu(ctx, target_cpu) : NULL;
 	if (!cpuq || cpuq->owner_cell_index != runtime->cell_index)
 		target_cpu = queue_pick_primary_cpu(
 			primary, runtime->queue_cpumask, p, -1);
@@ -135,7 +140,7 @@ queue_fairness_enqueue_cell(struct snake_ladder_ctx *ctx, struct task_struct *p,
 			   stage_started_at);
 	if (ret)
 		return ret;
-	cpuq = queue_cpu(target_cpu);
+	cpuq = queue_cpu(ctx, target_cpu);
 	if (!cpuq || cpuq->owner_cell_index != runtime->cell_index)
 		return -EINVAL;
 
@@ -144,6 +149,8 @@ queue_fairness_enqueue_cell(struct snake_ladder_ctx *ctx, struct task_struct *p,
 	runtime->direct_cell_valid = 0;
 	stage_started_at	   = fine_timing_start(fine);
 	dsq			   = dsq_normal(cpuq->normal_queue_index);
+	if (queue_transition_active())
+		return -EAGAIN;
 	if (!dsq_insert_vtime(p, dsq,
 			      fairness_vtime_slice(runtime->active_weight),
 			      runtime->vruntime, flags, fine)) {
@@ -171,7 +178,7 @@ static __always_inline int queue_fairness_enqueue_affinity(
 	const struct snake_fine_timing_ctx *fine)
 {
 	struct snake_cpu_queue *cpuq;
-	s32	 target_cpu	  = queue_pick_allowed_cpu(p, selected_cpu);
+	s32	 target_cpu	  = queue_pick_allowed_cpu(ctx, p, selected_cpu);
 	s32	 ret		  = 0;
 	u64	 flags		  = enq_flags & ~SCX_ENQ_PREEMPT;
 	u64	 stage_started_at = fine_timing_start(fine);
@@ -182,7 +189,7 @@ static __always_inline int queue_fairness_enqueue_affinity(
 		ret = target_cpu;
 		goto out;
 	}
-	cpuq = queue_cpu(target_cpu);
+	cpuq = queue_cpu(ctx, target_cpu);
 	if (!cpuq || queue_fairness_prepare_affinity(ctx, runtime,
 						     cpuq->owner_cell_index)) {
 		ret = -EINVAL;
@@ -193,6 +200,10 @@ static __always_inline int queue_fairness_enqueue_affinity(
 	runtime->direct_cell_valid = 0;
 	dsq			   = dsq_affinity(target_cpu);
 	insert_started_at	   = fine_timing_start(fine);
+	if (queue_transition_active()) {
+		ret = -EAGAIN;
+		goto out;
+	}
 	if (!dsq_insert_vtime(p, dsq,
 			      fairness_vtime_slice(runtime->active_weight),
 			      runtime->affinity_vruntime, flags, fine)) {
@@ -214,6 +225,43 @@ out:
 	fine_timing_finish(fine, SNAKE_FINE_TIMING_ENQUEUE_AFFINITY_PATH,
 			   stage_started_at);
 	return ret;
+}
+
+static __always_inline int queue_transition_enqueue(
+	struct snake_ladder_ctx *ctx, struct task_struct *p, u64 enq_flags,
+	const struct snake_fine_timing_ctx *fine)
+{
+	struct snake_task_runtime *runtime;
+	dsq_id_t		   target;
+	s32			   selected_cpu, target_cpu;
+	u64			   slice;
+
+	if (queue_global_mode_enabled()) {
+		fairness_vtime_prepare_runnable(ctx, p);
+		runtime = fairness_vtime_prepare_task(ctx, p);
+		if (runtime) {
+			runtime->active_weight = fairness_task_weight(p);
+			runtime->pending_weight = runtime->active_weight;
+		}
+	} else {
+		runtime = queue_fairness_prepare_runnable(ctx, p, fine);
+	}
+	if (!runtime)
+		return -EINVAL;
+	selected_cpu = task_route_take_selected_cpu(runtime, p);
+	target_cpu = queue_pick_allowed_cpu(ctx, p, selected_cpu);
+	if (target_cpu < 0)
+		return target_cpu;
+	runtime->queue_class	     = SNAKE_QUEUE_CLASS_NORMAL;
+	runtime->run_direct	     = 0;
+	runtime->direct_cell_valid = 0;
+	target = dsq_local_on(target_cpu);
+	slice = fairness_vtime_slice(runtime->active_weight);
+	if (!dsq_insert(p, target, slice, enq_flags & ~SCX_ENQ_PREEMPT, fine))
+		return -EINVAL;
+	queue_timing_record_insert(ctx, p, target, SNAKE_QUEUE_CELL_NONE, fine);
+	scx_bpf_kick_cpu(target_cpu, SCX_KICK_IDLE);
+	return 0;
 }
 
 struct snake_queue_enqueue_loop_ctx {

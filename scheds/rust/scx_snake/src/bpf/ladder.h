@@ -169,7 +169,7 @@ static __noinline s32 execute_rung(const struct snake_ladder_ctx *ctx,
 			cell = task_annotation(p);
 			if (!cell)
 				return -ENOENT;
-			exists = queue_task_cell_id(p, &cell_id);
+			exists = queue_task_cell_id(ctx, p, &cell_id);
 			if (exists)
 				return exists;
 			exists = mask_table_has_key(ctx, rung->data, cell_id);
@@ -210,7 +210,7 @@ static __noinline s32 execute_rung(const struct snake_ladder_ctx *ctx,
 			cell = task_annotation(p);
 			if (!cell)
 				return -ENOENT;
-			exists = queue_task_cell_id(p, &cell_id);
+			exists = queue_task_cell_id(ctx, p, &cell_id);
 			if (exists)
 				return exists;
 			exists = mask_table_has_key(ctx, rung->data, cell_id);
@@ -233,7 +233,7 @@ static __noinline s32 execute_rung(const struct snake_ladder_ctx *ctx,
 		s32 cpu;
 
 		cpu = queue_pick_task_cell_cpu(
-			p, rung->data,
+			ctx, p, rung->data,
 			rung->flags & SNAKE_RUNG_F_PICK_IDLE_CORE,
 			rung->flags & SNAKE_RUNG_F_PICK_RANDOM,
 			queue_cell_index);

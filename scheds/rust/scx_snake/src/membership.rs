@@ -38,7 +38,7 @@ impl CellDirectory {
         }
     }
 
-    fn from_policy(policy: &MembershipPolicy, slot_epochs: &BTreeMap<u32, u32>) -> Self {
+    pub(crate) fn from_policy(policy: &MembershipPolicy, slot_epochs: &BTreeMap<u32, u32>) -> Self {
         let assignments = policy
             .assignments
             .iter()

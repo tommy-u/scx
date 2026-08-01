@@ -35,7 +35,7 @@ use inspection::{InspectionView, Inspector, SlotPolicy};
 use libbpf_rs::{MapCore as _, MapFlags, OpenObject, ProgramInput};
 use log::{debug, info, warn};
 use mask_tables::{dump_mask_tables, resolve_mask_tables, ResolvedMaskTable};
-use membership::MembershipManager;
+use membership::{CellDirectory, MembershipManager};
 use policy::{
     CompiledPolicy, CompiledRung, InputSource, Opcode, QueueDispatchAction, QueueDispatchOperation,
     QueueDispatchSource, QueueEnqueueAction, QueueEnqueueTarget,
@@ -802,7 +802,10 @@ fn queue_mode_for_topology(topology: Option<&queue_topology::QueueTopology>) -> 
     }
 }
 
-fn encode_queue_topology(topology: &queue_topology::QueueTopology) -> Result<EncodedQueueTopology> {
+fn encode_queue_topology(
+    topology: &queue_topology::QueueTopology,
+    generation: u64,
+) -> Result<EncodedQueueTopology> {
     let mut cell_lookup = vec![0_u32; policy::MAX_CELL_IDS as usize];
     let mut cells = (0..bpf_intf::SNAKE_MAX_QUEUE_CELLS)
         .map(|_| bpf_intf::snake_queue_cell {
@@ -909,6 +912,7 @@ fn encode_queue_topology(topology: &queue_topology::QueueTopology) -> Result<Enc
             nr_cells: topology.cells.len().try_into()?,
             nr_normal_queues: topology.normal_queues.len().try_into()?,
             nr_cpus,
+            topology_generation: generation,
         },
         cell_lookup,
         cells,
@@ -919,41 +923,46 @@ fn encode_queue_topology(topology: &queue_topology::QueueTopology) -> Result<Enc
 
 fn install_queue_topology(
     skel: &mut BpfSkel<'_>,
+    slot: u32,
+    generation: u64,
     topology: Option<&queue_topology::QueueTopology>,
 ) -> Result<()> {
+    if slot >= bpf_intf::SNAKE_LADDER_SLOTS {
+        bail!("invalid queue topology slot {slot}");
+    }
     let Some(topology) = topology else {
         return Ok(());
     };
-    let encoded = encode_queue_topology(topology)?;
+    let encoded = encode_queue_topology(topology, generation)?;
     for (key, value) in encoded.cell_lookup.iter().enumerate() {
-        let key = u32::try_from(key)?;
+        let key = slot * bpf_intf::SNAKE_MAX_CPUS + u32::try_from(key)?;
         skel.maps
             .queue_cell_lookup
             .update(&key.to_ne_bytes(), &value.to_ne_bytes(), MapFlags::ANY)
             .with_context(|| format!("installing queue cell lookup {key}"))?;
     }
     for (key, value) in encoded.cells.iter().enumerate() {
-        let key = u32::try_from(key)?;
+        let key = slot * bpf_intf::SNAKE_MAX_QUEUE_CELLS + u32::try_from(key)?;
         skel.maps
             .queue_cells
             .update(&key.to_ne_bytes(), bytes_of(value), MapFlags::ANY)
             .with_context(|| format!("installing queue cell {key}"))?;
     }
     for (key, value) in encoded.normal_queues.iter().enumerate() {
-        let key = u32::try_from(key)?;
+        let key = slot * bpf_intf::SNAKE_MAX_NORMAL_QUEUES + u32::try_from(key)?;
         skel.maps
             .normal_queues
             .update(&key.to_ne_bytes(), bytes_of(value), MapFlags::ANY)
             .with_context(|| format!("installing normal queue {key}"))?;
     }
     for (key, value) in encoded.cpu_queues.iter().enumerate() {
-        let key = u32::try_from(key)?;
+        let key = slot * bpf_intf::SNAKE_MAX_CPUS + u32::try_from(key)?;
         skel.maps
             .cpu_queues
             .update(&key.to_ne_bytes(), bytes_of(value), MapFlags::ANY)
             .with_context(|| format!("installing CPU queue {key}"))?;
     }
-    let key = 0_u32;
+    let key = slot;
     skel.maps
         .queue_header
         .update(&key.to_ne_bytes(), bytes_of(&encoded.header), MapFlags::ANY)
@@ -1057,6 +1066,37 @@ fn set_active_ladder(skel: &mut BpfSkel<'_>, slot: u32) -> Result<()> {
         .with_context(|| format!("publishing ladder slot {slot}"))
 }
 
+fn set_queue_draining(skel: &mut BpfSkel<'_>, draining: bool) -> Result<()> {
+    skel.maps
+        .bss_data
+        .as_mut()
+        .context("BPF bss map is not memory mapped")?
+        .queue_draining = u32::from(draining);
+    Ok(())
+}
+
+fn wait_for_queue_drain(skel: &mut BpfSkel<'_>, timeout: Duration) -> Result<()> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let output = skel
+            .progs
+            .queue_drain_ready
+            .test_run(ProgramInput::default())
+            .context("checking queue topology drain")?;
+        let result = output.return_value as i32;
+        if result == 0 {
+            return Ok(());
+        }
+        if result != -libc::EAGAIN {
+            bail!("checking queue topology drain failed: {result}");
+        }
+        if Instant::now() >= deadline {
+            bail!("timed out waiting for custom queue topology DSQs to drain");
+        }
+        std::thread::sleep(SLOT_QUIESCENCE_POLL_INTERVAL);
+    }
+}
+
 fn write_ladder_slot(
     skel: &mut BpfSkel<'_>,
     slot: u32,
@@ -1082,9 +1122,19 @@ fn prepare_ladder_slot(skel: &mut BpfSkel<'_>, slot: u32) -> Result<()> {
         .test_run(ProgramInput::default())
         .with_context(|| format!("preparing ladder slot {slot}"))?;
     if output.return_value != 0 {
+        let bss = skel
+            .maps
+            .bss_data
+            .as_ref()
+            .context("BPF bss map is not memory mapped")?;
+        let ladder_stage = bss.staging_ladder_prepare_stage;
+        let ladder_error = bss.staging_ladder_prepare_error;
+        let topology_stage = bss.queue_topology_prepare_stage;
+        let topology_error = bss.queue_topology_prepare_error;
+        let topology_detail = bss.queue_topology_prepare_detail;
         bail!(
-            "preparing ladder slot {slot} failed: {}",
-            output.return_value as i32
+            "preparing ladder slot {slot} failed: {} (ladder stage {ladder_stage}, topology stage {topology_stage}, topology detail {topology_detail}; ladder error {ladder_error}, topology error {topology_error})",
+            output.return_value as i32,
         );
     }
     Ok(())
@@ -1146,11 +1196,12 @@ fn clear_slot_stats(skel: &mut BpfSkel<'_>, slot: u32) -> Result<()> {
     Ok(())
 }
 
-struct BpfPolicyBackend<'skel, 'object> {
+struct BpfPolicyBackend<'skel, 'object, 'topology> {
     skel: &'skel mut BpfSkel<'object>,
+    queue_topology: Option<&'topology queue_topology::QueueTopology>,
 }
 
-impl runtime_policy::PolicyBackend for BpfPolicyBackend<'_, '_> {
+impl runtime_policy::PolicyBackend for BpfPolicyBackend<'_, '_, '_> {
     fn wait_for_slot_quiescent(&mut self, slot: u32) -> Result<()> {
         wait_for_slot_quiescent(self.skel, slot, SLOT_QUIESCENCE_TIMEOUT)
     }
@@ -1162,6 +1213,10 @@ impl runtime_policy::PolicyBackend for BpfPolicyBackend<'_, '_> {
     fn write_mask_tables(&mut self, slot: u32, tables: &[ResolvedMaskTable]) -> Result<()> {
         clear_mask_table_data(self.skel, slot)?;
         install_mask_tables(self.skel, slot, tables)
+    }
+
+    fn write_queue_topology(&mut self, slot: u32, generation: u64) -> Result<()> {
+        install_queue_topology(self.skel, slot, generation, self.queue_topology)
     }
 
     fn prepare_ladder(&mut self, slot: u32) -> Result<()> {
@@ -1647,6 +1702,8 @@ struct Scheduler<'object, 'policy> {
     fairness: FairnessMode,
     queue_topology: Option<queue_topology::QueueTopology>,
     membership: Option<MembershipManager>,
+    managed_reconcile_interval: Option<Duration>,
+    next_managed_reconcile: Option<Instant>,
     callback_timing_sample_rate: u32,
     fine_timing_state: fine_timing::FineTimingState,
     queue_timing_state: queue_timing::QueueTimingState,
@@ -1705,7 +1762,7 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
         }
         skel.struct_ops.snake_ops_mut().exit_dump_len = opts.exit_dump_len;
         let mut skel = scx_ops_load!(skel, snake_ops, uei)?;
-        install_queue_topology(&mut skel, queue_topology)?;
+        install_queue_topology(&mut skel, 0, runtime.generation, queue_topology)?;
         set_active_ladder(&mut skel, bpf_intf::SNAKE_LADDER_SLOT_INVALID)?;
         install_ladder_slot(
             &mut skel,
@@ -1730,6 +1787,13 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
         } else {
             None
         };
+        let managed_reconcile_interval = runtime
+            .compiled
+            .managed_cells
+            .as_ref()
+            .map(|managed| Duration::from_millis(managed.reconcile_ms));
+        let next_managed_reconcile =
+            managed_reconcile_interval.map(|interval| Instant::now() + interval);
         let struct_ops = Some(scx_ops_attach!(skel, snake_ops)?);
         let stats_server = StatsServer::new(stats::server_data()).launch()?;
         info!(
@@ -1791,6 +1855,8 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
             fairness: opts.fairness,
             queue_topology: queue_topology.cloned(),
             membership,
+            managed_reconcile_interval,
+            next_managed_reconcile,
             callback_timing_sample_rate: opts.callback_timing_sample_rate,
             fine_timing_state: fine_timing::FineTimingState::default(),
             queue_timing_state: queue_timing::QueueTimingState::default(),
@@ -1835,6 +1901,7 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
         let active_queue_topology = self.queue_topology.clone();
         let mut backend = BpfPolicyBackend {
             skel: &mut self.skel,
+            queue_topology: active_queue_topology.as_ref(),
         };
         let response = runtime_policy::replace_policy(
             self.runtime,
@@ -2141,6 +2208,7 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
 
         let mut backend = BpfPolicyBackend {
             skel: &mut self.skel,
+            queue_topology: self.queue_topology.as_ref(),
         };
         let reset_result =
             runtime_policy::reset_stats(self.runtime, &resolved_tables, &mut backend);
@@ -2484,15 +2552,142 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
         Ok(snapshot)
     }
 
+    fn time_until_managed_reconcile(&self) -> Option<Duration> {
+        self.next_managed_reconcile
+            .map(|next| next.saturating_duration_since(Instant::now()))
+    }
+
+    fn reconcile_managed_cells_if_due(&mut self) -> Result<()> {
+        let Some(next) = self.next_managed_reconcile else {
+            return Ok(());
+        };
+        if Instant::now() < next {
+            return Ok(());
+        }
+        let interval = self
+            .managed_reconcile_interval
+            .context("managed reconciliation has no interval")?;
+        self.next_managed_reconcile = Some(Instant::now() + interval);
+
+        let mut candidate = self.runtime.compiled.clone();
+        managed_cells::resolve_managed_cells(&mut candidate)
+            .context("discovering live managed cells")?;
+        if candidate == self.runtime.compiled {
+            return Ok(());
+        }
+        let topology = match resolve_host_queue_topology(&candidate)
+            .context("resolving live managed cell topology")
+        {
+            Ok(Some(topology)) => topology,
+            Ok(None) => bail!("managed cells resolved without a queue topology"),
+            Err(error) => {
+                warn!("managed cell candidate remains unbound in cell 0: {error:#}");
+                return Ok(());
+            }
+        };
+        let tables = match resolve_mask_tables(&candidate)
+            .context("resolving live managed cell mask tables")
+        {
+            Ok(tables) => tables,
+            Err(error) => {
+                warn!("managed cell candidate remains unbound in cell 0: {error:#}");
+                return Ok(());
+            }
+        };
+
+        let previous_slot = self.runtime.active_slot;
+        let frozen_metrics = self.metrics()?;
+        set_queue_draining(&mut self.skel, true)?;
+        if let Err(error) = wait_for_queue_drain(&mut self.skel, SLOT_QUIESCENCE_TIMEOUT) {
+            set_queue_draining(&mut self.skel, false)?;
+            warn!("managed cell topology activation deferred: {error:#}");
+            return Ok(());
+        }
+
+        let source = self.runtime.source.clone();
+        let activation = {
+            let mut backend = BpfPolicyBackend {
+                skel: &mut self.skel,
+                queue_topology: Some(&topology),
+            };
+            runtime_policy::activate_compiled_policy(
+                self.runtime,
+                source,
+                candidate,
+                &tables,
+                &mut backend,
+            )
+        };
+        let response = match activation {
+            Ok(response) => response,
+            Err(error) => {
+                set_queue_draining(&mut self.skel, false)?;
+                warn!("managed cell topology activation rejected: {error:#}");
+                return Ok(());
+            }
+        };
+
+        wait_for_slot_quiescent(&self.skel, previous_slot, SLOT_QUIESCENCE_TIMEOUT)
+            .context("waiting for the retired managed topology bank")?;
+        set_queue_draining(&mut self.skel, false)?;
+        self.queue_topology = Some(topology.clone());
+
+        let membership_policy = self
+            .runtime
+            .compiled
+            .membership
+            .as_ref()
+            .context("managed topology has no membership policy")?;
+        let directory =
+            CellDirectory::from_policy(membership_policy, &self.runtime.compiled.cell_slot_epochs);
+        let manager = self
+            .membership
+            .as_mut()
+            .context("managed topology has no membership manager")?;
+        manager.replace_directory(directory);
+        match manager.reconcile(&self.skel.maps.task_cells) {
+            Ok(report) => debug!(
+                "managed topology membership discovered {}, updated {}, transient {}",
+                report.discovered, report.updated, report.transient
+            ),
+            Err(error) => warn!("managed topology membership update failed: {error:#}"),
+        }
+
+        let activated_at_ms = unix_time_ms();
+        self.inspector.set_queue_topology(Some(topology));
+        self.inspector.activate(
+            SlotPolicy::new(
+                self.runtime.active_slot,
+                self.runtime.generation,
+                self.runtime.source.clone(),
+                self.runtime.compiled.clone(),
+                tables,
+                activated_at_ms,
+            ),
+            frozen_metrics,
+            activated_at_ms,
+        );
+        info!(
+            "activated managed cell topology generation {} with {} managed cells",
+            response.generation,
+            self.runtime.compiled.cells.len()
+        );
+        Ok(())
+    }
+
     fn run(&mut self, shutdown: Arc<AtomicBool>) -> Result<UserExitInfo> {
         let (response_channel, request_channel) = self.stats_server.channels();
+        let live_managed_cells = self.managed_reconcile_interval.is_some();
         while !shutdown.load(Ordering::Relaxed) && !self.exited() {
-            let timeout = self
+            let mut timeout = self
                 .membership
                 .as_ref()
                 .map(MembershipManager::time_until_reconcile)
                 .unwrap_or(Duration::from_secs(1))
                 .min(Duration::from_secs(1));
+            if let Some(managed_timeout) = self.time_until_managed_reconcile() {
+                timeout = timeout.min(managed_timeout);
+            }
             let timeout = if self.queue_timing_state.is_enabled()
                 || fine_timing::FineTimingCallback::ALL
                     .into_iter()
@@ -2561,6 +2756,7 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
                 }
             }
             self.drain_timing_events()?;
+            self.reconcile_managed_cells_if_due()?;
             if let Some(manager) = &mut self.membership {
                 match manager.reconcile_if_due(&self.skel.maps.task_cells) {
                     Ok(Some(report)) if report.updated != 0 || report.transient != 0 => debug!(
@@ -2568,11 +2764,21 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
                         report.discovered, report.updated, report.transient
                     ),
                     Ok(_) => {}
-                    Err(error) if manager.identity_errors_are_fatal() => return Err(error)
-                        .context(
-                        "managed child identity changed; restart Snake to resolve managed cells",
-                    ),
-                    Err(error) => warn!("task membership reconciliation failed: {error:#}"),
+                    Err(error) => {
+                        if manager.identity_errors_are_fatal() && !live_managed_cells {
+                            return Err(error).context(
+                                "managed child identity changed; restart Snake to resolve managed cells",
+                            );
+                        }
+                        if manager.identity_errors_are_fatal() {
+                            self.next_managed_reconcile = Some(Instant::now());
+                            warn!(
+                                "managed child changed during membership reconciliation; retrying topology discovery: {error:#}"
+                            );
+                        } else {
+                            warn!("task membership reconciliation failed: {error:#}");
+                        }
+                    }
                 }
             }
         }
@@ -2949,37 +3155,37 @@ scope = "task_allowed"
                 __uint(type, BPF_MAP_TYPE_ARRAY);
                 __type(key, u32);
                 __type(value, struct snake_queue_header);
-                __uint(max_entries, 1);
+                __uint(max_entries, SNAKE_LADDER_SLOTS);
             } queue_header SEC(".maps");"#,
             r#"struct {
                 __uint(type, BPF_MAP_TYPE_ARRAY);
                 __type(key, u32);
                 __type(value, u32);
-                __uint(max_entries, SNAKE_MAX_CPUS);
+                __uint(max_entries, SNAKE_LADDER_SLOTS * SNAKE_MAX_CPUS);
             } queue_cell_lookup SEC(".maps");"#,
             r#"struct {
                 __uint(type, BPF_MAP_TYPE_ARRAY);
                 __type(key, u32);
                 __type(value, struct snake_queue_cell);
-                __uint(max_entries, SNAKE_MAX_QUEUE_CELLS);
+                __uint(max_entries, SNAKE_LADDER_SLOTS * SNAKE_MAX_QUEUE_CELLS);
             } queue_cells SEC(".maps");"#,
             r#"struct {
                 __uint(type, BPF_MAP_TYPE_ARRAY);
                 __type(key, u32);
                 __type(value, struct snake_normal_queue);
-                __uint(max_entries, SNAKE_MAX_NORMAL_QUEUES);
+                __uint(max_entries, SNAKE_LADDER_SLOTS * SNAKE_MAX_NORMAL_QUEUES);
             } normal_queues SEC(".maps");"#,
             r#"struct {
                 __uint(type, BPF_MAP_TYPE_ARRAY);
                 __type(key, u32);
                 __type(value, struct snake_cpu_queue);
-                __uint(max_entries, SNAKE_MAX_CPUS);
+                __uint(max_entries, SNAKE_LADDER_SLOTS * SNAKE_MAX_CPUS);
             } cpu_queues SEC(".maps");"#,
             r#"struct {
                 __uint(type, BPF_MAP_TYPE_ARRAY);
                 __type(key, u32);
                 __type(value, struct snake_queue_cell_masks);
-                __uint(max_entries, SNAKE_MAX_QUEUE_CELLS);
+                __uint(max_entries, SNAKE_LADDER_SLOTS * SNAKE_MAX_QUEUE_CELLS);
             } queue_cell_masks SEC(".maps");"#,
             r#"struct {
                 __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
@@ -3060,6 +3266,7 @@ scope = "task_allowed"
         ];
         const EXPECTED_PROGRAMS: &[&str] = &[
             "prepare_ladder",
+            "queue_drain_ready",
             "scx_lib_init_probe",
             "snake_dispatch",
             "snake_enqueue",
@@ -3143,6 +3350,110 @@ scope = "task_allowed"
     }
 
     #[test]
+    fn queue_topology_is_banked_with_the_pinned_ladder_slot() {
+        let state = include_str!("bpf/queue_state.h");
+        let bank = include_str!("bpf/policy_bank.h");
+        let init = include_str!("bpf/queue_init.h");
+        let main = include_str!("bpf/main.bpf.c");
+
+        for capacity in [
+            "SNAKE_LADDER_SLOTS * SNAKE_MAX_CPUS",
+            "SNAKE_LADDER_SLOTS * SNAKE_MAX_QUEUE_CELLS",
+            "SNAKE_LADDER_SLOTS * SNAKE_MAX_NORMAL_QUEUES",
+        ] {
+            assert!(
+                state.contains(capacity),
+                "missing banked capacity {capacity}"
+            );
+        }
+        assert!(state.contains("queue_config(const struct snake_ladder_ctx *ctx)"));
+        assert!(state.contains("queue_slot_index(ctx->slot, SNAKE_MAX_QUEUE_CELLS"));
+        assert!(state.contains("queue_slot_index(ctx->slot, SNAKE_MAX_NORMAL_QUEUES"));
+        assert!(state.contains("queue_cpu_slot(ctx->slot, cpu)"));
+        assert!(state.contains("queue_slot_index(slot, SNAKE_MAX_CPUS"));
+        assert!(bank.contains("Pin one complete policy and topology slot"));
+        assert!(init.contains("prepare_queue_topology(u32 slot)"));
+        assert!(main.contains("prepare_queue_topology(slot)"));
+
+        let validation = init
+            .split_once("static __always_inline int validate_queue_topology(u32 bank)")
+            .and_then(|(_, body)| {
+                body.split_once("static __always_inline int create_queue_topology_dsqs")
+            })
+            .map(|(body, _)| body)
+            .expect("queue topology validator should have one definition");
+        assert!(validation.contains("cell = queue_cell_slot(bank, i);"));
+        assert!(!validation.contains("bpf_map_lookup_elem(&queue_cells, &i)"));
+    }
+
+    #[test]
+    fn live_topology_transition_stops_custom_inserts_until_old_readers_drain() {
+        let main = include_str!("bpf/main.bpf.c");
+        let enqueue = include_str!("bpf/queue_enqueue.h");
+        let init = include_str!("bpf/queue_init.h");
+
+        assert!(main.contains("queue_draining;"));
+        assert!(main.contains("SEC(\"syscall\")\nint queue_drain_ready"));
+        assert!(main.contains("if (queue_transition_active())"));
+        assert!(main.contains("goto direct_dispatch;"));
+        assert!(enqueue.contains("queue_transition_enqueue("));
+        assert!(enqueue.contains("if (queue_transition_active())"));
+        assert!(init.contains("header->nr_cpus"));
+        assert!(main.contains("dsq_nr_queued(dsq_affinity(i))"));
+        assert!(main.contains("dsq_nr_queued(dsq_normal(i))"));
+    }
+
+    #[test]
+    fn managed_cell_reconciliation_activates_resources_before_membership() {
+        let source = include_str!("main.rs");
+        let reconcile = source
+            .split_once("fn reconcile_managed_cells_if_due(")
+            .map(|(_, body)| body)
+            .expect("scheduler should reconcile managed resources at runtime");
+        let stage = reconcile
+            .find("activate_compiled_policy(")
+            .expect("managed reconciliation should publish a compiled bank");
+        let membership = reconcile
+            .find("replace_directory")
+            .expect("managed reconciliation should update task membership");
+
+        assert!(stage < membership);
+        assert!(reconcile.contains("set_queue_draining(&mut self.skel, true)"));
+        assert!(reconcile.contains("wait_for_queue_drain(&mut self.skel"));
+        assert!(reconcile.contains("wait_for_slot_quiescent(&self.skel, previous_slot"));
+        assert!(reconcile.contains("set_queue_draining(&mut self.skel, false)"));
+    }
+
+    #[test]
+    fn managed_membership_identity_races_request_an_immediate_topology_retry() {
+        let source = include_str!("main.rs");
+        let run_loop = source
+            .split_once("fn run(&mut self, shutdown: Arc<AtomicBool>)")
+            .and_then(|(_, body)| body.split_once("impl Drop for Scheduler"))
+            .map(|(body, _)| body)
+            .expect("scheduler should have a run loop");
+
+        assert!(run_loop.contains("let live_managed_cells ="));
+        assert!(run_loop.contains("manager.identity_errors_are_fatal() && !live_managed_cells"));
+        assert!(run_loop.contains("self.next_managed_reconcile = Some(Instant::now())"));
+    }
+
+    #[test]
+    fn staged_topology_failures_report_the_exact_prepare_stage() {
+        let main = include_str!("bpf/main.bpf.c");
+        let init = include_str!("bpf/queue_init.h");
+        let rust = include_str!("main.rs");
+
+        assert!(main.contains("staging_ladder_prepare_stage"));
+        assert!(main.contains("staging_ladder_prepare_error"));
+        assert!(init.contains("queue_topology_prepare_stage"));
+        assert!(init.contains("queue_topology_prepare_error"));
+        assert!(init.contains("queue_topology_prepare_detail"));
+        assert!(rust.contains("ladder stage {ladder_stage}, topology stage {topology_stage}"));
+        assert!(rust.contains("topology detail {topology_detail}"));
+    }
+
+    #[test]
     fn task_runtime_flat_layout_is_stable() {
         const EXPECTED_DECLARATIONS: &[&str] = &[
             "struct bpf_cpumask __kptr *queue_cpumask",
@@ -3150,6 +3461,8 @@ scope = "task_allowed"
             "u64 service_budget",
             "u64 vruntime",
             "u64 affinity_vruntime",
+            "u64 topology_generation",
+            "u64 affinity_topology_generation",
             "u64 deadline",
             "u64 request_remaining_ns",
             "u64 queue_timing_session_id",
@@ -3159,7 +3472,11 @@ scope = "task_allowed"
             "u32 active_weight",
             "u32 pending_weight",
             "u32 cell_index",
+            "u32 cell_external_id",
+            "u32 cell_epoch",
             "u32 affinity_cell_index",
+            "u32 affinity_cell_external_id",
+            "u32 affinity_cell_epoch",
             "u32 run_cell_index",
             "u32 run_owner_cell_index",
             "u32 selected_cpu",
@@ -3202,44 +3519,50 @@ scope = "task_allowed"
         assert_eq!(declarations, EXPECTED_DECLARATIONS);
 
         type TaskRuntime = bpf_skel::types::snake_task_runtime;
-        assert_eq!(size_of::<TaskRuntime>(), 144);
+        assert_eq!(size_of::<TaskRuntime>(), 176);
         assert_eq!(std::mem::align_of::<TaskRuntime>(), 8);
         assert_eq!(offset_of!(TaskRuntime, queue_cpumask), 0);
         assert_eq!(offset_of!(TaskRuntime, started_exec_runtime), 8);
         assert_eq!(offset_of!(TaskRuntime, service_budget), 16);
         assert_eq!(offset_of!(TaskRuntime, vruntime), 24);
         assert_eq!(offset_of!(TaskRuntime, affinity_vruntime), 32);
-        assert_eq!(offset_of!(TaskRuntime, deadline), 40);
-        assert_eq!(offset_of!(TaskRuntime, request_remaining_ns), 48);
-        assert_eq!(offset_of!(TaskRuntime, queue_timing_session_id), 56);
-        assert_eq!(offset_of!(TaskRuntime, queue_timing_dsq_id), 64);
-        assert_eq!(offset_of!(TaskRuntime, queue_timing_enqueued_at_ns), 72);
-        assert_eq!(offset_of!(TaskRuntime, sleep_lag), 80);
-        assert_eq!(offset_of!(TaskRuntime, active_weight), 88);
-        assert_eq!(offset_of!(TaskRuntime, pending_weight), 92);
-        assert_eq!(offset_of!(TaskRuntime, cell_index), 96);
-        assert_eq!(offset_of!(TaskRuntime, affinity_cell_index), 100);
-        assert_eq!(offset_of!(TaskRuntime, run_cell_index), 104);
-        assert_eq!(offset_of!(TaskRuntime, run_owner_cell_index), 108);
-        assert_eq!(offset_of!(TaskRuntime, selected_cpu), 112);
-        assert_eq!(offset_of!(TaskRuntime, direct_cell_index), 116);
-        assert_eq!(offset_of!(TaskRuntime, queue_timing_cell_index), 120);
+        assert_eq!(offset_of!(TaskRuntime, topology_generation), 40);
+        assert_eq!(offset_of!(TaskRuntime, affinity_topology_generation), 48);
+        assert_eq!(offset_of!(TaskRuntime, deadline), 56);
+        assert_eq!(offset_of!(TaskRuntime, request_remaining_ns), 64);
+        assert_eq!(offset_of!(TaskRuntime, queue_timing_session_id), 72);
+        assert_eq!(offset_of!(TaskRuntime, queue_timing_dsq_id), 80);
+        assert_eq!(offset_of!(TaskRuntime, queue_timing_enqueued_at_ns), 88);
+        assert_eq!(offset_of!(TaskRuntime, sleep_lag), 96);
+        assert_eq!(offset_of!(TaskRuntime, active_weight), 104);
+        assert_eq!(offset_of!(TaskRuntime, pending_weight), 108);
+        assert_eq!(offset_of!(TaskRuntime, cell_index), 112);
+        assert_eq!(offset_of!(TaskRuntime, cell_external_id), 116);
+        assert_eq!(offset_of!(TaskRuntime, cell_epoch), 120);
+        assert_eq!(offset_of!(TaskRuntime, affinity_cell_index), 124);
+        assert_eq!(offset_of!(TaskRuntime, affinity_cell_external_id), 128);
+        assert_eq!(offset_of!(TaskRuntime, affinity_cell_epoch), 132);
+        assert_eq!(offset_of!(TaskRuntime, run_cell_index), 136);
+        assert_eq!(offset_of!(TaskRuntime, run_owner_cell_index), 140);
+        assert_eq!(offset_of!(TaskRuntime, selected_cpu), 144);
+        assert_eq!(offset_of!(TaskRuntime, direct_cell_index), 148);
+        assert_eq!(offset_of!(TaskRuntime, queue_timing_cell_index), 152);
         assert_eq!(
             offset_of!(TaskRuntime, queue_timing_depth_after_insert),
-            124
+            156
         );
-        assert_eq!(offset_of!(TaskRuntime, queue_timing_queue_class), 128);
-        assert_eq!(offset_of!(TaskRuntime, runtime_valid), 132);
-        assert_eq!(offset_of!(TaskRuntime, initialized), 133);
-        assert_eq!(offset_of!(TaskRuntime, runnable_accounted), 134);
-        assert_eq!(offset_of!(TaskRuntime, has_sleep_lag), 135);
-        assert_eq!(offset_of!(TaskRuntime, run_direct), 136);
-        assert_eq!(offset_of!(TaskRuntime, cell_initialized), 137);
-        assert_eq!(offset_of!(TaskRuntime, affinity_initialized), 138);
-        assert_eq!(offset_of!(TaskRuntime, selected_cpu_valid), 139);
-        assert_eq!(offset_of!(TaskRuntime, queue_class), 140);
-        assert_eq!(offset_of!(TaskRuntime, run_queue_class), 141);
-        assert_eq!(offset_of!(TaskRuntime, direct_cell_valid), 142);
+        assert_eq!(offset_of!(TaskRuntime, queue_timing_queue_class), 160);
+        assert_eq!(offset_of!(TaskRuntime, runtime_valid), 164);
+        assert_eq!(offset_of!(TaskRuntime, initialized), 165);
+        assert_eq!(offset_of!(TaskRuntime, runnable_accounted), 166);
+        assert_eq!(offset_of!(TaskRuntime, has_sleep_lag), 167);
+        assert_eq!(offset_of!(TaskRuntime, run_direct), 168);
+        assert_eq!(offset_of!(TaskRuntime, cell_initialized), 169);
+        assert_eq!(offset_of!(TaskRuntime, affinity_initialized), 170);
+        assert_eq!(offset_of!(TaskRuntime, selected_cpu_valid), 171);
+        assert_eq!(offset_of!(TaskRuntime, queue_class), 172);
+        assert_eq!(offset_of!(TaskRuntime, run_queue_class), 173);
+        assert_eq!(offset_of!(TaskRuntime, direct_cell_valid), 174);
     }
 
     #[test]
@@ -3394,7 +3717,7 @@ scope = "task_allowed"
                 "active_ladder_slot()",
                 "validate_compiled_ladder(ladder)",
                 "scx_bpf_nr_cpu_ids()",
-                "validate_queue_topology()",
+                "prepare_queue_topology(slot)",
                 "queue_topology_enabled() && !fairness_is_vtime()",
                 "prepare_mask_tables(slot, ladder)",
             ],
@@ -3411,11 +3734,11 @@ scope = "task_allowed"
             &[
                 "scx_bpf_nr_cpu_ids()",
                 "init_mask_table_scratch()",
-                "validate_queue_topology()",
+                "active_ladder_slot()",
+                "validate_queue_topology(active)",
                 "queue_topology_enabled() && !fairness_is_vtime()",
                 "fairness_init()",
-                "queue_init_cell_masks()",
-                "create_queue_topology_dsqs()",
+                "create_queue_topology_dsqs(active)",
                 "acquire_active_ladder(&ladder_ctx)",
                 "validate_compiled_ladder(ladder_ctx.ladder)",
             ],
@@ -4829,7 +5152,7 @@ scope = "task_allowed"
                 .iter()
                 .map(|source| source.matches("queue_timing_record_insert(").count())
                 .sum::<usize>(),
-            10
+            11
         );
         assert_eq!(
             outside_owner
@@ -5047,7 +5370,7 @@ scope = "task_allowed"
         let policy = policy::compile_policy(policy_source()).expect("policy should compile");
         let encoded = encode_ladder(&policy, 42).expect("ladder should encode");
 
-        assert_eq!(bpf_intf::SNAKE_ABI_VERSION, 25);
+        assert_eq!(bpf_intf::SNAKE_ABI_VERSION, 26);
         assert_eq!(size_of::<bpf_intf::snake_callback_timing>(), 520);
         assert_eq!(offset_of!(bpf_intf::snake_callback_timing, total_ns), 0);
         assert_eq!(offset_of!(bpf_intf::snake_callback_timing, buckets), 8);
@@ -5469,7 +5792,7 @@ scope = "task_cell"
         )
         .unwrap()
         .unwrap();
-        let encoded = encode_queue_topology(&topology).unwrap();
+        let encoded = encode_queue_topology(&topology, 7).unwrap();
 
         assert_eq!(encoded.header.mode, bpf_intf::SNAKE_QUEUE_MODE_CELL);
         assert_eq!(encoded.header.nr_cells, 2);
@@ -5521,7 +5844,7 @@ scope = "task_cell"
         )
         .unwrap()
         .unwrap();
-        let encoded = encode_queue_topology(&topology).unwrap();
+        let encoded = encode_queue_topology(&topology, 7).unwrap();
 
         assert_eq!(encoded.header.nr_cpus, 2);
         assert_eq!(encoded.cpu_queues[0].valid, 0);
@@ -5549,7 +5872,7 @@ scope = "task_allowed"
         )
         .unwrap()
         .unwrap();
-        let encoded = encode_queue_topology(&topology).unwrap();
+        let encoded = encode_queue_topology(&topology, 7).unwrap();
 
         assert_eq!(encoded.header.mode, bpf_intf::SNAKE_QUEUE_MODE_GLOBAL);
         assert_eq!(encoded.header.nr_cells, 0);
@@ -5848,7 +6171,9 @@ scope = "task_cell"
             fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bpf/queue.h"))
                 .unwrap();
         let resolver = queue
-            .split_once("queue_task_cell(struct task_struct *p, u32 *indexp)")
+            .split_once(
+                "queue_task_cell(const struct snake_ladder_ctx *ctx, struct task_struct *p,",
+            )
             .and_then(|(_, body)| body.split_once("queue_task_cell_index("))
             .map(|(body, _)| body)
             .expect("task-cell resolver should have one definition");
@@ -5871,6 +6196,21 @@ scope = "task_cell"
         assert_eq!(ladder.matches("queue_task_cell_id(").count(), 2);
         assert!(clear.contains("READ_ONCE(annotation->cell_epoch)"));
         assert!(clear.contains("READ_ONCE(cell->slot_epoch)"));
+    }
+
+    #[test]
+    fn queue_runtime_rebases_vtime_when_a_cell_slot_is_rebound() {
+        let intf = include_str!("bpf/intf.h");
+        let task_state = include_str!("bpf/task_state.h");
+        let queue_vtime = include_str!("bpf/queue_vtime.h");
+
+        assert!(intf.contains("u64 topology_generation;"));
+        assert!(task_state.contains("topology_generation;"));
+        assert!(task_state.contains("cell_external_id;"));
+        assert!(task_state.contains("cell_epoch;"));
+        assert!(queue_vtime.contains("runtime->cell_external_id != external_id"));
+        assert!(queue_vtime.contains("runtime->cell_epoch != slot_epoch"));
+        assert!(queue_vtime.contains("runtime->vruntime = new_now;"));
     }
 
     #[test]

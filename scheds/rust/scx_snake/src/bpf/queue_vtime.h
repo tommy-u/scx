@@ -44,14 +44,14 @@ static __always_inline u64 queue_translate_vruntime(u64 vruntime, u64 old_now,
 	return new_now + lag;
 }
 
-static __noinline void queue_clear_rehome_if_cell(struct task_struct *p,
-						  u32 cell_index)
+static __noinline void queue_clear_rehome_if_cell(
+	const struct snake_ladder_ctx *ctx, struct task_struct *p, u32 cell_index)
 {
 	struct snake_queue_cell *cell;
 	struct snake_task_cell	*annotation;
 	u32			 external_id, slot_epoch;
 
-	cell = queue_cell(cell_index);
+	cell = queue_cell(ctx, cell_index);
 	if (!cell)
 		return;
 	external_id = READ_ONCE(cell->external_id);
@@ -73,9 +73,12 @@ queue_fairness_prepare_task_for_cell(struct snake_ladder_ctx *ctx,
 				     const struct snake_fine_timing_ctx *fine)
 {
 	struct snake_task_runtime *runtime;
+	struct snake_queue_header *header;
+	struct snake_queue_cell   *cell;
 	struct snake_vtime_domain *old_domain, *new_domain;
 	struct snake_task_cell	  *annotation;
 	u64			   old_now, new_now, stage_started_at;
+	u32			   external_id, slot_epoch;
 
 	stage_started_at = fine_timing_start(fine);
 	runtime		 = fairness_task(ctx, p, false);
@@ -84,18 +87,32 @@ queue_fairness_prepare_task_for_cell(struct snake_ladder_ctx *ctx,
 	if (!runtime)
 		return NULL;
 	stage_started_at = fine_timing_start(fine);
+	header		 = queue_config(ctx);
+	cell		 = queue_cell(ctx, cell_index);
 	new_domain	 = queue_cell_domain(cell_index);
-	if (!new_domain) {
+	if (!header || !cell || !new_domain) {
 		fine_timing_finish(fine,
 				   SNAKE_FINE_TIMING_ENQUEUE_PREPARE_CELL_CLOCK,
 				   stage_started_at);
 		fairness_accounting_error(ctx);
 		return NULL;
 	}
+	external_id = READ_ONCE(cell->external_id);
+	slot_epoch  = READ_ONCE(cell->slot_epoch);
+	new_now     = queue_domain_now(new_domain);
 	if (!runtime->cell_initialized) {
-		runtime->vruntime	  = queue_domain_now(new_domain);
+		runtime->vruntime	  = new_now;
 		runtime->cell_index	  = cell_index;
 		runtime->cell_initialized = 1;
+	} else if (runtime->topology_generation !=
+		   header->topology_generation) {
+		if (runtime->cell_index != cell_index ||
+		    runtime->cell_external_id != external_id ||
+		    runtime->cell_epoch != slot_epoch) {
+			runtime->vruntime = new_now;
+			cell_stat_inc(ctx, cell_index,
+				      SNAKE_CELL_STAT_CLOCK_TRANSITIONS);
+		}
 	} else if (runtime->cell_index != cell_index) {
 		old_domain = queue_cell_domain(runtime->cell_index);
 		if (!old_domain) {
@@ -107,13 +124,21 @@ queue_fairness_prepare_task_for_cell(struct snake_ladder_ctx *ctx,
 			return NULL;
 		}
 		old_now		  = queue_domain_now(old_domain);
-		new_now		  = queue_domain_now(new_domain);
 		runtime->vruntime = queue_translate_vruntime(runtime->vruntime,
 							     old_now, new_now);
 		runtime->cell_index = cell_index;
 		cell_stat_inc(ctx, cell_index,
 			      SNAKE_CELL_STAT_CLOCK_TRANSITIONS);
+	} else if (runtime->cell_external_id != external_id ||
+		   runtime->cell_epoch != slot_epoch) {
+		runtime->vruntime = new_now;
+		cell_stat_inc(ctx, cell_index,
+			      SNAKE_CELL_STAT_CLOCK_TRANSITIONS);
 	}
+	runtime->cell_index		= cell_index;
+	runtime->cell_external_id	= external_id;
+	runtime->cell_epoch		= slot_epoch;
+	runtime->topology_generation = header->topology_generation;
 	fine_timing_finish(fine, SNAKE_FINE_TIMING_ENQUEUE_PREPARE_CELL_CLOCK,
 			   stage_started_at);
 	annotation = task_annotation(p);
@@ -128,7 +153,7 @@ static __always_inline struct snake_task_runtime *
 queue_fairness_prepare_task(struct snake_ladder_ctx *ctx, struct task_struct *p)
 {
 	return queue_fairness_prepare_task_for_cell(
-		ctx, p, queue_task_cell_index(p), true, NULL);
+		ctx, p, queue_task_cell_index(ctx, p), true, NULL);
 }
 
 static __always_inline struct snake_task_runtime *
@@ -180,7 +205,7 @@ queue_fairness_prepare_runnable(struct snake_ladder_ctx		   *ctx,
 		return queue_fairness_prepare_runnable_for_cell(
 			ctx, p, runtime->direct_cell_index, false, fine);
 	return queue_fairness_prepare_runnable_for_cell(
-		ctx, p, queue_task_cell_index(p), true, fine);
+		ctx, p, queue_task_cell_index(ctx, p), true, fine);
 }
 
 static __noinline void
@@ -201,13 +226,20 @@ queue_fairness_prepare_affinity(struct snake_ladder_ctx	  *ctx,
 				u32			   owner_cell_index)
 {
 	struct snake_vtime_domain *task_domain, *old_domain, *new_domain;
+	struct snake_queue_header *header;
+	struct snake_queue_cell   *owner;
 	u64			   minimum, task_now, old_now, new_now;
+	u32			   external_id, slot_epoch;
 
 	if (!runtime)
 		return -EINVAL;
+	header = queue_config(ctx);
+	owner = queue_cell(ctx, owner_cell_index);
 	new_domain = queue_cell_domain(owner_cell_index);
-	if (!new_domain)
+	if (!header || !owner || !new_domain)
 		return -EINVAL;
+	external_id = READ_ONCE(owner->external_id);
+	slot_epoch = READ_ONCE(owner->slot_epoch);
 	new_now = queue_domain_now(new_domain);
 	if (!runtime->affinity_initialized) {
 		task_domain = queue_cell_domain(runtime->cell_index);
@@ -218,6 +250,15 @@ queue_fairness_prepare_affinity(struct snake_ladder_ctx	  *ctx,
 			runtime->vruntime, task_now, new_now);
 		runtime->affinity_cell_index  = owner_cell_index;
 		runtime->affinity_initialized = 1;
+	} else if (runtime->affinity_topology_generation !=
+		   header->topology_generation) {
+		if (runtime->affinity_cell_index != owner_cell_index ||
+		    runtime->affinity_cell_external_id != external_id ||
+		    runtime->affinity_cell_epoch != slot_epoch) {
+			runtime->affinity_vruntime = new_now;
+			cell_stat_inc(ctx, owner_cell_index,
+				      SNAKE_CELL_STAT_CLOCK_TRANSITIONS);
+		}
 	} else if (runtime->affinity_cell_index != owner_cell_index) {
 		old_domain = queue_cell_domain(runtime->affinity_cell_index);
 		if (!old_domain)
@@ -228,7 +269,16 @@ queue_fairness_prepare_affinity(struct snake_ladder_ctx	  *ctx,
 		runtime->affinity_cell_index = owner_cell_index;
 		cell_stat_inc(ctx, owner_cell_index,
 			      SNAKE_CELL_STAT_CLOCK_TRANSITIONS);
+	} else if (runtime->affinity_cell_external_id != external_id ||
+		   runtime->affinity_cell_epoch != slot_epoch) {
+		runtime->affinity_vruntime = new_now;
+		cell_stat_inc(ctx, owner_cell_index,
+			      SNAKE_CELL_STAT_CLOCK_TRANSITIONS);
 	}
+	runtime->affinity_cell_index = owner_cell_index;
+	runtime->affinity_cell_external_id = external_id;
+	runtime->affinity_cell_epoch = slot_epoch;
+	runtime->affinity_topology_generation = header->topology_generation;
 	minimum = new_now - SNAKE_VTIME_SLICE_NS;
 	if (time_before(runtime->affinity_vruntime, minimum)) {
 		runtime->affinity_vruntime = minimum;
@@ -237,9 +287,9 @@ queue_fairness_prepare_affinity(struct snake_ladder_ctx	  *ctx,
 	return 0;
 }
 
-static __always_inline bool
-queue_fairness_rehome_pending(struct task_struct	*p,
-			      struct snake_task_runtime *runtime)
+static __always_inline bool queue_fairness_rehome_pending(
+	const struct snake_ladder_ctx *ctx, struct task_struct *p,
+	struct snake_task_runtime *runtime)
 {
 	struct snake_task_cell *annotation;
 
@@ -248,7 +298,7 @@ queue_fairness_rehome_pending(struct task_struct	*p,
 	annotation = task_annotation(p);
 	if (annotation && READ_ONCE(annotation->needs_rehome))
 		return true;
-	return queue_task_cell_index(p) != runtime->cell_index;
+	return queue_task_cell_index(ctx, p) != runtime->cell_index;
 }
 
 static __always_inline bool
@@ -273,7 +323,7 @@ queue_fairness_replenish(struct snake_ladder_ctx *ctx,
 		stat_inc(ctx, SNAKE_STAT_QUEUE_BORROW_YIELDS);
 		return 0;
 	}
-	if (queue_fairness_rehome_pending(prev, runtime)) {
+	if (queue_fairness_rehome_pending(ctx, prev, runtime)) {
 		stat_inc(ctx, SNAKE_STAT_QUEUE_REHOME_PREEMPTIONS);
 		return 0;
 	}
@@ -312,11 +362,11 @@ static __always_inline int queue_fairness_running(struct snake_ladder_ctx *ctx,
 			ctx, p, direct_cell_index, false, NULL);
 		if (!runtime)
 			return -EINVAL;
-		queue_clear_rehome_if_cell(p, direct_cell_index);
+		queue_clear_rehome_if_cell(ctx, p, direct_cell_index);
 		runtime->direct_cell_valid = 0;
 	} else if (runtime && runtime->cell_initialized &&
 		   runtime->queue_class == SNAKE_QUEUE_CLASS_NORMAL &&
-		   queue_task_cell_index(p) != runtime->cell_index) {
+		   queue_task_cell_index(ctx, p) != runtime->cell_index) {
 		/* Charge an already-queued execution to the cell which queued it. */
 		stat_inc(ctx, SNAKE_STAT_QUEUE_STALE_REHOME_RUNS);
 	} else {
@@ -325,7 +375,7 @@ static __always_inline int queue_fairness_running(struct snake_ladder_ctx *ctx,
 			return -EINVAL;
 	}
 	cpu  = bpf_get_smp_processor_id();
-	cpuq = queue_cpu(cpu);
+	cpuq = queue_cpu(ctx, cpu);
 	if (!cpuq)
 		return -EINVAL;
 	domain = queue_cell_domain(runtime->cell_index);

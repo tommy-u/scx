@@ -65,6 +65,7 @@ pub trait PolicyBackend {
     fn wait_for_slot_quiescent(&mut self, slot: u32) -> Result<()>;
     fn write_ladder(&mut self, slot: u32, generation: u64, policy: &CompiledPolicy) -> Result<()>;
     fn write_mask_tables(&mut self, slot: u32, tables: &[ResolvedMaskTable]) -> Result<()>;
+    fn write_queue_topology(&mut self, slot: u32, generation: u64) -> Result<()>;
     fn prepare_ladder(&mut self, slot: u32) -> Result<()>;
     fn clear_stats(&mut self, slot: u32) -> Result<()>;
     fn publish_ladder(&mut self, slot: u32) -> Result<()>;
@@ -121,6 +122,19 @@ where
 {
     let compiled = policy::compile_policy(&source).context("compiling replacement policy")?;
     let tables = resolve_tables(&compiled).context("resolving replacement policy mask tables")?;
+    activate_compiled_policy(current, source, compiled, &tables, backend)
+}
+
+pub fn activate_compiled_policy<B>(
+    current: &mut RuntimePolicy,
+    source: String,
+    compiled: CompiledPolicy,
+    tables: &[ResolvedMaskTable],
+    backend: &mut B,
+) -> Result<PolicyUpdateResponse>
+where
+    B: PolicyBackend,
+{
     let generation = current
         .generation
         .checked_add(1)
@@ -136,7 +150,8 @@ where
 
     backend.wait_for_slot_quiescent(slot)?;
     backend.write_ladder(slot, generation, &candidate.compiled)?;
-    backend.write_mask_tables(slot, &tables)?;
+    backend.write_mask_tables(slot, tables)?;
+    backend.write_queue_topology(slot, generation)?;
     backend.prepare_ladder(slot)?;
     backend.clear_stats(slot)?;
     backend.publish_ladder(slot)?;
@@ -159,6 +174,7 @@ where
     backend.wait_for_slot_quiescent(slot)?;
     backend.write_ladder(slot, current.generation, &current.compiled)?;
     backend.write_mask_tables(slot, tables)?;
+    backend.write_queue_topology(slot, current.generation)?;
     backend.prepare_ladder(slot)?;
     backend.clear_stats(slot)?;
     backend.publish_ladder(slot)?;
@@ -306,6 +322,10 @@ scope = "task_allowed"
             self.record("write_masks")
         }
 
+        fn write_queue_topology(&mut self, _slot: u32, _generation: u64) -> Result<()> {
+            self.record("write_topology")
+        }
+
         fn prepare_ladder(&mut self, _slot: u32) -> Result<()> {
             self.record("prepare")
         }
@@ -345,6 +365,7 @@ scope = "task_allowed"
                 "wait",
                 "write_ladder",
                 "write_masks",
+                "write_topology",
                 "prepare",
                 "clear_stats",
                 "publish"
@@ -384,6 +405,7 @@ scope = "task_allowed"
             "wait",
             "write_ladder",
             "write_masks",
+            "write_topology",
             "prepare",
             "clear_stats",
             "publish",
@@ -423,6 +445,7 @@ scope = "task_allowed"
                 "wait",
                 "write_ladder",
                 "write_masks",
+                "write_topology",
                 "prepare",
                 "clear_stats",
                 "publish"
@@ -442,6 +465,7 @@ scope = "task_allowed"
             "wait",
             "write_ladder",
             "write_masks",
+            "write_topology",
             "prepare",
             "clear_stats",
             "publish",

@@ -13,10 +13,9 @@ queue_pick_random_idle_cpu(const struct cpumask *candidates, bool whole_core)
 	return cpu_pick_random_idle(candidates, whole_core);
 }
 
-static __always_inline s32 queue_pick_task_cell_cpu(struct task_struct *p,
-						    u32 kind, bool whole_core,
-						    bool random,
-						    u32 *cell_indexp)
+static __always_inline s32 queue_pick_task_cell_cpu(
+	const struct snake_ladder_ctx *ctx, struct task_struct *p, u32 kind,
+	bool whole_core, bool random, u32 *cell_indexp)
 {
 	struct snake_task_runtime *runtime;
 	struct bpf_cpumask	  *scratch;
@@ -25,8 +24,8 @@ static __always_inline s32 queue_pick_task_cell_cpu(struct task_struct *p,
 	s32			   selected;
 
 	runtime	   = task_state_lookup(p);
-	cell_index = queue_task_cell_index(p);
-	source	   = queue_cell_mask(cell_index, kind);
+	cell_index = queue_task_cell_index(ctx, p);
+	source	   = queue_cell_mask(ctx, cell_index, kind);
 	if (!runtime || !source)
 		return -EINVAL;
 	scratch = runtime->queue_cpumask;

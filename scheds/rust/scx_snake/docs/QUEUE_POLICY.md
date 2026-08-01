@@ -1,7 +1,7 @@
 # Queue Policies
 
-Queue policies replace Snake's default global VTIME storage with an
-attachment-time custom-DSQ topology. The global `llc` layout shards one fairness
+Queue policies replace Snake's default global VTIME storage with a fixed-pool
+custom-DSQ topology. The global `llc` layout shards one fairness
 domain by cache locality; `cell` and `cell_llc` add resource allocation to task
 cell annotations. All queue policies are experimental, require `--fairness
 vtime`, and leave FIFO as the scheduler default.
@@ -286,16 +286,22 @@ idle capacity.
 
 ## Live updates
 
-Queue topology is attachment-time state because custom DSQs cannot be removed
-and recreated as part of an atomic ladder publication. A live policy update
-must resolve to the exact same layout, cells, weights, primary allocation,
-borrowable masks, normal queues, and CPU queues. For `llc`, CPU-to-local routes
-and normal consumer masks must also match. Restart Snake to change any of them.
+Custom DSQs come from a fixed pool created at attachment and are never removed.
+An explicit live policy update must resolve to the exact same layout, cells,
+weights, primary allocation, borrowable masks, normal queues, and CPU queues.
+For `llc`, CPU-to-local routes and normal consumer masks must also match. Restart
+Snake to change any of them through policy replacement.
+
+Managed-cell reconciliation may rebind that fixed pool. It first diverts new
+enqueues to CPU-local DSQs and waits for custom queues to empty, then stages the
+new descriptors and masks beside the policy in the inactive bank. One slot
+switch publishes the complete configuration. The old bank is retained until its
+callback readers quiesce, after which task membership is reconciled.
 
 Callback ladders are part of the double-buffered policy generation. Cell
 dispatch sources may be reordered, a full source pair may switch to or from
 `min_vtime`, and a previously unused cell target/source pair may be added when
-the attachment-time topology already contains its queues. The cell enqueue
+the active topology already contains its queues. The cell enqueue
 ladder must still keep `affinity` terminal. The `llc` layout retains its
 validated peek/consume source set and terminal CPU enqueue escape. A live update
 may not remove an active enqueue target or represented dispatch class: work

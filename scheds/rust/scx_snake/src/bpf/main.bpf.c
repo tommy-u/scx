@@ -14,6 +14,12 @@ char _license[] SEC("license") = "GPL";
 UEI_DEFINE(uei);
 
 u32				   staging_ladder_slot;
+u32				   staging_ladder_prepare_stage;
+s32				   staging_ladder_prepare_error;
+u32				   queue_topology_prepare_stage;
+s32				   queue_topology_prepare_error;
+u32				   queue_topology_prepare_detail;
+u32				   queue_draining;
 u32				   callback_timing_sample_rate;
 u64				   select_fine_timing_session_id;
 u64				   dispatch_fine_timing_session_id;
@@ -69,17 +75,64 @@ int prepare_ladder(void *ctx)
 	ladder = bpf_map_lookup_elem(&compiled_ladders, &slot);
 	if (!ladder)
 		return -EINVAL;
+	WRITE_ONCE(staging_ladder_prepare_stage, 1);
 	ret = validate_compiled_ladder(ladder);
-	if (ret)
+	if (ret) {
+		WRITE_ONCE(staging_ladder_prepare_error, ret);
 		return ret;
+	}
 
 	nr_cpu_ids = scx_bpf_nr_cpu_ids();
-	ret	   = validate_queue_topology();
-	if (ret)
+	WRITE_ONCE(staging_ladder_prepare_stage, 2);
+	ret	   = prepare_queue_topology(slot);
+	if (ret) {
+		WRITE_ONCE(staging_ladder_prepare_error, ret);
 		return ret;
-	if (queue_topology_enabled() && !fairness_is_vtime())
+	}
+	if (queue_topology_enabled() && !fairness_is_vtime()) {
+		WRITE_ONCE(staging_ladder_prepare_error, -EINVAL);
 		return -EINVAL;
-	return prepare_mask_tables(slot, ladder);
+	}
+	WRITE_ONCE(staging_ladder_prepare_stage, 3);
+	ret = prepare_mask_tables(slot, ladder);
+	WRITE_ONCE(staging_ladder_prepare_error, ret);
+	if (!ret)
+		WRITE_ONCE(staging_ladder_prepare_stage, 0);
+	return ret;
+}
+
+/* Report when every reusable custom DSQ is empty during a topology change. */
+SEC("syscall")
+int queue_drain_ready(void *ctx)
+{
+	struct snake_queue_header *header;
+	s32			    active;
+	u32			    i;
+
+	(void)ctx;
+	if (!queue_transition_active())
+		return -EINVAL;
+	active = active_ladder_slot();
+	if (active < 0 || active >= SNAKE_LADDER_SLOTS)
+		return -EINVAL;
+	header = queue_config_slot(active);
+	if (!header || header->mode == SNAKE_QUEUE_MODE_NONE)
+		return 0;
+	bpf_for(i, 0, SNAKE_MAX_CPUS)
+	{
+		if (i >= nr_cpu_ids)
+			break;
+		if (dsq_nr_queued(dsq_affinity(i)) > 0)
+			return -EAGAIN;
+	}
+	bpf_for(i, 0, SNAKE_MAX_NORMAL_QUEUES)
+	{
+		if (i >= header->nr_cpus)
+			break;
+		if (dsq_nr_queued(dsq_normal(i)) > 0)
+			return -EAGAIN;
+	}
+	return 0;
 }
 
 /* Run the policy ladder, then use its affinity-safe exhaustion fallback. */
@@ -125,6 +178,8 @@ s32 BPF_STRUCT_OPS(snake_select_cpu, struct task_struct *p, s32 prev_cpu,
 				  fine_stage_started_at);
 	if (cpu >= 0) {
 		if (queue_topology_enabled()) {
+			if (queue_transition_active())
+				goto direct_dispatch;
 			if (dispatch_flags & SNAKE_SELECT_F_BORROWED) {
 				fine_stage_started_at =
 					fine_timing_select_start(
@@ -216,6 +271,8 @@ s32 BPF_STRUCT_OPS(snake_select_cpu, struct task_struct *p, s32 prev_cpu,
 					  fine_stage_started_at);
 		goto out;
 	}
+	if (queue_topology_enabled() && queue_transition_active())
+		goto direct_dispatch;
 	ret = queue_topology_enabled() ?
 		      queue_fairness_select_cpu(&ladder_ctx, p, cpu) :
 		      0;
@@ -467,6 +524,7 @@ s32 BPF_STRUCT_OPS(snake_init_task, struct task_struct *p,
 s32 BPF_STRUCT_OPS_SLEEPABLE(snake_init)
 {
 	struct snake_ladder_ctx ladder_ctx = {};
+	s32			active;
 	int			ret;
 
 	nr_cpu_ids = scx_bpf_nr_cpu_ids();
@@ -477,7 +535,10 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(snake_init)
 			ret);
 		return ret;
 	}
-	ret = validate_queue_topology();
+	active = active_ladder_slot();
+	if (active < 0 || active >= SNAKE_LADDER_SLOTS)
+		return -EINVAL;
+	ret = validate_queue_topology(active);
 	if (ret) {
 		scx_bpf_error("snake queue topology validation failed: %d",
 			      ret);
@@ -492,19 +553,7 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(snake_init)
 		scx_bpf_error("snake fairness initialization failed: %d", ret);
 		return ret;
 	}
-	ret = queue_init_cell_masks();
-	if (ret) {
-		scx_bpf_error("snake queue mask initialization failed: %d",
-			      ret);
-		return ret;
-	}
-	ret = queue_init_normal_masks();
-	if (ret) {
-		scx_bpf_error("snake normal queue mask initialization failed: %d",
-			      ret);
-		return ret;
-	}
-	ret = create_queue_topology_dsqs();
+	ret = create_queue_topology_dsqs(active);
 	if (ret) {
 		scx_bpf_error("snake queue DSQ creation failed: %d", ret);
 		return ret;

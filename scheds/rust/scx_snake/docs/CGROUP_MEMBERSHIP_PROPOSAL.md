@@ -88,8 +88,8 @@ ladders but must not change membership paths or assignments.
 
 ## Managed Direct Children
 
-Snake can synthesize the static cells and membership assignments at attachment
-instead of listing them individually:
+Snake can synthesize and maintain cells and membership assignments instead of
+listing them individually:
 
 ```toml
 [managed_cells]
@@ -104,10 +104,12 @@ layout = "cell_llc"
 
 `parent` is an absolute cgroup path. A path already rooted beneath
 `/sys/fs/cgroup` is also accepted. Each non-excluded direct child is assigned a
-deterministic cell ID, ordered by child name, and its
-`cpuset.cpus.effective` mask becomes that cell's CPU claim. Snake fails attach
-if the effective mask is missing, invalid, or empty, or if the number of
-children exceeds `max_children`.
+cell ID and its `cpuset.cpus.effective` mask becomes that cell's CPU claim.
+Existing children retain their IDs across reconciliations. New children take the
+lowest free ID, and slot reuse or same-name inode replacement advances the slot
+epoch. A child beyond `max_children` remains in cell 0 and is retried when a slot
+becomes free. Snake rejects a candidate whose effective mask is missing,
+invalid, or empty.
 
 Only direct children create cells. All nested cgroups remain flat within their
 direct child's cell, and the membership walker applies the same cell reference
@@ -115,21 +117,22 @@ to their threads. A nested cgroup's narrower effective cpuset is still enforced
 through each task's kernel allowed-CPU mask; it does not create a nested cell or
 another queue domain.
 
-Managed discovery is currently an attachment-time snapshot. New direct
-children, direct-child cpuset changes, and cell deletion require restarting
-Snake. The existing membership reconciliation still handles thread creation,
-exit, and movement within the synthesized child assignments.
+Managed discovery runs at `reconcile_ms`. For a changed child set or effective
+cpuset, userspace resolves a complete candidate, drains the fixed custom-DSQ
+pool, prepares policy and topology in the inactive configuration bank, and
+publishes the bank atomically. The active bank remains unchanged if preparation
+fails. Membership is updated only after old-bank readers have quiesced.
 
-Discovery pins each managed child's cgroup inode. If a managed direct child is
-deleted or replaced under the same name, reconciliation fails closed and Snake
-detaches instead of applying the old CPU plan and slot epoch to a new cgroup.
-Restarting Snake discovers the replacement and builds a fresh plan.
+Discovery records each managed child's cgroup inode. Deletion removes its cell;
+same-name replacement is a new identity even if it reuses the numeric slot.
+Both paths advance the topology generation, and reuse advances the slot epoch so
+sleeping tasks cannot carry old VTIME state into the replacement cell.
 
 ## Semantics
 
 - A managed cell assignment creates the task-storage record consumed by BPF.
-- Static policy assignments use slot epoch zero. A dynamic cell controller can
-  provide nonzero epochs without changing the walker.
+- Static policy assignments use slot epoch zero. Managed cells use nonzero slot
+  epochs and increment them whenever a slot is rebound.
 - A task outside every assigned child is `NoCell`. It has no managed record and
   therefore schedules in synthetic cell 0.
 - `membership_no_cell_runs` counts actual running callbacks for this policy;

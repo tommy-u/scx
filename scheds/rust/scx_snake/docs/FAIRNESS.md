@@ -313,7 +313,7 @@ create a separate fairness domain or entitlement; fairness is global per task.
 ## Data ownership
 
 Userspace supplies startup mode, compiled placement and callback ladders,
-resolved CPU masks, attachment-time queue topology, and live task-to-cell
+resolved CPU masks, active-bank queue topology, and live task-to-cell
 annotations. BPF reads the kernel task weight and runtime, maintains VTIME or
 EEVDF clocks and per-task state, and performs ordering, accounting, and dispatch
 decisions. Cell meanings remain entirely in userspace.

@@ -6,6 +6,7 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
+use log::warn;
 
 use crate::policy::{CompiledPolicy, MembershipPolicy, MAX_CELL_IDS};
 
@@ -60,22 +61,71 @@ fn resolve_managed_cells_at(policy: &mut CompiledPolicy, cgroup_root: &Path) -> 
         }
     }
     children.sort_by(|left, right| left.0.cmp(&right.0));
-    if children.len() > managed.max_children {
-        bail!(
-            "managed cell parent {} has {} managed children; maximum is {}",
-            parent.display(),
-            children.len(),
-            managed.max_children
-        );
-    }
+    let previous_assignments = policy
+        .membership
+        .as_ref()
+        .map(|membership| membership.assignments.clone())
+        .unwrap_or_default();
+    let previous_inodes = policy
+        .membership
+        .as_ref()
+        .and_then(|membership| membership.child_inodes.clone())
+        .unwrap_or_default();
 
     let mut cells = BTreeMap::new();
     let mut weights = BTreeMap::new();
-    let mut epochs = BTreeMap::new();
+    let mut epochs = policy.cell_slot_epochs.clone();
     let mut assignments = BTreeMap::new();
     let mut child_inodes = BTreeMap::new();
-    for (index, (name, path, inode)) in children.into_iter().enumerate() {
-        let cell_id = u32::try_from(index + 1).context("managed cell ID overflow")?;
+    let mut used_ids = BTreeSet::new();
+    let mut retained_ids = BTreeMap::new();
+    for (name, _, _) in &children {
+        let Some(cell_id) = previous_assignments.get(name).copied() else {
+            continue;
+        };
+        if cell_id > 0
+            && usize::try_from(cell_id).is_ok_and(|id| id <= managed.max_children)
+            && used_ids.insert(cell_id)
+        {
+            retained_ids.insert(name.clone(), cell_id);
+        }
+    }
+    for (name, path, inode) in children {
+        let previous_id = retained_ids.get(&name).copied();
+        let cell_id = match previous_id {
+            Some(cell_id) => {
+                if previous_inodes.get(&name).copied() != Some(inode) {
+                    let next = epochs
+                        .get(&cell_id)
+                        .copied()
+                        .unwrap_or(0)
+                        .checked_add(1)
+                        .context("managed cell slot epoch overflow")?;
+                    epochs.insert(cell_id, next);
+                }
+                cell_id
+            }
+            None => {
+                let Some(cell_id) = (1..=u32::try_from(managed.max_children)?)
+                    .find(|cell_id| !used_ids.contains(cell_id))
+                else {
+                    warn!(
+                        "managed child {name} remains in cell 0: all {} managed cell slots are occupied",
+                        managed.max_children
+                    );
+                    continue;
+                };
+                let next = epochs
+                    .get(&cell_id)
+                    .copied()
+                    .unwrap_or(0)
+                    .checked_add(1)
+                    .context("managed cell slot epoch overflow")?;
+                epochs.insert(cell_id, next);
+                cell_id
+            }
+        };
+        used_ids.insert(cell_id);
         let effective_path = path.join("cpuset.cpus.effective");
         let cpulist = fs::read_to_string(&effective_path)
             .with_context(|| format!("reading {}", effective_path.display()))?;
@@ -106,7 +156,6 @@ fn resolve_managed_cells_at(policy: &mut CompiledPolicy, cgroup_root: &Path) -> 
         }
         cells.insert(cell_id, cpus);
         weights.insert(cell_id, 1);
-        epochs.insert(cell_id, 1);
         child_inodes.insert(name.clone(), inode);
         assignments.insert(name, cell_id);
     }
@@ -252,7 +301,7 @@ scope = "task_cell"
     }
 
     #[test]
-    fn discovery_rejects_capacity_overflow_and_empty_effective_cpusets() {
+    fn discovery_leaves_capacity_overflow_unassigned_and_rejects_empty_cpusets() {
         let root = temporary_root("invalid");
         let parent = root.join("workloads");
         fs::create_dir_all(&parent).unwrap();
@@ -260,11 +309,11 @@ scope = "task_cell"
         add_child(&parent, "beta", "1\n");
         let mut too_many = policy("/workloads", 1, &[]);
 
-        let error = resolve_managed_cells_at(&mut too_many, &root)
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("2 managed children"), "{error}");
-        assert!(error.contains("maximum is 1"), "{error}");
+        resolve_managed_cells_at(&mut too_many, &root).unwrap();
+        assert_eq!(
+            too_many.membership.unwrap().assignments,
+            BTreeMap::from([("alpha".into(), 1)])
+        );
 
         fs::remove_dir_all(parent.join("beta")).unwrap();
         fs::write(parent.join("alpha/cpuset.cpus.effective"), "\n").unwrap();
@@ -273,6 +322,112 @@ scope = "task_cell"
             .unwrap_err()
             .to_string();
         assert!(error.contains("empty effective CPU set"), "{error}");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn repeated_discovery_preserves_slots_and_epochs_across_churn() {
+        let root = temporary_root("churn");
+        let parent = root.join("workloads");
+        fs::create_dir_all(&parent).unwrap();
+        add_child(&parent, "alpha", "0-1\n");
+        add_child(&parent, "beta", "2-3\n");
+        let mut policy = policy("/workloads", 2, &[]);
+
+        resolve_managed_cells_at(&mut policy, &root).unwrap();
+        assert_eq!(
+            policy.membership.as_ref().unwrap().assignments,
+            BTreeMap::from([("alpha".into(), 1), ("beta".into(), 2)])
+        );
+
+        fs::remove_dir_all(parent.join("alpha")).unwrap();
+        resolve_managed_cells_at(&mut policy, &root).unwrap();
+        assert_eq!(
+            policy.membership.as_ref().unwrap().assignments,
+            BTreeMap::from([("beta".into(), 2)])
+        );
+        assert_eq!(policy.cell_slot_epochs, BTreeMap::from([(1, 1), (2, 1)]));
+
+        add_child(&parent, "gamma", "4-5\n");
+        resolve_managed_cells_at(&mut policy, &root).unwrap();
+        assert_eq!(
+            policy.membership.as_ref().unwrap().assignments,
+            BTreeMap::from([("beta".into(), 2), ("gamma".into(), 1)])
+        );
+        assert_eq!(policy.cell_slot_epochs, BTreeMap::from([(1, 2), (2, 1)]));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn same_name_replacement_advances_the_slot_epoch() {
+        let root = temporary_root("replacement");
+        let parent = root.join("workloads");
+        fs::create_dir_all(&parent).unwrap();
+        add_child(&parent, "alpha", "0-1\n");
+        let mut policy = policy("/workloads", 1, &[]);
+
+        resolve_managed_cells_at(&mut policy, &root).unwrap();
+        let old_inode = policy
+            .membership
+            .as_ref()
+            .unwrap()
+            .child_inodes
+            .as_ref()
+            .unwrap()["alpha"];
+
+        fs::remove_dir_all(parent.join("alpha")).unwrap();
+        add_child(&parent, "replacement", "2-3\n");
+        fs::rename(parent.join("replacement"), parent.join("alpha")).unwrap();
+        resolve_managed_cells_at(&mut policy, &root).unwrap();
+
+        let membership = policy.membership.as_ref().unwrap();
+        assert_ne!(
+            membership.child_inodes.as_ref().unwrap()["alpha"],
+            old_inode
+        );
+        assert_eq!(membership.assignments["alpha"], 1);
+        assert_eq!(policy.cell_slot_epochs[&1], 2);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_new_earlier_name_cannot_renumber_an_existing_child() {
+        let root = temporary_root("stable-order");
+        let parent = root.join("workloads");
+        fs::create_dir_all(&parent).unwrap();
+        add_child(&parent, "beta", "2-3\n");
+        let mut policy = policy("/workloads", 2, &[]);
+        resolve_managed_cells_at(&mut policy, &root).unwrap();
+        assert_eq!(policy.membership.as_ref().unwrap().assignments["beta"], 1);
+
+        add_child(&parent, "alpha", "0-1\n");
+        resolve_managed_cells_at(&mut policy, &root).unwrap();
+
+        assert_eq!(
+            policy.membership.as_ref().unwrap().assignments,
+            BTreeMap::from([("alpha".into(), 2), ("beta".into(), 1)])
+        );
+        assert_eq!(policy.cell_slot_epochs, BTreeMap::from([(1, 1), (2, 1)]));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn excess_new_children_remain_unassigned_in_cell_zero() {
+        let root = temporary_root("overflow");
+        let parent = root.join("workloads");
+        fs::create_dir_all(&parent).unwrap();
+        add_child(&parent, "alpha", "0\n");
+        let mut policy = policy("/workloads", 1, &[]);
+        resolve_managed_cells_at(&mut policy, &root).unwrap();
+
+        add_child(&parent, "beta", "1\n");
+        resolve_managed_cells_at(&mut policy, &root).unwrap();
+
+        assert_eq!(
+            policy.membership.as_ref().unwrap().assignments,
+            BTreeMap::from([("alpha".into(), 1)])
+        );
+        assert!(!policy.cells.values().any(|cpus| cpus.contains(&1)));
         fs::remove_dir_all(root).unwrap();
     }
 }
