@@ -18,6 +18,10 @@ const dsqMetricRows = document.querySelector("#dsqMetricRows");
 const probeManifestRows = document.querySelector("#probeManifestRows");
 const downloadSnapshotButton = document.querySelector("#downloadSnapshot");
 const snapshotDownloadStatus = document.querySelector("#snapshotDownloadStatus");
+const callbackLatencyMetric = document.querySelector("#callbackLatencyMetric");
+const schedulerLatencyMetric = document.querySelector("#schedulerLatencyMetric");
+const softirqLatencyMetric = document.querySelector("#softirqLatencyMetric");
+const hardirqLatencyMetric = document.querySelector("#hardirqLatencyMetric");
 const sectionLinks = [...document.querySelectorAll("#sectionNavigation a[href^='#']")];
 const sectionTargets = sectionLinks
   .map((link) => ({ link, target: document.querySelector(link.hash) }))
@@ -40,6 +44,17 @@ const feedbackState = {
 let topology = null;
 let latestSnapshot = null;
 let sectionUpdatePending = false;
+const liveHistory = new MitosisCharts.History(600);
+const migrationHistory = new MitosisCharts.History(600);
+let previousMigrationCounts = null;
+
+const chartColors = {
+  blue: "#2878a6",
+  green: "#16795b",
+  orange: "#b86b25",
+  red: "#b44949",
+  purple: "#7557a6",
+};
 
 function setActiveSection(activeLink) {
   sectionLinks.forEach((link) => {
@@ -138,6 +153,177 @@ async function downloadDiagnosticSnapshot() {
   } finally {
     downloadSnapshotButton.disabled = false;
   }
+}
+
+function finiteAverage(rows, key) {
+  const values = (rows || []).map((row) => Number(row[key])).filter(Number.isFinite);
+  return values.length
+    ? values.reduce((sum, value) => sum + value, 0) / values.length
+    : Number.NaN;
+}
+
+function syncMetricSelect(select, rows, valueKey, label) {
+  const previous = select.value;
+  const options = (rows || []).map((row) => {
+    const option = document.createElement("option");
+    option.value = String(row[valueKey]);
+    option.textContent = label(row);
+    return option;
+  });
+  select.replaceChildren(...options);
+  if (options.some((option) => option.value === previous)) select.value = previous;
+}
+
+function durationLabel(upperNs) {
+  if (upperNs === Number.MAX_SAFE_INTEGER) return ">=104d";
+  if (upperNs < 1_000) return `${upperNs}ns`;
+  if (upperNs < 1_000_000) return `${rate.format(upperNs / 1_000)}us`;
+  if (upperNs < 1_000_000_000) return `${rate.format(upperNs / 1_000_000)}ms`;
+  return `${rate.format(upperNs / 1_000_000_000)}s`;
+}
+
+function histogramBuckets(counts) {
+  if (!Array.isArray(counts) || counts.length === 0) return [];
+  const first = counts.findIndex((count) => count > 0);
+  if (first < 0) return [];
+  let last = counts.length - 1;
+  while (last > first && counts[last] === 0) last -= 1;
+  return counts.slice(first, last + 1).map((value, offset) => {
+    const index = first + offset;
+    const upper = index >= 53 ? Number.MAX_SAFE_INTEGER : (2 ** (index + 1)) - 1;
+    return { label: durationLabel(upper), value };
+  });
+}
+
+function drawLatencyHistogram(canvasId, counts) {
+  MitosisCharts.drawHistogram(
+    document.querySelector(`#${canvasId}`),
+    histogramBuckets(counts),
+    { unit: "" },
+  );
+}
+
+function updateMigrationHistory(migrations, at) {
+  const current = new Map((migrations || []).map((row) => [
+    `${row.from_cpu}:${row.to_cpu}`,
+    row.count,
+  ]));
+  if (!topology || previousMigrationCounts == null) {
+    previousMigrationCounts = current;
+    return;
+  }
+  const cpuById = new Map(topology.cpus.map((cpu) => [cpu.cpu, cpu]));
+  const totals = { same_core: 0, same_llc: 0, cross_llc: 0, cross_numa: 0 };
+  for (const row of migrations || []) {
+    const source = cpuById.get(row.from_cpu);
+    const destination = cpuById.get(row.to_cpu);
+    if (!source || !destination) continue;
+    const delta = Math.max(0, row.count - (previousMigrationCounts.get(`${row.from_cpu}:${row.to_cpu}`) || 0));
+    if (source.package === destination.package && source.core === destination.core) {
+      totals.same_core += delta;
+    } else if (source.package === destination.package && source.llc === destination.llc) {
+      totals.same_llc += delta;
+    } else if (source.node === destination.node) {
+      totals.cross_llc += delta;
+    } else {
+      totals.cross_numa += delta;
+    }
+  }
+  previousMigrationCounts = current;
+  const total = Object.values(totals).reduce((sum, value) => sum + value, 0);
+  if (total > 0) {
+    migrationHistory.push(at, Object.fromEntries(
+      Object.entries(totals).map(([key, value]) => [key, value / total * 100]),
+    ));
+  }
+}
+
+function pushLiveHistory(snapshot) {
+  const at = Date.now();
+  const wakeup = snapshot.scheduler_timings.find(
+    (timing) => timing.metric === "wakeup_to_running",
+  );
+  liveHistory.push(at, {
+    task_cpu: finiteAverage(snapshot.cpu_runtime, "utilization_pct"),
+    irq_cpu: finiteAverage(snapshot.interrupt_cpu, "total_utilization_pct"),
+    callbacks: snapshot.counters.reduce((sum, counter) => sum + counter.rate_per_second, 0),
+    wakeup_p95_us: wakeup?.p95_ns == null ? Number.NaN : wakeup.p95_ns / 1_000,
+    dsq_average: snapshot.dsq_metrics.available
+      ? snapshot.dsq_metrics.depth_average
+      : Number.NaN,
+    dsq_max: snapshot.dsq_metrics.available
+      ? snapshot.dsq_metrics.depth_latest_max
+      : Number.NaN,
+    inspector_cpu: snapshot.inspector_bpf_cpu_equivalent_pct,
+    inspector_host: snapshot.inspector_bpf_host_capacity_pct,
+  });
+  updateMigrationHistory(snapshot.migrations, at);
+}
+
+function renderHistoryCharts() {
+  const line = MitosisCharts.drawLineChart;
+  line(document.querySelector("#cpuHistoryChart"), [
+    { label: "Task", color: chartColors.green, points: liveHistory.points("task_cpu") },
+    { label: "IRQ", color: chartColors.red, points: liveHistory.points("irq_cpu") },
+  ], { unit: "%", minY: 0, maxY: 100 });
+  line(document.querySelector("#callbackRateHistoryChart"), [
+    { label: "Callbacks", color: chartColors.blue, points: liveHistory.points("callbacks") },
+  ], { unit: "/s", minY: 0 });
+  line(document.querySelector("#latencyHistoryChart"), [
+    { label: "Wakeup p95", color: chartColors.orange, points: liveHistory.points("wakeup_p95_us") },
+  ], { unit: "us", minY: 0 });
+  line(document.querySelector("#dsqDepthHistoryChart"), [
+    { label: "Average", color: chartColors.blue, points: liveHistory.points("dsq_average") },
+    { label: "Latest max", color: chartColors.purple, points: liveHistory.points("dsq_max") },
+  ], { minY: 0 });
+  line(document.querySelector("#overheadHistoryChart"), [
+    { label: "One CPU", color: chartColors.red, points: liveHistory.points("inspector_cpu") },
+    { label: "Host", color: chartColors.blue, points: liveHistory.points("inspector_host") },
+  ], { unit: "%", minY: 0 });
+  line(document.querySelector("#migrationLocalityChart"), [
+    { label: "Same core", color: chartColors.green, points: migrationHistory.points("same_core") },
+    { label: "Same LLC", color: chartColors.blue, points: migrationHistory.points("same_llc") },
+    { label: "Cross LLC", color: chartColors.orange, points: migrationHistory.points("cross_llc") },
+    { label: "Cross NUMA", color: chartColors.red, points: migrationHistory.points("cross_numa") },
+  ], { unit: "%", minY: 0, maxY: 100 });
+}
+
+function renderLatencyCharts(snapshot) {
+  syncMetricSelect(callbackLatencyMetric, snapshot.callback_timings, "callback", (row) => row.callback);
+  syncMetricSelect(schedulerLatencyMetric, snapshot.scheduler_timings, "metric", (row) => row.metric.replaceAll("_", " "));
+  syncMetricSelect(softirqLatencyMetric, snapshot.softirqs, "vector", (row) => `${row.vector} ${row.name}`);
+  syncMetricSelect(hardirqLatencyMetric, snapshot.hardirqs.rows, "irq", (row) => `${row.irq} ${row.name || "unknown"}`);
+  const callback = snapshot.callback_timings.find((row) => String(row.callback) === callbackLatencyMetric.value);
+  const scheduler = snapshot.scheduler_timings.find((row) => String(row.metric) === schedulerLatencyMetric.value);
+  const softirq = snapshot.softirqs.find((row) => String(row.vector) === softirqLatencyMetric.value);
+  const hardirq = snapshot.hardirqs.rows.find((row) => String(row.irq) === hardirqLatencyMetric.value);
+  drawLatencyHistogram("callbackLatencyChart", callback?.buckets);
+  drawLatencyHistogram("schedulerLatencyChart", scheduler?.buckets);
+  drawLatencyHistogram("softirqLatencyChart", softirq?.timing_buckets);
+  drawLatencyHistogram("hardirqLatencyChart", hardirq?.timing_buckets);
+  drawLatencyHistogram("blockIoLatencyChart", snapshot.block_io.latency_buckets);
+  drawLatencyHistogram("dsqResidenceChart", snapshot.dsq_metrics.residence_buckets);
+}
+
+function renderCallbackCost(snapshot) {
+  const rates = new Map(snapshot.counters.map((counter) => [counter.name, counter.rate_per_second]));
+  const items = snapshot.callback_timings.map((timing, index) => ({
+    label: timing.callback,
+    value: timing.mean_ns == null ? Number.NaN : timing.mean_ns * (rates.get(timing.callback) || 0) / 1_000_000,
+    color: [chartColors.blue, chartColors.green, chartColors.orange, chartColors.red, chartColors.purple][index],
+  }));
+  MitosisCharts.drawBarChart(
+    document.querySelector("#callbackCostChart"),
+    items,
+    { unit: "ms/s" },
+  );
+}
+
+function renderVisualizations(snapshot, push = false) {
+  if (push) pushLiveHistory(snapshot);
+  renderHistoryCharts();
+  renderLatencyCharts(snapshot);
+  renderCallbackCost(snapshot);
 }
 
 function timingValue(value) {
@@ -382,6 +568,7 @@ function renderHostContext(context) {
   topology = context.topology;
   if (latestSnapshot) {
     renderCpuBreakdown(latestSnapshot);
+    renderVisualizations(latestSnapshot);
     MitosisHeatmap.update({ ...latestSnapshot, topology });
   }
 }
@@ -402,6 +589,7 @@ function render(snapshot) {
   renderInspectorBpfPrograms(snapshot);
   renderDsqMetrics(snapshot.dsq_metrics);
   renderProbeManifest(snapshot.probe_manifest || []);
+  renderVisualizations(snapshot, true);
   MitosisHeatmap.update({ ...snapshot, topology });
 
   const counters = new Map(snapshot.counters.map((counter) => [counter.name, counter]));
@@ -666,8 +854,19 @@ feedbackElements.close.addEventListener("click", closeFeedback);
 feedbackElements.copy.addEventListener("click", copyFeedback);
 feedbackElements.clear.addEventListener("click", clearFeedback);
 downloadSnapshotButton.addEventListener("click", downloadDiagnosticSnapshot);
+[
+  callbackLatencyMetric,
+  schedulerLatencyMetric,
+  softirqLatencyMetric,
+  hardirqLatencyMetric,
+].forEach((select) => select.addEventListener("change", () => {
+  if (latestSnapshot) renderLatencyCharts(latestSnapshot);
+}));
 window.addEventListener("scroll", scheduleSectionUpdate, { passive: true });
-window.addEventListener("resize", scheduleSectionUpdate);
+window.addEventListener("resize", () => {
+  scheduleSectionUpdate();
+  if (latestSnapshot) renderVisualizations(latestSnapshot);
+});
 window.addEventListener("hashchange", scheduleSectionUpdate);
 renderFeedback();
 updateActiveSection();

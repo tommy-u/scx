@@ -506,6 +506,7 @@ fn build_softirq_rows(
                     0.0
                 },
                 samples: summary.samples,
+                timing_buckets: current.timing.buckets.clone(),
                 mean_ns: summary.mean_ns,
                 p50_ns: summary.p50_ns,
                 p95_ns: summary.p95_ns,
@@ -585,6 +586,7 @@ fn build_block_io_view(
         unmatched_completions: current.unmatched_completions,
         tracking_failures: current.tracking_failures,
         latency_samples: latency.samples,
+        latency_buckets: current.latency.buckets.clone(),
         latency_mean_ns: latency.mean_ns,
         latency_p50_ns: latency.p50_ns,
         latency_p95_ns: latency.p95_ns,
@@ -741,6 +743,7 @@ fn build_hardirq_view(
                     0.0
                 },
                 samples: summary.samples,
+                timing_buckets: metric.timing.buckets.clone(),
                 mean_ns: summary.mean_ns,
                 p50_ns: summary.p50_ns,
                 p95_ns: summary.p95_ns,
@@ -997,6 +1000,7 @@ fn read_dsq_metrics(skel: &BpfSkel<'_>, available: bool) -> Result<DsqMetricsVie
         insert_count,
         move_count,
         residence_samples: summary.samples,
+        residence_buckets: residence.buckets,
         residence_mean_ns: summary.mean_ns,
         residence_p50_ns: summary.p50_ns,
         residence_p95_ns: summary.p95_ns,

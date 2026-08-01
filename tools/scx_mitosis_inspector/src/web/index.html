@@ -32,7 +32,9 @@
           <span class="navigation-group-label">On this page</span>
           <a href="#overview">Overview</a>
           <a href="#probe-manifest">Probe status</a>
+          <a href="#live-history">Live history</a>
           <a href="#counterGrid">Callback counters</a>
+          <a href="#callback-cost">Callback cost</a>
           <a href="#callback-latency">Callback latency</a>
           <a href="#bpf-runtime">BPF runtime</a>
           <a href="#inspector-overhead">Inspector overhead</a>
@@ -96,6 +98,31 @@
           </div>
         </section>
 
+        <section class="table-section" id="live-history" aria-labelledby="liveHistoryHeading" data-feedback-key="Callbacks:Live-history">
+          <div class="table-section-heading">
+            <h2 id="liveHistoryHeading">Live history</h2>
+            <p>Last 10 minutes in this browser</p>
+          </div>
+          <div class="chart-grid">
+            <section class="chart-panel" aria-labelledby="cpuHistoryHeading">
+              <h3 id="cpuHistoryHeading">CPU utilization</h3>
+              <canvas class="chart-canvas" id="cpuHistoryChart" width="640" height="220"></canvas>
+            </section>
+            <section class="chart-panel" aria-labelledby="callbackRateHistoryHeading">
+              <h3 id="callbackRateHistoryHeading">Callback rate</h3>
+              <canvas class="chart-canvas" id="callbackRateHistoryChart" width="640" height="220"></canvas>
+            </section>
+            <section class="chart-panel" aria-labelledby="latencyHistoryHeading">
+              <h3 id="latencyHistoryHeading">Wakeup tail latency</h3>
+              <canvas class="chart-canvas" id="latencyHistoryChart" width="640" height="220"></canvas>
+            </section>
+            <section class="chart-panel" aria-labelledby="dsqDepthHistoryHeading">
+              <h3 id="dsqDepthHistoryHeading">DSQ depth</h3>
+              <canvas class="chart-canvas" id="dsqDepthHistoryChart" width="640" height="220"></canvas>
+            </section>
+          </div>
+        </section>
+
         <section class="counter-grid" id="counterGrid" aria-label="Callback counters" data-feedback-key="Callbacks:Counters">
           <article class="counter-card" data-callback="select_cpu">
             <h2>select_cpu</h2>
@@ -129,11 +156,24 @@
           </article>
         </section>
 
+        <section class="table-section" id="callback-cost" aria-labelledby="callbackCostHeading" data-feedback-key="Callbacks:Estimated-cost">
+          <div class="table-section-heading">
+            <h2 id="callbackCostHeading">Estimated callback cost</h2>
+            <p>Sampled duration multiplied by current call rate</p>
+          </div>
+          <canvas class="chart-canvas chart-canvas-wide" id="callbackCostChart" width="1100" height="240"></canvas>
+        </section>
+
         <section class="table-section" id="callback-latency" aria-labelledby="callbackTimingHeading" data-feedback-key="Callbacks:Latency">
           <div class="table-section-heading">
             <h2 id="callbackTimingHeading">Callback latency</h2>
-            <p>Sampling <strong id="callbackTimingSampleRate">--</strong></p>
+            <div class="chart-heading-controls">
+              <label for="callbackLatencyMetric">Callback</label>
+              <select id="callbackLatencyMetric"></select>
+              <p>Sampling <strong id="callbackTimingSampleRate">--</strong></p>
+            </div>
           </div>
+          <canvas class="chart-canvas chart-canvas-wide" id="callbackLatencyChart" width="1100" height="260"></canvas>
           <div class="table-scroll">
             <table>
               <thead>
@@ -179,6 +219,7 @@
             <h2 id="inspectorOverheadHeading">Inspector BPF overhead</h2>
             <p id="inspectorOverheadStatus">Checking kernel runtime counters</p>
           </div>
+          <canvas class="chart-canvas chart-canvas-wide" id="overheadHistoryChart" width="1100" height="220"></canvas>
           <section class="summary compact-summary" aria-label="Inspector overhead summary">
             <dl>
               <div><dt>One-CPU equivalent</dt><dd id="inspectorCpuEquivalent">--</dd></div>
@@ -223,8 +264,13 @@
         <section class="table-section" id="softirq-activity" aria-labelledby="softirqHeading" data-feedback-key="Callbacks:Softirq-latency">
           <div class="table-section-heading">
             <h2 id="softirqHeading">Softirq activity</h2>
-            <p>Exact entry and duration counters</p>
+            <div class="chart-heading-controls">
+              <label for="softirqLatencyMetric">Vector</label>
+              <select id="softirqLatencyMetric"></select>
+              <p>Exact entry and duration counters</p>
+            </div>
           </div>
+          <canvas class="chart-canvas chart-canvas-wide" id="softirqLatencyChart" width="1100" height="240"></canvas>
           <div class="table-scroll">
             <table>
               <thead>
@@ -247,8 +293,13 @@
         <section class="table-section" id="hardirq-activity" aria-labelledby="hardirqHeading" data-feedback-key="Callbacks:Hardirq-latency">
           <div class="table-section-heading">
             <h2 id="hardirqHeading">Hard IRQ activity</h2>
-            <p id="hardirqStatus">Checking kernel IRQ tracepoints</p>
+            <div class="chart-heading-controls">
+              <label for="hardirqLatencyMetric">IRQ</label>
+              <select id="hardirqLatencyMetric"></select>
+              <p id="hardirqStatus">Checking kernel IRQ tracepoints</p>
+            </div>
           </div>
+          <canvas class="chart-canvas chart-canvas-wide" id="hardirqLatencyChart" width="1100" height="240"></canvas>
           <div class="table-scroll">
             <table>
               <thead>
@@ -274,6 +325,7 @@
             <h2 id="blockIoHeading">Block I/O</h2>
             <p id="blockIoStatus">Checking kernel block tracepoints</p>
           </div>
+          <canvas class="chart-canvas chart-canvas-wide" id="blockIoLatencyChart" width="1100" height="240"></canvas>
           <div class="table-scroll">
             <table>
               <thead>
@@ -290,8 +342,13 @@
         <section class="table-section" id="scheduler-latency" aria-labelledby="schedulerTimingHeading" data-feedback-key="Callbacks:Scheduler-latency">
           <div class="table-section-heading">
             <h2 id="schedulerTimingHeading">Scheduler latency</h2>
-            <p>Sampling <strong id="eventTimingSampleRate">--</strong></p>
+            <div class="chart-heading-controls">
+              <label for="schedulerLatencyMetric">Metric</label>
+              <select id="schedulerLatencyMetric"></select>
+              <p>Sampling <strong id="eventTimingSampleRate">--</strong></p>
+            </div>
           </div>
+          <canvas class="chart-canvas chart-canvas-wide" id="schedulerLatencyChart" width="1100" height="260"></canvas>
           <div class="table-scroll">
             <table>
               <thead>
@@ -314,6 +371,7 @@
             <h2 id="dsqHeading">DSQ performance</h2>
             <p id="dsqStatus">Checking kernel DSQ probes</p>
           </div>
+          <canvas class="chart-canvas chart-canvas-wide" id="dsqResidenceChart" width="1100" height="240"></canvas>
           <div class="table-scroll">
             <table>
               <thead>
@@ -389,6 +447,7 @@
               </label>
             </div>
           </div>
+          <canvas class="chart-canvas chart-canvas-wide" id="migrationLocalityChart" width="1100" height="220"></canvas>
           <section class="migration-pair-inspection" id="migrationPairInspection" aria-live="polite"></section>
           <div class="heatmap-viewport" id="migrationHeatmapViewport">
             <canvas id="migrationHeatmapCanvas" width="800" height="800" role="img" aria-label="CPU migration heatmap"></canvas>
@@ -432,6 +491,7 @@
         </section>
       </div>
     </dialog>
+    <script src="/assets/charts.js" defer></script>
     <script src="/assets/heatmap.js" defer></script>
     <script src="/assets/app.js" defer></script>
   </body>

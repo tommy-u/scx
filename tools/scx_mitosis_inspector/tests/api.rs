@@ -32,6 +32,7 @@ fn snapshot() -> Snapshot {
         callback_timings: vec![CallbackTimingRow {
             callback: "select_cpu",
             samples: 18,
+            buckets: vec![0; 64],
             mean_ns: Some(211),
             p50_ns: Some(127),
             p95_ns: None,
@@ -40,6 +41,7 @@ fn snapshot() -> Snapshot {
         scheduler_timings: vec![TimingMetricRow {
             metric: "wakeup_to_running",
             samples: 25,
+            buckets: vec![0; 64],
             mean_ns: Some(12_400),
             p50_ns: Some(8_191),
             p95_ns: Some(32_767),
@@ -217,7 +219,44 @@ async fn index_is_the_one_page_inspector() {
     assert!(html.contains("id=\"hardirqRows\""));
     assert!(html.contains("id=\"probeManifestRows\""));
     assert!(html.contains("id=\"inspectorBpfProgramRows\""));
+    for id in [
+        "live-history",
+        "cpuHistoryChart",
+        "callbackRateHistoryChart",
+        "latencyHistoryChart",
+        "dsqDepthHistoryChart",
+        "callbackCostChart",
+        "callbackLatencyChart",
+        "schedulerLatencyChart",
+        "softirqLatencyChart",
+        "hardirqLatencyChart",
+        "blockIoLatencyChart",
+        "dsqResidenceChart",
+        "overheadHistoryChart",
+        "migrationLocalityChart",
+    ] {
+        assert!(html.contains(&format!("id=\"{id}\"")), "missing {id}");
+    }
+    assert!(html.contains("/assets/charts.js"));
     assert!(html.contains("/assets/app.js"));
+}
+
+#[tokio::test]
+async fn shared_chart_library_is_served() {
+    let response = app()
+        .oneshot(
+            Request::builder()
+                .uri("/assets/charts.js")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let javascript = std::str::from_utf8(&body).unwrap();
+    assert!(javascript.contains("MitosisCharts"));
 }
 
 #[tokio::test]
