@@ -2778,6 +2778,17 @@ test("Cells page renders a live cell and DSQ layout diagram", () => {
   assert.match(stylesheet, /\.cell-affinity-group/);
 });
 
+test("Cells mobile controls wrap without widening the viewport", () => {
+  const stylesheet = readFileSync(
+    new URL("../../src/web/style.css", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(stylesheet, /#cellsView\s*>\s*\.view-heading\s*\{[^}]*flex-wrap:\s*wrap/s);
+  assert.match(stylesheet, /\.workload-control-band\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)/s);
+  assert.match(stylesheet, /\.workload-control-band\s+\.control-field\s*\{[^}]*width:\s*100%/s);
+});
+
 test("current scheduler command formats exact argv and unavailable states", () => {
   assert.equal(typeof inspectionState.schedulerCurrentCommand, "function");
   assert.equal(

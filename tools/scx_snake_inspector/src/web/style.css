@@ -3933,16 +3933,41 @@ button:focus-visible {
     padding-top: 3px;
   }
 
+  #cellsView > .view-heading {
+    flex-wrap: wrap;
+  }
+
   .cell-heading-actions {
-    min-width: 104px;
+    width: 100%;
+    min-width: 0;
     align-items: flex-end;
-    flex-direction: column;
-    gap: 5px;
+    justify-content: space-between;
+    gap: 10px;
   }
 
   .compact-window-field {
     width: 104px;
     flex: none;
+  }
+
+  .workload-control-band {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .workload-control-band .control-field {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .workload-control-band .workload-target-field {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .workload-control-band .apply-button,
+  .workload-control-band .secondary-button {
+    width: 100%;
   }
 
   .callback-summary-band {
