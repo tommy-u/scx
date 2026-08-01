@@ -173,6 +173,15 @@ pub struct CpuRuntimeRow {
     pub utilization_pct: f64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+pub struct CpuCapacityLossRow {
+    pub cpu: u32,
+    pub rt_stop_utilization_pct: f64,
+    pub deadline_utilization_pct: f64,
+    pub steal_utilization_pct: f64,
+    pub total_utilization_pct: f64,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
 pub struct DsqMetricsView {
     pub available: bool,
@@ -223,6 +232,51 @@ pub fn build_cpu_runtime_rows(
                 } else {
                     0.0
                 },
+            }
+        })
+        .collect()
+}
+
+pub fn build_cpu_capacity_loss_rows(
+    current_rt_stop: &[u64],
+    previous_rt_stop: &[u64],
+    current_deadline: &[u64],
+    previous_deadline: &[u64],
+    steal_utilization_pct: &[f64],
+    elapsed: Duration,
+) -> Vec<CpuCapacityLossRow> {
+    let cpu_count = current_rt_stop
+        .len()
+        .max(current_deadline.len())
+        .max(steal_utilization_pct.len());
+    let elapsed_ns = elapsed.as_nanos() as f64;
+    let runtime_pct = |current: &[u64], previous: &[u64], cpu: usize| {
+        if elapsed_ns == 0.0 {
+            return 0.0;
+        }
+        let delta = current
+            .get(cpu)
+            .copied()
+            .unwrap_or_default()
+            .saturating_sub(previous.get(cpu).copied().unwrap_or_default());
+        (delta as f64 / elapsed_ns * 100.0).clamp(0.0, 100.0)
+    };
+
+    (0..cpu_count)
+        .map(|cpu| {
+            let rt_stop = runtime_pct(current_rt_stop, previous_rt_stop, cpu);
+            let deadline = runtime_pct(current_deadline, previous_deadline, cpu);
+            let steal = steal_utilization_pct
+                .get(cpu)
+                .copied()
+                .unwrap_or_default()
+                .clamp(0.0, 100.0);
+            CpuCapacityLossRow {
+                cpu: cpu as u32,
+                rt_stop_utilization_pct: rt_stop,
+                deadline_utilization_pct: deadline,
+                steal_utilization_pct: steal,
+                total_utilization_pct: (rt_stop + deadline + steal).clamp(0.0, 100.0),
             }
         })
         .collect()

@@ -14,9 +14,15 @@
           <p>Scheduler activity and runtime statistics</p>
         </div>
       </div>
-      <div class="status" id="status" role="status" aria-live="polite">
-        <span class="status-dot" aria-hidden="true"></span>
-        <span id="statusText">Connecting</span>
+      <div class="topbar-actions">
+        <div class="reset-stats-control">
+          <button class="reset-all-stats" id="resetAllStats" type="button">Reset all stats</button>
+          <span id="resetStatsStatus" role="status" aria-live="polite"></span>
+        </div>
+        <div class="status" id="status" role="status" aria-live="polite">
+          <span class="status-dot" aria-hidden="true"></span>
+          <span id="statusText">Connecting</span>
+        </div>
       </div>
     </header>
 
@@ -76,6 +82,58 @@
             <div><dt>Inspector uptime</dt><dd id="uptime">0s</dd></div>
             <div><dt>Last refresh</dt><dd id="refreshed">--</dd></div>
           </dl>
+        </section>
+
+        <section class="table-section migration-section" id="migration-locality" aria-labelledby="migrationHeading" data-feedback-key="Callbacks:CPU-migration-matrix">
+          <div class="table-section-heading migration-heading">
+            <div>
+              <h2 id="migrationHeading">CPU migration matrix</h2>
+              <p>Source CPU by destination CPU, with IRQ, non-SCX loss, task, whole-core, and LLC utilization</p>
+            </div>
+            <div class="heatmap-heading-tools">
+              <label class="heatmap-window">
+                <span>Window</span>
+                <select id="migrationWindow" aria-label="Migration rolling time window"></select>
+                <small id="migrationWindowCoverage">Collecting</small>
+              </label>
+              <div class="legend" aria-label="Heat intensity legend">
+                <span id="migrationLegendLow">0</span>
+                <span class="legend-ramp" aria-hidden="true"></span>
+                <span id="migrationLegendHigh">0</span>
+              </div>
+              <fieldset class="segmented" aria-label="CPU order">
+                <label><input type="radio" name="migrationOrder" value="topology" checked><span>Topology</span></label>
+                <label><input type="radio" name="migrationOrder" value="numeric"><span>Numeric</span></label>
+              </fieldset>
+              <fieldset class="segmented" aria-label="Color scale">
+                <label><input type="radio" name="migrationScale" value="log" checked><span>Log</span></label>
+                <label><input type="radio" name="migrationScale" value="linear"><span>Linear</span></label>
+              </fieldset>
+              <label class="heatmap-zoom">
+                <span>Zoom</span>
+                <input id="migrationZoom" type="range" min="0.25" max="3" step="0.25" value="1" aria-label="Heatmap zoom">
+              </label>
+            </div>
+          </div>
+          <canvas class="chart-canvas chart-canvas-wide" id="migrationLocalityChart" width="1100" height="220"></canvas>
+          <section class="migration-pair-inspection" id="migrationPairInspection" aria-live="polite"></section>
+          <div class="heatmap-viewport" id="migrationHeatmapViewport">
+            <canvas id="migrationHeatmapCanvas" width="800" height="800" role="img" aria-label="CPU migration heatmap"></canvas>
+            <div class="heatmap-tooltip hidden" id="migrationHeatmapTooltip" role="tooltip"></div>
+          </div>
+          <h3 class="table-subheading">Busiest pairs</h3>
+          <div class="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">Source CPU</th>
+                  <th scope="col">Destination CPU</th>
+                  <th scope="col">Count</th>
+                </tr>
+              </thead>
+              <tbody id="migrationRows"></tbody>
+            </table>
+          </div>
         </section>
 
         <section class="table-section" id="probe-manifest" aria-labelledby="probeManifestHeading" data-feedback-key="Callbacks:Probe-status">
@@ -413,6 +471,9 @@
                     <th scope="col">LLC</th>
                     <th scope="col">Node</th>
                     <th scope="col">Utilization</th>
+                    <th scope="col">RT / stop</th>
+                    <th scope="col">Deadline</th>
+                    <th scope="col">Steal</th>
                   </tr>
                 </thead>
                 <tbody id="cpuUtilizationRows"></tbody>
@@ -421,52 +482,6 @@
           </div>
         </section>
 
-        <section class="table-section migration-section" id="migration-locality" aria-labelledby="migrationHeading" data-feedback-key="Callbacks:CPU-migration-matrix">
-          <div class="table-section-heading migration-heading">
-            <div>
-              <h2 id="migrationHeading">CPU migration matrix</h2>
-              <p>Source CPU by destination CPU, with IRQ, task, whole-core, and LLC utilization</p>
-            </div>
-            <div class="heatmap-heading-tools">
-              <div class="legend" aria-label="Heat intensity legend">
-                <span id="migrationLegendLow">0</span>
-                <span class="legend-ramp" aria-hidden="true"></span>
-                <span id="migrationLegendHigh">0</span>
-              </div>
-              <fieldset class="segmented" aria-label="CPU order">
-                <label><input type="radio" name="migrationOrder" value="topology" checked><span>Topology</span></label>
-                <label><input type="radio" name="migrationOrder" value="numeric"><span>Numeric</span></label>
-              </fieldset>
-              <fieldset class="segmented" aria-label="Color scale">
-                <label><input type="radio" name="migrationScale" value="log" checked><span>Log</span></label>
-                <label><input type="radio" name="migrationScale" value="linear"><span>Linear</span></label>
-              </fieldset>
-              <label class="heatmap-zoom">
-                <span>Zoom</span>
-                <input id="migrationZoom" type="range" min="0.25" max="3" step="0.25" value="1" aria-label="Heatmap zoom">
-              </label>
-            </div>
-          </div>
-          <canvas class="chart-canvas chart-canvas-wide" id="migrationLocalityChart" width="1100" height="220"></canvas>
-          <section class="migration-pair-inspection" id="migrationPairInspection" aria-live="polite"></section>
-          <div class="heatmap-viewport" id="migrationHeatmapViewport">
-            <canvas id="migrationHeatmapCanvas" width="800" height="800" role="img" aria-label="CPU migration heatmap"></canvas>
-            <div class="heatmap-tooltip hidden" id="migrationHeatmapTooltip" role="tooltip"></div>
-          </div>
-          <h3 class="table-subheading">Busiest pairs</h3>
-          <div class="table-scroll">
-            <table>
-              <thead>
-                <tr>
-                  <th scope="col">Source CPU</th>
-                  <th scope="col">Destination CPU</th>
-                  <th scope="col">Count</th>
-                </tr>
-              </thead>
-              <tbody id="migrationRows"></tbody>
-            </table>
-          </div>
-        </section>
       </main>
     </div>
     <dialog class="feedback-drawer" id="feedbackDrawer" aria-labelledby="feedbackTitle">

@@ -14,6 +14,7 @@ use clap::Parser;
 use scx_mitosis_inspector::api::{router, ApiContext};
 use scx_mitosis_inspector::collector::{self, CollectorConfig, Snapshot};
 use scx_mitosis_inspector::host_context::HostContextView;
+use scx_mitosis_inspector::migration_history::{parse_duration, MigrationHistory};
 use scx_mitosis_inspector::stats::{self, StatsSnapshot, DEFAULT_STATS_PATH};
 use scx_mitosis_inspector::system_stats::SystemStatsCollector;
 use scx_mitosis_inspector::{
@@ -30,6 +31,14 @@ struct Opts {
     /// Mitosis statistics socket.
     #[clap(long, default_value = DEFAULT_STATS_PATH)]
     stats_path: PathBuf,
+
+    /// Initial rolling migration window shown in the heatmap.
+    #[clap(long, default_value = "10s", value_parser = parse_duration)]
+    window: Duration,
+
+    /// Maximum rolling migration history retained in memory.
+    #[clap(long, default_value = "5m", value_parser = parse_duration)]
+    max_window: Duration,
 
     /// Sample one in every N callback executions for latency; zero disables it.
     #[clap(
@@ -69,8 +78,18 @@ struct Opts {
 #[tokio::main]
 async fn main() -> Result<()> {
     let opts = Opts::parse();
+    anyhow::ensure!(
+        opts.window <= opts.max_window,
+        "--window cannot exceed --max-window"
+    );
+    let migration_window_ms =
+        u64::try_from(opts.window.as_millis()).context("initial migration window is too large")?;
+    let migration_max_window_ms = u64::try_from(opts.max_window.as_millis())
+        .context("maximum migration window is too large")?;
+    let migration_history = Arc::new(RwLock::new(MigrationHistory::new(migration_max_window_ms)));
     let host_context = HostContextView::discover().context("discovering host context")?;
     let shutdown = Arc::new(AtomicBool::new(false));
+    let reset_requested = Arc::new(AtomicBool::new(false));
     let state = Arc::new(RwLock::new(Snapshot {
         scheduler: "scx_mitosis",
         target_program_ids: [0; 5],
@@ -85,6 +104,7 @@ async fn main() -> Result<()> {
         scheduler_timings: Vec::new(),
         migrations: Vec::new(),
         cpu_runtime: Vec::new(),
+        cpu_capacity_loss: Vec::new(),
         bpf_program_stats: Vec::new(),
         inspector_bpf_program_stats: Vec::new(),
         inspector_bpf_cpu_equivalent_pct: None,
@@ -99,7 +119,9 @@ async fn main() -> Result<()> {
     }));
     let (ready_tx, ready_rx) = mpsc::channel();
     let collector_state = state.clone();
+    let collector_migration_history = migration_history.clone();
     let collector_shutdown = shutdown.clone();
+    let collector_reset_requested = reset_requested.clone();
     let collector_config = CollectorConfig {
         callback_timing_sample_rate: opts.callback_timing_sample_rate,
         event_timing_sample_rate: opts.event_timing_sample_rate,
@@ -111,7 +133,9 @@ async fn main() -> Result<()> {
     let collector = std::thread::spawn(move || {
         collector::run(
             collector_state,
+            collector_migration_history,
             collector_shutdown,
+            collector_reset_requested,
             ready_tx,
             collector_config,
         )
@@ -150,7 +174,15 @@ async fn main() -> Result<()> {
         .await
         .with_context(|| format!("binding inspector to {}", opts.listen))?;
     println!("Mitosis inspector listening on http://{}", opts.listen);
-    let context = ApiContext::new(state, stats_state, system_state, host_context);
+    let context = ApiContext::new(
+        state,
+        stats_state,
+        system_state,
+        host_context,
+        migration_history,
+        migration_window_ms,
+        reset_requested,
+    );
     let server = axum::serve(listener, router(context)).with_graceful_shutdown(async {
         let _ = tokio::signal::ctrl_c().await;
     });

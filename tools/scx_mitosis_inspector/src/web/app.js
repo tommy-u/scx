@@ -10,6 +10,8 @@ const softirqRows = document.querySelector("#softirqRows");
 const blockIoRows = document.querySelector("#blockIoRows");
 const hardirqRows = document.querySelector("#hardirqRows");
 const migrationRows = document.querySelector("#migrationRows");
+const migrationWindow = document.querySelector("#migrationWindow");
+const migrationWindowCoverage = document.querySelector("#migrationWindowCoverage");
 const cpuUtilizationRows = document.querySelector("#cpuUtilizationRows");
 const llcUtilizationRows = document.querySelector("#llcUtilizationRows");
 const bpfProgramRows = document.querySelector("#bpfProgramRows");
@@ -18,6 +20,8 @@ const dsqMetricRows = document.querySelector("#dsqMetricRows");
 const probeManifestRows = document.querySelector("#probeManifestRows");
 const downloadSnapshotButton = document.querySelector("#downloadSnapshot");
 const snapshotDownloadStatus = document.querySelector("#snapshotDownloadStatus");
+const resetAllStatsButton = document.querySelector("#resetAllStats");
+const resetStatsStatus = document.querySelector("#resetStatsStatus");
 const callbackLatencyMetric = document.querySelector("#callbackLatencyMetric");
 const schedulerLatencyMetric = document.querySelector("#schedulerLatencyMetric");
 const softirqLatencyMetric = document.querySelector("#softirqLatencyMetric");
@@ -46,7 +50,8 @@ let latestSnapshot = null;
 let sectionUpdatePending = false;
 const liveHistory = new MitosisCharts.History(600);
 const migrationHistory = new MitosisCharts.History(600);
-let previousMigrationCounts = null;
+let migrationWindowMs = null;
+let migrationMaxWindowMs = null;
 
 const chartColors = {
   blue: "#2878a6",
@@ -111,6 +116,9 @@ function diagnosticFilename(hostname, generatedAt) {
 async function downloadDiagnosticSnapshot() {
   const endpoints = [
     ["counters", "/api/counters"],
+    ["migrations", migrationWindowMs == null
+      ? "/api/migrations"
+      : `/api/migrations?window_ms=${migrationWindowMs}`],
     ["system", "/api/system"],
     ["scheduler", "/api/stats"],
     ["host_context", "/api/host-context"],
@@ -155,6 +163,27 @@ async function downloadDiagnosticSnapshot() {
   }
 }
 
+async function resetAllStats() {
+  const confirmed = window.confirm(
+    "Reset inspector-owned counters and browser histories? Mitosis scheduler stats and kernel-wide counters will be preserved.",
+  );
+  if (!confirmed) return;
+  resetAllStatsButton.disabled = true;
+  resetStatsStatus.textContent = "Resetting";
+  try {
+    const response = await fetch("/api/reset", { method: "POST", cache: "no-store" });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    liveHistory.clear();
+    migrationHistory.clear();
+    renderHistoryCharts();
+    resetStatsStatus.textContent = "New epoch";
+  } catch {
+    resetStatsStatus.textContent = "Reset failed";
+  } finally {
+    resetAllStatsButton.disabled = false;
+  }
+}
+
 function finiteAverage(rows, key) {
   const values = (rows || []).map((row) => Number(row[key])).filter(Number.isFinite);
   return values.length
@@ -182,6 +211,33 @@ function durationLabel(upperNs) {
   return `${rate.format(upperNs / 1_000_000_000)}s`;
 }
 
+function windowLabel(milliseconds) {
+  if (milliseconds < 1_000) return `${milliseconds}ms`;
+  if (milliseconds < 60_000) return `${rate.format(milliseconds / 1_000)}s`;
+  return `${rate.format(milliseconds / 60_000)}m`;
+}
+
+function configureMigrationWindow(view) {
+  migrationWindowMs = view.window_ms;
+  migrationMaxWindowMs = view.max_window_ms;
+  const presets = [1_000, 5_000, 10_000, 30_000, 60_000, 120_000, 300_000]
+    .filter((value) => value <= migrationMaxWindowMs);
+  const values = [...new Set([...presets, migrationWindowMs, migrationMaxWindowMs])]
+    .sort((left, right) => left - right);
+  const currentOptions = [...migrationWindow.options].map((option) => Number(option.value));
+  if (currentOptions.length !== values.length
+      || currentOptions.some((value, index) => value !== values[index])) {
+    migrationWindow.replaceChildren(...values.map((value) => {
+      const option = document.createElement("option");
+      option.value = String(value);
+      option.textContent = windowLabel(value);
+      return option;
+    }));
+  }
+  migrationWindow.value = String(migrationWindowMs);
+  migrationWindowCoverage.textContent = `${windowLabel(view.observed_ms)} observed · ${rate.format(view.rate_per_second)}/s`;
+}
+
 function histogramBuckets(counts) {
   if (!Array.isArray(counts) || counts.length === 0) return [];
   const first = counts.findIndex((count) => count > 0);
@@ -204,32 +260,23 @@ function drawLatencyHistogram(canvasId, counts) {
 }
 
 function updateMigrationHistory(migrations, at) {
-  const current = new Map((migrations || []).map((row) => [
-    `${row.from_cpu}:${row.to_cpu}`,
-    row.count,
-  ]));
-  if (!topology || previousMigrationCounts == null) {
-    previousMigrationCounts = current;
-    return;
-  }
+  if (!topology) return;
   const cpuById = new Map(topology.cpus.map((cpu) => [cpu.cpu, cpu]));
   const totals = { same_core: 0, same_llc: 0, cross_llc: 0, cross_numa: 0 };
   for (const row of migrations || []) {
     const source = cpuById.get(row.from_cpu);
     const destination = cpuById.get(row.to_cpu);
     if (!source || !destination) continue;
-    const delta = Math.max(0, row.count - (previousMigrationCounts.get(`${row.from_cpu}:${row.to_cpu}`) || 0));
     if (source.package === destination.package && source.core === destination.core) {
-      totals.same_core += delta;
+      totals.same_core += row.count;
     } else if (source.package === destination.package && source.llc === destination.llc) {
-      totals.same_llc += delta;
+      totals.same_llc += row.count;
     } else if (source.node === destination.node) {
-      totals.cross_llc += delta;
+      totals.cross_llc += row.count;
     } else {
-      totals.cross_numa += delta;
+      totals.cross_numa += row.count;
     }
   }
-  previousMigrationCounts = current;
   const total = Object.values(totals).reduce((sum, value) => sum + value, 0);
   if (total > 0) {
     migrationHistory.push(at, Object.fromEntries(
@@ -243,9 +290,22 @@ function pushLiveHistory(snapshot) {
   const wakeup = snapshot.scheduler_timings.find(
     (timing) => timing.metric === "wakeup_to_running",
   );
+  const irqByCpu = new Map((snapshot.interrupt_cpu || []).map((row) => [
+    row.cpu, row.total_utilization_pct,
+  ]));
+  const lossByCpu = new Map((snapshot.cpu_capacity_loss || []).map((row) => [
+    row.cpu, row.total_utilization_pct,
+  ]));
+  const scxUtilization = (snapshot.cpu_runtime || []).map((row) => ({
+    utilization_pct: Math.max(
+      0,
+      row.utilization_pct - (irqByCpu.get(row.cpu) || 0) - (lossByCpu.get(row.cpu) || 0),
+    ),
+  }));
   liveHistory.push(at, {
-    task_cpu: finiteAverage(snapshot.cpu_runtime, "utilization_pct"),
+    task_cpu: finiteAverage(scxUtilization, "utilization_pct"),
     irq_cpu: finiteAverage(snapshot.interrupt_cpu, "total_utilization_pct"),
+    other_cpu: finiteAverage(snapshot.cpu_capacity_loss, "total_utilization_pct"),
     callbacks: snapshot.counters.reduce((sum, counter) => sum + counter.rate_per_second, 0),
     wakeup_p95_us: wakeup?.p95_ns == null ? Number.NaN : wakeup.p95_ns / 1_000,
     dsq_average: snapshot.dsq_metrics.available
@@ -263,8 +323,9 @@ function pushLiveHistory(snapshot) {
 function renderHistoryCharts() {
   const line = MitosisCharts.drawLineChart;
   line(document.querySelector("#cpuHistoryChart"), [
-    { label: "Task", color: chartColors.green, points: liveHistory.points("task_cpu") },
+    { label: "SCX est.", color: chartColors.green, points: liveHistory.points("task_cpu") },
     { label: "IRQ", color: chartColors.red, points: liveHistory.points("irq_cpu") },
+    { label: "RT/DL/steal", color: chartColors.orange, points: liveHistory.points("other_cpu") },
   ], { unit: "%", minY: 0, maxY: 100 });
   line(document.querySelector("#callbackRateHistoryChart"), [
     { label: "Callbacks", color: chartColors.blue, points: liveHistory.points("callbacks") },
@@ -485,6 +546,7 @@ function renderDsqMetrics(metrics) {
 function renderCpuBreakdown(snapshot) {
   const runtime = Array.isArray(snapshot.cpu_runtime) ? snapshot.cpu_runtime : [];
   const runtimeByCpu = new Map(runtime.map((row) => [row.cpu, row]));
+  const lossByCpu = new Map((snapshot.cpu_capacity_loss || []).map((row) => [row.cpu, row]));
   const cpus = topology?.cpus || runtime.map((row) => ({
     cpu: row.cpu, core: row.cpu, llc: 0, node: 0,
   }));
@@ -498,6 +560,7 @@ function renderCpuBreakdown(snapshot) {
   cpuUtilizationRows.replaceChildren(...ordered.flatMap((cpuId) => {
     const cpu = cpuById.get(cpuId);
     const row = runtimeByCpu.get(cpuId);
+    const loss = lossByCpu.get(cpuId);
     if (!cpu || !row) return [];
     return [tableRow([
       number.format(cpu.cpu),
@@ -505,6 +568,9 @@ function renderCpuBreakdown(snapshot) {
       number.format(cpu.llc),
       number.format(cpu.node),
       `${rate.format(row.utilization_pct)}%`,
+      loss ? `${rate.format(loss.rt_stop_utilization_pct)}%` : "--",
+      loss ? `${rate.format(loss.deadline_utilization_pct)}%` : "--",
+      loss ? `${rate.format(loss.steal_utilization_pct)}%` : "--",
     ])];
   }));
 
@@ -613,9 +679,23 @@ async function refreshHostContext() {
 
 async function refresh() {
   try {
-    const response = await fetch("/api/counters", { cache: "no-store" });
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    render(await response.json());
+    const migrationPath = migrationWindowMs == null
+      ? "/api/migrations"
+      : `/api/migrations?window_ms=${migrationWindowMs}`;
+    const [counterResponse, migrationResponse] = await Promise.all([
+      fetch("/api/counters", { cache: "no-store" }),
+      fetch(migrationPath, { cache: "no-store" }),
+    ]);
+    if (!counterResponse.ok) throw new Error(`HTTP ${counterResponse.status}`);
+    if (!migrationResponse.ok) throw new Error(`HTTP ${migrationResponse.status}`);
+    const [snapshot, migrationView] = await Promise.all([
+      counterResponse.json(),
+      migrationResponse.json(),
+    ]);
+    configureMigrationWindow(migrationView);
+    snapshot.migrations = migrationView.rows;
+    snapshot.migration_window = migrationView;
+    render(snapshot);
   } catch (error) {
     status.classList.remove("live");
     statusText.textContent = "Disconnected";
@@ -841,6 +921,10 @@ document.querySelectorAll("[name=migrationScale]").forEach((control) => {
 document.querySelector("#migrationZoom").addEventListener("input", (event) => {
   MitosisHeatmap.setZoom(event.currentTarget.value);
 });
+migrationWindow.addEventListener("change", () => {
+  migrationWindowMs = Number(migrationWindow.value);
+  refresh();
+});
 document.addEventListener("click", (event) => {
   const toggle = event.target.closest("[data-feedback-toggle]");
   if (toggle) toggleFeedbackComposer(toggle.dataset.feedbackToggle);
@@ -854,6 +938,7 @@ feedbackElements.close.addEventListener("click", closeFeedback);
 feedbackElements.copy.addEventListener("click", copyFeedback);
 feedbackElements.clear.addEventListener("click", clearFeedback);
 downloadSnapshotButton.addEventListener("click", downloadDiagnosticSnapshot);
+resetAllStatsButton.addEventListener("click", resetAllStats);
 [
   callbackLatencyMetric,
   schedulerLatencyMetric,

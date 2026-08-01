@@ -157,6 +157,23 @@
     return { hardirqPct, order, positions, softirqPct, topology, totalPct };
   }
 
+  function buildCapacityLossUsage(topology, entries, order) {
+    const positions = new Map(order.map((cpu, index) => [cpu, index]));
+    const rtStopPct = new Float64Array(order.length);
+    const deadlinePct = new Float64Array(order.length);
+    const stealPct = new Float64Array(order.length);
+    const totalPct = new Float64Array(order.length);
+    for (const entry of Array.isArray(entries) ? entries : []) {
+      const index = positions.get(cpuId(entry?.cpu));
+      if (index == null) continue;
+      rtStopPct[index] = Math.max(0, Number(entry.rt_stop_utilization_pct) || 0);
+      deadlinePct[index] = Math.max(0, Number(entry.deadline_utilization_pct) || 0);
+      stealPct[index] = Math.max(0, Number(entry.steal_utilization_pct) || 0);
+      totalPct[index] = Math.max(0, Number(entry.total_utilization_pct) || 0);
+    }
+    return { deadlinePct, order, positions, rtStopPct, stealPct, topology, totalPct };
+  }
+
   function buildGroupedUsage(usage, identityForCpu) {
     const cpuInfo = new Map(usage.topology.cpus.map((cpu) => [cpu.cpu, cpu]));
     const groups = [];
@@ -281,7 +298,9 @@
     const usageHeight = Math.max(13, Math.min(26, cellSize * 2.5));
     const irqHeight = Math.max(13, Math.min(26, cellSize * 2.5));
     const irqTop = 20;
-    const usageTop = irqTop + irqHeight + 4;
+    const lossHeight = Math.max(13, Math.min(26, cellSize * 2.5));
+    const lossTop = irqTop + irqHeight + 4;
+    const usageTop = lossTop + lossHeight + 4;
     const coreHeight = Math.max(16, Math.min(24, cellSize * 2.5));
     const coreTop = usageTop + usageHeight + 4;
     const llcHeight = Math.max(16, Math.min(24, cellSize * 2.5));
@@ -297,6 +316,8 @@
       irqTop,
       llcHeight,
       llcTop,
+      lossHeight,
+      lossTop,
       margins,
       matrixSize,
       usageHeight,
@@ -377,7 +398,7 @@
       context.fillStyle = infernoColor(normalizeCount(utilization, 100, scale));
       context.fillRect(margins.left + index * cellSize, usageTop, Math.ceil(cellSize), usageHeight);
     });
-    drawBandLabel(context, "Task util", margins.left - 7, usageTop + usageHeight / 2);
+    drawBandLabel(context, "SCX est.", margins.left - 7, usageTop + usageHeight / 2);
     for (const boundary of topologyBoundaries(usage.topology, usage.order)) {
       const x = margins.left + boundary.index * cellSize;
       context.beginPath();
@@ -408,6 +429,29 @@
       context.strokeStyle = boundary.level === "llc" ? "#ffffff" : "#6f7f8b";
       context.moveTo(x, irqTop);
       context.lineTo(x, irqTop + irqHeight);
+      context.stroke();
+    }
+  }
+
+  function drawCapacityLoss(context, usage, geometry, scale) {
+    const { cellSize, lossHeight, lossTop, margins, matrixSize } = geometry;
+    const maximum = Math.max(1, ...usage.totalPct);
+    context.fillStyle = "#11161c";
+    context.fillRect(margins.left, lossTop, matrixSize, lossHeight);
+    usage.order.forEach((cpu, index) => {
+      const utilization = usage.totalPct[index];
+      if (utilization <= 0) return;
+      context.fillStyle = infernoColor(normalizeCount(utilization, maximum, scale));
+      context.fillRect(margins.left + index * cellSize, lossTop, Math.ceil(cellSize), lossHeight);
+    });
+    drawBandLabel(context, "Non-SCX", margins.left - 7, lossTop + lossHeight / 2);
+    for (const boundary of topologyBoundaries(usage.topology, usage.order)) {
+      const x = margins.left + boundary.index * cellSize;
+      context.beginPath();
+      context.lineWidth = boundary.level === "llc" ? 2 : 1;
+      context.strokeStyle = boundary.level === "llc" ? "#ffffff" : "#6f7f8b";
+      context.moveTo(x, lossTop);
+      context.lineTo(x, lossTop + lossHeight);
       context.stroke();
     }
   }
@@ -560,15 +604,26 @@
       renderer.snapshot?.interrupt_cpu,
       matrix.order,
     );
+    const capacityLoss = buildCapacityLossUsage(
+      matrix.topology,
+      renderer.snapshot?.cpu_capacity_loss,
+      matrix.order,
+    );
     const irqByCpu = new Map(interruptUsage.order.map((cpu, index) => [
       cpu,
       interruptUsage.totalPct[index],
+    ]));
+    const lossByCpu = new Map(capacityLoss.order.map((cpu, index) => [
+      cpu,
+      capacityLoss.totalPct[index],
     ]));
     const taskRuntime = (renderer.snapshot?.cpu_runtime || []).map((entry) => ({
       ...entry,
       utilization_pct: Math.max(
         0,
-        Number(entry.utilization_pct || 0) - Number(irqByCpu.get(entry.cpu) || 0),
+        Number(entry.utilization_pct || 0)
+          - Number(irqByCpu.get(entry.cpu) || 0)
+          - Number(lossByCpu.get(entry.cpu) || 0),
       ),
     }));
     const usage = buildCpuUsage(matrix.topology, taskRuntime, matrix.order);
@@ -608,17 +663,20 @@
     drawPinnedPair(context, matrix, geometry);
     drawAxes(context, matrix, geometry);
     drawInterruptUsage(context, interruptUsage, geometry, renderer.scale);
+    drawCapacityLoss(context, capacityLoss, geometry, renderer.scale);
     drawCpuUsage(context, usage, geometry, renderer.scale);
     drawGroupedUsage(context, coreUsage, geometry, "core", renderer.scale);
     drawGroupedUsage(context, llcUsage, geometry, "llc", renderer.scale);
     drawLlcAnnotations(context, matrix, geometry);
-    renderer.geometry = { ...geometry, coreUsage, interruptUsage, llcUsage, matrix, usage };
+    renderer.geometry = {
+      ...geometry, capacityLoss, coreUsage, interruptUsage, llcUsage, matrix, usage,
+    };
     renderer.legendLow.textContent = number.format(matrix.minPositive);
     renderer.legendHigh.textContent = number.format(matrix.max);
     renderPairInspection(matrix);
     renderer.canvas.setAttribute(
       "aria-label",
-      `CPU migration heatmap with ${number.format(matrix.total)} transitions, IRQ utilization, task utilization, whole-core utilization, and LLC utilization across ${size} CPUs`,
+      `CPU migration heatmap with ${number.format(matrix.total)} transitions, IRQ utilization, non-SCX capacity loss, task utilization, whole-core utilization, and LLC utilization across ${size} CPUs`,
     );
   }
 
@@ -684,9 +742,24 @@
       const cpuInfo = new Map(geometry.matrix.topology.cpus.map((entry) => [entry.cpu, entry]));
       renderer.tooltip.textContent = [
         `CPU ${cpu}`,
-        `CPU utilization: ${geometry.usage.utilizationPct[column].toFixed(1)}%`,
+        `Estimated SCX task utilization: ${geometry.usage.utilizationPct[column].toFixed(1)}%`,
         `${formatRuntime(geometry.usage.runtimeNs[column])} cumulative runtime`,
         topologyLine("Topology", cpuInfo.get(cpu)),
+      ].join("\n");
+      positionTooltip(event);
+      return;
+    }
+    if (column >= 0 && column < size
+        && canvasY >= geometry.lossTop
+        && canvasY < geometry.lossTop + geometry.lossHeight) {
+      const cpu = geometry.capacityLoss.order[column];
+      renderer.tooltip.textContent = [
+        `CPU ${cpu} non-SCX capacity loss`,
+        `Combined measured: ${geometry.capacityLoss.totalPct[column].toFixed(2)}%`,
+        `RT / stop class: ${geometry.capacityLoss.rtStopPct[column].toFixed(2)}%`,
+        `Deadline class: ${geometry.capacityLoss.deadlinePct[column].toFixed(2)}%`,
+        `Hypervisor steal: ${geometry.capacityLoss.stealPct[column].toFixed(2)}%`,
+        "NMI / SMI duration: unavailable",
       ].join("\n");
       positionTooltip(event);
       return;
