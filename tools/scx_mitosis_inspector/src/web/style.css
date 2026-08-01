@@ -383,6 +383,78 @@ code { color: #404b5e; }
   font-size: 12px;
 }
 
+.section-heading {
+  margin-bottom: 10px;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.section-heading h2 { margin-bottom: 0; }
+
+.section-heading p {
+  color: #637083;
+  font-size: 12px;
+}
+
+.chart-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 20px 24px;
+}
+
+.chart-panel {
+  min-width: 0;
+  margin: 0;
+}
+
+.chart-panel h3,
+.chart-panel figcaption {
+  min-height: 22px;
+  margin: 0 0 6px;
+  color: #404b5e;
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.chart-canvas {
+  width: 100%;
+  height: 220px;
+  display: block;
+  background: #ffffff;
+  border: 1px solid #d4dbe3;
+}
+
+.chart-canvas-wide {
+  height: 240px;
+}
+
+.chart-heading-controls {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.chart-heading-controls label {
+  color: #637083;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.chart-heading-controls select {
+  min-height: 30px;
+  max-width: 220px;
+  padding: 5px 28px 5px 8px;
+  color: #172033;
+  background: #ffffff;
+  border: 1px solid #b8c2ce;
+  border-radius: 4px;
+  font-size: 12px;
+}
+
 .migration-heading {
   align-items: center;
 }
@@ -782,6 +854,7 @@ tbody tr:last-child td { border-bottom: 0; }
 
 @media (max-width: 900px) {
   .counter-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .chart-grid { grid-template-columns: 1fr; }
   .breakdown-grid { grid-template-columns: 1fr; }
   .migration-heading { align-items: flex-start; flex-direction: column; }
   .heatmap-heading-tools { justify-content: flex-start; }
@@ -842,6 +915,8 @@ tbody tr:last-child td { border-bottom: 0; }
   .view-heading { flex-direction: column; }
   .view-actions { width: 100%; justify-content: flex-start; flex-wrap: wrap; }
   .table-section-heading { align-items: flex-start; flex-direction: column; }
+  .section-heading { align-items: flex-start; flex-direction: column; }
+  .chart-heading-controls { justify-content: flex-start; }
   .heatmap-viewport { min-height: 320px; }
   .heatmap-heading-tools { align-items: flex-start; flex-direction: column; }
 }
