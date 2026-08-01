@@ -38,6 +38,16 @@ const TARGET_NAMES: [&str; 5] = [
     "mitosis_stopping",
 ];
 
+#[derive(Clone, Copy, Debug)]
+pub struct CollectorConfig {
+    pub callback_timing_sample_rate: u32,
+    pub event_timing_sample_rate: u32,
+    pub enable_dsq: bool,
+    pub enable_scheduler_events: bool,
+    pub enable_irqs: bool,
+    pub enable_block_io: bool,
+}
+
 struct TargetProgram {
     id: u32,
     fd: OwnedFd,
@@ -90,6 +100,9 @@ pub struct Snapshot {
     pub migrations: Vec<MigrationRow>,
     pub cpu_runtime: Vec<CpuRuntimeRow>,
     pub bpf_program_stats: Vec<BpfProgramStatsRow>,
+    pub inspector_bpf_program_stats: Vec<BpfProgramStatsRow>,
+    pub inspector_bpf_cpu_equivalent_pct: Option<f64>,
+    pub inspector_bpf_host_capacity_pct: Option<f64>,
     pub dsq_metrics: DsqMetricsView,
     pub scheduler_events: Vec<SchedulerEventRow>,
     pub softirqs: Vec<SoftirqRow>,
@@ -173,8 +186,7 @@ fn set_targets(
 
 fn attach_programs(
     skel: &BpfSkel<'_>,
-    callback_timing_sample_rate: u32,
-    event_timing_sample_rate: u32,
+    config: CollectorConfig,
     block_io_supported: bool,
     hardirq_supported: bool,
 ) -> Result<(Vec<Link>, bool, bool, bool)> {
@@ -185,16 +197,24 @@ fn attach_programs(
         skel.progs.observe_running.attach_trace()?,
         skel.progs.observe_stopping.attach_trace()?,
         skel.progs.on_sched_migrate_task.attach()?,
-        skel.progs.scheduler_event_switch.attach()?,
-        skel.progs.scheduler_event_wakeup.attach()?,
-        skel.progs.scheduler_event_wakeup_new.attach()?,
-        skel.progs.scheduler_event_fork.attach()?,
-        skel.progs.scheduler_event_exec.attach()?,
-        skel.progs.scheduler_event_exit.attach()?,
-        skel.progs.sirqo_entry.attach()?,
-        skel.progs.sirqo_exit.attach()?,
     ];
-    if callback_timing_sample_rate > 0 {
+    if config.enable_scheduler_events {
+        links.extend([
+            skel.progs.scheduler_event_switch.attach()?,
+            skel.progs.scheduler_event_wakeup.attach()?,
+            skel.progs.scheduler_event_wakeup_new.attach()?,
+            skel.progs.scheduler_event_fork.attach()?,
+            skel.progs.scheduler_event_exec.attach()?,
+            skel.progs.scheduler_event_exit.attach()?,
+        ]);
+    }
+    if config.enable_irqs {
+        links.extend([
+            skel.progs.sirqo_entry.attach()?,
+            skel.progs.sirqo_exit.attach()?,
+        ]);
+    }
+    if config.callback_timing_sample_rate > 0 {
         links.extend([
             skel.progs.observe_select_cpu_exit.attach_trace()?,
             skel.progs.observe_enqueue_exit.attach_trace()?,
@@ -203,14 +223,14 @@ fn attach_programs(
             skel.progs.observe_stopping_exit.attach_trace()?,
         ]);
     }
-    if event_timing_sample_rate > 0 {
+    if config.event_timing_sample_rate > 0 {
         links.extend([
             skel.progs.on_sched_wakeup.attach()?,
             skel.progs.on_sched_wakeup_new.attach()?,
             skel.progs.on_sched_switch.attach()?,
         ]);
     }
-    let dsq_available = attach_dsq_programs(skel, &mut links);
+    let dsq_available = config.enable_dsq && attach_dsq_programs(skel, &mut links);
     let block_io_available = block_io_supported && attach_block_io_programs(skel, &mut links);
     let hardirq_available = hardirq_supported && attach_hardirq_programs(skel, &mut links);
     Ok((links, dsq_available, block_io_available, hardirq_available))
@@ -225,8 +245,12 @@ fn tracepoint_available(group: &str, event: &str) -> bool {
     .any(|root| Path::new(root).join(group).join(event).exists())
 }
 
-fn configure_block_io_programs(open_skel: &mut crate::bpf_skel::OpenBpfSkel<'_>) -> bool {
-    let supported = tracepoint_available("block", "block_rq_issue")
+fn configure_block_io_programs(
+    open_skel: &mut crate::bpf_skel::OpenBpfSkel<'_>,
+    enabled: bool,
+) -> bool {
+    let supported = enabled
+        && tracepoint_available("block", "block_rq_issue")
         && tracepoint_available("block", "block_rq_complete");
     if !supported {
         open_skel.progs.block_io_observer_issue.set_autoload(false);
@@ -257,8 +281,12 @@ fn attach_block_io_programs(skel: &BpfSkel<'_>, links: &mut Vec<Link>) -> bool {
     true
 }
 
-fn configure_hardirq_programs(open_skel: &mut crate::bpf_skel::OpenBpfSkel<'_>) -> bool {
-    let supported = tracepoint_available("irq", "irq_handler_entry")
+fn configure_hardirq_programs(
+    open_skel: &mut crate::bpf_skel::OpenBpfSkel<'_>,
+    enabled: bool,
+) -> bool {
+    let supported = enabled
+        && tracepoint_available("irq", "irq_handler_entry")
         && tracepoint_available("irq", "irq_handler_exit");
     if !supported {
         open_skel.progs.hirqo_entry.set_autoload(false);
@@ -907,8 +935,7 @@ pub fn run(
     state: Arc<RwLock<Snapshot>>,
     shutdown: Arc<AtomicBool>,
     ready: Sender<Result<()>>,
-    callback_timing_sample_rate: u32,
-    event_timing_sample_rate: u32,
+    config: CollectorConfig,
 ) -> Result<()> {
     let targets = match find_targets() {
         Ok(targets) => targets,
@@ -919,32 +946,34 @@ pub fn run(
         }
     };
     let target_program_ids = targets.each_ref().map(|target| target.id);
+    let existing_program_ids = ProgInfoIter::default()
+        .map(|program| program.id)
+        .collect::<HashSet<_>>();
 
     let mut open_object = MaybeUninit::<OpenObject>::uninit();
     let mut open_skel = BpfSkelBuilder::default()
         .open(&mut open_object)
         .context("opening callback collector BPF object")?;
     set_targets(&mut open_skel, &targets).context("setting callback attach targets")?;
-    let block_io_supported = configure_block_io_programs(&mut open_skel);
-    let hardirq_supported = configure_hardirq_programs(&mut open_skel);
+    let block_io_supported = configure_block_io_programs(&mut open_skel, config.enable_block_io);
+    let hardirq_supported = configure_hardirq_programs(&mut open_skel, config.enable_irqs);
     let rodata = open_skel
         .maps
         .rodata_data
         .as_mut()
         .context("callback collector rodata is unavailable")?;
-    rodata.callback_timing_sample_rate = callback_timing_sample_rate;
-    rodata.event_timing_sample_rate = event_timing_sample_rate;
+    rodata.callback_timing_sample_rate = config.callback_timing_sample_rate;
+    rodata.event_timing_sample_rate = config.event_timing_sample_rate;
     let skel = open_skel
         .load()
         .context("loading callback collector BPF object")?;
-    let (_links, dsq_available, block_io_available, hardirq_available) = attach_programs(
-        &skel,
-        callback_timing_sample_rate,
-        event_timing_sample_rate,
-        block_io_supported,
-        hardirq_supported,
-    )
-    .context("attaching callback observer programs")?;
+    let inspector_program_ids = ProgInfoIter::default()
+        .filter(|program| !existing_program_ids.contains(&program.id))
+        .map(|program| program.id)
+        .collect::<Vec<_>>();
+    let (_links, dsq_available, block_io_available, hardirq_available) =
+        attach_programs(&skel, config, block_io_supported, hardirq_supported)
+            .context("attaching callback observer programs")?;
 
     let started = Instant::now();
     let mut previous = read_counts(&skel)?;
@@ -959,6 +988,11 @@ pub fn run(
     let migrations = read_migrations(&skel)?;
     let mut previous_cpu_runtime = read_cpu_runtime(&skel)?;
     let bpf_program_stats = query_bpf_program_stats(&target_program_ids);
+    let inspector_bpf_program_stats = query_bpf_program_stats(&inspector_program_ids);
+    let mut previous_inspector_runtime_ns = inspector_bpf_program_stats
+        .iter()
+        .map(|program| program.run_time_ns)
+        .sum::<u64>();
     let dsq_metrics = read_dsq_metrics(&skel, dsq_available)?;
     let mut previous_at = Instant::now();
     {
@@ -968,8 +1002,8 @@ pub fn run(
             target_program_ids,
             uptime_seconds: 0,
             counters: build_counters(previous, previous, Duration::ZERO),
-            callback_timing_sample_rate,
-            event_timing_sample_rate,
+            callback_timing_sample_rate: config.callback_timing_sample_rate,
+            event_timing_sample_rate: config.event_timing_sample_rate,
             callback_timings: build_callback_timing_rows(&callback_timings),
             scheduler_timings: vec![
                 build_timing_metric_row("wakeup_to_running", &wakeup_latency),
@@ -983,6 +1017,9 @@ pub fn run(
                 Duration::ZERO,
             ),
             bpf_program_stats,
+            inspector_bpf_program_stats,
+            inspector_bpf_cpu_equivalent_pct: None,
+            inspector_bpf_host_capacity_pct: None,
             dsq_metrics,
             scheduler_events: build_scheduler_event_rows(
                 previous_scheduler_events,
@@ -1034,8 +1071,21 @@ pub fn run(
         let migrations = read_migrations(&skel)?;
         let current_cpu_runtime = read_cpu_runtime(&skel)?;
         let bpf_program_stats = query_bpf_program_stats(&target_program_ids);
+        let inspector_bpf_program_stats = query_bpf_program_stats(&inspector_program_ids);
         let dsq_metrics = read_dsq_metrics(&skel, dsq_available)?;
         let elapsed = now.duration_since(previous_at);
+        let inspector_runtime_ns = inspector_bpf_program_stats
+            .iter()
+            .map(|program| program.run_time_ns)
+            .sum::<u64>();
+        let inspector_stats_enabled = inspector_bpf_program_stats
+            .iter()
+            .any(|program| program.run_count > 0 || program.run_time_ns > 0);
+        let inspector_cpu_equivalent_pct = inspector_stats_enabled.then(|| {
+            inspector_runtime_ns.saturating_sub(previous_inspector_runtime_ns) as f64
+                / elapsed.as_nanos() as f64
+                * 100.0
+        });
         let counters = build_counters(current, previous, elapsed);
         previous = current;
         let mut snapshot = state.write().expect("snapshot lock poisoned");
@@ -1052,6 +1102,11 @@ pub fn run(
             build_cpu_runtime_rows(&current_cpu_runtime, &previous_cpu_runtime, elapsed);
         previous_cpu_runtime = current_cpu_runtime;
         snapshot.bpf_program_stats = bpf_program_stats;
+        snapshot.inspector_bpf_program_stats = inspector_bpf_program_stats;
+        snapshot.inspector_bpf_cpu_equivalent_pct = inspector_cpu_equivalent_pct;
+        snapshot.inspector_bpf_host_capacity_pct = inspector_cpu_equivalent_pct
+            .map(|percentage| percentage / previous_cpu_runtime.len().max(1) as f64);
+        previous_inspector_runtime_ns = inspector_runtime_ns;
         snapshot.dsq_metrics = dsq_metrics;
         snapshot.scheduler_events = build_scheduler_event_rows(
             current_scheduler_events,

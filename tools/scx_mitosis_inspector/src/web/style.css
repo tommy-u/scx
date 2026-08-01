@@ -268,6 +268,9 @@ dd {
 
 code { color: #404b5e; }
 
+.compact-summary { margin: 0 0 10px; }
+.compact-summary dl { grid-template-columns: repeat(2, minmax(0, 220px)); }
+
 .table-section { margin-top: 26px; }
 
 .table-section h2 {
