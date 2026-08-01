@@ -2131,6 +2131,204 @@ export function decorateCells(cells, taskMappings) {
   });
 }
 
+const CELL_WORKSPACE_TABS = [
+  { id: "layout", label: "Layout" },
+  { id: "changes", label: "Changes" },
+];
+
+export function cellWorkspaceTabModel(activeTab = "layout") {
+  const selected = CELL_WORKSPACE_TABS.some((tab) => tab.id === activeTab)
+    ? activeTab
+    : "layout";
+  return CELL_WORKSPACE_TABS.map((tab) => ({
+    ...tab,
+    selected: tab.id === selected,
+  }));
+}
+
+export function nextCellWorkspaceTab(activeTab, key) {
+  const tabs = CELL_WORKSPACE_TABS.map((tab) => tab.id);
+  const current = Math.max(0, tabs.indexOf(activeTab));
+  if (key === "Home") return tabs[0];
+  if (key === "End") return tabs[tabs.length - 1];
+  if (["ArrowRight", "ArrowDown"].includes(key)) {
+    return tabs[(current + 1) % tabs.length];
+  }
+  if (["ArrowLeft", "ArrowUp"].includes(key)) {
+    return tabs[(current - 1 + tabs.length) % tabs.length];
+  }
+  return tabs[current];
+}
+
+const TOPOLOGY_OUTCOME_LABELS = {
+  applied: "Applied",
+  deferred: "Deferred",
+  rejected: "Rejected",
+};
+const TOPOLOGY_STAGE_LABELS = {
+  discovery: "Discovery",
+  resolution: "Topology resolution",
+  drain: "Queue drain",
+  publication: "Publication",
+  quiescence: "Reader quiescence",
+  membership: "Membership",
+};
+const TOPOLOGY_STAGE_STATUS_LABELS = {
+  complete: "Complete",
+  warning: "Warning",
+  failed: "Failed",
+};
+const TOPOLOGY_CHANGE_LABELS = {
+  added: "Added",
+  removed: "Removed",
+  changed: "Changed",
+};
+
+function topologyCpuList(value) {
+  return [...new Set((value || [])
+    .map(Number)
+    .filter((cpu) => Number.isSafeInteger(cpu) && cpu >= 0))]
+    .sort((left, right) => left - right);
+}
+
+function topologyCellState(state, cellId) {
+  if (!state || typeof state !== "object") {
+    return null;
+  }
+  const name = typeof state.name === "string" && state.name.trim() !== ""
+      ? state.name.trim()
+      : null;
+  const primaryCpus = topologyCpuList(state.primary_cpus);
+  const borrowableCpus = topologyCpuList(state.borrowable_cpus);
+  return {
+    name,
+    identityLabel: name || (cellId === 0 ? "Fallback cell 0" : `Cell ${cellId}`),
+    slotEpoch: Math.max(0, finiteValue(state.slot_epoch) ?? 0),
+    primaryCpuCount: Math.max(
+      0,
+      finiteValue(state.primary_cpu_count) ?? primaryCpus.length,
+    ),
+    borrowableCpuCount: Math.max(
+      0,
+      finiteValue(state.borrowable_cpu_count) ?? borrowableCpus.length,
+    ),
+    normalDsqCount: Math.max(0, finiteValue(state.normal_dsq_count) ?? 0),
+    affinityDsqCount: Math.max(0, finiteValue(state.affinity_dsq_count) ?? 0),
+  };
+}
+
+function topologyCellChange(change) {
+  const cellId = finiteValue(change?.cell_id);
+  if (!Number.isSafeInteger(cellId) || cellId < 0) {
+    return null;
+  }
+  const before = topologyCellState(change?.before, cellId);
+  const after = topologyCellState(change?.after, cellId);
+  const identity = after || before;
+  const kind = TOPOLOGY_CHANGE_LABELS[change?.kind] ? change.kind : "changed";
+  return {
+    cellId,
+    kind,
+    kindLabel: TOPOLOGY_CHANGE_LABELS[kind],
+    label: identity?.name || (cellId === 0 ? "Fallback cell 0" : `Cell ${cellId}`),
+    before,
+    after,
+    primaryCpusAdded: topologyCpuList(change?.primary_cpus_added),
+    primaryCpusRemoved: topologyCpuList(change?.primary_cpus_removed),
+    borrowableCpusAdded: topologyCpuList(change?.borrowable_cpus_added),
+    borrowableCpusRemoved: topologyCpuList(change?.borrowable_cpus_removed),
+  };
+}
+
+function topologyTransition(transition) {
+  const id = finiteValue(transition?.id);
+  const fromGeneration = Math.max(0, finiteValue(transition?.from_generation) ?? 0);
+  const toGeneration = finiteValue(transition?.to_generation);
+  const outcome = TOPOLOGY_OUTCOME_LABELS[transition?.outcome]
+    ? transition.outcome
+    : "rejected";
+  const cellChanges = (transition?.cell_changes || [])
+    .map(topologyCellChange)
+    .filter(Boolean);
+  return {
+    id: Number.isSafeInteger(id) && id >= 0 ? id : 0,
+    reason: transition?.reason || "managed_cells_changed",
+    reasonLabel: transition?.reason === "managed_cells_changed"
+      ? "Managed cells changed"
+      : "Topology reconciliation",
+    outcome,
+    outcomeLabel: TOPOLOGY_OUTCOME_LABELS[outcome],
+    fromGeneration,
+    toGeneration,
+    generationLabel: toGeneration === null
+      ? `Generation ${fromGeneration} unchanged`
+      : `Generation ${fromGeneration} to ${toGeneration}`,
+    startedAtMs: finiteValue(transition?.started_at_ms),
+    completedAtMs: finiteValue(transition?.completed_at_ms),
+    durationMs: Math.max(0, finiteValue(transition?.duration_ms) ?? 0),
+    detail: transition?.detail || null,
+    stages: (transition?.stages || []).map((stage) => {
+      const status = TOPOLOGY_STAGE_STATUS_LABELS[stage?.status]
+        ? stage.status
+        : "failed";
+      return {
+        stage: stage?.stage || "unknown",
+        label: TOPOLOGY_STAGE_LABELS[stage?.stage] || "Unknown stage",
+        status,
+        statusLabel: TOPOLOGY_STAGE_STATUS_LABELS[status],
+        durationMs: Math.max(0, finiteValue(stage?.duration_ms) ?? 0),
+        detail: stage?.detail || null,
+      };
+    }),
+    cellChanges,
+    affectedCellCount: cellChanges.length,
+  };
+}
+
+export function topologyLifecycleModel(payload) {
+  const available = Boolean(payload && typeof payload === "object");
+  const managed = available && payload.managed === true;
+  const transitions = available
+    ? (payload.transitions || [])
+      .map(topologyTransition)
+      .sort((left, right) => right.id - left.id)
+    : [];
+  return {
+    available,
+    managed,
+    currentGeneration: available ? finiteValue(payload.current_generation) : null,
+    stateLabel: !available ? "Unavailable" : managed ? "Managed" : "Static",
+    transitions,
+    transitionCount: transitions.length,
+    emptyMessage: transitions.length > 0
+      ? null
+      : !available
+        ? "Topology lifecycle data is unavailable from this Snake version."
+        : managed
+          ? "No managed topology changes have occurred since attachment."
+          : "The active policy does not use managed cells.",
+  };
+}
+
+export function topologyLifecycleSignature(model) {
+  return JSON.stringify({
+    available: model?.available === true,
+    managed: model?.managed === true,
+    currentGeneration: model?.currentGeneration ?? null,
+    transitions: model?.transitions || [],
+    emptyMessage: model?.emptyMessage || null,
+  });
+}
+
+export function topologyAnchorScrollDelta(beforeTop, afterTop) {
+  if (beforeTop == null || afterTop == null) {
+    return 0;
+  }
+  const before = Number(beforeTop);
+  const after = Number(afterTop);
+  return Number.isFinite(before) && Number.isFinite(after) ? after - before : 0;
+}
+
 function cellDisplayName(cell) {
   const names = [
     cell?.name,

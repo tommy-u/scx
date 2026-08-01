@@ -2836,6 +2836,378 @@ button:focus-visible {
   line-height: 1.35;
 }
 
+.cell-workspace-tabs {
+  min-height: 48px;
+  padding: 0 clamp(16px, 3vw, 40px);
+  display: flex;
+  align-items: stretch;
+  gap: 24px;
+  overflow-x: auto;
+  background: var(--surface-muted);
+  border-bottom: 1px solid var(--border);
+}
+
+.cell-workspace-tab {
+  min-width: max-content;
+  padding: 0 2px;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--muted);
+  background: transparent;
+  border: 0;
+  border-bottom: 3px solid transparent;
+  border-radius: 0;
+  font-size: 0.75rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.cell-workspace-tab:hover {
+  color: var(--ink);
+}
+
+.cell-workspace-tab[aria-selected="true"] {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+.cell-workspace-tab:focus-visible,
+.cell-workspace-panel:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.cell-workspace-panel[hidden] {
+  display: none;
+}
+
+.cell-change-count {
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  display: inline-grid;
+  place-items: center;
+  color: var(--surface);
+  background: var(--accent);
+  border-radius: 9px;
+  font-size: 0.58rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.topology-lifecycle-panel {
+  padding: 20px clamp(12px, 3vw, 40px) 32px;
+}
+
+.topology-lifecycle-summary,
+.topology-transition-list {
+  background: var(--surface);
+  border: 1px solid var(--border);
+}
+
+.topology-lifecycle-summary dl {
+  min-height: 62px;
+  margin: 0;
+  padding: 10px 14px;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(120px, 1fr));
+  align-items: center;
+}
+
+.topology-lifecycle-summary dl > div {
+  min-width: 0;
+  padding: 0 16px;
+  border-left: 1px solid var(--border);
+}
+
+.topology-lifecycle-summary dl > div:first-child {
+  padding-left: 0;
+  border-left: 0;
+}
+
+.topology-lifecycle-summary dt,
+.topology-transition-facts small {
+  color: var(--muted);
+  font-size: 0.57rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.topology-lifecycle-summary dd,
+.topology-transition-facts > span > strong {
+  margin: 3px 0 0;
+  font-size: 0.78rem;
+  font-weight: 720;
+}
+
+.topology-lifecycle-state {
+  color: var(--muted);
+}
+
+.topology-lifecycle-state.managed {
+  color: var(--active);
+}
+
+.topology-transition-list {
+  margin-top: 14px;
+}
+
+.topology-history-empty {
+  margin: 0;
+  padding: 28px 18px;
+  color: var(--muted);
+  font-size: 0.78rem;
+  text-align: center;
+}
+
+.topology-transition {
+  border-left: 4px solid var(--border-strong);
+}
+
+.topology-transition + .topology-transition {
+  border-top: 1px solid var(--border);
+}
+
+.topology-transition.applied {
+  border-left-color: var(--active);
+}
+
+.topology-transition.deferred {
+  border-left-color: var(--waiting);
+}
+
+.topology-transition.rejected {
+  border-left-color: var(--danger);
+}
+
+.topology-transition > summary {
+  min-height: 72px;
+  padding: 10px 14px;
+  display: grid;
+  grid-template-columns: 82px minmax(260px, 1fr) minmax(220px, 0.55fr);
+  align-items: center;
+  gap: 18px;
+  cursor: pointer;
+  list-style-position: inside;
+}
+
+.topology-transition > summary:hover {
+  background: #f5f8fa;
+}
+
+.topology-outcome {
+  font-size: 0.68rem;
+  font-weight: 760;
+  text-transform: uppercase;
+}
+
+.topology-transition.applied .topology-outcome {
+  color: var(--active);
+}
+
+.topology-transition.deferred .topology-outcome {
+  color: var(--waiting);
+}
+
+.topology-transition.rejected .topology-outcome {
+  color: var(--danger);
+}
+
+.topology-transition-title {
+  min-width: 0;
+}
+
+.topology-transition-title strong,
+.topology-transition-title span {
+  display: block;
+}
+
+.topology-transition-title strong {
+  overflow: hidden;
+  font-size: 0.82rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.topology-transition-title span {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 0.66rem;
+}
+
+.topology-transition-facts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(80px, 1fr));
+  gap: 12px;
+}
+
+.topology-transition-facts small,
+.topology-transition-facts > span > strong {
+  display: block;
+}
+
+.topology-transition-body {
+  padding: 0 14px 18px;
+  border-top: 1px solid var(--border);
+}
+
+.topology-transition-detail {
+  margin: 0 -14px 14px;
+  padding: 10px 14px;
+  color: var(--danger);
+  background: #fff1f0;
+  border-bottom: 1px solid #efc2bd;
+  font-size: 0.7rem;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.topology-stage-section h4,
+.topology-cell-changes h4 {
+  margin: 16px 0 8px;
+  font-size: 0.68rem;
+  text-transform: uppercase;
+}
+
+.topology-stage-section ol {
+  margin: 0;
+  padding: 0;
+  border-top: 1px solid var(--border);
+  list-style: none;
+}
+
+.topology-stage-section li {
+  min-height: 42px;
+  padding: 7px 4px;
+  display: grid;
+  grid-template-columns: 12px minmax(0, 1fr) 72px;
+  align-items: center;
+  gap: 9px;
+  border-bottom: 1px solid var(--border);
+}
+
+.topology-stage-mark {
+  width: 9px;
+  height: 9px;
+  background: var(--active);
+  border: 2px solid var(--active);
+  border-radius: 50%;
+}
+
+.topology-stage-section li.warning .topology-stage-mark {
+  background: var(--surface);
+  border-color: var(--waiting);
+}
+
+.topology-stage-section li.failed .topology-stage-mark {
+  background: var(--danger);
+  border-color: var(--danger);
+}
+
+.topology-stage-section li div strong,
+.topology-stage-section li div span {
+  display: block;
+}
+
+.topology-stage-section li div strong {
+  font-size: 0.72rem;
+}
+
+.topology-stage-section li div span {
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 0.64rem;
+  overflow-wrap: anywhere;
+}
+
+.topology-stage-section time {
+  color: var(--muted);
+  font-size: 0.67rem;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.topology-cell-change {
+  padding: 10px 4px 12px;
+  border-top: 1px solid var(--border);
+}
+
+.topology-cell-change > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.topology-cell-change > header div {
+  min-width: 0;
+}
+
+.topology-cell-change > header strong {
+  font-size: 0.74rem;
+}
+
+.topology-cell-change > header div span {
+  margin-left: 8px;
+  color: var(--muted);
+  font-size: 0.62rem;
+}
+
+.topology-change-kind {
+  color: var(--muted);
+  font-size: 0.63rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.topology-cell-before-after {
+  margin-top: 8px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.topology-cell-before-after > div {
+  min-width: 0;
+}
+
+.topology-cell-before-after span {
+  color: var(--muted);
+  font-size: 0.56rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.topology-cell-before-after p {
+  margin: 3px 0 0;
+  color: var(--ink);
+  font-size: 0.66rem;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.topology-cpu-deltas {
+  margin-top: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  font-size: 0.64rem;
+}
+
+.topology-cpu-delta.added strong {
+  color: var(--active);
+}
+
+.topology-cpu-delta.removed strong {
+  color: var(--danger);
+}
+
+.topology-no-cell-changes {
+  margin: 14px 0 0;
+  color: var(--muted);
+  font-size: 0.7rem;
+}
+
 .cells-layout {
   padding: 20px clamp(12px, 3vw, 40px) 32px;
   display: grid;
@@ -4131,6 +4503,47 @@ button:focus-visible {
 
   .fine-timing-toggle {
     white-space: normal;
+  }
+
+  .cell-workspace-tabs {
+    padding: 0 12px;
+  }
+
+  .topology-lifecycle-panel {
+    padding: 12px 8px 20px;
+  }
+
+  .topology-lifecycle-summary dl {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .topology-lifecycle-summary dl > div,
+  .topology-lifecycle-summary dl > div:first-child {
+    padding: 8px 0;
+    border-top: 1px solid var(--border);
+    border-left: 0;
+  }
+
+  .topology-lifecycle-summary dl > div:first-child {
+    border-top: 0;
+  }
+
+  .topology-transition > summary {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 8px;
+  }
+
+  .topology-transition-facts {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .topology-cell-before-after {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 8px;
+  }
+
+  .topology-stage-section li {
+    grid-template-columns: 12px minmax(0, 1fr) 58px;
   }
 
   .slot-comparison,

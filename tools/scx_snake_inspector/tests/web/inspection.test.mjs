@@ -11,6 +11,7 @@ import * as inspectionState from "../../src/web/inspection.js";
 import {
   callbackSampleRateOptions,
   cellLayoutDiagramModel,
+  cellWorkspaceTabModel,
   compactCpuList,
   decorateCells,
   dsqActivityHeatmapModel,
@@ -21,6 +22,7 @@ import {
   fineTimingDsqModels,
   formatCallbackDuration,
   ladderPercentages,
+  nextCellWorkspaceTab,
   nextPolicyCandidate,
   policyLibraryModels,
   policyInlineActionModel,
@@ -40,6 +42,9 @@ import {
   rungPercentages,
   rungTimingSummary,
   selectionRungHitFlow,
+  topologyAnchorScrollDelta,
+  topologyLifecycleModel,
+  topologyLifecycleSignature,
   workloadAssignmentRequest,
 } from "../../src/web/inspection.js";
 
@@ -1910,6 +1915,118 @@ test("cell decoration exposes overlaps and mapped tasks", () => {
   assert.equal(cells[1].tasks[0].tid, 72);
 });
 
+test("topology lifecycle model explains outcomes stages and cell deltas", () => {
+  const model = topologyLifecycleModel({
+    current_generation: 12,
+    managed: true,
+    transitions: [
+      {
+        id: 3,
+        reason: "managed_cells_changed",
+        outcome: "deferred",
+        from_generation: 10,
+        to_generation: null,
+        started_at_ms: 4_991,
+        completed_at_ms: 5_000,
+        duration_ms: 9,
+        stages: [
+          { stage: "discovery", status: "complete", duration_ms: 1 },
+          { stage: "drain", status: "failed", duration_ms: 8, detail: "queues remained busy" },
+        ],
+        cell_changes: [],
+        detail: "queues remained busy",
+      },
+      {
+        id: 4,
+        reason: "managed_cells_changed",
+        outcome: "applied",
+        from_generation: 11,
+        to_generation: 12,
+        started_at_ms: 3_000,
+        completed_at_ms: 3_018,
+        duration_ms: 18,
+        stages: [
+          { stage: "discovery", status: "complete", duration_ms: 2 },
+          { stage: "drain", status: "complete", duration_ms: 5 },
+          { stage: "membership", status: "warning", duration_ms: 3, detail: "one task disappeared" },
+        ],
+        cell_changes: [
+          {
+            cell_id: 0,
+            kind: "changed",
+            before: { name: null, slot_epoch: 0, primary_cpu_count: 2, borrowable_cpu_count: 1, normal_dsq_count: 1, affinity_dsq_count: 2 },
+            after: { name: null, slot_epoch: 0, primary_cpu_count: 1, borrowable_cpu_count: 2, normal_dsq_count: 1, affinity_dsq_count: 1 },
+            primary_cpus_added: [],
+            primary_cpus_removed: [1],
+            borrowable_cpus_added: [1],
+            borrowable_cpus_removed: [],
+          },
+          {
+            cell_id: 7,
+            kind: "changed",
+            before: { name: "batch-old.slice", slot_epoch: 3, primary_cpu_count: 1, borrowable_cpu_count: 1, normal_dsq_count: 1, affinity_dsq_count: 1 },
+            after: { name: "batch.slice", slot_epoch: 4, primary_cpu_count: 2, borrowable_cpu_count: 0, normal_dsq_count: 2, affinity_dsq_count: 2 },
+            primary_cpus_added: [4],
+            primary_cpus_removed: [],
+            borrowable_cpus_added: [],
+            borrowable_cpus_removed: [4],
+          },
+        ],
+        detail: null,
+      },
+    ],
+  });
+
+  assert.equal(model.available, true);
+  assert.equal(model.managed, true);
+  assert.equal(model.currentGeneration, 12);
+  assert.equal(model.stateLabel, "Managed");
+  assert.equal(model.transitions[0].id, 4);
+  assert.equal(model.transitions[0].outcomeLabel, "Applied");
+  assert.equal(model.transitions[0].generationLabel, "Generation 11 to 12");
+  assert.equal(model.transitions[0].affectedCellCount, 2);
+  assert.deepEqual(
+    model.transitions[0].stages.map(({ label, statusLabel }) => ({ label, statusLabel })),
+    [
+      { label: "Discovery", statusLabel: "Complete" },
+      { label: "Queue drain", statusLabel: "Complete" },
+      { label: "Membership", statusLabel: "Warning" },
+    ],
+  );
+  assert.equal(model.transitions[0].cellChanges[0].label, "Fallback cell 0");
+  assert.equal(model.transitions[0].cellChanges[0].before.identityLabel, "Fallback cell 0");
+  assert.equal(model.transitions[0].cellChanges[1].label, "batch.slice");
+  assert.equal(model.transitions[0].cellChanges[1].kindLabel, "Changed");
+  assert.equal(model.transitions[0].cellChanges[1].before.name, "batch-old.slice");
+  assert.equal(model.transitions[0].cellChanges[1].after.name, "batch.slice");
+  assert.equal(model.transitions[1].outcomeLabel, "Deferred");
+  assert.equal(model.transitions[1].generationLabel, "Generation 10 unchanged");
+  assert.equal(model.emptyMessage, null);
+
+  assert.equal(
+    topologyLifecycleModel({ current_generation: 5, managed: true, transitions: [] }).emptyMessage,
+    "No managed topology changes have occurred since attachment.",
+  );
+  assert.equal(
+    topologyLifecycleModel({ current_generation: 5, managed: false, transitions: [] }).emptyMessage,
+    "The active policy does not use managed cells.",
+  );
+  assert.equal(topologyAnchorScrollDelta(120, 178), 58);
+  assert.equal(topologyAnchorScrollDelta(null, 178), 0);
+  assert.equal(topologyLifecycleSignature(model), topologyLifecycleSignature({ ...model }));
+});
+
+test("cell workspace tabs preserve selection and keyboard order", () => {
+  assert.deepEqual(cellWorkspaceTabModel("changes"), [
+    { id: "layout", label: "Layout", selected: false },
+    { id: "changes", label: "Changes", selected: true },
+  ]);
+  assert.equal(nextCellWorkspaceTab("layout", "ArrowRight"), "changes");
+  assert.equal(nextCellWorkspaceTab("changes", "ArrowRight"), "layout");
+  assert.equal(nextCellWorkspaceTab("changes", "Home"), "layout");
+  assert.equal(nextCellWorkspaceTab("layout", "End"), "changes");
+});
+
 test("cell layout diagram joins cells with LLC-scoped normal and affinity DSQs", () => {
   const topology = queueTopologyModel(
     { mode_name: "vtime" },
@@ -2881,7 +2998,18 @@ test("Cells page renders a live cell and DSQ layout diagram", () => {
 
   assert.match(page, /<h2 id="cellsTitle">Cells &amp; DSQs<\/h2>/);
   assert.match(page, /<h3>Live cell layout<\/h3>/);
+  assert.match(page, /id="cellWorkspaceTabs"[^>]*role="tablist"/);
+  assert.match(page, /id="cellLayoutTab"[^>]*role="tab"/);
+  assert.match(page, /id="cellChangesTab"[^>]*role="tab"/);
+  assert.match(page, /id="cellLayoutPanel"[^>]*role="tabpanel"/);
+  assert.match(page, /id="cellChangesPanel"[^>]*role="tabpanel"/);
+  assert.match(page, /id="topologyTransitionList"/);
   assert.match(script, /cellLayoutDiagramModel/);
+  assert.match(script, /topologyLifecycleModel/);
+  assert.match(script, /renderTopologyTransitions/);
+  assert.match(script, /cellState\.identityLabel/);
+  assert.match(script, /topologyLifecycleSignature/);
+  assert.match(script, /topologyHistoryAnchor/);
   assert.match(script, /class="cell-layout-summary"/);
   assert.match(script, /class="cell-topology-band/);
   assert.match(script, /data-render-key="cell:/);
@@ -2911,6 +3039,8 @@ test("Cells mobile controls wrap without widening the viewport", () => {
   assert.match(stylesheet, /\.workload-control-band\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)/s);
   assert.match(stylesheet, /\.workload-control-band\s+\.control-field\s*\{[^}]*width:\s*100%/s);
   assert.match(stylesheet, /\.cell-llc-grid\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)/s);
+  assert.match(stylesheet, /\.topology-lifecycle-summary dl\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)/s);
+  assert.match(stylesheet, /\.topology-transition > summary\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)/s);
 });
 
 test("current scheduler command formats exact argv and unavailable states", () => {

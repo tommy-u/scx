@@ -24,6 +24,7 @@ import {
   cellLayoutDiagramModel,
   cellQueueFacts,
   cellStatsModel,
+  cellWorkspaceTabModel,
   compactCpuList,
   dsqActivityHeatmapModel,
   dsqActivityModels,
@@ -54,6 +55,7 @@ import {
   queueTopologyTabModel,
   mergeQueueTimingTopology,
   nanosecondDurationClass,
+  nextCellWorkspaceTab,
   overviewModel,
   parseInspectorRoute,
   runtimeContextModel,
@@ -77,6 +79,9 @@ import {
   selectionRungHitFlow,
   testingCampaignTabs,
   testingMatrixModel,
+  topologyAnchorScrollDelta,
+  topologyLifecycleModel,
+  topologyLifecycleSignature,
   vtimeDebugModel,
   workloadAssignmentRequest,
 } from "/assets/inspection.js";
@@ -137,10 +142,17 @@ const elements = {
   cellsNotice: document.querySelector("#cellsNotice"),
   cellStatsNotice: document.querySelector("#cellStatsNotice"),
   cellWindowSelect: document.querySelector("#cellWindowSelect"),
+  cellWindowField: document.querySelector("#cellWindowField"),
   cellsView: document.querySelector("#cellsView"),
+  cellWorkspaceTabs: document.querySelector("#cellWorkspaceTabs"),
+  cellLayoutPanel: document.querySelector("#cellLayoutPanel"),
+  cellChangesPanel: document.querySelector("#cellChangesPanel"),
+  cellChangeCount: document.querySelector("#cellChangeCount"),
   cellDetail: document.querySelector("#cellDetail"),
   cellBarTooltip: document.querySelector("#cellBarTooltip"),
   cellList: document.querySelector("#cellList"),
+  topologyLifecycleSummary: document.querySelector("#topologyLifecycleSummary"),
+  topologyTransitionList: document.querySelector("#topologyTransitionList"),
   workloadTargetKind: document.querySelector("#workloadTargetKind"),
   workloadTargetLabel: document.querySelector("#workloadTargetLabel"),
   workloadTargetValue: document.querySelector("#workloadTargetValue"),
@@ -280,6 +292,8 @@ const state = {
   callbackTimingRequestId: 0,
   callbackRatePending: false,
   callbackRateDirty: false,
+  cellWorkspaceTab: "layout",
+  topologyLifecycleRenderSignature: null,
   fineTiming: null,
   fineTimingError: null,
   fineTimingLoading: false,
@@ -519,6 +533,24 @@ function bindControls() {
     }
     event.preventDefault();
     selectQueueTopologyTab(nextTab, true);
+  });
+  elements.cellWorkspaceTabs.addEventListener("click", (event) => {
+    const tab = event.target.closest("[data-cell-workspace-tab]");
+    if (tab) {
+      selectCellWorkspaceTab(tab.dataset.cellWorkspaceTab);
+    }
+  });
+  elements.cellWorkspaceTabs.addEventListener("keydown", (event) => {
+    const tab = event.target.closest("[data-cell-workspace-tab]");
+    if (!tab) {
+      return;
+    }
+    const nextTab = nextCellWorkspaceTab(tab.dataset.cellWorkspaceTab, event.key);
+    if (nextTab === tab.dataset.cellWorkspaceTab && !["Home", "End"].includes(event.key)) {
+      return;
+    }
+    event.preventDefault();
+    selectCellWorkspaceTab(nextTab, true);
   });
   elements.debuggingVtimeView.addEventListener("click", (event) => {
     const tab = event.target.closest("[data-vtime-counter-tab]");
@@ -4527,6 +4559,12 @@ function replaceKeyedHtml(container, html) {
 
 function renderCells() {
   renderInspectionStatus(elements.cellsNotice, elements.cellsFreshness);
+  const lifecycleModel = topologyLifecycleModel(state.inspection?.topology_lifecycle);
+  renderCellWorkspaceTabs(lifecycleModel);
+  if (state.cellWorkspaceTab === "changes") {
+    renderTopologyTransitions(lifecycleModel);
+    return;
+  }
   renderWorkloadCellOptions();
   const statsModel = cellStatsModel(state.snapshot?.cell_stats, {
     policyGeneration: state.inspectionContext?.policy_generation,
@@ -4579,6 +4617,176 @@ function renderCells() {
   } else {
     elements.cellDetail.replaceChildren();
   }
+}
+
+function selectCellWorkspaceTab(tabId, focus = false) {
+  const selected = cellWorkspaceTabModel(tabId).find((tab) => tab.selected).id;
+  state.cellWorkspaceTab = selected;
+  renderCells();
+  if (focus) {
+    requestAnimationFrame(() => {
+      elements.cellWorkspaceTabs
+        .querySelector(`[data-cell-workspace-tab="${selected}"]`)
+        ?.focus({ preventScroll: true });
+    });
+  }
+}
+
+function renderCellWorkspaceTabs(lifecycle) {
+  const tabs = cellWorkspaceTabModel(state.cellWorkspaceTab);
+  state.cellWorkspaceTab = tabs.find((tab) => tab.selected).id;
+  for (const tab of tabs) {
+    const control = elements.cellWorkspaceTabs.querySelector(
+      `[data-cell-workspace-tab="${tab.id}"]`,
+    );
+    control?.setAttribute("aria-selected", String(tab.selected));
+    control?.setAttribute("tabindex", tab.selected ? "0" : "-1");
+  }
+  const showLayout = state.cellWorkspaceTab === "layout";
+  elements.cellLayoutPanel.hidden = !showLayout;
+  elements.cellChangesPanel.hidden = showLayout;
+  elements.cellWindowField.classList.toggle("hidden", !showLayout);
+  elements.cellChangeCount.textContent = formatCount(lifecycle.transitionCount);
+  elements.cellChangeCount.classList.toggle("hidden", lifecycle.transitionCount === 0);
+}
+
+function topologyCellStateText(cellState) {
+  if (!cellState) {
+    return "Not present";
+  }
+  return `${cellState.identityLabel} · epoch ${formatCount(cellState.slotEpoch)} · ${formatCount(cellState.primaryCpuCount)} primary · ${formatCount(cellState.borrowableCpuCount)} borrowable · ${formatCount(cellState.normalDsqCount)} normal / ${formatCount(cellState.affinityDsqCount)} affinity DSQs`;
+}
+
+function topologyCpuDelta(label, cpus, kind) {
+  if (!cpus.length) {
+    return "";
+  }
+  return `<span class="topology-cpu-delta ${kind}"><strong>${escapeHtml(label)}</strong> ${escapeHtml(compactCpuList(cpus))}</span>`;
+}
+
+function renderTopologyCellChange(change) {
+  const deltas = [
+    topologyCpuDelta("Primary +", change.primaryCpusAdded, "added"),
+    topologyCpuDelta("Primary -", change.primaryCpusRemoved, "removed"),
+    topologyCpuDelta("Borrowable +", change.borrowableCpusAdded, "added"),
+    topologyCpuDelta("Borrowable -", change.borrowableCpusRemoved, "removed"),
+  ].filter(Boolean).join("");
+  return `
+    <div class="topology-cell-change ${escapeHtml(change.kind)}">
+      <header>
+        <div><strong>${escapeHtml(change.label)}</strong><span>Cell ${formatCount(change.cellId)}</span></div>
+        <span class="topology-change-kind">${escapeHtml(change.kindLabel)}</span>
+      </header>
+      <div class="topology-cell-before-after">
+        <div><span>Before</span><p>${escapeHtml(topologyCellStateText(change.before))}</p></div>
+        <div><span>After</span><p>${escapeHtml(topologyCellStateText(change.after))}</p></div>
+      </div>
+      ${deltas ? `<div class="topology-cpu-deltas">${deltas}</div>` : ""}
+    </div>`;
+}
+
+function renderTopologyTransitionStage(stage) {
+  return `
+    <li class="${escapeHtml(stage.status)}">
+      <span class="topology-stage-mark" aria-hidden="true"></span>
+      <div><strong>${escapeHtml(stage.label)}</strong><span>${escapeHtml(stage.statusLabel)}${stage.detail ? ` · ${escapeHtml(stage.detail)}` : ""}</span></div>
+      <time>${escapeHtml(formatDuration(stage.durationMs))}</time>
+    </li>`;
+}
+
+function renderTopologyTransition(transition) {
+  const detail = transition.detail
+    ? `<p class="topology-transition-detail">${escapeHtml(transition.detail)}</p>`
+    : "";
+  const changes = transition.cellChanges.length > 0
+    ? `<section class="topology-cell-changes" aria-label="Affected cells">
+        <h4>Affected cells</h4>
+        ${transition.cellChanges.map(renderTopologyCellChange).join("")}
+      </section>`
+    : '<p class="topology-no-cell-changes">No resolved cell delta was available for this attempt.</p>';
+  return `
+    <details class="topology-transition ${escapeHtml(transition.outcome)}"
+      data-render-key="topology-transition:${transition.id}">
+      <summary data-render-key="topology-transition:${transition.id}:summary">
+        <span class="topology-outcome">${escapeHtml(transition.outcomeLabel)}</span>
+        <span class="topology-transition-title">
+          <strong>${escapeHtml(transition.generationLabel)}</strong>
+          <span>${escapeHtml(transition.reasonLabel)} · ${escapeHtml(formatTimestamp(transition.completedAtMs))}</span>
+        </span>
+        <span class="topology-transition-facts">
+          <span><small>Duration</small><strong>${escapeHtml(formatDuration(transition.durationMs))}</strong></span>
+          <span><small>Affected</small><strong>${formatCount(transition.affectedCellCount)} cells</strong></span>
+        </span>
+      </summary>
+      <div class="topology-transition-body">
+        ${detail}
+        <section class="topology-stage-section" aria-label="Transition stages">
+          <h4>Stages</h4>
+          <ol>${transition.stages.map(renderTopologyTransitionStage).join("")}</ol>
+        </section>
+        ${changes}
+      </div>
+    </details>`;
+}
+
+function topologyHistoryAnchor(container) {
+  const focused = document.activeElement?.closest?.("details[data-render-key]");
+  const open = container.querySelector("details[open][data-render-key]");
+  const visible = [...container.querySelectorAll("details[data-render-key]")]
+    .find((node) => {
+      const bounds = node.getBoundingClientRect();
+      return bounds.bottom > 0 && bounds.top < window.innerHeight;
+    });
+  const node = focused && container.contains(focused) ? focused : open || visible;
+  if (!node) {
+    return null;
+  }
+  return {
+    key: node.dataset.renderKey,
+    top: node.getBoundingClientRect().top,
+  };
+}
+
+function replaceTopologyHistory(html) {
+  const anchor = topologyHistoryAnchor(elements.topologyTransitionList);
+  replaceKeyedHtml(elements.topologyTransitionList, html);
+  if (!anchor?.key) {
+    return;
+  }
+  const replacement = [...elements.topologyTransitionList.querySelectorAll("[data-render-key]")]
+    .find((node) => node.dataset.renderKey === anchor.key);
+  if (!replacement) {
+    return;
+  }
+  const delta = topologyAnchorScrollDelta(
+    anchor.top,
+    replacement.getBoundingClientRect().top,
+  );
+  if (delta !== 0) {
+    window.scrollBy(0, delta);
+  }
+}
+
+function renderTopologyTransitions(model) {
+  const signature = topologyLifecycleSignature(model);
+  if (signature === state.topologyLifecycleRenderSignature) {
+    return;
+  }
+  state.topologyLifecycleRenderSignature = signature;
+  const generation = model.currentGeneration == null
+    ? "Unavailable"
+    : formatCount(model.currentGeneration);
+  elements.topologyLifecycleSummary.innerHTML = `
+    <dl>
+      <div><dt>Topology generation</dt><dd>${escapeHtml(generation)}</dd></div>
+      <div><dt>Mode</dt><dd><span class="topology-lifecycle-state ${model.managed ? "managed" : "static"}">${escapeHtml(model.stateLabel)}</span></dd></div>
+      <div><dt>Recorded attempts</dt><dd>${formatCount(model.transitionCount)}</dd></div>
+    </dl>`;
+  replaceTopologyHistory(
+    model.emptyMessage
+      ? `<p class="topology-history-empty">${escapeHtml(model.emptyMessage)}</p>`
+      : model.transitions.map(renderTopologyTransition).join(""),
+  );
 }
 
 function renderCellLayoutSummary(summary) {

@@ -345,7 +345,7 @@
             <p>Live workload, CPU ownership, and queue routing by cell</p>
           </div>
           <div class="cell-heading-actions">
-            <label class="control-field compact-window-field">
+            <label class="control-field compact-window-field" id="cellWindowField">
               <span>Window</span>
               <select id="cellWindowSelect" aria-label="Cell statistics window"></select>
             </label>
@@ -353,41 +353,51 @@
           </div>
         </header>
         <p class="notice hidden" id="cellsNotice" role="status"></p>
-        <p class="notice hidden" id="cellStatsNotice" role="status"></p>
-        <section class="control-band workload-control-band" aria-label="Workload cell assignment" data-feedback-key="Cells:Workload-assignment">
-          <fieldset class="control-field segmented" id="workloadTargetKind">
-            <legend>Target</legend>
-            <label><input type="radio" name="workloadTargetKind" value="tid" checked><span>TID</span></label>
-            <label><input type="radio" name="workloadTargetKind" value="tgid"><span>TGID</span></label>
-            <label><input type="radio" name="workloadTargetKind" value="cgroup"><span>Cgroup</span></label>
-          </fieldset>
-          <label class="control-field workload-target-field">
-            <span id="workloadTargetLabel">TID</span>
-            <input id="workloadTargetValue" type="text" inputmode="numeric" placeholder="4812" autocomplete="off">
-          </label>
-          <label class="control-field">
-            <span>Destination</span>
-            <select id="workloadCellId" aria-label="Destination cell"></select>
-          </label>
-          <button class="apply-button" id="assignWorkloadCell" type="button">Assign</button>
-          <button class="secondary-button" id="clearWorkloadCell" type="button">Clear override</button>
-          <p class="control-message hidden" id="workloadAssignmentNotice" role="status"></p>
-        </section>
-        <div class="cells-layout">
-          <section class="cell-browser" aria-label="Configured cells" data-feedback-key="Cells:Cell-browser">
-            <header class="cell-browser-heading">
-              <h3>Live cell layout</h3>
-              <div class="cell-topology-legend" aria-label="Topology legend">
-                <span><i class="normal"></i>Normal DSQ</span>
-                <span><i class="affinity"></i>Affinity DSQs</span>
-                <span><i class="owned"></i>Primary CPUs</span>
-              </div>
-            </header>
-            <div class="cell-list" id="cellList"></div>
-          </section>
-          <div class="cell-bar-tooltip hidden" id="cellBarTooltip" role="tooltip"></div>
-          <section class="cell-detail" id="cellDetail" aria-live="polite" data-feedback-key="Cells:Cell-detail"></section>
+        <div class="cell-workspace-tabs" id="cellWorkspaceTabs" role="tablist" aria-label="Cell inspection views">
+          <button class="cell-workspace-tab" id="cellLayoutTab" type="button" role="tab" aria-controls="cellLayoutPanel" aria-selected="true" tabindex="0" data-cell-workspace-tab="layout">Layout</button>
+          <button class="cell-workspace-tab" id="cellChangesTab" type="button" role="tab" aria-controls="cellChangesPanel" aria-selected="false" tabindex="-1" data-cell-workspace-tab="changes">Changes <span class="cell-change-count hidden" id="cellChangeCount">0</span></button>
         </div>
+        <section class="cell-workspace-panel" id="cellLayoutPanel" role="tabpanel" aria-labelledby="cellLayoutTab" tabindex="0">
+          <p class="notice hidden" id="cellStatsNotice" role="status"></p>
+          <section class="control-band workload-control-band" aria-label="Workload cell assignment" data-feedback-key="Cells:Workload-assignment">
+            <fieldset class="control-field segmented" id="workloadTargetKind">
+              <legend>Target</legend>
+              <label><input type="radio" name="workloadTargetKind" value="tid" checked><span>TID</span></label>
+              <label><input type="radio" name="workloadTargetKind" value="tgid"><span>TGID</span></label>
+              <label><input type="radio" name="workloadTargetKind" value="cgroup"><span>Cgroup</span></label>
+            </fieldset>
+            <label class="control-field workload-target-field">
+              <span id="workloadTargetLabel">TID</span>
+              <input id="workloadTargetValue" type="text" inputmode="numeric" placeholder="4812" autocomplete="off">
+            </label>
+            <label class="control-field">
+              <span>Destination</span>
+              <select id="workloadCellId" aria-label="Destination cell"></select>
+            </label>
+            <button class="apply-button" id="assignWorkloadCell" type="button">Assign</button>
+            <button class="secondary-button" id="clearWorkloadCell" type="button">Clear override</button>
+            <p class="control-message hidden" id="workloadAssignmentNotice" role="status"></p>
+          </section>
+          <div class="cells-layout">
+            <section class="cell-browser" aria-label="Configured cells" data-feedback-key="Cells:Cell-browser">
+              <header class="cell-browser-heading">
+                <h3>Live cell layout</h3>
+                <div class="cell-topology-legend" aria-label="Topology legend">
+                  <span><i class="normal"></i>Normal DSQ</span>
+                  <span><i class="affinity"></i>Affinity DSQs</span>
+                  <span><i class="owned"></i>Primary CPUs</span>
+                </div>
+              </header>
+              <div class="cell-list" id="cellList"></div>
+            </section>
+            <div class="cell-bar-tooltip hidden" id="cellBarTooltip" role="tooltip"></div>
+            <section class="cell-detail" id="cellDetail" aria-live="polite" data-feedback-key="Cells:Cell-detail"></section>
+          </div>
+        </section>
+        <section class="cell-workspace-panel topology-lifecycle-panel" id="cellChangesPanel" role="tabpanel" aria-labelledby="cellChangesTab" tabindex="0" hidden data-feedback-key="Cells:Topology-changes">
+          <div class="topology-lifecycle-summary" id="topologyLifecycleSummary"></div>
+          <div class="topology-transition-list" id="topologyTransitionList"></div>
+        </section>
       </section>
 
       <section class="view-panel hidden" id="controlView" data-view="configure" aria-labelledby="controlTitle">
