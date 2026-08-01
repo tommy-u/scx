@@ -2787,6 +2787,7 @@ test("Cells mobile controls wrap without widening the viewport", () => {
   assert.match(stylesheet, /#cellsView\s*>\s*\.view-heading\s*\{[^}]*flex-wrap:\s*wrap/s);
   assert.match(stylesheet, /\.workload-control-band\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)/s);
   assert.match(stylesheet, /\.workload-control-band\s+\.control-field\s*\{[^}]*width:\s*100%/s);
+  assert.match(stylesheet, /\.cell-order-mode\s*\{[^}]*flex:\s*1\s+0\s+100%/s);
 });
 
 test("current scheduler command formats exact argv and unavailable states", () => {
