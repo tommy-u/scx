@@ -257,7 +257,7 @@ static __noinline s32 queue_pick_restricted_preferred_cpu(
 
 static __always_inline int
 queue_fairness_select_cpu(struct snake_ladder_ctx *ctx, struct task_struct *p,
-			  s32 cpu)
+			  s32 cpu, const struct snake_fine_timing_ctx *fine)
 {
 	struct snake_task_runtime *runtime;
 
@@ -265,7 +265,7 @@ queue_fairness_select_cpu(struct snake_ladder_ctx *ctx, struct task_struct *p,
 		fairness_vtime_prepare_runnable(ctx, p);
 		runtime = fairness_vtime_prepare_task(ctx, p);
 	} else {
-		runtime = queue_fairness_prepare_task(ctx, p);
+		runtime = queue_fairness_prepare_task(ctx, p, fine);
 	}
 
 	return task_route_record_selected_cpu(runtime, cpu);

@@ -252,7 +252,8 @@ static __noinline s32 snake_select_cpu_impl(struct task_struct *p,
 			}
 			fine_stage_started_at =
 				fine_timing_select_start(callback_started_at);
-			ret = queue_fairness_select_cpu(&ladder_ctx, p, cpu);
+			ret = queue_fairness_select_cpu(&ladder_ctx, p, cpu,
+						&fine_timing);
 			fine_timing_finish_select(
 				SNAKE_FINE_TIMING_SELECT_QUEUE_TARGET,
 				fine_stage_started_at);
@@ -315,7 +316,8 @@ static __noinline s32 snake_select_cpu_impl(struct task_struct *p,
 	if (queue_topology_enabled() && queue_transition_active())
 		goto direct_dispatch;
 	ret = queue_topology_enabled() ?
-		      queue_fairness_select_cpu(&ladder_ctx, p, cpu) :
+		      queue_fairness_select_cpu(&ladder_ctx, p, cpu,
+						&fine_timing) :
 		      0;
 	fine_timing_finish_select(SNAKE_FINE_TIMING_SELECT_FALLBACK,
 				  fine_stage_started_at);

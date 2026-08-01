@@ -20,16 +20,86 @@ queue_cell_domain(u32 cell_index)
 	return bpf_map_lookup_elem(&cell_vtime_domains, &cell_index);
 }
 
-static __always_inline u64 queue_domain_now(struct snake_vtime_domain *domain)
+static __always_inline u32 queue_domain_read_stage(
+	const struct snake_fine_timing_ctx *fine)
 {
-	u64 now;
+	if (!fine)
+		return SNAKE_NR_FINE_TIMING_STAGES;
+	if (fine->callback == SNAKE_FINE_TIMING_CALLBACK_SELECT_CPU)
+		return SNAKE_FINE_TIMING_SELECT_CELL_CLOCK_READ;
+	if (fine->callback == SNAKE_FINE_TIMING_CALLBACK_ENQUEUE)
+		return SNAKE_FINE_TIMING_ENQUEUE_CELL_CLOCK_READ;
+	if (fine->callback == SNAKE_FINE_TIMING_CALLBACK_RUNNABLE)
+		return SNAKE_FINE_TIMING_RUNNABLE_CELL_CLOCK_READ;
+	if (fine->callback == SNAKE_FINE_TIMING_CALLBACK_RUNNING)
+		return SNAKE_FINE_TIMING_RUNNING_CELL_CLOCK_READ;
+	return SNAKE_NR_FINE_TIMING_STAGES;
+}
+
+static __always_inline u64
+queue_domain_now(struct snake_vtime_domain *domain,
+		 const struct snake_fine_timing_ctx *fine)
+{
+	u64 now, started_at;
+	u32 stage;
 
 	if (!domain)
 		return 0;
+	started_at = fine_timing_start(fine);
 	bpf_spin_lock(&domain->lock);
 	now = domain->vtime_now;
 	bpf_spin_unlock(&domain->lock);
+	stage = queue_domain_read_stage(fine);
+	if (stage < SNAKE_NR_FINE_TIMING_STAGES)
+		fine_timing_finish(fine, stage, started_at);
 	return now;
+}
+
+static __always_inline u64
+queue_domain_run_start(struct snake_vtime_domain *domain, u64 vruntime,
+		       const struct snake_fine_timing_ctx *fine)
+{
+	u64 started_at;
+	u32 stage;
+	bool advanced = false;
+
+	if (!domain)
+		return vruntime;
+	started_at = fine_timing_start(fine);
+	bpf_spin_lock(&domain->lock);
+	vruntime = fairness_vtime_run_start(vruntime, domain->vtime_now);
+	if (time_before(domain->vtime_now, vruntime)) {
+		domain->vtime_now = vruntime;
+		advanced = true;
+	}
+	bpf_spin_unlock(&domain->lock);
+	stage = advanced ? SNAKE_FINE_TIMING_RUNNING_CELL_CLOCK_RUN_START_ADVANCE :
+			   SNAKE_FINE_TIMING_RUNNING_CELL_CLOCK_RUN_START_NOOP;
+	fine_timing_finish(fine, stage, started_at);
+	return vruntime;
+}
+
+static __always_inline bool
+queue_domain_advance(struct snake_vtime_domain *domain, u64 candidate,
+		     const struct snake_fine_timing_ctx *fine)
+{
+	u64 started_at;
+	u32 stage;
+	bool advanced = false;
+
+	if (!domain)
+		return false;
+	started_at = fine_timing_start(fine);
+	bpf_spin_lock(&domain->lock);
+	if (time_before(domain->vtime_now, candidate)) {
+		domain->vtime_now = candidate;
+		advanced = true;
+	}
+	bpf_spin_unlock(&domain->lock);
+	stage = advanced ? SNAKE_FINE_TIMING_RUNNING_AFFINITY_CLOCK_ADVANCE :
+			   SNAKE_FINE_TIMING_RUNNING_AFFINITY_CLOCK_NOOP;
+	fine_timing_finish(fine, stage, started_at);
+	return advanced;
 }
 
 static __always_inline u64 queue_translate_vruntime(u64 vruntime, u64 old_now,
@@ -99,7 +169,7 @@ queue_fairness_prepare_task_for_cell(struct snake_ladder_ctx *ctx,
 	}
 	external_id = READ_ONCE(cell->external_id);
 	slot_epoch  = READ_ONCE(cell->slot_epoch);
-	new_now     = queue_domain_now(new_domain);
+	new_now     = queue_domain_now(new_domain, fine);
 	if (!runtime->cell_initialized) {
 		runtime->vruntime	  = new_now;
 		runtime->cell_index	  = cell_index;
@@ -123,7 +193,7 @@ queue_fairness_prepare_task_for_cell(struct snake_ladder_ctx *ctx,
 			fairness_accounting_error(ctx);
 			return NULL;
 		}
-		old_now		  = queue_domain_now(old_domain);
+		old_now		  = queue_domain_now(old_domain, fine);
 		runtime->vruntime = queue_translate_vruntime(runtime->vruntime,
 							     old_now, new_now);
 		runtime->cell_index = cell_index;
@@ -149,11 +219,12 @@ queue_fairness_prepare_task_for_cell(struct snake_ladder_ctx *ctx,
 	return runtime;
 }
 
-static __always_inline struct snake_task_runtime *
-queue_fairness_prepare_task(struct snake_ladder_ctx *ctx, struct task_struct *p)
+static __always_inline struct snake_task_runtime *queue_fairness_prepare_task(
+	struct snake_ladder_ctx *ctx, struct task_struct *p,
+	const struct snake_fine_timing_ctx *fine)
 {
 	return queue_fairness_prepare_task_for_cell(
-		ctx, p, queue_task_cell_index(ctx, p), true, NULL);
+		ctx, p, queue_task_cell_index(ctx, p), true, fine);
 }
 
 static __always_inline struct snake_task_runtime *
@@ -178,7 +249,7 @@ queue_fairness_prepare_runnable_for_cell(
 		fairness_accounting_error(ctx);
 		return NULL;
 	}
-	now	= queue_domain_now(domain);
+	now	= queue_domain_now(domain, fine);
 	minimum = now - SNAKE_VTIME_SLICE_NS;
 	if (time_before(runtime->vruntime, minimum)) {
 		runtime->vruntime = minimum;
@@ -222,8 +293,9 @@ queue_fairness_cancel_direct(struct snake_ladder_ctx *ctx,
 
 static __always_inline int
 queue_fairness_prepare_affinity(struct snake_ladder_ctx	  *ctx,
-				struct snake_task_runtime *runtime,
-				u32			   owner_cell_index)
+					struct snake_task_runtime *runtime,
+					u32			   owner_cell_index,
+					const struct snake_fine_timing_ctx *fine)
 {
 	struct snake_vtime_domain *task_domain, *old_domain, *new_domain;
 	struct snake_queue_header *header;
@@ -240,12 +312,12 @@ queue_fairness_prepare_affinity(struct snake_ladder_ctx	  *ctx,
 		return -EINVAL;
 	external_id = READ_ONCE(owner->external_id);
 	slot_epoch = READ_ONCE(owner->slot_epoch);
-	new_now = queue_domain_now(new_domain);
+	new_now = queue_domain_now(new_domain, fine);
 	if (!runtime->affinity_initialized) {
 		task_domain = queue_cell_domain(runtime->cell_index);
 		if (!task_domain)
 			return -EINVAL;
-		task_now		   = queue_domain_now(task_domain);
+		task_now		   = queue_domain_now(task_domain, fine);
 		runtime->affinity_vruntime = queue_translate_vruntime(
 			runtime->vruntime, task_now, new_now);
 		runtime->affinity_cell_index  = owner_cell_index;
@@ -263,7 +335,7 @@ queue_fairness_prepare_affinity(struct snake_ladder_ctx	  *ctx,
 		old_domain = queue_cell_domain(runtime->affinity_cell_index);
 		if (!old_domain)
 			return -EINVAL;
-		old_now			   = queue_domain_now(old_domain);
+		old_now			   = queue_domain_now(old_domain, fine);
 		runtime->affinity_vruntime = queue_translate_vruntime(
 			runtime->affinity_vruntime, old_now, new_now);
 		runtime->affinity_cell_index = owner_cell_index;
@@ -342,8 +414,9 @@ queue_fairness_replenish(struct snake_ladder_ctx *ctx,
 	return 0;
 }
 
-static __always_inline int queue_fairness_running(struct snake_ladder_ctx *ctx,
-						  struct task_struct	  *p)
+static __always_inline int queue_fairness_running(
+	struct snake_ladder_ctx *ctx, struct task_struct *p,
+	const struct snake_fine_timing_ctx *fine)
 {
 	struct snake_task_runtime *runtime = fairness_task(ctx, p, false);
 	struct snake_vtime_domain *domain;
@@ -359,7 +432,7 @@ static __always_inline int queue_fairness_running(struct snake_ladder_ctx *ctx,
 		u32 direct_cell_index = runtime->direct_cell_index;
 
 		runtime		      = queue_fairness_prepare_task_for_cell(
-			ctx, p, direct_cell_index, false, NULL);
+			ctx, p, direct_cell_index, false, fine);
 		if (!runtime)
 			return -EINVAL;
 		queue_clear_rehome_if_cell(ctx, p, direct_cell_index);
@@ -370,7 +443,7 @@ static __always_inline int queue_fairness_running(struct snake_ladder_ctx *ctx,
 		/* Charge an already-queued execution to the cell which queued it. */
 		stat_inc(ctx, SNAKE_STAT_QUEUE_STALE_REHOME_RUNS);
 	} else {
-		runtime = queue_fairness_prepare_task(ctx, p);
+		runtime = queue_fairness_prepare_task(ctx, p, fine);
 		if (!runtime)
 			return -EINVAL;
 	}
@@ -381,23 +454,15 @@ static __always_inline int queue_fairness_running(struct snake_ladder_ctx *ctx,
 	domain = queue_cell_domain(runtime->cell_index);
 	if (!domain)
 		return -EINVAL;
-	bpf_spin_lock(&domain->lock);
-	runtime->vruntime =
-		fairness_vtime_run_start(runtime->vruntime, domain->vtime_now);
-	if (time_before(domain->vtime_now, runtime->vruntime))
-		domain->vtime_now = runtime->vruntime;
-	bpf_spin_unlock(&domain->lock);
+	runtime->vruntime = queue_domain_run_start(domain, runtime->vruntime, fine);
 	if (runtime->queue_class == SNAKE_QUEUE_CLASS_AFFINITY) {
 		if (queue_fairness_prepare_affinity(ctx, runtime,
-						    cpuq->owner_cell_index))
+						    cpuq->owner_cell_index, fine))
 			return -EINVAL;
 		domain = queue_cell_domain(cpuq->owner_cell_index);
 		if (!domain)
 			return -EINVAL;
-		bpf_spin_lock(&domain->lock);
-		if (time_before(domain->vtime_now, runtime->affinity_vruntime))
-			domain->vtime_now = runtime->affinity_vruntime;
-		bpf_spin_unlock(&domain->lock);
+		queue_domain_advance(domain, runtime->affinity_vruntime, fine);
 	}
 	/* select_cpu() may be followed directly by running() when prev is kept. */
 	task_route_clear_selected_cpu(runtime);

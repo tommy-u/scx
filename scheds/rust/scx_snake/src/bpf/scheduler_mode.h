@@ -198,7 +198,7 @@ static __always_inline int scheduler_mode_runnable(
 	bool prepared;
 
 	if (queue_cell_mode_enabled()) {
-		prepared = queue_fairness_prepare_runnable(ctx, p, NULL);
+		prepared = queue_fairness_prepare_runnable(ctx, p, fine);
 		fine_timing_finish(fine,
 				   SNAKE_FINE_TIMING_RUNNABLE_RUNNABLE_STATE,
 				   stage_started_at);
@@ -235,7 +235,7 @@ static __always_inline int scheduler_mode_running(
 	}
 	stage_started_at = fine_timing_start(fine);
 	if (queue_cell_mode_enabled())
-		ret = queue_fairness_running(ctx, p);
+		ret = queue_fairness_running(ctx, p, fine);
 	else if (queue_global_mode_enabled())
 		fairness_vtime_running(ctx, p);
 	else

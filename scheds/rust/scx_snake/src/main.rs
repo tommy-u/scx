@@ -4510,6 +4510,46 @@ scope = "task_allowed"
     }
 
     #[test]
+    fn cell_vtime_clock_access_is_centralized_and_timed() {
+        let vtime = include_str!("bpf/queue_vtime.h");
+        let running = vtime
+            .split_once("static __always_inline int queue_fairness_running(")
+            .and_then(|(_, body)| {
+                body.split_once("static __always_inline int queue_fairness_stopping(")
+            })
+            .map(|(body, _)| body)
+            .expect("queue running callback should have one definition");
+
+        for wrapper in [
+            "queue_domain_now(",
+            "queue_domain_run_start(",
+            "queue_domain_advance(",
+        ] {
+            assert!(
+                vtime.contains(wrapper),
+                "missing cell clock wrapper {wrapper}"
+            );
+        }
+        for stage in [
+            "SNAKE_FINE_TIMING_ENQUEUE_CELL_CLOCK_READ",
+            "SNAKE_FINE_TIMING_SELECT_CELL_CLOCK_READ",
+            "SNAKE_FINE_TIMING_RUNNABLE_CELL_CLOCK_READ",
+            "SNAKE_FINE_TIMING_RUNNING_CELL_CLOCK_READ",
+            "SNAKE_FINE_TIMING_RUNNING_CELL_CLOCK_RUN_START",
+            "SNAKE_FINE_TIMING_RUNNING_AFFINITY_CLOCK_ADVANCE",
+        ] {
+            assert!(
+                vtime.contains(stage),
+                "cell clock wrapper is missing {stage}"
+            );
+        }
+        assert!(running.contains("queue_domain_run_start("));
+        assert!(running.contains("queue_domain_advance("));
+        assert!(!running.contains("domain->vtime_now"));
+        assert!(!running.contains("bpf_spin_lock"));
+    }
+
+    #[test]
     fn mitosis_callback_ladders_preserve_the_kernel_control_flow() {
         let bpf_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bpf");
         let queue = fs::read_to_string(bpf_dir.join("queue.h")).unwrap();
@@ -7763,11 +7803,13 @@ scope = "task_allowed"
         assert!(names(select).contains(&"direct_insert"));
         assert!(names(select).contains(&"strict_preempt"));
         assert!(names(select).contains(&"fallback"));
+        assert!(names(select).contains(&"cell_clock_read"));
         assert!(names(select).contains(&"finish"));
         assert!(names(enqueue).contains(&"prepare_route_lookup"));
         assert!(names(enqueue).contains(&"prepare_task_storage"));
         assert!(names(enqueue).contains(&"prepare_cell_clock"));
         assert!(names(enqueue).contains(&"prepare_credit_clamp"));
+        assert!(names(enqueue).contains(&"cell_clock_read"));
         assert!(names(enqueue).contains(&"normal_dsq_insert"));
         assert!(names(enqueue).contains(&"affinity_dsq_insert"));
         assert!(names(enqueue).contains(&"affinity_path"));

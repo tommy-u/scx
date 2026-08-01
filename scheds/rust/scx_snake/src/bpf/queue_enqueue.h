@@ -79,7 +79,7 @@ static __always_inline int queue_fairness_direct_insert(
 	const struct cpumask	  *mask;
 
 	runtime = queue_fairness_prepare_runnable_for_cell(ctx, p, cell_index,
-							   false, NULL);
+							   false, fine);
 	if (!runtime || cpu < 0 || cpu >= nr_cpu_ids ||
 	    !bpf_cpumask_test_cpu(cpu, p->cpus_ptr))
 		return -EINVAL;
@@ -89,7 +89,7 @@ static __always_inline int queue_fairness_direct_insert(
 		return -EINVAL;
 	if (queue_class == SNAKE_QUEUE_CLASS_AFFINITY) {
 		if (queue_fairness_prepare_affinity(ctx, runtime,
-						    cpuq->owner_cell_index))
+						    cpuq->owner_cell_index, fine))
 			return -EINVAL;
 	} else {
 		mask = queue_cell_mask(ctx, cell_index, mask_kind);
@@ -254,7 +254,7 @@ static __always_inline int queue_fairness_enqueue_affinity(
 	}
 	cpuq = queue_cpu(ctx, target_cpu);
 	if (!cpuq || queue_fairness_prepare_affinity(ctx, runtime,
-						     cpuq->owner_cell_index)) {
+						     cpuq->owner_cell_index, fine)) {
 		ret = -EINVAL;
 		goto out;
 	}

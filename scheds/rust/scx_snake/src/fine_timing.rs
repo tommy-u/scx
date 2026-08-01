@@ -91,7 +91,7 @@ pub struct FineTimingControlResponse {
     pub session_id: Option<u64>,
 }
 
-const SELECT_STAGES: [FineTimingStage; 7] = [
+const SELECT_STAGES: [FineTimingStage; 8] = [
     FineTimingStage {
         id: bpf_intf::snake_fine_timing_stage_SNAKE_FINE_TIMING_SELECT_ACQUIRE_LADDER,
         name: "acquire_ladder",
@@ -117,6 +117,10 @@ const SELECT_STAGES: [FineTimingStage; 7] = [
         name: "fallback",
     },
     FineTimingStage {
+        id: bpf_intf::snake_fine_timing_stage_SNAKE_FINE_TIMING_SELECT_CELL_CLOCK_READ,
+        name: "cell_clock_read",
+    },
+    FineTimingStage {
         id: bpf_intf::snake_fine_timing_stage_SNAKE_FINE_TIMING_SELECT_FINISH,
         name: "finish",
     },
@@ -128,7 +132,7 @@ pub struct FineTimingStage {
     pub name: &'static str,
 }
 
-const ENQUEUE_STAGES: [FineTimingStage; 14] = [
+const ENQUEUE_STAGES: [FineTimingStage; 15] = [
     FineTimingStage {
         id: bpf_intf::snake_fine_timing_stage_SNAKE_FINE_TIMING_ENQUEUE_ACQUIRE_LADDER,
         name: "acquire_ladder",
@@ -156,6 +160,10 @@ const ENQUEUE_STAGES: [FineTimingStage; 14] = [
     FineTimingStage {
         id: bpf_intf::snake_fine_timing_stage_SNAKE_FINE_TIMING_ENQUEUE_PREPARE_CREDIT_CLAMP,
         name: "prepare_credit_clamp",
+    },
+    FineTimingStage {
+        id: bpf_intf::snake_fine_timing_stage_SNAKE_FINE_TIMING_ENQUEUE_CELL_CLOCK_READ,
+        name: "cell_clock_read",
     },
     FineTimingStage {
         id: bpf_intf::snake_fine_timing_stage_SNAKE_FINE_TIMING_ENQUEUE_CELL_VALIDATE,
@@ -266,7 +274,7 @@ const DISPATCH_STAGES: [FineTimingStage; 19] = [
     },
 ];
 
-const RUNNABLE_STAGES: [FineTimingStage; 3] = [
+const RUNNABLE_STAGES: [FineTimingStage; 4] = [
     FineTimingStage {
         id: bpf_intf::snake_fine_timing_stage_SNAKE_FINE_TIMING_RUNNABLE_ACQUIRE_LADDER,
         name: "acquire_ladder",
@@ -276,12 +284,16 @@ const RUNNABLE_STAGES: [FineTimingStage; 3] = [
         name: "runnable_state",
     },
     FineTimingStage {
+        id: bpf_intf::snake_fine_timing_stage_SNAKE_FINE_TIMING_RUNNABLE_CELL_CLOCK_READ,
+        name: "cell_clock_read",
+    },
+    FineTimingStage {
         id: bpf_intf::snake_fine_timing_stage_SNAKE_FINE_TIMING_RUNNABLE_FINISH,
         name: "finish",
     },
 ];
 
-const RUNNING_STAGES: [FineTimingStage; 4] = [
+const RUNNING_STAGES: [FineTimingStage; 9] = [
     FineTimingStage {
         id: bpf_intf::snake_fine_timing_stage_SNAKE_FINE_TIMING_RUNNING_ACQUIRE_LADDER,
         name: "acquire_ladder",
@@ -293,6 +305,27 @@ const RUNNING_STAGES: [FineTimingStage; 4] = [
     FineTimingStage {
         id: bpf_intf::snake_fine_timing_stage_SNAKE_FINE_TIMING_RUNNING_RUN_STATE,
         name: "run_state",
+    },
+    FineTimingStage {
+        id: bpf_intf::snake_fine_timing_stage_SNAKE_FINE_TIMING_RUNNING_CELL_CLOCK_READ,
+        name: "cell_clock_read",
+    },
+    FineTimingStage {
+        id:
+            bpf_intf::snake_fine_timing_stage_SNAKE_FINE_TIMING_RUNNING_CELL_CLOCK_RUN_START_ADVANCE,
+        name: "cell_clock_run_start_advance",
+    },
+    FineTimingStage {
+        id: bpf_intf::snake_fine_timing_stage_SNAKE_FINE_TIMING_RUNNING_CELL_CLOCK_RUN_START_NOOP,
+        name: "cell_clock_run_start_noop",
+    },
+    FineTimingStage {
+        id: bpf_intf::snake_fine_timing_stage_SNAKE_FINE_TIMING_RUNNING_AFFINITY_CLOCK_ADVANCE,
+        name: "affinity_clock_advance",
+    },
+    FineTimingStage {
+        id: bpf_intf::snake_fine_timing_stage_SNAKE_FINE_TIMING_RUNNING_AFFINITY_CLOCK_NOOP,
+        name: "affinity_clock_noop",
     },
     FineTimingStage {
         id: bpf_intf::snake_fine_timing_stage_SNAKE_FINE_TIMING_RUNNING_FINISH,
@@ -474,7 +507,12 @@ mod tests {
 
         assert_eq!(
             names(FineTimingCallback::Runnable),
-            ["acquire_ladder", "runnable_state", "finish"]
+            [
+                "acquire_ladder",
+                "runnable_state",
+                "cell_clock_read",
+                "finish"
+            ]
         );
         assert_eq!(
             names(FineTimingCallback::Running),
@@ -482,6 +520,11 @@ mod tests {
                 "acquire_ladder",
                 "membership_account",
                 "run_state",
+                "cell_clock_read",
+                "cell_clock_run_start_advance",
+                "cell_clock_run_start_noop",
+                "affinity_clock_advance",
+                "affinity_clock_noop",
                 "finish"
             ]
         );
