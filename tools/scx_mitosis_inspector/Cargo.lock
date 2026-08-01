@@ -949,6 +949,7 @@ dependencies = [
  "clap",
  "http-body-util",
  "libbpf-rs",
+ "libc",
  "scx_cargo",
  "scx_stats",
  "serde",
