@@ -21,13 +21,14 @@ use serde::Serialize;
 
 use crate::bpf_program_stats::{query_bpf_program_stats, BpfProgramStatsRow};
 use crate::bpf_skel::{BpfSkel, BpfSkelBuilder};
+use crate::probe_manifest::{build_probe_manifest, ProbeManifestInputs};
 use crate::{
     build_callback_timing_rows, build_counters, build_cpu_runtime_rows, build_scheduler_event_rows,
     build_timing_metric_row, program_name_matches, project_cpu_runtime, summarize_callback_timing,
     BlockIoMetricsView, CallbackCounter, CallbackTimingCounters, CallbackTimingRow, CpuRuntimeRow,
     DsqMetricsView, HardirqMetricsView, HardirqRow, InterruptCpuRow, MigrationRow,
-    SchedulerEventRow, SoftirqRow, TimingMetricRow, CALLBACK_NAMES, CALLBACK_TIMING_BUCKETS,
-    SCHEDULER_EVENT_NAMES, SOFTIRQ_NAMES,
+    ProbeManifestRow, SchedulerEventRow, SoftirqRow, TimingMetricRow, CALLBACK_NAMES,
+    CALLBACK_TIMING_BUCKETS, SCHEDULER_EVENT_NAMES, SOFTIRQ_NAMES,
 };
 
 const TARGET_NAMES: [&str; 5] = [
@@ -109,6 +110,28 @@ pub struct Snapshot {
     pub block_io: BlockIoMetricsView,
     pub interrupt_cpu: Vec<InterruptCpuRow>,
     pub hardirqs: HardirqMetricsView,
+    pub probe_manifest: Vec<ProbeManifestRow>,
+}
+
+fn probe_manifest(
+    config: CollectorConfig,
+    dsq_available: bool,
+    block_io_available: bool,
+    hardirq_available: bool,
+    runtime_accounting_enabled: bool,
+) -> Vec<ProbeManifestRow> {
+    build_probe_manifest(ProbeManifestInputs {
+        callback_timing_sample_rate: config.callback_timing_sample_rate,
+        event_timing_sample_rate: config.event_timing_sample_rate,
+        dsq_enabled: config.enable_dsq,
+        dsq_available,
+        scheduler_events_enabled: config.enable_scheduler_events,
+        irqs_enabled: config.enable_irqs,
+        hardirq_available,
+        block_io_enabled: config.enable_block_io,
+        block_io_available,
+        runtime_accounting_enabled,
+    })
 }
 
 fn find_targets() -> Result<[TargetProgram; 5]> {
@@ -642,11 +665,64 @@ fn read_hardirq_metrics(skel: &BpfSkel<'_>, available: bool) -> Result<HardirqMe
     Ok(result)
 }
 
+fn parse_irq_names(interrupts: &str) -> BTreeMap<u32, String> {
+    let mut lines = interrupts.lines();
+    let cpu_count = lines
+        .next()
+        .map(|header| {
+            header
+                .split_whitespace()
+                .filter(|column| {
+                    column.strip_prefix("CPU").is_some_and(|suffix| {
+                        !suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_digit())
+                    })
+                })
+                .count()
+        })
+        .unwrap_or(0);
+    if cpu_count == 0 {
+        return BTreeMap::new();
+    }
+
+    lines
+        .filter_map(|line| {
+            let (irq, fields) = line.split_once(':')?;
+            let irq = irq.trim().parse::<u32>().ok()?;
+            let fields = fields.split_whitespace().collect::<Vec<_>>();
+            if fields.len() <= cpu_count
+                || !fields[..cpu_count]
+                    .iter()
+                    .all(|count| count.bytes().all(|b| b.is_ascii_digit()))
+            {
+                return None;
+            }
+            let metadata = &fields[cpu_count..];
+            let trigger = metadata.iter().position(|field| {
+                let field = field.to_ascii_lowercase();
+                field == "edge"
+                    || field == "level"
+                    || field.contains("-edge")
+                    || field.contains("-level")
+                    || field.contains("-fasteoi")
+            })?;
+            let name = metadata.get(trigger + 1..)?.join(" ");
+            (!name.is_empty()).then_some((irq, name))
+        })
+        .collect()
+}
+
+fn read_irq_names() -> BTreeMap<u32, String> {
+    fs::read_to_string("/proc/interrupts")
+        .map(|contents| parse_irq_names(&contents))
+        .unwrap_or_default()
+}
+
 fn build_hardirq_view(
     current: &HardirqMetrics,
     previous: &HardirqMetrics,
     elapsed: Duration,
     available: bool,
+    irq_names: &BTreeMap<u32, String>,
 ) -> HardirqMetricsView {
     let seconds = elapsed.as_secs_f64();
     let mut rows = current
@@ -657,6 +733,7 @@ fn build_hardirq_view(
             let previous_count = previous.rows.get(&irq).map_or(0, |row| row.count);
             HardirqRow {
                 irq,
+                name: irq_names.get(&irq).cloned(),
                 count: metric.count,
                 rate_per_second: if seconds > 0.0 {
                     metric.count.saturating_sub(previous_count) as f64 / seconds
@@ -981,6 +1058,7 @@ pub fn run(
     let mut previous_softirqs = read_softirq_metrics(&skel)?;
     let mut previous_block_io = read_block_io_metrics(&skel, block_io_available)?;
     let mut previous_hardirqs = read_hardirq_metrics(&skel, hardirq_available)?;
+    let irq_names = read_irq_names();
     let callback_timings = read_callback_timings(&skel)?;
     let wakeup_latency = read_wakeup_latency(&skel)?;
     let cpu_slice_duration = read_cpu_slice_duration(&skel)?;
@@ -989,6 +1067,9 @@ pub fn run(
     let mut previous_cpu_runtime = read_cpu_runtime(&skel)?;
     let bpf_program_stats = query_bpf_program_stats(&target_program_ids);
     let inspector_bpf_program_stats = query_bpf_program_stats(&inspector_program_ids);
+    let inspector_stats_enabled = inspector_bpf_program_stats
+        .iter()
+        .any(|program| program.run_count > 0 || program.run_time_ns > 0);
     let mut previous_inspector_runtime_ns = inspector_bpf_program_stats
         .iter()
         .map(|program| program.run_time_ns)
@@ -1049,6 +1130,14 @@ pub fn run(
                 &previous_hardirqs,
                 Duration::ZERO,
                 hardirq_available,
+                &irq_names,
+            ),
+            probe_manifest: probe_manifest(
+                config,
+                dsq_available,
+                block_io_available,
+                hardirq_available,
+                inspector_stats_enabled,
             ),
         };
     }
@@ -1135,10 +1224,51 @@ pub fn run(
             &previous_hardirqs,
             elapsed,
             hardirq_available,
+            &irq_names,
+        );
+        snapshot.probe_manifest = probe_manifest(
+            config,
+            dsq_available,
+            block_io_available,
+            hardirq_available,
+            inspector_stats_enabled,
         );
         previous_softirqs = current_softirqs;
         previous_hardirqs = current_hardirqs;
         previous_at = now;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_irq_names;
+
+    #[test]
+    fn parses_irq_action_names_after_per_cpu_counts() {
+        let interrupts = r#"           CPU0       CPU1
+  8:          1          2  IR-IO-APIC    8-edge      rtc0
+ 24:         10         20  IR-PCI-MSIX-0000:00:1f.4    0-edge      i2c_designware.0
+ 45:          3          4  GICv3  30 Level     arch_timer
+NMI:          0          0   Non-maskable interrupts
+"#;
+
+        let names = parse_irq_names(interrupts);
+
+        assert_eq!(names.get(&8).map(String::as_str), Some("rtc0"));
+        assert_eq!(names.get(&24).map(String::as_str), Some("i2c_designware.0"));
+        assert_eq!(names.get(&45).map(String::as_str), Some("arch_timer"));
+        assert!(!names.contains_key(&0));
+    }
+
+    #[test]
+    fn skips_malformed_and_unrecognized_irq_lines() {
+        let interrupts = r#"           CPU0       CPU1
+abc:          1          2  IR-IO-APIC  8-edge bogus
+  9:          x          2  IR-IO-APIC  9-fasteoi malformed
+ 10:          1          2  vendor-format mystery-device
+"#;
+
+        assert!(parse_irq_names(interrupts).is_empty());
+    }
 }

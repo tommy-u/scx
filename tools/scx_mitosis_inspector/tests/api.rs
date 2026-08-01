@@ -11,7 +11,8 @@ use scx_mitosis_inspector::stats::StatsSnapshot;
 use scx_mitosis_inspector::system_stats::SystemStatsCollector;
 use scx_mitosis_inspector::topology::{CpuInfo, TopologyView};
 use scx_mitosis_inspector::{
-    CallbackCounter, CallbackTimingRow, CpuRuntimeRow, MigrationRow, TimingMetricRow,
+    CallbackCounter, CallbackTimingRow, CpuRuntimeRow, MigrationRow, ProbeManifestRow,
+    TimingMetricRow,
 };
 use serde_json::json;
 use tower::ServiceExt;
@@ -72,6 +73,12 @@ fn snapshot() -> Snapshot {
         block_io: Default::default(),
         interrupt_cpu: Vec::new(),
         hardirqs: Default::default(),
+        probe_manifest: vec![ProbeManifestRow {
+            group: "Callback latency",
+            status: "active",
+            mode: "Sampled 1/1024".into(),
+            scope: "Mitosis callbacks",
+        }],
     }
 }
 
@@ -174,6 +181,8 @@ async fn counters_endpoint_returns_the_current_snapshot() {
     assert_eq!(value["migrations"][0]["from_cpu"], 2);
     assert_eq!(value["migrations"][0]["to_cpu"], 7);
     assert_eq!(value["dsq_metrics"]["available"], false);
+    assert_eq!(value["probe_manifest"][0]["status"], "active");
+    assert_eq!(value["probe_manifest"][0]["mode"], "Sampled 1/1024");
 }
 
 #[tokio::test]
@@ -189,6 +198,10 @@ async fn index_is_the_one_page_inspector() {
     assert!(html.contains("Mitosis inspector"));
     assert!(html.contains("class=\"workspace-sidebar\""));
     assert!(html.contains("aria-current=\"page\" href=\"/\">Callbacks"));
+    assert!(html.contains("id=\"sectionNavigation\""));
+    assert!(html.contains("href=\"#probe-manifest\""));
+    assert!(html.contains("href=\"#migration-locality\""));
+    assert!(html.contains("id=\"downloadSnapshot\""));
     assert!(html.contains("id=\"hostname\""));
     assert!(html.contains("id=\"kernelRelease\""));
     assert!(html.contains("id=\"cpuCount\""));
@@ -202,6 +215,7 @@ async fn index_is_the_one_page_inspector() {
     assert!(html.contains("id=\"softirqRows\""));
     assert!(html.contains("id=\"blockIoRows\""));
     assert!(html.contains("id=\"hardirqRows\""));
+    assert!(html.contains("id=\"probeManifestRows\""));
     assert!(html.contains("id=\"inspectorBpfProgramRows\""));
     assert!(html.contains("/assets/app.js"));
 }
