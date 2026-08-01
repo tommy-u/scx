@@ -46,6 +46,35 @@
           </dl>
         </section>
 
+        <section class="table-section" aria-labelledby="cellHistoryHeading">
+          <div class="section-heading">
+            <div>
+              <h2 id="cellHistoryHeading">Cell history</h2>
+              <p>Last 10 minutes in this browser</p>
+            </div>
+          </div>
+          <div class="chart-grid">
+            <div class="chart-panel">
+              <h3>Utilization by cell</h3>
+              <canvas
+                id="cellUtilizationChart"
+                class="chart-canvas"
+                role="img"
+                aria-label="Cell utilization over the last 10 minutes"
+              ></canvas>
+            </div>
+            <div class="chart-panel">
+              <h3>Demand and capacity movement</h3>
+              <canvas
+                id="cellBalanceChart"
+                class="chart-canvas"
+                role="img"
+                aria-label="Cell demand, borrowed capacity, and lent capacity over the last 10 minutes"
+              ></canvas>
+            </div>
+          </div>
+        </section>
+
         <section class="table-section" aria-labelledby="globalStatsHeading">
           <h2 id="globalStatsHeading">Global metrics</h2>
           <div class="table-scroll">
@@ -67,6 +96,7 @@
         </section>
       </main>
     </div>
+    <script src="/assets/charts.js" defer></script>
     <script src="/assets/stats.js" defer></script>
   </body>
 </html>
