@@ -63,6 +63,7 @@ fn snapshot() -> Snapshot {
             recursion_misses: 0,
             verified_insns: Some(100),
         }],
+        dsq_metrics: Default::default(),
     }
 }
 
@@ -164,6 +165,7 @@ async fn counters_endpoint_returns_the_current_snapshot() {
     assert_eq!(value["scheduler_timings"][0]["samples"], 25);
     assert_eq!(value["migrations"][0]["from_cpu"], 2);
     assert_eq!(value["migrations"][0]["to_cpu"], 7);
+    assert_eq!(value["dsq_metrics"]["available"], false);
 }
 
 #[tokio::test]
@@ -187,6 +189,7 @@ async fn index_is_the_one_page_inspector() {
     assert!(html.contains("id=\"schedulerTimingRows\""));
     assert!(html.contains("id=\"eventTimingSampleRate\""));
     assert!(html.contains("id=\"migrationRows\""));
+    assert!(html.contains("id=\"dsqMetricRows\""));
     assert!(html.contains("/assets/app.js"));
 }
 

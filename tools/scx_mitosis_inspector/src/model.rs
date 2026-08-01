@@ -75,6 +75,22 @@ pub struct CpuRuntimeRow {
     pub utilization_pct: f64,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct DsqMetricsView {
+    pub available: bool,
+    pub insert_count: u64,
+    pub move_count: u64,
+    pub residence_samples: u64,
+    pub residence_mean_ns: Option<u64>,
+    pub residence_p50_ns: Option<u64>,
+    pub residence_p95_ns: Option<u64>,
+    pub residence_p99_ns: Option<u64>,
+    pub depth_samples: u64,
+    pub depth_average: Option<f64>,
+    pub depth_latest_max: u64,
+    pub depth_max: u64,
+}
+
 pub fn project_cpu_runtime(
     busy_ns: u64,
     last_switch_ns: u64,
