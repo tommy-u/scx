@@ -1,10 +1,11 @@
 use std::time::Duration;
 
 use scx_mitosis_inspector::{
-    build_callback_timing_rows, build_counters, build_cpu_runtime_rows, build_scheduler_event_rows,
-    build_timing_metric_row, parse_callback_timing_sample_rate, program_name_matches,
-    project_cpu_runtime, summarize_callback_timing, BlockIoMetricsView, CallbackCounter,
-    CallbackTimingCounters, DsqMetricsView, HardirqRow, SoftirqRow,
+    build_callback_timing_rows, build_counters, build_cpu_capacity_loss_rows,
+    build_cpu_runtime_rows, build_scheduler_event_rows, build_timing_metric_row,
+    parse_callback_timing_sample_rate, program_name_matches, project_cpu_runtime,
+    summarize_callback_timing, BlockIoMetricsView, CallbackCounter, CallbackTimingCounters,
+    DsqMetricsView, HardirqRow, SoftirqRow,
 };
 
 fn timing(total_ns: u64, buckets: &[(usize, u64)]) -> CallbackTimingCounters {
@@ -166,6 +167,23 @@ fn cpu_runtime_uses_the_observation_interval() {
 fn cpu_runtime_includes_the_open_running_interval() {
     assert_eq!(project_cpu_runtime(40, 100, true, 160), 100);
     assert_eq!(project_cpu_runtime(40, 100, false, 160), 40);
+}
+
+#[test]
+fn cpu_capacity_loss_combines_non_ext_classes_and_hypervisor_steal() {
+    let rows = build_cpu_capacity_loss_rows(
+        &[250_000_000],
+        &[0],
+        &[100_000_000],
+        &[0],
+        &[5.0],
+        Duration::from_secs(1),
+    );
+
+    assert_eq!(rows[0].rt_stop_utilization_pct, 25.0);
+    assert_eq!(rows[0].deadline_utilization_pct, 10.0);
+    assert_eq!(rows[0].steal_utilization_pct, 5.0);
+    assert_eq!(rows[0].total_utilization_pct, 40.0);
 }
 
 #[test]

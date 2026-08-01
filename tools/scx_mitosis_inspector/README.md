@@ -14,14 +14,16 @@ Build and start it after `scx_mitosis` is attached:
 ```bash
 cargo build --release --manifest-path tools/scx_mitosis_inspector/Cargo.toml
 sudo tools/scx_mitosis_inspector/target/release/scx_mitosis_inspector \
-  --listen 0.0.0.0:44105
+  --listen 0.0.0.0:44105 \
+  --window 10s \
+  --max-window 5m
 ```
 
 The process needs permission to enumerate loaded BPF programs and load tracing
 BPF programs. The default listen address is `0.0.0.0:44105`.
 
 The callback view is served at `/`. Its section explorer links to each table,
-and **Download snapshot** exports all four JSON APIs in one diagnostic file.
+and **Download snapshot** exports all five JSON APIs in one diagnostic file.
 The probe-status table reports which measurement groups are active, disabled,
 or unavailable and whether each group is exact or sampled. `/system` reports
 host CPU, pressure, memory, frequency, network, and sched_ext lifecycle data
@@ -48,6 +50,10 @@ Wakeup-to-running latency is collected from sched tracepoints and uses
 The same sampled sched-switch stream reports on-CPU slice duration.
 Blocked off-CPU duration is measured from a blocking switch until wakeup.
 CPU migration pairs are aggregated from `sched_migrate_task` in a bounded map.
+The heatmap reads rolling deltas from `/api/migrations`; its window menu changes
+the displayed interval. `--window` sets the initial interval and `--max-window`
+sets the bounded server-side retention, which defaults to five minutes. The
+lifetime counters remain available in `/api/counters` for compatibility.
 Compatible DSQ insert and move symbols are observed with kprobes to report exact
 operation counts, queue residence-time histograms, and remaining queue depth.
 Scheduler tracepoints provide exact switch, preemption, blocking, wakeup, and
@@ -58,7 +64,12 @@ Hard IRQ entry and exit tracepoints provide per-IRQ counts, rates, duration
 percentiles, explicit correlation-loss counters, and device/action names from
 `/proc/interrupts` when the host exposes them.
 The migration heatmap includes a per-CPU IRQ utilization band from kernel CPU
-accounting, split into hardirq and softirq time in its tooltip.
+accounting, split into hardirq and softirq time in its tooltip. A separate
+non-SCX band reports RT/stop-class and deadline runtime observed at
+`sched_switch`, plus hypervisor steal time from per-CPU `/proc/stat`. NMI and
+SMI duration are not generally exported by Linux, so the inspector marks them
+unavailable instead of reporting zero. Scheduler and BPF runtime remains a
+global signal because kernel BPF stats do not provide a per-CPU breakdown.
 When block request tracepoints are available, the inspector reports request
 rates, bytes, errors, correlation losses, and completion latency percentiles.
 The callback page also reads kernel BPF program run counts and runtime totals;
@@ -78,6 +89,10 @@ measurement window, enable `kernel.bpf_stats_enabled`, use the inspector BPF
 overhead table, then restore the host's original sysctl value. Kernel BPF
 runtime accounting itself has a cost and should not be left enabled solely for
 the inspector.
+
+The top-bar **Reset all stats** button clears inspector-owned BPF maps, starts a
+new rolling migration epoch, and clears browser histories. It intentionally
+preserves Mitosis's stats socket and kernel-wide counters.
 
 For the 16-vCPU development guest, expose the guest port with QEMU user-mode
 networking and run `run-in-vm.sh` as the guest command. The script owns the

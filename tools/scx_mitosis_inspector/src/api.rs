@@ -3,16 +3,20 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 
-use axum::extract::State;
-use axum::http::{header, HeaderMap, HeaderValue};
+use axum::extract::{Query, State};
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::Html;
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
+use serde::Deserialize;
+use serde_json::json;
 
 use crate::collector::Snapshot;
 use crate::host_context::HostContextView;
+use crate::migration_history::{MigrationHistory, MigrationWindowView};
 use crate::stats::StatsSnapshot;
 use crate::system_stats::SystemStatsSnapshot;
 
@@ -33,6 +37,9 @@ pub struct ApiContext {
     stats: Arc<RwLock<StatsSnapshot>>,
     system: Arc<RwLock<SystemStatsSnapshot>>,
     host_context: HostContextView,
+    migrations: Arc<RwLock<MigrationHistory>>,
+    migration_window_ms: u64,
+    reset_requested: Arc<AtomicBool>,
 }
 
 impl ApiContext {
@@ -41,12 +48,18 @@ impl ApiContext {
         stats: Arc<RwLock<StatsSnapshot>>,
         system: Arc<RwLock<SystemStatsSnapshot>>,
         host_context: HostContextView,
+        migrations: Arc<RwLock<MigrationHistory>>,
+        migration_window_ms: u64,
+        reset_requested: Arc<AtomicBool>,
     ) -> Self {
         Self {
             counters,
             stats,
             system,
             host_context,
+            migrations,
+            migration_window_ms,
+            reset_requested,
         }
     }
 }
@@ -63,6 +76,8 @@ pub fn router(context: ApiContext) -> Router {
         .route("/assets/system.js", get(system_script))
         .route("/assets/style.css", get(stylesheet))
         .route("/api/counters", get(counters))
+        .route("/api/migrations", get(migration_snapshot))
+        .route("/api/reset", post(reset_inspector))
         .route("/api/host-context", get(host_context))
         .route("/api/stats", get(stats_snapshot))
         .route("/api/system", get(system_snapshot))
@@ -122,6 +137,49 @@ async fn counters(State(context): State<ApiContext>) -> Json<Snapshot> {
             .read()
             .expect("snapshot lock poisoned")
             .clone(),
+    )
+}
+
+#[derive(Deserialize)]
+struct MigrationQuery {
+    window_ms: Option<u64>,
+}
+
+async fn migration_snapshot(
+    State(context): State<ApiContext>,
+    Query(query): Query<MigrationQuery>,
+) -> Result<Json<MigrationWindowView>, (StatusCode, Json<serde_json::Value>)> {
+    let window_ms = query.window_ms.unwrap_or(context.migration_window_ms);
+    context
+        .migrations
+        .read()
+        .expect("migration history lock poisoned")
+        .view(window_ms)
+        .map(Json)
+        .map_err(|error| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": error.to_string() })),
+            )
+        })
+}
+
+async fn reset_inspector(
+    State(context): State<ApiContext>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    context
+        .migrations
+        .write()
+        .expect("migration history lock poisoned")
+        .reset();
+    context.reset_requested.store(true, Ordering::Release);
+    (
+        StatusCode::ACCEPTED,
+        Json(json!({
+            "accepted": true,
+            "scope": "inspector",
+            "preserved": ["scheduler stats socket", "kernel counters"]
+        })),
     )
 }
 
