@@ -75,6 +75,19 @@ pub struct CpuRuntimeRow {
     pub utilization_pct: f64,
 }
 
+pub fn project_cpu_runtime(
+    busy_ns: u64,
+    last_switch_ns: u64,
+    current_busy: bool,
+    now_ns: u64,
+) -> u64 {
+    if current_busy {
+        busy_ns.saturating_add(now_ns.saturating_sub(last_switch_ns))
+    } else {
+        busy_ns
+    }
+}
+
 pub fn build_cpu_runtime_rows(
     current: &[u64],
     previous: &[u64],

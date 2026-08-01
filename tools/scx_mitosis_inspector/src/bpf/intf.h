@@ -17,6 +17,7 @@ struct mitosis_cpu_pair {
 struct mitosis_cpu_runtime {
 	u64 last_switch_ns;
 	u64 busy_ns;
+	u64 current_busy;
 };
 
 #endif /* __SCX_MITOSIS_INSPECTOR_INTF_H */

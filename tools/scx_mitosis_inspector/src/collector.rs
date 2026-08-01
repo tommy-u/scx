@@ -20,8 +20,9 @@ use crate::bpf_program_stats::{query_bpf_program_stats, BpfProgramStatsRow};
 use crate::bpf_skel::{BpfSkel, BpfSkelBuilder};
 use crate::{
     build_callback_timing_rows, build_counters, build_cpu_runtime_rows, build_timing_metric_row,
-    program_name_matches, CallbackCounter, CallbackTimingCounters, CallbackTimingRow,
-    CpuRuntimeRow, MigrationRow, TimingMetricRow, CALLBACK_NAMES, CALLBACK_TIMING_BUCKETS,
+    program_name_matches, project_cpu_runtime, CallbackCounter, CallbackTimingCounters,
+    CallbackTimingRow, CpuRuntimeRow, MigrationRow, TimingMetricRow, CALLBACK_NAMES,
+    CALLBACK_TIMING_BUCKETS,
 };
 
 const TARGET_NAMES: [&str; 5] = [
@@ -279,13 +280,50 @@ fn read_cpu_runtime(skel: &BpfSkel<'_>) -> Result<Vec<u64>> {
         .cpu_runtime
         .lookup_percpu(&key, MapFlags::ANY)?
         .context("CPU runtime entry missing")?;
+    let now_ns = monotonic_time_ns()?;
     values
         .into_iter()
         .map(|value| {
-            let bytes = value.get(8..16).context("short CPU runtime value")?;
-            Ok(u64::from_ne_bytes(bytes.try_into()?))
+            let last_switch_ns = u64::from_ne_bytes(
+                value
+                    .get(..8)
+                    .context("short CPU runtime value")?
+                    .try_into()?,
+            );
+            let busy_ns = u64::from_ne_bytes(
+                value
+                    .get(8..16)
+                    .context("short CPU runtime value")?
+                    .try_into()?,
+            );
+            let current_busy = u64::from_ne_bytes(
+                value
+                    .get(16..24)
+                    .context("short CPU runtime value")?
+                    .try_into()?,
+            ) != 0;
+            Ok(project_cpu_runtime(
+                busy_ns,
+                last_switch_ns,
+                current_busy,
+                now_ns,
+            ))
         })
         .collect()
+}
+
+fn monotonic_time_ns() -> Result<u64> {
+    let mut time = MaybeUninit::<libc::timespec>::uninit();
+    if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, time.as_mut_ptr()) } != 0 {
+        return Err(std::io::Error::last_os_error()).context("reading monotonic clock");
+    }
+    let time = unsafe { time.assume_init() };
+    let seconds = u64::try_from(time.tv_sec).context("negative monotonic clock seconds")?;
+    let nanoseconds =
+        u64::try_from(time.tv_nsec).context("negative monotonic clock nanoseconds")?;
+    Ok(seconds
+        .saturating_mul(1_000_000_000)
+        .saturating_add(nanoseconds))
 }
 
 pub fn run(
