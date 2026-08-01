@@ -20,6 +20,9 @@ pub const SCHEDULER_EVENT_NAMES: [&str; 9] = [
     "task_execs",
     "task_exits",
 ];
+pub const SOFTIRQ_NAMES: [&str; 10] = [
+    "HI", "TIMER", "NET_TX", "NET_RX", "BLOCK", "IRQ_POLL", "TASKLET", "SCHED", "HRTIMER", "RCU",
+];
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct CallbackCounter {
@@ -33,6 +36,19 @@ pub struct SchedulerEventRow {
     pub metric: &'static str,
     pub count: u64,
     pub rate_per_second: f64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct SoftirqRow {
+    pub vector: u32,
+    pub name: &'static str,
+    pub count: u64,
+    pub rate_per_second: f64,
+    pub samples: u64,
+    pub mean_ns: Option<u64>,
+    pub p50_ns: Option<u64>,
+    pub p95_ns: Option<u64>,
+    pub p99_ns: Option<u64>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
