@@ -520,6 +520,11 @@ scope = "task_allowed"
                             clock_model: "no virtual-time clock".into(),
                         },
                         queue_topology: None,
+                        topology_lifecycle: crate::inspection::TopologyLifecycleInspectionView {
+                            current_generation: 1,
+                            managed: false,
+                            transitions: Vec::new(),
+                        },
                         slots: Vec::new(),
                         cells: Vec::new(),
                         task_mappings: Vec::new(),

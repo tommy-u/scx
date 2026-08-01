@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use scx_snake::fairness::FairnessMode;
 use serde::Serialize;
@@ -142,6 +142,82 @@ pub struct CellInspectionView {
     pub task_count: usize,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TopologyTransitionOutcome {
+    Applied,
+    Deferred,
+    Rejected,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TopologyTransitionStageStatus {
+    Complete,
+    Warning,
+    Failed,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct TopologyTransitionStageInspectionView {
+    pub stage: String,
+    pub status: TopologyTransitionStageStatus,
+    pub duration_ms: u64,
+    pub detail: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TopologyCellChangeKind {
+    Added,
+    Removed,
+    Changed,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct TopologyCellStateInspectionView {
+    pub name: Option<String>,
+    pub slot_epoch: u32,
+    pub primary_cpu_count: usize,
+    pub borrowable_cpu_count: usize,
+    pub normal_dsq_count: usize,
+    pub affinity_dsq_count: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct TopologyCellChangeInspectionView {
+    pub cell_id: u32,
+    pub kind: TopologyCellChangeKind,
+    pub before: Option<TopologyCellStateInspectionView>,
+    pub after: Option<TopologyCellStateInspectionView>,
+    pub primary_cpus_added: Vec<u32>,
+    pub primary_cpus_removed: Vec<u32>,
+    pub borrowable_cpus_added: Vec<u32>,
+    pub borrowable_cpus_removed: Vec<u32>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct TopologyTransitionInspectionView {
+    pub id: u64,
+    pub reason: String,
+    pub outcome: TopologyTransitionOutcome,
+    pub from_generation: u64,
+    pub to_generation: Option<u64>,
+    pub started_at_ms: u64,
+    pub completed_at_ms: u64,
+    pub duration_ms: u64,
+    pub stages: Vec<TopologyTransitionStageInspectionView>,
+    pub cell_changes: Vec<TopologyCellChangeInspectionView>,
+    pub detail: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct TopologyLifecycleInspectionView {
+    pub current_generation: u64,
+    pub managed: bool,
+    pub transitions: Vec<TopologyTransitionInspectionView>,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct TaskMappingInspectionView {
     pub tid: i32,
@@ -168,6 +244,7 @@ pub struct InspectionView {
     pub queue_timing: Option<QueueTimingInspectionView>,
     pub fairness: FairnessInspectionView,
     pub queue_topology: Option<QueueTopologyInspectionView>,
+    pub topology_lifecycle: TopologyLifecycleInspectionView,
     pub slots: Vec<SlotInspectionView>,
     pub cells: Vec<CellInspectionView>,
     pub task_mappings: Vec<TaskMappingInspectionView>,
@@ -273,7 +350,11 @@ pub struct Inspector {
     queue_topology: Option<QueueTopologyInspectionView>,
     slots: [Option<SlotPolicy>; 2],
     assignments: BTreeMap<i32, u32>,
+    topology_transitions: VecDeque<TopologyTransitionInspectionView>,
+    next_topology_transition_id: u64,
 }
+
+const TOPOLOGY_TRANSITION_HISTORY_LIMIT: usize = 20;
 
 impl Inspector {
     pub fn new(
@@ -291,6 +372,8 @@ impl Inspector {
             queue_topology: queue_topology.as_ref().map(queue_topology_view),
             slots,
             assignments: BTreeMap::new(),
+            topology_transitions: VecDeque::new(),
+            next_topology_transition_id: 1,
         }
     }
 
@@ -305,6 +388,18 @@ impl Inspector {
 
     pub fn set_queue_topology(&mut self, topology: Option<QueueTopology>) {
         self.queue_topology = topology.as_ref().map(queue_topology_view);
+    }
+
+    pub fn record_topology_transition(&mut self, transition: TopologyTransitionInspectionView) {
+        self.topology_transitions.push_front(transition);
+        self.topology_transitions
+            .truncate(TOPOLOGY_TRANSITION_HISTORY_LIMIT);
+    }
+
+    pub fn next_topology_transition_id(&mut self) -> u64 {
+        let id = self.next_topology_transition_id;
+        self.next_topology_transition_id = self.next_topology_transition_id.saturating_add(1);
+        id
     }
 
     pub fn activate(&mut self, next: SlotPolicy, frozen_metrics: Metrics, at_ms: u64) {
@@ -426,6 +521,7 @@ impl Inspector {
             })
             .collect();
 
+        let managed = active_policy.is_some_and(|policy| policy.managed_cells.is_some());
         InspectionView {
             schema_version: 1,
             active_slot: self.active_slot,
@@ -434,11 +530,138 @@ impl Inspector {
             queue_timing: None,
             fairness: self.fairness.clone(),
             queue_topology: self.queue_topology.clone(),
+            topology_lifecycle: TopologyLifecycleInspectionView {
+                current_generation: self.slots[self.active_slot as usize]
+                    .as_ref()
+                    .map(|slot| slot.generation)
+                    .unwrap_or_default(),
+                managed,
+                transitions: if managed {
+                    self.topology_transitions.iter().cloned().collect()
+                } else {
+                    Vec::new()
+                },
+            },
             slots,
             cells,
             task_mappings,
         }
     }
+}
+
+fn topology_cell_state(
+    topology: &QueueTopology,
+    cell_id: u32,
+    names: &BTreeMap<u32, String>,
+) -> Option<TopologyCellStateInspectionView> {
+    let cell = topology
+        .cells
+        .iter()
+        .find(|cell| cell.external_id == cell_id)?;
+    let affinity_dsq_count = topology
+        .cpu_queues
+        .values()
+        .filter(|queue| queue.owner_cell_index == Some(cell.index))
+        .count();
+    Some(TopologyCellStateInspectionView {
+        name: names.get(&cell_id).cloned(),
+        slot_epoch: cell.slot_epoch,
+        primary_cpu_count: cell.primary.len(),
+        borrowable_cpu_count: cell.borrowable.len(),
+        normal_dsq_count: cell.normal_queues.len(),
+        affinity_dsq_count,
+    })
+}
+
+pub fn topology_transition_changes(
+    before: Option<&QueueTopology>,
+    after: Option<&QueueTopology>,
+    before_names: &BTreeMap<u32, String>,
+    after_names: &BTreeMap<u32, String>,
+) -> Vec<TopologyCellChangeInspectionView> {
+    let cell_ids = before
+        .into_iter()
+        .flat_map(|topology| topology.cells.iter().map(|cell| cell.external_id))
+        .chain(
+            after
+                .into_iter()
+                .flat_map(|topology| topology.cells.iter().map(|cell| cell.external_id)),
+        )
+        .collect::<BTreeSet<_>>();
+
+    cell_ids
+        .into_iter()
+        .filter_map(|cell_id| {
+            let before_state =
+                before.and_then(|topology| topology_cell_state(topology, cell_id, before_names));
+            let after_state =
+                after.and_then(|topology| topology_cell_state(topology, cell_id, after_names));
+            let before_primary = before
+                .and_then(|topology| {
+                    topology
+                        .cells
+                        .iter()
+                        .find(|cell| cell.external_id == cell_id)
+                })
+                .map(|cell| cell.primary.clone())
+                .unwrap_or_default();
+            let after_primary = after
+                .and_then(|topology| {
+                    topology
+                        .cells
+                        .iter()
+                        .find(|cell| cell.external_id == cell_id)
+                })
+                .map(|cell| cell.primary.clone())
+                .unwrap_or_default();
+            let before_borrowable = before
+                .and_then(|topology| {
+                    topology
+                        .cells
+                        .iter()
+                        .find(|cell| cell.external_id == cell_id)
+                })
+                .map(|cell| cell.borrowable.clone())
+                .unwrap_or_default();
+            let after_borrowable = after
+                .and_then(|topology| {
+                    topology
+                        .cells
+                        .iter()
+                        .find(|cell| cell.external_id == cell_id)
+                })
+                .map(|cell| cell.borrowable.clone())
+                .unwrap_or_default();
+            if before_state == after_state
+                && before_primary == after_primary
+                && before_borrowable == after_borrowable
+            {
+                return None;
+            }
+            let kind = match (&before_state, &after_state) {
+                (None, Some(_)) => TopologyCellChangeKind::Added,
+                (Some(_), None) => TopologyCellChangeKind::Removed,
+                (Some(_), Some(_)) => TopologyCellChangeKind::Changed,
+                (None, None) => return None,
+            };
+            Some(TopologyCellChangeInspectionView {
+                cell_id,
+                kind,
+                before: before_state,
+                after: after_state,
+                primary_cpus_added: after_primary.difference(&before_primary).copied().collect(),
+                primary_cpus_removed: before_primary.difference(&after_primary).copied().collect(),
+                borrowable_cpus_added: after_borrowable
+                    .difference(&before_borrowable)
+                    .copied()
+                    .collect(),
+                borrowable_cpus_removed: before_borrowable
+                    .difference(&after_borrowable)
+                    .copied()
+                    .collect(),
+            })
+        })
+        .collect()
 }
 
 fn fairness_view(mode: FairnessMode, queue_layout: Option<QueueLayout>) -> FairnessInspectionView {
@@ -1648,5 +1871,155 @@ scope = "task_cell"
         assert_eq!(view.fairness.mode_name, "fifo");
         assert_eq!(view.fairness.clock_model, "no virtual-time clock");
         assert!(view.queue_topology.is_none());
+    }
+
+    #[test]
+    fn topology_transition_changes_identify_added_removed_and_resized_cells() {
+        let before_source = r#"
+[queues]
+layout = "cell_llc"
+
+[[cell]]
+id = 7
+cpus = "0-1"
+
+[[cell]]
+id = 8
+cpus = "2-3"
+
+[[rung]]
+operation = "pick_idle"
+scope = "task_cell"
+"#;
+        let after_source = r#"
+[queues]
+layout = "cell_llc"
+
+[[cell]]
+id = 7
+cpus = "0-2"
+
+[[cell]]
+id = 9
+cpus = "3"
+
+[[rung]]
+operation = "pick_idle"
+scope = "task_cell"
+"#;
+        let available = [0, 1, 2, 3].into_iter().collect();
+        let llcs = BTreeMap::from([(0, 10), (1, 10), (2, 20), (3, 20)]);
+        let before = queue_topology::resolve_queue_topology(
+            &policy::compile_policy(before_source).unwrap(),
+            &available,
+            &llcs,
+        )
+        .unwrap()
+        .unwrap();
+        let after = queue_topology::resolve_queue_topology(
+            &policy::compile_policy(after_source).unwrap(),
+            &available,
+            &llcs,
+        )
+        .unwrap()
+        .unwrap();
+
+        let changes = topology_transition_changes(
+            Some(&before),
+            Some(&after),
+            &BTreeMap::from([(7, "frontend.slice".into()), (8, "batch.slice".into())]),
+            &BTreeMap::from([(7, "frontend.slice".into()), (9, "search.slice".into())]),
+        );
+        assert_eq!(
+            changes
+                .iter()
+                .map(|change| change.cell_id)
+                .collect::<Vec<_>>(),
+            vec![0, 7, 8, 9]
+        );
+        assert_eq!(changes[0].kind, TopologyCellChangeKind::Changed);
+        assert_eq!(changes[0].primary_cpus_added, vec![2]);
+        assert_eq!(changes[0].primary_cpus_removed, vec![3]);
+        let resized = changes.iter().find(|change| change.cell_id == 7).unwrap();
+        assert_eq!(resized.kind, TopologyCellChangeKind::Changed);
+        assert!(resized.primary_cpus_added.is_empty());
+        assert_eq!(resized.borrowable_cpus_added, vec![2]);
+        assert_eq!(resized.before.as_ref().unwrap().primary_cpu_count, 1);
+        assert_eq!(resized.after.as_ref().unwrap().borrowable_cpu_count, 2);
+        assert_eq!(resized.before.as_ref().unwrap().normal_dsq_count, 1);
+        assert_eq!(resized.after.as_ref().unwrap().normal_dsq_count, 1);
+        let serialized = serde_json::to_value(resized).unwrap();
+        assert!(serialized["before"].get("primary_cpus").is_none());
+        assert!(serialized["after"].get("borrowable_cpus").is_none());
+        let removed = changes.iter().find(|change| change.cell_id == 8).unwrap();
+        assert_eq!(removed.kind, TopologyCellChangeKind::Removed);
+        assert_eq!(removed.primary_cpus_removed, vec![2]);
+        assert_eq!(removed.borrowable_cpus_removed, vec![3]);
+        let added = changes.iter().find(|change| change.cell_id == 9).unwrap();
+        assert_eq!(added.kind, TopologyCellChangeKind::Added);
+        assert_eq!(added.primary_cpus_added, vec![3]);
+        assert_eq!(
+            added.after.as_ref().unwrap().name.as_deref(),
+            Some("search.slice")
+        );
+    }
+
+    #[test]
+    fn topology_transition_history_is_newest_first_and_bounded() {
+        let mut active = slot(0, 1, FIRST_POLICY, 1_000);
+        active.compiled.managed_cells = Some(policy::ManagedCellsPolicy {
+            parent: "/workloads".into(),
+            exclude_children: Vec::new(),
+            max_children: 31,
+            reconcile_ms: 1_000,
+        });
+        let mut inspector = Inspector::new(active, FairnessMode::Fifo, None);
+        for id in 1..=25 {
+            inspector.record_topology_transition(TopologyTransitionInspectionView {
+                id,
+                reason: "managed_cells_changed".into(),
+                outcome: TopologyTransitionOutcome::Applied,
+                from_generation: id,
+                to_generation: Some(id + 1),
+                started_at_ms: id * 100,
+                completed_at_ms: id * 100 + 7,
+                duration_ms: 7,
+                stages: Vec::new(),
+                cell_changes: Vec::new(),
+                detail: None,
+            });
+        }
+
+        let view = inspector.snapshot(metrics(1, 1), Vec::new());
+
+        assert_eq!(view.topology_lifecycle.current_generation, 1);
+        assert!(view.topology_lifecycle.managed);
+        assert_eq!(view.topology_lifecycle.transitions.len(), 20);
+        assert_eq!(view.topology_lifecycle.transitions[0].id, 25);
+        assert_eq!(view.topology_lifecycle.transitions[19].id, 6);
+    }
+
+    #[test]
+    fn static_policy_never_exposes_retained_topology_transitions() {
+        let mut inspector =
+            Inspector::new(slot(0, 1, FIRST_POLICY, 1_000), FairnessMode::Fifo, None);
+        inspector.record_topology_transition(TopologyTransitionInspectionView {
+            id: 1,
+            reason: "managed_cells_changed".into(),
+            outcome: TopologyTransitionOutcome::Applied,
+            from_generation: 1,
+            to_generation: Some(2),
+            started_at_ms: 100,
+            completed_at_ms: 110,
+            duration_ms: 10,
+            stages: Vec::new(),
+            cell_changes: Vec::new(),
+            detail: None,
+        });
+
+        let view = inspector.snapshot(metrics(1, 1), Vec::new());
+
+        assert!(!view.topology_lifecycle.managed);
+        assert!(view.topology_lifecycle.transitions.is_empty());
     }
 }

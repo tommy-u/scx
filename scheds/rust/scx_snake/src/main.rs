@@ -71,6 +71,10 @@ fn unix_time_ms() -> u64 {
     .unwrap_or(u64::MAX)
 }
 
+fn duration_ms(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
 enum StatsFormat {
     #[default]
@@ -1746,6 +1750,106 @@ fn read_raw_cell_stats(
         .collect()
 }
 
+struct TopologyTransitionAttempt {
+    id: u64,
+    from_generation: u64,
+    started_at_ms: u64,
+    stages: Vec<inspection::TopologyTransitionStageInspectionView>,
+    cell_changes: Vec<inspection::TopologyCellChangeInspectionView>,
+}
+
+impl TopologyTransitionAttempt {
+    fn new(id: u64, from_generation: u64, started_at_ms: u64) -> Self {
+        Self {
+            id,
+            from_generation,
+            started_at_ms,
+            stages: Vec::new(),
+            cell_changes: Vec::new(),
+        }
+    }
+
+    fn push_stage(
+        &mut self,
+        stage: &str,
+        status: inspection::TopologyTransitionStageStatus,
+        duration: Duration,
+        detail: Option<String>,
+    ) {
+        self.stages
+            .push(inspection::TopologyTransitionStageInspectionView {
+                stage: stage.into(),
+                status,
+                duration_ms: duration_ms(duration),
+                detail,
+            });
+    }
+
+    fn complete_stage(&mut self, stage: &str, duration: Duration) {
+        self.push_stage(
+            stage,
+            inspection::TopologyTransitionStageStatus::Complete,
+            duration,
+            None,
+        );
+    }
+
+    fn warn_stage(&mut self, stage: &str, duration: Duration, detail: String) {
+        self.push_stage(
+            stage,
+            inspection::TopologyTransitionStageStatus::Warning,
+            duration,
+            Some(detail),
+        );
+    }
+
+    fn fail_stage(&mut self, stage: &str, duration: Duration, detail: String) {
+        self.push_stage(
+            stage,
+            inspection::TopologyTransitionStageStatus::Failed,
+            duration,
+            Some(detail),
+        );
+    }
+
+    fn finish(
+        self,
+        outcome: inspection::TopologyTransitionOutcome,
+        to_generation: Option<u64>,
+        completed_at_ms: u64,
+        duration: Duration,
+        detail: Option<String>,
+    ) -> inspection::TopologyTransitionInspectionView {
+        inspection::TopologyTransitionInspectionView {
+            id: self.id,
+            reason: "managed_cells_changed".into(),
+            outcome,
+            from_generation: self.from_generation,
+            to_generation,
+            started_at_ms: self.started_at_ms,
+            completed_at_ms,
+            duration_ms: duration_ms(duration),
+            stages: self.stages,
+            cell_changes: self.cell_changes,
+            detail,
+        }
+    }
+}
+
+fn topology_cell_names(policy: &CompiledPolicy) -> BTreeMap<u32, String> {
+    policy
+        .membership
+        .as_ref()
+        .into_iter()
+        .flat_map(|membership| {
+            membership
+                .assignments
+                .iter()
+                .map(|(name, &cell_id)| (cell_id, name.clone()))
+        })
+        .collect()
+}
+
 struct Scheduler<'object, 'policy> {
     skel: BpfSkel<'object>,
     struct_ops: Option<libbpf_rs::Link>,
@@ -2656,18 +2760,67 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
             .context("managed reconciliation has no interval")?;
         self.next_managed_reconcile = Some(Instant::now() + interval);
 
+        let transition_started = Instant::now();
+        let started_at_ms = unix_time_ms();
+        let discovery_started = Instant::now();
         let mut candidate = self.runtime.compiled.clone();
-        managed_cells::resolve_managed_cells(&mut candidate)
-            .context("discovering live managed cells")?;
+        if let Err(error) = managed_cells::resolve_managed_cells(&mut candidate)
+            .context("discovering live managed cells")
+        {
+            let mut transition = TopologyTransitionAttempt::new(
+                self.inspector.next_topology_transition_id(),
+                self.runtime.generation,
+                started_at_ms,
+            );
+            let detail = format!("{error:#}");
+            transition.fail_stage("discovery", discovery_started.elapsed(), detail.clone());
+            self.inspector.record_topology_transition(transition.finish(
+                inspection::TopologyTransitionOutcome::Rejected,
+                None,
+                unix_time_ms(),
+                transition_started.elapsed(),
+                Some(detail),
+            ));
+            return Err(error);
+        }
         if candidate == self.runtime.compiled {
             return Ok(());
         }
+        let mut transition = TopologyTransitionAttempt::new(
+            self.inspector.next_topology_transition_id(),
+            self.runtime.generation,
+            started_at_ms,
+        );
+        transition.complete_stage("discovery", discovery_started.elapsed());
+
+        let resolution_started = Instant::now();
         let topology = match resolve_host_queue_topology(&candidate)
             .context("resolving live managed cell topology")
         {
             Ok(Some(topology)) => topology,
-            Ok(None) => bail!("managed cells resolved without a queue topology"),
+            Ok(None) => {
+                let error = anyhow!("managed cells resolved without a queue topology");
+                let detail = format!("{error:#}");
+                transition.fail_stage("resolution", resolution_started.elapsed(), detail.clone());
+                self.inspector.record_topology_transition(transition.finish(
+                    inspection::TopologyTransitionOutcome::Rejected,
+                    None,
+                    unix_time_ms(),
+                    transition_started.elapsed(),
+                    Some(detail),
+                ));
+                return Err(error);
+            }
             Err(error) => {
+                let detail = format!("{error:#}");
+                transition.fail_stage("resolution", resolution_started.elapsed(), detail.clone());
+                self.inspector.record_topology_transition(transition.finish(
+                    inspection::TopologyTransitionOutcome::Rejected,
+                    None,
+                    unix_time_ms(),
+                    transition_started.elapsed(),
+                    Some(detail),
+                ));
                 warn!("managed cell candidate remains unbound in cell 0: {error:#}");
                 return Ok(());
             }
@@ -2677,20 +2830,59 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
         {
             Ok(tables) => tables,
             Err(error) => {
+                let detail = format!("{error:#}");
+                transition.fail_stage("resolution", resolution_started.elapsed(), detail.clone());
+                self.inspector.record_topology_transition(transition.finish(
+                    inspection::TopologyTransitionOutcome::Rejected,
+                    None,
+                    unix_time_ms(),
+                    transition_started.elapsed(),
+                    Some(detail),
+                ));
                 warn!("managed cell candidate remains unbound in cell 0: {error:#}");
                 return Ok(());
             }
         };
+        transition.complete_stage("resolution", resolution_started.elapsed());
+        transition.cell_changes = inspection::topology_transition_changes(
+            self.queue_topology.as_ref(),
+            Some(&topology),
+            &topology_cell_names(&self.runtime.compiled),
+            &topology_cell_names(&candidate),
+        );
 
         let previous_slot = self.runtime.active_slot;
         let frozen_metrics = self.metrics()?;
-        set_queue_draining(&mut self.skel, true)?;
+        let drain_started = Instant::now();
+        if let Err(error) = set_queue_draining(&mut self.skel, true) {
+            let detail = format!("{error:#}");
+            transition.fail_stage("drain", drain_started.elapsed(), detail.clone());
+            self.inspector.record_topology_transition(transition.finish(
+                inspection::TopologyTransitionOutcome::Rejected,
+                None,
+                unix_time_ms(),
+                transition_started.elapsed(),
+                Some(detail),
+            ));
+            return Err(error);
+        }
         if let Err(error) = wait_for_queue_drain(&mut self.skel, SLOT_QUIESCENCE_TIMEOUT) {
+            let detail = format!("{error:#}");
+            transition.fail_stage("drain", drain_started.elapsed(), detail.clone());
+            self.inspector.record_topology_transition(transition.finish(
+                inspection::TopologyTransitionOutcome::Deferred,
+                None,
+                unix_time_ms(),
+                transition_started.elapsed(),
+                Some(detail),
+            ));
             set_queue_draining(&mut self.skel, false)?;
             warn!("managed cell topology activation deferred: {error:#}");
             return Ok(());
         }
+        transition.complete_stage("drain", drain_started.elapsed());
 
+        let publication_started = Instant::now();
         let source = self.runtime.source.clone();
         let activation = {
             let mut backend = BpfPolicyBackend {
@@ -2708,36 +2900,88 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
         let response = match activation {
             Ok(response) => response,
             Err(error) => {
+                let detail = format!("{error:#}");
+                transition.fail_stage("publication", publication_started.elapsed(), detail.clone());
+                self.inspector.record_topology_transition(transition.finish(
+                    inspection::TopologyTransitionOutcome::Rejected,
+                    None,
+                    unix_time_ms(),
+                    transition_started.elapsed(),
+                    Some(detail),
+                ));
                 set_queue_draining(&mut self.skel, false)?;
                 warn!("managed cell topology activation rejected: {error:#}");
                 return Ok(());
             }
         };
+        transition.complete_stage("publication", publication_started.elapsed());
 
-        wait_for_slot_quiescent(&self.skel, previous_slot, SLOT_QUIESCENCE_TIMEOUT)
-            .context("waiting for the retired managed topology bank")?;
+        let quiescence_started = Instant::now();
+        if let Err(error) =
+            wait_for_slot_quiescent(&self.skel, previous_slot, SLOT_QUIESCENCE_TIMEOUT)
+                .context("waiting for the retired managed topology bank")
+        {
+            let detail = format!("{error:#}");
+            transition.fail_stage("quiescence", quiescence_started.elapsed(), detail.clone());
+            self.inspector.record_topology_transition(transition.finish(
+                inspection::TopologyTransitionOutcome::Applied,
+                Some(response.generation),
+                unix_time_ms(),
+                transition_started.elapsed(),
+                Some(detail),
+            ));
+            return Err(error);
+        }
+        transition.complete_stage("quiescence", quiescence_started.elapsed());
         set_queue_draining(&mut self.skel, false)?;
         self.queue_topology = Some(topology.clone());
 
-        let membership_policy = self
-            .runtime
-            .compiled
-            .membership
-            .as_ref()
-            .context("managed topology has no membership policy")?;
+        let membership_started = Instant::now();
+        let Some(membership_policy) = self.runtime.compiled.membership.as_ref() else {
+            let error = anyhow!("managed topology has no membership policy");
+            let detail = format!("{error:#}");
+            transition.fail_stage("membership", membership_started.elapsed(), detail.clone());
+            self.inspector.record_topology_transition(transition.finish(
+                inspection::TopologyTransitionOutcome::Applied,
+                Some(response.generation),
+                unix_time_ms(),
+                transition_started.elapsed(),
+                Some(detail),
+            ));
+            return Err(error);
+        };
         let directory =
             CellDirectory::from_policy(membership_policy, &self.runtime.compiled.cell_slot_epochs);
-        let manager = self
-            .membership
-            .as_mut()
-            .context("managed topology has no membership manager")?;
+        let Some(manager) = self.membership.as_mut() else {
+            let error = anyhow!("managed topology has no membership manager");
+            let detail = format!("{error:#}");
+            transition.fail_stage("membership", membership_started.elapsed(), detail.clone());
+            self.inspector.record_topology_transition(transition.finish(
+                inspection::TopologyTransitionOutcome::Applied,
+                Some(response.generation),
+                unix_time_ms(),
+                transition_started.elapsed(),
+                Some(detail),
+            ));
+            return Err(error);
+        };
         manager.replace_directory(directory);
         match manager.reconcile(&self.skel.maps.task_cells) {
-            Ok(report) => debug!(
-                "managed topology membership discovered {}, updated {}, transient {}",
-                report.discovered, report.updated, report.transient
-            ),
-            Err(error) => warn!("managed topology membership update failed: {error:#}"),
+            Ok(report) => {
+                transition.complete_stage("membership", membership_started.elapsed());
+                debug!(
+                    "managed topology membership discovered {}, updated {}, transient {}",
+                    report.discovered, report.updated, report.transient
+                );
+            }
+            Err(error) => {
+                transition.warn_stage(
+                    "membership",
+                    membership_started.elapsed(),
+                    format!("{error:#}"),
+                );
+                warn!("managed topology membership update failed: {error:#}");
+            }
         }
 
         let activated_at_ms = unix_time_ms();
@@ -2754,6 +2998,13 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
             frozen_metrics,
             activated_at_ms,
         );
+        self.inspector.record_topology_transition(transition.finish(
+            inspection::TopologyTransitionOutcome::Applied,
+            Some(response.generation),
+            unix_time_ms(),
+            transition_started.elapsed(),
+            None,
+        ));
         info!(
             "activated managed cell topology generation {} with {} managed cells",
             response.generation,
@@ -3511,6 +3762,99 @@ scope = "task_allowed"
         assert!(reconcile.contains("wait_for_queue_drain(&mut self.skel"));
         assert!(reconcile.contains("wait_for_slot_quiescent(&self.skel, previous_slot"));
         assert!(reconcile.contains("set_queue_draining(&mut self.skel, false)"));
+    }
+
+    #[test]
+    fn managed_cell_reconciliation_records_topology_lifecycle_stages() {
+        let source = include_str!("main.rs");
+        let reconcile = source
+            .split_once("fn reconcile_managed_cells_if_due(")
+            .and_then(|(_, body)| body.split_once("fn run(&mut self, shutdown:"))
+            .map(|(body, _)| body)
+            .expect("scheduler should reconcile managed resources at runtime");
+
+        assert!(reconcile.contains("topology_transition_changes("));
+        assert!(reconcile.contains("record_topology_transition("));
+        for stage in [
+            "discovery",
+            "resolution",
+            "drain",
+            "publication",
+            "quiescence",
+            "membership",
+        ] {
+            assert!(
+                reconcile.contains(&format!("complete_stage(\"{stage}\""))
+                    || reconcile.contains(&format!("fail_stage(\"{stage}\""))
+                    || reconcile.contains(&format!("warn_stage(\"{stage}\"")),
+                "managed reconciliation does not record {stage}"
+            );
+        }
+        for outcome in ["Applied", "Deferred", "Rejected"] {
+            assert!(
+                reconcile.contains(&format!("TopologyTransitionOutcome::{outcome}")),
+                "managed reconciliation does not record {outcome} outcomes"
+            );
+        }
+    }
+
+    #[test]
+    fn topology_transition_attempt_preserves_stage_outcomes() {
+        let mut attempt = TopologyTransitionAttempt::new(4, 10, 1_000);
+        attempt.complete_stage("discovery", Duration::from_millis(2));
+        attempt.warn_stage(
+            "membership",
+            Duration::from_millis(3),
+            "one task disappeared".into(),
+        );
+        attempt.fail_stage(
+            "drain",
+            Duration::from_millis(5),
+            "queues remained busy".into(),
+        );
+        let view = attempt.finish(
+            inspection::TopologyTransitionOutcome::Deferred,
+            None,
+            1_012,
+            Duration::from_millis(12),
+            Some("queues remained busy".into()),
+        );
+
+        assert_eq!(view.id, 4);
+        assert_eq!(view.from_generation, 10);
+        assert_eq!(view.duration_ms, 12);
+        assert_eq!(view.stages.len(), 3);
+        assert_eq!(
+            view.stages[0].status,
+            inspection::TopologyTransitionStageStatus::Complete
+        );
+        assert_eq!(
+            view.stages[1].status,
+            inspection::TopologyTransitionStageStatus::Warning
+        );
+        assert_eq!(
+            view.stages[2].status,
+            inspection::TopologyTransitionStageStatus::Failed
+        );
+    }
+
+    #[test]
+    fn topology_transition_attempt_preserves_every_final_outcome() {
+        for (index, outcome, to_generation) in [
+            (1, inspection::TopologyTransitionOutcome::Applied, Some(11)),
+            (2, inspection::TopologyTransitionOutcome::Deferred, None),
+            (3, inspection::TopologyTransitionOutcome::Rejected, None),
+        ] {
+            let view = TopologyTransitionAttempt::new(index, 10, 1_000).finish(
+                outcome,
+                to_generation,
+                1_005,
+                Duration::from_millis(5),
+                None,
+            );
+            assert_eq!(view.outcome, outcome);
+            assert_eq!(view.to_generation, to_generation);
+        }
     }
 
     #[test]
