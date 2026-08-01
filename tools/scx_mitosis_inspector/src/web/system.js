@@ -1,6 +1,13 @@
 const status = document.querySelector("#status");
 const statusText = document.querySelector("#statusText");
 const number = new Intl.NumberFormat("en-US", { maximumFractionDigits: 2 });
+const { History, drawLineChart } = MitosisCharts;
+const historyPoints = 10 * 60 / 2;
+const pressureHistory = new History(historyPoints);
+const frequencyHistory = new History(historyPoints);
+const networkHistory = new History(historyPoints);
+const irqHistory = new History(historyPoints);
+const blockHistory = new History(historyPoints);
 
 function row(values) {
   const tr = document.createElement("tr");
@@ -106,18 +113,111 @@ function render(snapshot) {
   ])) || [row(["Unavailable", "--", "--", "--", "--", snapshot.network.error || "No data"])];
   document.querySelector("#networkRows").replaceChildren(...networkRows);
 
-  status.classList.add("live");
-  statusText.textContent = "Live";
+}
+
+function finite(value) {
+  return Number.isFinite(value) ? value : Number.NaN;
+}
+
+function pressureAvg10(snapshot, resource) {
+  const source = snapshot.pressure?.[resource];
+  return finite(source?.available ? source.value?.some?.avg10 : null);
+}
+
+function sumRates(items, key) {
+  const values = (items || []).map((item) => item[key]).filter(Number.isFinite);
+  return values.length ? values.reduce((sum, value) => sum + value, 0) : Number.NaN;
+}
+
+function average(items, key) {
+  const values = (items || []).map((item) => item[key]).filter(Number.isFinite);
+  return values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : Number.NaN;
+}
+
+function pushHistory(at, systemSnapshot, countersSnapshot) {
+  if (systemSnapshot) {
+    pressureHistory.push(at, {
+      cpu: pressureAvg10(systemSnapshot, "cpu"),
+      memory: pressureAvg10(systemSnapshot, "memory"),
+      io: pressureAvg10(systemSnapshot, "io"),
+    });
+    const averageKhz = systemSnapshot.frequencies?.available
+      ? systemSnapshot.frequencies.value?.average_khz
+      : null;
+    frequencyHistory.push(at, {
+      mhz: Number.isFinite(averageKhz) ? averageKhz / 1000 : Number.NaN,
+    });
+    const interfaces = systemSnapshot.network?.available
+      ? systemSnapshot.network.value?.interfaces
+      : [];
+    networkHistory.push(at, {
+      rx: sumRates(interfaces, "rx_bytes_per_second"),
+      tx: sumRates(interfaces, "tx_bytes_per_second"),
+    });
+  }
+
+  if (countersSnapshot) {
+    irqHistory.push(at, {
+      total: average(countersSnapshot.interrupt_cpu, "total_utilization_pct"),
+    });
+    const block = countersSnapshot.block_io;
+    blockHistory.push(at, {
+      completions: finite(block?.available ? block.completion_rate_per_second : null),
+      mib: finite(block?.available ? block.completed_bytes_per_second / (1024 * 1024) : null),
+    });
+  }
+}
+
+function drawHistory() {
+  drawLineChart(document.querySelector("#pressureHistory"), [
+    { label: "CPU", color: "#2f7d62", points: pressureHistory.points("cpu") },
+    { label: "Memory", color: "#b05b3b", points: pressureHistory.points("memory") },
+    { label: "I/O", color: "#3f6f9f", points: pressureHistory.points("io") },
+  ], { unit: "%", minY: 0 });
+  drawLineChart(document.querySelector("#frequencyHistory"), [
+    { label: "Average", color: "#2f7d62", points: frequencyHistory.points("mhz") },
+  ], { unit: "MHz", minY: 0 });
+  drawLineChart(document.querySelector("#networkHistory"), [
+    { label: "RX", color: "#2f7d62", points: networkHistory.points("rx") },
+    { label: "TX", color: "#b05b3b", points: networkHistory.points("tx") },
+  ], { unit: "B/s", minY: 0 });
+  drawLineChart(document.querySelector("#irqHistory"), [
+    { label: "IRQ", color: "#b05b3b", points: irqHistory.points("total") },
+  ], { unit: "%", minY: 0, maxY: 100 });
+  drawLineChart(document.querySelector("#blockRateHistory"), [
+    { label: "Completions", color: "#3f6f9f", points: blockHistory.points("completions") },
+  ], { unit: "IOPS", minY: 0 });
+  drawLineChart(document.querySelector("#blockThroughputHistory"), [
+    { label: "Completed", color: "#2f7d62", points: blockHistory.points("mib") },
+  ], { unit: "MiB/s", minY: 0 });
+}
+
+async function fetchJson(url) {
+  const response = await fetch(url, { cache: "no-store" });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  return response.json();
 }
 
 async function refresh() {
-  try {
-    const response = await fetch("/api/system", { cache: "no-store" });
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    render(await response.json());
-  } catch (error) {
+  const [systemResult, countersResult] = await Promise.allSettled([
+    fetchJson("/api/system"),
+    fetchJson("/api/counters"),
+  ]);
+  const systemSnapshot = systemResult.status === "fulfilled" ? systemResult.value : null;
+  const countersSnapshot = countersResult.status === "fulfilled" ? countersResult.value : null;
+
+  if (systemSnapshot) render(systemSnapshot);
+  pushHistory(Date.now(), systemSnapshot, countersSnapshot);
+  drawHistory();
+
+  if (!systemSnapshot && !countersSnapshot) {
     status.classList.remove("live");
     statusText.textContent = "Disconnected";
+  } else {
+    status.classList.add("live");
+    if (!systemSnapshot) statusText.textContent = "Probes live; system unavailable";
+    else if (!countersSnapshot) statusText.textContent = "System live; probes unavailable";
+    else statusText.textContent = "Live";
   }
 }
 
