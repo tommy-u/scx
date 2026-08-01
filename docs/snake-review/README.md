@@ -82,7 +82,7 @@ priority labels. It is a dated planning snapshot, not a promise of delivery orde
 | Area | What landed | What remains unproven |
 | --- | --- | --- |
 | Global VTIME queues | LLC-sharded normal queues, bounded remote scans, preallocated task state, and optional direct dispatch | Throughput and tail-latency benefit versus kernel default |
-| Kernel-default simulation | Direct dispatch, previous whole-idle-core claim, and the ninth placement rung | Restricted-task topology gating and an explanation for residual LLC skew |
+| Placement simulations | Direct dispatch, the previous whole-idle-core claim, the kernel-default nine-stage ladder, and 16 visible Mitosis idle-selection stages | Restricted-task topology gating and an explanation for residual LLC skew |
 | VTIME and placement diagnostics | LLC/core utilization, LLC heat-map annotations, credit-clamp counts/rates, routing/runtime mix, and queue timing | Alert thresholds and controlled before/after workload evidence |
 | Inspector operations | Durable remote control, reliable restart, visible launch errors, and cache-safe web assets | Real-browser smoke and large-host collection/render cost curves |
 | Validation | Inspector tests run in normal CI; a sharded VM workflow freezes inputs and compares kernels; three local 140-case campaigns completed with zero failures | The matrix checks failure/progress, not fairness ratios, throughput, latency, or placement balance |

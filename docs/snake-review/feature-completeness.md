@@ -32,7 +32,7 @@ or operational evidence is limited.
 
 | Feature | Complete | Confidence | Principal gap |
 | --- | ---: | --- | --- |
-| Declarative bounded placement ladder | 96% | High | Fixed nine-rung and four-mask-table ABI |
+| Declarative bounded placement ladder | 96% | High | Nine generic rungs; exact expanded Mitosis form uses sixteen |
 | Previous/allowed idle placement and safe fallback | 96% | High | Static 1,024-CPU ceiling |
 | LLC, NUMA, and split-LLC scopes | 88% | High | No distance-ordered remote NUMA search |
 | Whole-idle-core selection | 94% | High | No capacity, energy, or heterogeneous-core policy |
@@ -112,9 +112,10 @@ general resource elasticity**.
 Atomic slot publication is implemented in
 [runtime_policy.rs](../../scheds/rust/scx_snake/src/runtime_policy.rs#L112-L167) and
 [main.h](../../scheds/rust/scx_snake/src/bpf/main.h#L170-L212). Current
-`intf.h` and `POLICY_LOWERING.md` now agree on ABI 28, nine placement rungs, and
-eight enqueue/dispatch rungs. The versioned `--validate-policy` JSON record exposes
-those limits to automation without loading BPF.
+`intf.h` and `POLICY_LOWERING.md` now agree on ABI 29, nine generic placement
+rungs, the exact sixteen-rung expanded Mitosis ladder, and eight
+enqueue/dispatch rungs. The versioned `--validate-policy` JSON record exposes
+both placement limits to automation without loading BPF.
 
 Category estimate: **95% policy engine**, **82% topology support**.
 

@@ -59,14 +59,17 @@ belong to another layer.
 
 ## Verifier boundaries
 
-The placement ladder uses eight fixed, bounds-checked calls. This avoids
-carrying the large dynamic opcode switch through the callback SCC that Linux
-7.1 creates for `bpf_loop()`, which exceeds the standard verifier complexity
-limit. The placement-only task-cell enqueue walk, cell queue enqueue ladder,
-cell queue dispatch ladder, and queue allowed-CPU scan use `bpf_loop()`; each
-callback checks both the compile-time maximum and the active runtime count
-before indexing policy or queue state. Fixed global queue walks follow the
-same verifier-safe pattern as the placement ladder.
+Generic placement uses nine fixed, bounds-checked interpreter calls. The
+16-stage expanded Mitosis policy instead uses attachment-selected `select_cpu`
+and enqueue programs; the unused variants are not loaded. Its four scope
+helpers resolve LLC-local, primary, borrowable, or restricted candidates once
+and expose the four idle-core/CPU decisions as separate statistic and timing
+indices. This avoids carrying both placement engines, repeated topology
+lookups, or a 16-rung dynamic opcode loop through one verifier graph. The
+placement-only task-cell enqueue walk, cell queue enqueue ladder, cell queue
+dispatch ladder, and queue allowed-CPU scan use `bpf_loop()`; each callback
+checks both the compile-time maximum and active runtime count before indexing
+policy or queue state. Fixed global queue walks follow the same bounded pattern.
 
 The loop context contains only the state that must survive callback
 invocations. It copies small value contexts such as `snake_ladder_ctx` and
@@ -85,8 +88,9 @@ ABI version 21 introduced queue rungs using the mechanical
 `{ opcode, input, flags, reserved, data }` record and adds global queue mode,
 normal consumer masks, per-CPU remote cursors, and queue-rung counters. From
 that version onward, the coordinated surfaces are listed below. The current
-ABI is version 24: placement ladders have nine entries while enqueue and dispatch
-ladders retain eight entries.
+ABI is version 29: placement records have sixteen entries while enqueue and
+dispatch ladders retain eight entries. Generic placement uses at most nine;
+the full sixteen-entry form is the exact expanded Mitosis template.
 
 - map names, map types, or map key/value records;
 - sched_ext program and struct-ops names;

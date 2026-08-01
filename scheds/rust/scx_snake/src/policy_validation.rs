@@ -16,6 +16,7 @@ const SCHEMA_VERSION: u32 = 1;
 #[derive(Debug, Serialize)]
 struct ValidationLimits {
     placement_rungs: usize,
+    generic_placement_rungs: usize,
     queue_rungs: usize,
     mask_tables: usize,
 }
@@ -92,6 +93,7 @@ impl ValidationReport {
 fn validation_limits() -> ValidationLimits {
     ValidationLimits {
         placement_rungs: policy::MAX_RUNGS,
+        generic_placement_rungs: policy::MAX_GENERIC_RUNGS,
         queue_rungs: policy::MAX_QUEUE_RUNGS,
         mask_tables: policy::MAX_MASK_TABLES,
     }

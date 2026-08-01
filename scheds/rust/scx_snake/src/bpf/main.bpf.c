@@ -25,6 +25,7 @@ u64				   select_fine_timing_session_id;
 u64				   dispatch_fine_timing_session_id;
 u64				   queue_timing_session_id;
 struct snake_queue_timing_counters queue_timing_counters;
+const volatile u32		       expanded_mitosis_select = 0;
 
 static __always_inline int
 validate_compiled_ladder(const struct snake_compiled_ladder *ladder)
@@ -34,6 +35,12 @@ validate_compiled_ladder(const struct snake_compiled_ladder *ladder)
 	if (ladder->policy_abi_version != SNAKE_ABI_VERSION)
 		return -EPROTO;
 	if (!ladder->nr_rungs || ladder->nr_rungs > SNAKE_MAX_RUNGS)
+		return -EINVAL;
+	if (!!expanded_mitosis_select !=
+	    (ladder->nr_rungs > SNAKE_MAX_GENERIC_RUNGS))
+		return -EINVAL;
+	if (ladder->nr_rungs > SNAKE_MAX_GENERIC_RUNGS &&
+	    ladder->nr_rungs != SNAKE_MAX_RUNGS)
 		return -EINVAL;
 	if (ladder->nr_mask_tables > SNAKE_MAX_MASK_TABLES)
 		return -EINVAL;
@@ -50,8 +57,13 @@ validate_compiled_ladder(const struct snake_compiled_ladder *ladder)
 		if (i >= ladder->nr_rungs)
 			break;
 		rung = ladder->rungs[i];
-		if (!rung_is_valid(&rung, ladder->nr_mask_tables))
+		if (ladder->nr_rungs > SNAKE_MAX_GENERIC_RUNGS) {
+			if (!queue_atomic_rung_is_valid(&rung) ||
+			    !expanded_mitosis_rung_matches(&rung, i))
+				return -EINVAL;
+		} else if (!rung_is_valid(&rung, ladder->nr_mask_tables)) {
 			return -EINVAL;
+		}
 	}
 	return 0;
 }
@@ -135,9 +147,10 @@ int queue_drain_ready(void *ctx)
 	return 0;
 }
 
-/* Run the policy ladder, then use its affinity-safe exhaustion fallback. */
-s32 BPF_STRUCT_OPS(snake_select_cpu, struct task_struct *p, s32 prev_cpu,
-		   u64 wake_flags)
+/* Run one selected placement engine, then use its exhaustion fallback. */
+static __noinline s32 snake_select_cpu_impl(struct task_struct *p,
+				     s32 prev_cpu, u64 wake_flags,
+				     bool expanded_mitosis)
 {
 	struct snake_ladder_ctx	     ladder_ctx = {};
 	struct snake_fine_timing_ctx fine_timing;
@@ -148,6 +161,8 @@ s32 BPF_STRUCT_OPS(snake_select_cpu, struct task_struct *p, s32 prev_cpu,
 		.wake_flags	     = wake_flags,
 		.dispatch_flags	     = 0,
 		.callback_started_at = callback_started_at,
+		.local_llc_route_cpu = SNAKE_QUEUE_CELL_NONE,
+		.local_llc_cell_index = SNAKE_QUEUE_CELL_NONE,
 	};
 	u64 dispatch_flags = 0;
 	u64 fine_stage_started_at =
@@ -171,7 +186,9 @@ s32 BPF_STRUCT_OPS(snake_select_cpu, struct task_struct *p, s32 prev_cpu,
 	stat_inc(&ladder_ctx, SNAKE_STAT_SELECT_CALLS);
 
 	fine_stage_started_at = fine_timing_select_start(callback_started_at);
-	cpu		      = walk_policy_ladder(&ladder_ctx, p, &walk_args);
+	cpu = expanded_mitosis ?
+		      walk_expanded_mitosis_ladder(&ladder_ctx, p, &walk_args) :
+		      walk_generic_policy_ladder(&ladder_ctx, p, &walk_args);
 	dispatch_flags	      = walk_args.dispatch_flags;
 	queue_cell_index      = walk_args.queue_cell_index;
 	fine_timing_finish_select(SNAKE_FINE_TIMING_SELECT_POLICY_LADDER,
@@ -318,7 +335,21 @@ out:
 	return cpu;
 }
 
-void BPF_STRUCT_OPS(snake_enqueue, struct task_struct *p, u64 enq_flags)
+s32 BPF_STRUCT_OPS(snake_select_cpu, struct task_struct *p, s32 prev_cpu,
+		   u64 wake_flags)
+{
+	return snake_select_cpu_impl(p, prev_cpu, wake_flags, false);
+}
+
+s32 BPF_STRUCT_OPS(snake_select_cpu_expanded, struct task_struct *p,
+		   s32 prev_cpu, u64 wake_flags)
+{
+	return snake_select_cpu_impl(p, prev_cpu, wake_flags, true);
+}
+
+static __noinline void snake_enqueue_impl(struct task_struct *p,
+				   u64 enq_flags,
+				   bool expanded_mitosis)
 {
 	struct snake_ladder_ctx	     ladder_ctx = {};
 	struct snake_fine_timing_ctx fine_timing;
@@ -342,8 +373,13 @@ void BPF_STRUCT_OPS(snake_enqueue, struct task_struct *p, u64 enq_flags)
 			   SNAKE_FINE_TIMING_ENQUEUE_ACQUIRE_LADDER,
 			   stage_started_at);
 	stat_inc(&ladder_ctx, SNAKE_STAT_ENQUEUES);
-	ret = scheduler_mode_enqueue(&ladder_ctx, p, enq_flags, &fine_timing,
-				     callback_started_at);
+	ret = expanded_mitosis ?
+		      scheduler_mode_enqueue_expanded(
+			      &ladder_ctx, p, enq_flags, &fine_timing,
+			      callback_started_at) :
+		      scheduler_mode_enqueue_generic(
+			      &ladder_ctx, p, enq_flags, &fine_timing,
+			      callback_started_at);
 	if (ret && queue_topology_enabled()) {
 		queue_error	 = true;
 		stage_started_at = fine_timing_start(&fine_timing);
@@ -357,6 +393,17 @@ void BPF_STRUCT_OPS(snake_enqueue, struct task_struct *p, u64 enq_flags)
 	if (ret && !queue_error)
 		scx_bpf_error("snake fairness enqueue failed for pid %d: %d",
 			      p->pid, ret);
+}
+
+void BPF_STRUCT_OPS(snake_enqueue, struct task_struct *p, u64 enq_flags)
+{
+	snake_enqueue_impl(p, enq_flags, false);
+}
+
+void BPF_STRUCT_OPS(snake_enqueue_expanded, struct task_struct *p,
+		    u64 enq_flags)
+{
+	snake_enqueue_impl(p, enq_flags, true);
 }
 
 void BPF_STRUCT_OPS(snake_dispatch, s32 cpu, struct task_struct *prev)

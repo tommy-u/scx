@@ -66,7 +66,13 @@ static __always_inline bool rung_is_valid(const struct snake_rung *rung,
 	return (rung->opcode == SNAKE_OP_CLAIM_IDLE &&
 		(rung->flags == 0 ||
 		 rung->flags == SNAKE_RUNG_F_PICK_IDLE_CORE) &&
-		rung->input == SNAKE_INPUT_CPU_PREV && !rung->data) ||
+		((rung->input == SNAKE_INPUT_CPU_PREV && !rung->data) ||
+		 (rung->input == SNAKE_INPUT_QUEUE_CELL &&
+		  (rung->data == SNAKE_QUEUE_MASK_PRIMARY ||
+		   rung->data == SNAKE_QUEUE_MASK_BORROWABLE ||
+		   rung->data == SNAKE_QUEUE_MASK_LOCAL_LLC)) ||
+		 (rung->input == SNAKE_INPUT_TASK_ALLOWED_RESTRICTED &&
+		  !rung->data))) ||
 	       (rung->opcode == SNAKE_OP_PICK_IDLE &&
 		(rung->flags == 0 ||
 		 rung->flags == SNAKE_RUNG_F_PICK_IDLE_CORE) &&
@@ -96,14 +102,20 @@ static __always_inline bool rung_is_valid(const struct snake_rung *rung,
 				 SNAKE_RUNG_F_PICK_IDLE_CORE)) &&
 		rung->data < nr_mask_tables) ||
 	       (rung->opcode == SNAKE_OP_PICK_IDLE_QUEUE_MASK &&
-		rung->input == SNAKE_INPUT_QUEUE_CELL &&
-		(rung->flags == 0 ||
-		 rung->flags == SNAKE_RUNG_F_PICK_IDLE_CORE ||
-		 rung->flags == SNAKE_RUNG_F_PICK_RANDOM ||
-		 rung->flags == (SNAKE_RUNG_F_PICK_RANDOM |
-				 SNAKE_RUNG_F_PICK_IDLE_CORE)) &&
-		(rung->data == SNAKE_QUEUE_MASK_PRIMARY ||
-		 rung->data == SNAKE_QUEUE_MASK_BORROWABLE)) ||
+		(((rung->input == SNAKE_INPUT_QUEUE_CELL &&
+		   (rung->data == SNAKE_QUEUE_MASK_PRIMARY ||
+		    rung->data == SNAKE_QUEUE_MASK_BORROWABLE)) &&
+		  (rung->flags == 0 ||
+		   rung->flags == SNAKE_RUNG_F_PICK_IDLE_CORE ||
+		   rung->flags == SNAKE_RUNG_F_PICK_RANDOM ||
+		   rung->flags == (SNAKE_RUNG_F_PICK_RANDOM |
+				  SNAKE_RUNG_F_PICK_IDLE_CORE))) ||
+		 (((rung->input == SNAKE_INPUT_QUEUE_CELL &&
+		    rung->data == SNAKE_QUEUE_MASK_LOCAL_LLC) ||
+		   (rung->input == SNAKE_INPUT_TASK_ALLOWED_RESTRICTED &&
+		    !rung->data)) &&
+		  (rung->flags == 0 ||
+		   rung->flags == SNAKE_RUNG_F_PICK_IDLE_CORE)))) ||
 	       (rung->opcode == SNAKE_OP_PICK_IDLE_PREFER_PREVIOUS &&
 		!rung->flags &&
 		((rung->input == SNAKE_INPUT_QUEUE_CELL &&
@@ -114,11 +126,88 @@ static __always_inline bool rung_is_valid(const struct snake_rung *rung,
 		  !rung->data)));
 }
 
+static __always_inline bool
+queue_atomic_rung_is_valid(const struct snake_rung *rung)
+{
+	if (rung->reserved)
+		return false;
+
+	if (rung->opcode == SNAKE_OP_CLAIM_IDLE) {
+		if (rung->flags != 0 &&
+		    rung->flags != SNAKE_RUNG_F_PICK_IDLE_CORE)
+			return false;
+		return (rung->input == SNAKE_INPUT_QUEUE_CELL &&
+			(rung->data == SNAKE_QUEUE_MASK_PRIMARY ||
+			 rung->data == SNAKE_QUEUE_MASK_BORROWABLE ||
+			 rung->data == SNAKE_QUEUE_MASK_LOCAL_LLC)) ||
+		       (rung->input == SNAKE_INPUT_TASK_ALLOWED_RESTRICTED &&
+			!rung->data);
+	}
+
+	if (rung->opcode != SNAKE_OP_PICK_IDLE_QUEUE_MASK)
+		return false;
+	if (rung->input == SNAKE_INPUT_QUEUE_CELL &&
+	    (rung->data == SNAKE_QUEUE_MASK_PRIMARY ||
+	     rung->data == SNAKE_QUEUE_MASK_BORROWABLE))
+		return rung->flags == 0 ||
+		       rung->flags == SNAKE_RUNG_F_PICK_IDLE_CORE ||
+		       rung->flags == SNAKE_RUNG_F_PICK_RANDOM ||
+		       rung->flags == (SNAKE_RUNG_F_PICK_RANDOM |
+				      SNAKE_RUNG_F_PICK_IDLE_CORE);
+	return ((rung->input == SNAKE_INPUT_QUEUE_CELL &&
+		 rung->data == SNAKE_QUEUE_MASK_LOCAL_LLC) ||
+		(rung->input == SNAKE_INPUT_TASK_ALLOWED_RESTRICTED &&
+		 !rung->data)) &&
+	       (rung->flags == 0 ||
+		rung->flags == SNAKE_RUNG_F_PICK_IDLE_CORE);
+}
+
+static __always_inline bool
+expanded_mitosis_rung_matches(const struct snake_rung *rung, u32 index)
+{
+	u32 action, expected_flags, expected_input, expected_opcode;
+	u64 expected_data;
+
+	if (index >= SNAKE_MAX_RUNGS)
+		return false;
+	action = index & 3;
+	expected_opcode = action == 0 || action == 2 ?
+				  SNAKE_OP_CLAIM_IDLE :
+				  SNAKE_OP_PICK_IDLE_QUEUE_MASK;
+	expected_flags = action < 2 ? SNAKE_RUNG_F_PICK_IDLE_CORE : 0;
+	switch (index >> 2) {
+	case 0:
+		expected_input = SNAKE_INPUT_QUEUE_CELL;
+		expected_data = SNAKE_QUEUE_MASK_LOCAL_LLC;
+		break;
+	case 1:
+		expected_input = SNAKE_INPUT_QUEUE_CELL;
+		expected_data = SNAKE_QUEUE_MASK_PRIMARY;
+		break;
+	case 2:
+		expected_input = SNAKE_INPUT_QUEUE_CELL;
+		expected_data = SNAKE_QUEUE_MASK_BORROWABLE;
+		break;
+	case 3:
+		expected_input = SNAKE_INPUT_TASK_ALLOWED_RESTRICTED;
+		expected_data = 0;
+		break;
+	default:
+		return false;
+	}
+	return rung->opcode == expected_opcode &&
+	       rung->input == expected_input &&
+	       rung->flags == expected_flags && !rung->reserved &&
+	       rung->data == expected_data;
+}
+
 struct snake_rung_exec_args {
 	s32  prev_cpu;
 	u64  wake_flags;
 	u64 *dispatch_flags;
 	u32 *queue_cell_index;
+	u32 *local_llc_route_cpu;
+	u32 *local_llc_cell_index;
 };
 
 struct snake_ladder_walk_args {
@@ -127,6 +216,9 @@ struct snake_ladder_walk_args {
 	u64 wake_flags;
 	u64 dispatch_flags;
 	u64 callback_started_at;
+	u64 scope_started_at;
+	u32 local_llc_route_cpu;
+	u32 local_llc_cell_index;
 };
 
 /* Execute one validated rung and return an idle CPU or a miss. */
@@ -139,11 +231,43 @@ static __noinline s32 execute_rung(const struct snake_ladder_ctx *ctx,
 	u64  wake_flags	      = args->wake_flags;
 	u64 *dispatch_flags   = args->dispatch_flags;
 	u32 *queue_cell_index = args->queue_cell_index;
+	u32 *local_llc_route_cpu = args->local_llc_route_cpu;
+	u32 *local_llc_cell_index = args->local_llc_cell_index;
+	struct snake_queue_idle_args queue_args = {
+		.prev_cpu = prev_cpu,
+		.kind = 0,
+		.whole_core = false,
+		.random = false,
+		.local_llc_route_cpu = local_llc_route_cpu,
+		.local_llc_cell_index = local_llc_cell_index,
+		.cell_index = queue_cell_index,
+	};
 
 	switch (rung->opcode) {
 	case SNAKE_OP_CLAIM_IDLE: {
 		const struct cpumask *idle;
 		bool whole_core_idle;
+		s32 cpu;
+
+		if (rung->input == SNAKE_INPUT_QUEUE_CELL) {
+			queue_args.kind = rung->data;
+			queue_args.whole_core =
+				rung->flags & SNAKE_RUNG_F_PICK_IDLE_CORE;
+			cpu = queue_claim_task_cell_cpu(ctx, p, &queue_args);
+			if (cpu >= 0 &&
+			    rung->data == SNAKE_QUEUE_MASK_BORROWABLE)
+				*dispatch_flags |= SNAKE_SELECT_F_BORROWED;
+			return cpu;
+		}
+		if (rung->input == SNAKE_INPUT_TASK_ALLOWED_RESTRICTED) {
+			cpu = queue_claim_restricted_cpu(
+				ctx, p, prev_cpu,
+				rung->flags & SNAKE_RUNG_F_PICK_IDLE_CORE,
+				queue_cell_index);
+			if (cpu >= 0)
+				*dispatch_flags |= SNAKE_SELECT_F_AFFINITY;
+			return cpu;
+		}
 
 		/* Affinity is checked before the destructive idle claim. */
 		if (prev_cpu < 0 || prev_cpu >= nr_cpu_ids ||
@@ -240,11 +364,20 @@ static __noinline s32 execute_rung(const struct snake_ladder_ctx *ctx,
 	case SNAKE_OP_PICK_IDLE_QUEUE_MASK: {
 		s32 cpu;
 
-		cpu = queue_pick_task_cell_cpu(
-			ctx, p, rung->data,
-			rung->flags & SNAKE_RUNG_F_PICK_IDLE_CORE,
-			rung->flags & SNAKE_RUNG_F_PICK_RANDOM,
-			queue_cell_index);
+		if (rung->input == SNAKE_INPUT_TASK_ALLOWED_RESTRICTED) {
+			cpu = queue_pick_restricted_cpu(
+				ctx, p,
+				rung->flags & SNAKE_RUNG_F_PICK_IDLE_CORE,
+				queue_cell_index);
+			if (cpu >= 0)
+				*dispatch_flags |= SNAKE_SELECT_F_AFFINITY;
+			return cpu;
+		}
+		queue_args.kind = rung->data;
+		queue_args.whole_core =
+			rung->flags & SNAKE_RUNG_F_PICK_IDLE_CORE;
+		queue_args.random = rung->flags & SNAKE_RUNG_F_PICK_RANDOM;
+		cpu = queue_pick_task_cell_cpu(ctx, p, &queue_args);
 		if (cpu >= 0 && rung->data == SNAKE_QUEUE_MASK_BORROWABLE)
 			*dispatch_flags |= SNAKE_SELECT_F_BORROWED;
 		return cpu;
@@ -289,16 +422,21 @@ static long try_enqueue_task_cell_callback(
 	struct snake_rung	    rung;
 	u64			    dispatch_flags   = 0;
 	u32			    queue_cell_index = SNAKE_QUEUE_CELL_NONE;
+	u32			    local_llc_route_cpu = SNAKE_QUEUE_CELL_NONE;
+	u32			    local_llc_cell_index = SNAKE_QUEUE_CELL_NONE;
 	struct snake_rung_exec_args args	     = {
 			    .prev_cpu	      = -1,
 			    .wake_flags	      = 0,
 			    .dispatch_flags   = &dispatch_flags,
 			    .queue_cell_index = &queue_cell_index,
+			    .local_llc_route_cpu = &local_llc_route_cpu,
+			    .local_llc_cell_index = &local_llc_cell_index,
 	};
 	s32 cpu;
 	u64 rung_started_at;
 
-	if (i >= SNAKE_MAX_RUNGS || i >= loop_ctx->ladder_ctx.ladder->nr_rungs)
+	if (i >= SNAKE_MAX_GENERIC_RUNGS ||
+	    i >= loop_ctx->ladder_ctx.ladder->nr_rungs)
 		return 1;
 	rung = loop_ctx->ladder_ctx.ladder->rungs[i];
 	if (rung.input != SNAKE_INPUT_TASK_CELL)
@@ -359,7 +497,8 @@ static __always_inline s32 try_enqueue_task_cell(
 		return 0;
 	rehome_pending = READ_ONCE(cell->needs_rehome);
 
-	nr_loops = bpf_loop(SNAKE_MAX_RUNGS, try_enqueue_task_cell_callback,
+	nr_loops = bpf_loop(SNAKE_MAX_GENERIC_RUNGS,
+			    try_enqueue_task_cell_callback,
 			    &loop_ctx, 0);
 	if (nr_loops < 0) {
 		stat_inc(ctx, SNAKE_STAT_INVALID_ERRORS);
@@ -382,6 +521,8 @@ static __noinline s32 walk_policy_rung(struct snake_ladder_ctx *ctx,
 			    .wake_flags	      = walk_args->wake_flags,
 			    .dispatch_flags   = &dispatch_flags,
 			    .queue_cell_index = &queue_cell_index,
+			    .local_llc_route_cpu = &walk_args->local_llc_route_cpu,
+			    .local_llc_cell_index = &walk_args->local_llc_cell_index,
 	};
 	s32 cpu;
 	u64 rung_started_at;
@@ -418,15 +559,12 @@ static __noinline s32 walk_policy_rung(struct snake_ladder_ctx *ctx,
 	return -ENOENT;
 }
 
-/* Evaluate the configured rungs in order until one returns a valid hint. */
 static __noinline s32
-walk_policy_ladder(struct snake_ladder_ctx *ctx, struct task_struct *p,
-		   struct snake_ladder_walk_args *walk_args)
+walk_generic_policy_ladder(struct snake_ladder_ctx *ctx, struct task_struct *p,
+			   struct snake_ladder_walk_args *walk_args)
 {
 	s32 result;
 
-	/* Linux 7.1 retains bpf_loop() backedge states across this large opcode
-	 * switch. Fixed calls keep the walk below the verifier complexity limit. */
 	if (!ctx->ladder->nr_rungs)
 		return -ENOENT;
 	result = walk_policy_rung(ctx, p, 0, walk_args);
@@ -454,6 +592,221 @@ walk_policy_ladder(struct snake_ladder_ctx *ctx, struct task_struct *p,
 	if (result != -ENOENT || ctx->ladder->nr_rungs <= 8)
 		return result;
 	return walk_policy_rung(ctx, p, 8, walk_args);
+}
+
+static __noinline s32 expanded_mitosis_finish_stage(
+	struct snake_ladder_ctx *ctx, struct task_struct *p, u32 index,
+	u64 started_at, s32 cpu)
+{
+	rung_timing_finish(ctx, SNAKE_RUNG_LADDER_IDLE, index, started_at);
+	if (cpu < 0 && cpu != -ENOENT) {
+		stat_inc(ctx, SNAKE_STAT_RUNG_ERROR_BASE + index);
+		stat_inc(ctx, SNAKE_STAT_INVALID_ERRORS);
+		scx_bpf_error("snake expanded Mitosis rung %u failed: %d",
+			      index, cpu);
+		return cpu;
+	}
+	if (cpu >= 0 && cpu < nr_cpu_ids &&
+	    bpf_cpumask_test_cpu(cpu, p->cpus_ptr)) {
+		stat_inc(ctx, SNAKE_STAT_RUNG_HIT_BASE + index);
+		return cpu;
+	}
+	stat_inc(ctx, SNAKE_STAT_RUNG_MISS_BASE + index);
+	return -ENOENT;
+}
+
+static __noinline void expanded_mitosis_record_unavailable_stage(
+	struct snake_ladder_ctx *ctx, u32 index, u64 started_at)
+{
+	stat_inc(ctx, SNAKE_STAT_RUNG_ATTEMPT_BASE + index);
+	rung_timing_finish(ctx, SNAKE_RUNG_LADDER_IDLE, index, started_at);
+	stat_inc(ctx, SNAKE_STAT_RUNG_MISS_BASE + index);
+}
+
+static __noinline s32 expanded_mitosis_unavailable_scope(
+	struct snake_ladder_ctx *ctx, u32 base, s32 error,
+	u64 callback_started_at, u64 scope_started_at)
+{
+	if (error != -ENOENT) {
+		stat_inc(ctx, SNAKE_STAT_RUNG_ATTEMPT_BASE + base);
+		rung_timing_finish(ctx, SNAKE_RUNG_LADDER_IDLE, base,
+				   scope_started_at);
+		stat_inc(ctx, SNAKE_STAT_RUNG_ERROR_BASE + base);
+		stat_inc(ctx, SNAKE_STAT_INVALID_ERRORS);
+		scx_bpf_error("snake expanded Mitosis scope %u failed: %d",
+			      base, error);
+		return error;
+	}
+	expanded_mitosis_record_unavailable_stage(ctx, base, scope_started_at);
+	expanded_mitosis_record_unavailable_stage(
+		ctx, base + 1, rung_timing_start(callback_started_at));
+	expanded_mitosis_record_unavailable_stage(
+		ctx, base + 2, rung_timing_start(callback_started_at));
+	expanded_mitosis_record_unavailable_stage(
+		ctx, base + 3, rung_timing_start(callback_started_at));
+	return -ENOENT;
+}
+
+static __noinline s32 walk_expanded_mitosis_candidates(
+	struct snake_ladder_ctx *ctx, struct task_struct *p, u32 base,
+	const struct cpumask *candidates,
+	struct snake_ladder_walk_args *walk_args)
+{
+	const struct cpumask *idle;
+	s32 cpu, result;
+	u64 started_at;
+	bool prev_candidate, whole_core_idle = false;
+
+	prev_candidate = walk_args->prev_cpu >= 0 &&
+			 walk_args->prev_cpu < nr_cpu_ids &&
+			 bpf_cpumask_test_cpu(walk_args->prev_cpu, candidates);
+
+	stat_inc(ctx, SNAKE_STAT_RUNG_ATTEMPT_BASE + base);
+	started_at = walk_args->scope_started_at;
+	cpu = -ENOENT;
+	if (prev_candidate) {
+		idle = scx_bpf_get_idle_smtmask();
+		if (!idle) {
+			cpu = -EINVAL;
+		} else {
+			whole_core_idle = bpf_cpumask_test_cpu(
+				walk_args->prev_cpu, idle);
+			scx_bpf_put_idle_cpumask(idle);
+			if (whole_core_idle && scx_bpf_test_and_clear_cpu_idle(
+						 walk_args->prev_cpu))
+				cpu = walk_args->prev_cpu;
+		}
+	}
+	result = expanded_mitosis_finish_stage(
+		ctx, p, base, started_at, cpu);
+	if (result != -ENOENT)
+		return result;
+
+	stat_inc(ctx, SNAKE_STAT_RUNG_ATTEMPT_BASE + base + 1);
+	started_at = rung_timing_start(walk_args->callback_started_at);
+	cpu = scx_bpf_pick_idle_cpu(candidates, SCX_PICK_IDLE_CORE);
+	if (cpu < 0 && cpu != -EINVAL)
+		cpu = -ENOENT;
+	result = expanded_mitosis_finish_stage(
+		ctx, p, base + 1, started_at, cpu);
+	if (result != -ENOENT)
+		return result;
+
+	stat_inc(ctx, SNAKE_STAT_RUNG_ATTEMPT_BASE + base + 2);
+	started_at = rung_timing_start(walk_args->callback_started_at);
+	cpu = prev_candidate && scx_bpf_test_and_clear_cpu_idle(
+					  walk_args->prev_cpu) ?
+		      walk_args->prev_cpu :
+		      -ENOENT;
+	result = expanded_mitosis_finish_stage(
+		ctx, p, base + 2, started_at, cpu);
+	if (result != -ENOENT)
+		return result;
+
+	stat_inc(ctx, SNAKE_STAT_RUNG_ATTEMPT_BASE + base + 3);
+	started_at = rung_timing_start(walk_args->callback_started_at);
+	cpu = scx_bpf_pick_idle_cpu(candidates, 0);
+	if (cpu < 0 && cpu != -EINVAL)
+		cpu = -ENOENT;
+	return expanded_mitosis_finish_stage(
+		ctx, p, base + 3, started_at, cpu);
+}
+
+static __noinline s32 walk_expanded_mitosis_cell_scope(
+	struct snake_ladder_ctx *ctx, struct task_struct *p, u32 base, u32 kind,
+	struct snake_ladder_walk_args *walk_args)
+{
+	struct snake_task_runtime *runtime;
+	struct bpf_cpumask *scratch;
+	const struct cpumask *source;
+	u32 cell_index;
+	s32 error = 0, result;
+
+	walk_args->dispatch_flags = 0;
+	walk_args->queue_cell_index = SNAKE_QUEUE_CELL_NONE;
+	walk_args->scope_started_at =
+		rung_timing_start(walk_args->callback_started_at);
+	runtime = task_state_lookup(p);
+	cell_index = queue_task_cell_index(ctx, p);
+	if (!runtime)
+		return expanded_mitosis_unavailable_scope(
+			ctx, base, -EINVAL, walk_args->callback_started_at,
+			walk_args->scope_started_at);
+	source = queue_task_cell_idle_source(
+		ctx, p, cell_index, kind, walk_args->prev_cpu,
+		&walk_args->local_llc_route_cpu,
+		&walk_args->local_llc_cell_index, &error);
+	if (!source)
+		return expanded_mitosis_unavailable_scope(
+			ctx, base, error, walk_args->callback_started_at,
+			walk_args->scope_started_at);
+	scratch = runtime->queue_cpumask;
+	if (!scratch)
+		return expanded_mitosis_unavailable_scope(
+			ctx, base, -EINVAL, walk_args->callback_started_at,
+			walk_args->scope_started_at);
+	if (!bpf_cpumask_and(scratch, source, p->cpus_ptr))
+		return expanded_mitosis_unavailable_scope(
+			ctx, base, -ENOENT, walk_args->callback_started_at,
+			walk_args->scope_started_at);
+	result = walk_expanded_mitosis_candidates(
+		ctx, p, base, (const struct cpumask *)scratch, walk_args);
+	if (result >= 0) {
+		walk_args->queue_cell_index = cell_index;
+		if (kind == SNAKE_QUEUE_MASK_BORROWABLE)
+			walk_args->dispatch_flags = SNAKE_SELECT_F_BORROWED;
+	}
+	return result;
+}
+
+static __noinline s32 walk_expanded_mitosis_restricted_scope(
+	struct snake_ladder_ctx *ctx, struct task_struct *p, u32 base,
+	struct snake_ladder_walk_args *walk_args)
+{
+	u32 cell_index;
+	s32 restricted, result;
+
+	walk_args->dispatch_flags = 0;
+	walk_args->queue_cell_index = SNAKE_QUEUE_CELL_NONE;
+	walk_args->scope_started_at =
+		rung_timing_start(walk_args->callback_started_at);
+	cell_index = queue_task_cell_index(ctx, p);
+	restricted = queue_task_cell_affinity_restricted(ctx, p, cell_index);
+	if (restricted <= 0)
+		return expanded_mitosis_unavailable_scope(
+			ctx, base, restricted < 0 ? restricted : -ENOENT,
+			walk_args->callback_started_at,
+			walk_args->scope_started_at);
+	result = walk_expanded_mitosis_candidates(
+		ctx, p, base, p->cpus_ptr, walk_args);
+	if (result >= 0) {
+		walk_args->queue_cell_index = cell_index;
+		walk_args->dispatch_flags = SNAKE_SELECT_F_AFFINITY;
+	}
+	return result;
+}
+
+static __noinline s32
+walk_expanded_mitosis_ladder(struct snake_ladder_ctx *ctx,
+			     struct task_struct *p,
+			     struct snake_ladder_walk_args *walk_args)
+{
+	s32 result;
+
+	result = walk_expanded_mitosis_cell_scope(
+		ctx, p, 0, SNAKE_QUEUE_MASK_LOCAL_LLC, walk_args);
+	if (result != -ENOENT)
+		return result;
+	result = walk_expanded_mitosis_cell_scope(
+		ctx, p, 4, SNAKE_QUEUE_MASK_PRIMARY, walk_args);
+	if (result != -ENOENT)
+		return result;
+	result = walk_expanded_mitosis_cell_scope(
+		ctx, p, 8, SNAKE_QUEUE_MASK_BORROWABLE, walk_args);
+	if (result != -ENOENT)
+		return result;
+	return walk_expanded_mitosis_restricted_scope(
+		ctx, p, 12, walk_args);
 }
 
 #endif /* __SCX_SNAKE_LADDER_H */

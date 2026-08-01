@@ -112,7 +112,9 @@ scope = "task_allowed"
 Parsing rejects unknown fields, operations, and scopes. It also checks rung
 count, cell IDs, CPU-list syntax, duplicate cells, incompatible
 operation/scope pairs, and the requirement that `kernel_default` be terminal.
-At this point the policy still contains semantic concepts.
+Generic ladders may contain at most nine rungs. The only wider form is the
+exact 16-rung expanded Mitosis template described below. At this point the
+policy still contains semantic concepts.
 
 The global LLC layout declares explicit callback actions and topology-neutral
 sources:
@@ -176,18 +178,19 @@ table ID, or packed table IDs depending on the opcode.
 
 | Opcode | Value | BPF behavior |
 | --- | ---: | --- |
-| `CLAIM_IDLE` | 1 | Claim `prev_cpu` only if it is allowed and idle. |
+| `CLAIM_IDLE` | 1 | Claim `prev_cpu` only if it is allowed, belongs to the selected queue-cell or restricted-affinity scope when one is specified, and is idle. |
 | `PICK_IDLE` | 2 | Ask sched_ext for any allowed idle CPU. |
 | `PICK_IDLE_MASK_TABLE` | 3 | Pick an idle CPU from a prebuilt table mask intersected with task affinity. |
 | `PICK_RANDOM_IDLE` | 4 | Uniformly choose and claim an eligible idle CPU, either globally or from a table mask. |
 | `KERNEL_DEFAULT` | 5 | Call `scx_bpf_select_cpu_dfl()` and accept only an idle result. |
 | `SYNC_WAKE_AFFINE` | 6 | Apply synchronous wake-affine checks using previous-LLC and previous-NUMA-node tables. |
-| `PICK_IDLE_QUEUE_MASK` | 7 | Pick from a queue cell's active-bank primary or borrowable mask, intersected with live affinity. |
+| `PICK_IDLE_QUEUE_MASK` | 7 | Pick from a queue cell's active-bank LLC-local, primary, or borrowable mask, or from restricted task affinity. |
 | `PICK_IDLE_PREFER_PREVIOUS` | 8 | Apply the Mitosis idle-core/CPU preference order to an active queue-cell mask or restricted task affinity. |
 
 Opcode zero is invalid. BPF validates every opcode/input/flag/data combination
-while preparing a policy. The `select_cpu` ladder also rechecks each rung
-before executing it.
+while preparing a policy. Generic `select_cpu` execution also rechecks each
+rung. The expanded Mitosis form is validated as an exact template during
+preparation and then uses its fixed verifier-bounded execution path.
 
 ### Input sources
 
@@ -230,6 +233,12 @@ cell assignment.
 | `pick_random_idle[_core]` | queue-mode `task_cell` | `PICK_IDLE_QUEUE_MASK` | `QUEUE_CELL` | random, optional idle-core | 1: primary mask |
 | `pick_idle[_core]` | `task_cell_borrowable` | `PICK_IDLE_QUEUE_MASK` | `QUEUE_CELL` | optional idle-core | 2: borrowable mask |
 | `pick_random_idle[_core]` | `task_cell_borrowable` | `PICK_IDLE_QUEUE_MASK` | `QUEUE_CELL` | random, optional idle-core | 2: borrowable mask |
+| `claim_idle[_core]` | queue-mode `task_cell` | `CLAIM_IDLE` | `QUEUE_CELL` | optional idle-core | 1: primary mask |
+| `claim_idle[_core]` | `task_cell_borrowable` | `CLAIM_IDLE` | `QUEUE_CELL` | optional idle-core | 2: borrowable mask |
+| `claim_idle[_core]` | `task_cell_llc` | `CLAIM_IDLE` | `QUEUE_CELL` | optional idle-core | 3: previous-LLC normal-queue consumers |
+| `pick_idle[_core]` | `task_cell_llc` | `PICK_IDLE_QUEUE_MASK` | `QUEUE_CELL` | optional idle-core | 3: previous-LLC normal-queue consumers |
+| `claim_idle[_core]` | `task_allowed_restricted` | `CLAIM_IDLE` | `TASK_ALLOWED_RESTRICTED` | optional idle-core | 0 |
+| `pick_idle[_core]` | `task_allowed_restricted` | `PICK_IDLE_QUEUE_MASK` | `TASK_ALLOWED_RESTRICTED` | optional idle-core | 0 |
 | `pick_idle_prefer_previous` | `task_cell_llc` | `PICK_IDLE_PREFER_PREVIOUS` | `QUEUE_CELL` | none | 3: previous-LLC normal-queue consumers |
 | `pick_idle_prefer_previous` | queue-mode `task_cell` | `PICK_IDLE_PREFER_PREVIOUS` | `QUEUE_CELL` | none | 1: primary mask |
 | `pick_idle_prefer_previous` | `task_cell_borrowable` | `PICK_IDLE_PREFER_PREVIOUS` | `QUEUE_CELL` | none | 2: borrowable mask |
@@ -239,7 +248,24 @@ cell assignment.
 
 `pick_idle_core` and `pick_random_idle_core` are not separate opcodes. They are
 the normal opcode plus `PICK_IDLE_CORE`. Queue-mode random selection also uses
-the `PICK_RANDOM` flag rather than a separate opcode.
+the `PICK_RANDOM` flag rather than a separate opcode. Queue-cell `claim_idle`
+always tests the callback's `prev_cpu` against the selected scope before making
+the destructive idle claim. Queue-cell primary, borrowable, and LLC-local
+operations require unrestricted cell affinity; restricted tasks skip those
+operations and can only match `task_allowed_restricted`.
+
+The Production `mitosis-sim.toml` profile deliberately expands the fused
+`pick_idle_prefer_previous` behavior into 16 placement rungs for inspection.
+For each of LLC-local, primary, borrowable, and restricted-affinity scope it
+executes `claim_idle_core`, `pick_idle_core`, `claim_idle`, then `pick_idle`.
+The compiler and BPF preparation require this exact order for any ladder over
+nine rungs. At attach time userspace selects specialized `select_cpu` and
+enqueue BPF programs and disables the unused generic programs. The hot path
+resolves each scope once but attributes attempts, hits, misses, errors, and
+sampled timing to the four declared rung indices. Changing between the generic
+and expanded program variants requires restarting Snake. The fused operation
+remains supported for policies that prefer a smaller ladder over per-stage
+counters and timings.
 
 ### Queue callback instructions
 
@@ -313,10 +339,10 @@ Userspace encodes the lowered rungs into `snake_compiled_ladder` with:
 - ABI version;
 - rung and mask-table counts;
 - exhaustion fallback mode;
-- at most nine fixed-size placement rungs;
+- at most sixteen fixed-size placement rungs;
 - enqueue and dispatch callback rung counts and arrays.
 
-ABI version 28 limits placement ladders to nine rungs and enqueue/dispatch
+ABI version 29 limits placement ladders to sixteen rungs and enqueue/dispatch
 ladders to eight rungs. It also limits generic placement to four mask tables,
 CPU and mask keys to 1024, queue cells to 32 including cell 0, and policy
 storage to two ladder slots. Userspace and BPF share definitions from
@@ -339,6 +365,9 @@ For automation, validate without loading BPF and emit a versioned JSON record:
 ```
 
 A valid policy exits zero and reports its ABI, fixed limits, and compiled counts.
+`limits.placement_rungs` is the ABI capacity, while
+`limits.generic_placement_rungs` is the limit for policies other than the exact
+expanded Mitosis template.
 An invalid policy exits 2 and reports a stable error code, message, and source
 line/column when TOML deserialization provides a span. Schema version 1 uses the
 error codes `policy_read_failed`, `invalid_policy_toml`, `invalid_policy`,

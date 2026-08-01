@@ -292,8 +292,12 @@ Cell layouts give the placement ladder two cell scopes:
 - `task_cell_borrowable` searches its borrowable mask.
 
 Both support `pick_idle`, `pick_idle_core`, `pick_random_idle`, and
-`pick_random_idle_core`. The BPF mechanism intersects the selected mask with
-the task's live affinity before claiming an idle CPU.
+`pick_random_idle_core`. These primary and borrowable scopes apply only when
+the task may run on the cell's complete primary and borrowable masks. A task
+with narrower live affinity skips them and must use a
+`task_allowed_restricted` rung or the policy's affinity-safe fallback. For an
+eligible task, BPF still intersects the selected mask with live affinity before
+claiming an idle CPU.
 
 A primary hit records an enqueue hint and still flows through the enqueue
 ladder. A borrowable hit is different: Snake verifies that the CPU is owned by
@@ -326,13 +330,25 @@ idle capacity.
 
 ## Mitosis selection ladder
 
-`mitosis-sim.toml` uses `pick_idle_prefer_previous` over four scopes in order:
-the task cell's previous-LLC shard, its complete primary mask, its borrowable
-mask, and the task's allowed mask only when affinity is restricted. Each rung
-tries the previous CPU when its whole SMT core is idle, any idle core, the
-previous idle CPU, and finally any idle CPU. Unrestricted tasks therefore stay
-local when possible, expand gently through their cell, and borrow only after
-primary capacity is busy. Restricted tasks use the terminal affinity route.
+`mitosis-sim.toml` exposes 16 placement rungs: four operations over each of four
+scopes. The scopes are the task cell's previous-LLC shard, its complete primary
+mask, its borrowable mask, and the task's allowed mask only when affinity is
+restricted. Within each scope the operations are:
+
+1. `claim_idle_core`: claim the previous CPU if its whole SMT core is idle;
+2. `pick_idle_core`: find any idle core in the scope;
+3. `claim_idle`: claim the previous CPU if that logical CPU is idle;
+4. `pick_idle`: find any idle logical CPU in the scope.
+
+Each stage therefore has its own attempt, hit, miss, and timing data in the
+inspector. BPF resolves each scope's candidates once and accounts the four
+decisions separately. Unrestricted tasks stay local when possible, expand
+gently through their cell, and borrow only after primary capacity is busy.
+Restricted tasks use the terminal affinity route. This exact 16-rung order is
+the only placement ladder over nine rungs, and switching between generic and
+expanded placement requires restarting Snake. The fused
+`pick_idle_prefer_previous` operation remains supported for policies that do
+not need per-stage visibility.
 
 This profile models Mitosis cell discovery, CPU ownership, placement, direct
 dispatch, borrowing, and one VTIME domain per cell. It does not implement demand

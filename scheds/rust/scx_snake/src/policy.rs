@@ -6,7 +6,8 @@ use std::path::{Component, Path};
 
 use serde::Deserialize;
 
-pub const MAX_RUNGS: usize = 9;
+pub const MAX_RUNGS: usize = 16;
+pub const MAX_GENERIC_RUNGS: usize = 9;
 pub const MAX_MASK_TABLES: usize = 4;
 pub const MAX_CELL_IDS: u32 = 1024;
 pub const MAX_QUEUE_CELLS: usize = 32;
@@ -583,6 +584,11 @@ pub fn compile_policy(source: &str) -> Result<CompiledPolicy, PolicyError> {
             &mut mask_tables,
         )?);
     }
+    if rungs.len() > MAX_GENERIC_RUNGS && !is_expanded_mitosis_ladder(&rungs) {
+        return Err(PolicyError(format!(
+            "generic placement ladders are limited to {MAX_GENERIC_RUNGS} rungs; the only supported wide placement ladder is the {MAX_RUNGS}-rung expanded Mitosis queue-atomic template, so every rung must match that template"
+        )));
+    }
 
     if matches!(
         queues.as_ref(),
@@ -613,6 +619,43 @@ pub fn compile_policy(source: &str) -> Result<CompiledPolicy, PolicyError> {
         membership,
         managed_cells,
     })
+}
+
+fn expanded_mitosis_rung(index: usize) -> Option<CompiledRung> {
+    let scope = index / 4;
+    let action = index % 4;
+    if scope >= 4 {
+        return None;
+    }
+    let (input, data) = match scope {
+        0 => (InputSource::QueueCell, QueueMaskKind::LocalLlc as u64),
+        1 => (InputSource::QueueCell, QueueMaskKind::Primary as u64),
+        2 => (InputSource::QueueCell, QueueMaskKind::Borrowable as u64),
+        3 => (InputSource::TaskAllowedRestricted, 0),
+        _ => unreachable!(),
+    };
+    Some(CompiledRung {
+        opcode: if action == 0 || action == 2 {
+            Opcode::ClaimIdle
+        } else {
+            Opcode::PickIdleQueueMask
+        },
+        input,
+        flags: if action < 2 {
+            RUNG_FLAG_PICK_IDLE_CORE
+        } else {
+            0
+        },
+        data,
+    })
+}
+
+fn is_expanded_mitosis_ladder(rungs: &[CompiledRung]) -> bool {
+    rungs.len() == MAX_RUNGS
+        && rungs
+            .iter()
+            .enumerate()
+            .all(|(index, rung)| expanded_mitosis_rung(index).as_ref() == Some(rung))
 }
 
 fn compile_managed_cells(
@@ -1646,20 +1689,44 @@ fn compile_rung(
     }
 
     if queue_mode
-        && matches!(rung.scope.as_str(), "task_cell" | "task_cell_borrowable")
+        && queue_layout != Some(QueueLayout::Llc)
         && matches!(
-            rung.operation.as_str(),
-            "pick_idle" | "pick_idle_core" | "pick_random_idle" | "pick_random_idle_core"
+            rung.scope.as_str(),
+            "task_cell" | "task_cell_borrowable" | "task_cell_llc" | "task_allowed_restricted"
         )
     {
-        let data = if rung.scope == "task_cell" {
-            QueueMaskKind::Primary
-        } else {
-            QueueMaskKind::Borrowable
+        let (input, data) = match rung.scope.as_str() {
+            "task_cell" => (InputSource::QueueCell, QueueMaskKind::Primary as u64),
+            "task_cell_borrowable" => (InputSource::QueueCell, QueueMaskKind::Borrowable as u64),
+            "task_cell_llc" if queue_layout == Some(QueueLayout::CellLlc) => {
+                (InputSource::QueueCell, QueueMaskKind::LocalLlc as u64)
+            }
+            "task_allowed_restricted" => (InputSource::TaskAllowedRestricted, 0),
+            _ => {
+                return Err(PolicyError(format!(
+                    "rung {index}: operation `{}` is incompatible with scope `{}`",
+                    rung.operation, rung.scope
+                )))
+            }
+        };
+        let opcode = match rung.operation.as_str() {
+            "claim_idle" | "claim_idle_core" => Opcode::ClaimIdle,
+            "pick_idle" | "pick_idle_core" => Opcode::PickIdleQueueMask,
+            "pick_random_idle" | "pick_random_idle_core"
+                if matches!(rung.scope.as_str(), "task_cell" | "task_cell_borrowable") =>
+            {
+                Opcode::PickIdleQueueMask
+            }
+            _ => {
+                return Err(PolicyError(format!(
+                    "rung {index}: operation `{}` is incompatible with scope `{}`",
+                    rung.operation, rung.scope
+                )))
+            }
         };
         return Ok(CompiledRung {
-            opcode: Opcode::PickIdleQueueMask,
-            input: InputSource::QueueCell,
+            opcode,
+            input,
             flags: if rung.operation.ends_with("_core") {
                 RUNG_FLAG_PICK_IDLE_CORE
             } else {
@@ -1669,10 +1736,13 @@ fn compile_rung(
             } else {
                 0
             },
-            data: data as u64,
+            data,
         });
     }
-    if rung.scope == "task_cell_borrowable" {
+    if matches!(
+        rung.scope.as_str(),
+        "task_cell_borrowable" | "task_cell_llc" | "task_allowed_restricted"
+    ) {
         return Err(PolicyError(format!(
             "rung {index}: operation `{}` is incompatible with scope `{}`",
             rung.operation, rung.scope
@@ -2092,25 +2162,74 @@ scope = "task_cell_borrowable"
     }
 
     #[test]
-    fn compiles_mitosis_selection_as_four_topology_blind_rungs() {
+    fn global_llc_queues_reject_cell_only_atomic_scopes_without_panicking() {
+        for scope in [
+            "task_cell_borrowable",
+            "task_cell_llc",
+            "task_allowed_restricted",
+        ] {
+            let error = error_for(&format!(
+                r#"
+[queues]
+layout = "llc"
+
+[[rung]]
+operation = "pick_idle"
+scope = "{scope}"
+"#
+            ));
+            assert!(error.contains("incompatible") || error.contains("does not support"));
+        }
+    }
+
+    #[test]
+    fn compiles_mitosis_selection_as_sixteen_atomic_rungs() {
         let policy =
             compile_policy(MITOSIS_SIM_POLICY).expect("Mitosis selection policy should compile");
 
         assert!(policy.mask_tables.is_empty());
-        assert_eq!(policy.rungs.len(), 4);
-        assert!(policy
-            .rungs
-            .iter()
-            .all(|rung| rung.opcode == Opcode::PickIdlePreferPrevious));
-        assert_eq!(policy.rungs[0].input, InputSource::QueueCell);
-        assert_eq!(policy.rungs[0].data, QueueMaskKind::LocalLlc as u64);
-        assert_eq!(policy.rungs[1].input, InputSource::QueueCell);
-        assert_eq!(policy.rungs[1].data, QueueMaskKind::Primary as u64);
-        assert_eq!(policy.rungs[2].input, InputSource::QueueCell);
-        assert_eq!(policy.rungs[2].data, QueueMaskKind::Borrowable as u64);
-        assert_eq!(policy.rungs[3].input, InputSource::TaskAllowedRestricted);
-        assert_eq!(policy.rungs[3].data, 0);
-        assert!(policy.dump().contains("pick_idle_prefer_previous"));
+        assert_eq!(MAX_RUNGS, 16);
+        assert_eq!(policy.rungs.len(), 16);
+
+        let scopes = [
+            (InputSource::QueueCell, QueueMaskKind::LocalLlc as u64),
+            (InputSource::QueueCell, QueueMaskKind::Primary as u64),
+            (InputSource::QueueCell, QueueMaskKind::Borrowable as u64),
+            (InputSource::TaskAllowedRestricted, 0),
+        ];
+        for (scope_index, (input, data)) in scopes.into_iter().enumerate() {
+            let base = scope_index * 4;
+            assert_eq!(
+                &policy.rungs[base..base + 4],
+                &[
+                    CompiledRung {
+                        opcode: Opcode::ClaimIdle,
+                        input,
+                        flags: RUNG_FLAG_PICK_IDLE_CORE,
+                        data,
+                    },
+                    CompiledRung {
+                        opcode: Opcode::PickIdleQueueMask,
+                        input,
+                        flags: RUNG_FLAG_PICK_IDLE_CORE,
+                        data,
+                    },
+                    CompiledRung {
+                        opcode: Opcode::ClaimIdle,
+                        input,
+                        flags: 0,
+                        data,
+                    },
+                    CompiledRung {
+                        opcode: Opcode::PickIdleQueueMask,
+                        input,
+                        flags: 0,
+                        data,
+                    },
+                ]
+            );
+        }
+        assert!(!policy.dump().contains("pick_idle_prefer_previous"));
         assert!(policy.dump().contains("queue_cell"));
         assert!(policy.dump().contains("task_allowed_restricted"));
 
@@ -3366,6 +3485,41 @@ scope = "previous_cpu"
         let error = error_for(&source);
         assert!(error.contains("too many rungs"));
         assert!(error.contains(&MAX_RUNGS.to_string()));
+    }
+
+    #[test]
+    fn rejects_more_than_nine_generic_rungs() {
+        let source = (0..=MAX_GENERIC_RUNGS)
+            .map(|_| {
+                r#"
+[[rung]]
+operation = "claim_idle"
+scope = "previous_cpu"
+"#
+            })
+            .collect::<String>();
+
+        let error = error_for(&source);
+        assert!(error.contains("generic"));
+        assert!(error.contains(&MAX_GENERIC_RUNGS.to_string()));
+        assert!(error.contains("queue-atomic"));
+        assert!(error.contains("every rung"));
+    }
+
+    #[test]
+    fn rejects_noncanonical_wide_atomic_ladders() {
+        let rungs = (0..10)
+            .map(|_| {
+                r#"
+[[rung]]
+operation = "claim_idle"
+scope = "task_cell"
+"#
+            })
+            .collect::<String>();
+        let error = error_for(&format!("[queues]\nlayout = \"cell\"\n{rungs}"));
+        assert!(error.contains("wide placement ladder"));
+        assert!(error.contains("expanded Mitosis"));
     }
 
     #[test]

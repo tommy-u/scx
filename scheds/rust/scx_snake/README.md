@@ -106,10 +106,12 @@ operation = "pick_idle"
 scope = "task_allowed"
 ```
 
-A policy contains one to eight rungs. Its fallback is `previous_cpu` by default;
-`any_allowed` instead distributes fallback hints across the affinity mask.
-Invalid operations and operation/scope combinations are rejected before BPF is
-loaded. See [`examples/`](examples/) for random placement, sub-LLC partitions,
+A generic policy contains one to nine rungs. The exact 16-rung expanded
+Mitosis template is also supported; other 10-16 rung arrangements are rejected.
+Fallback is `previous_cpu` by default; `any_allowed` instead distributes
+fallback hints across the affinity mask. Invalid operations and
+operation/scope combinations are rejected before BPF is loaded. See
+[`examples/`](examples/) for random placement, sub-LLC partitions,
 whole-core selection, paired demo-only random variants, and the opaque
 kernel-default control.
 
@@ -183,6 +185,16 @@ managed-cell profile. It combines dynamic child-cgroup cells, cell/LLC queues,
 Mitosis-style preferred idle selection, cell-aware direct dispatch, borrowing,
 and combined `min_vtime` dispatch. Demand rebalancing, queued-work stealing,
 and slice shrinking are intentionally outside this profile.
+
+Its preferred idle selection is expanded into 16 observable placement rungs.
+LLC-local, primary, borrowable, and restricted-affinity scopes each run
+`claim_idle_core`, `pick_idle_core`, `claim_idle`, then `pick_idle`. This makes
+the four internal stages visible independently in inspector counters and
+timings. BPF resolves each scope once and accounts the four decisions
+separately. Generic and expanded callbacks are selected before BPF load, so a
+live update that crosses between those ladder classes requires a scheduler
+restart. The fused `pick_idle_prefer_previous` operation remains available to
+other policies.
 
 ### Queue policies
 

@@ -93,7 +93,7 @@ sequenceDiagram
 
     K->>S: task wake, previous CPU, wake flags
     S->>S: sample timing and pin active slot
-    S->>L: walk at most eight rungs
+    S->>L: walk up to 9 generic or 16 expanded Mitosis rungs
     alt placement-only idle hit
         L-->>S: claimed CPU
         S->>Q: insert directly into local DSQ
@@ -115,8 +115,9 @@ sequenceDiagram
 ```
 
 The callback implementation is concentrated in
-[main.bpf.c](../../scheds/rust/scx_snake/src/bpf/main.bpf.c#L82-L413). The ladder
-walk is bounded by eight rungs
+[main.bpf.c](../../scheds/rust/scx_snake/src/bpf/main.bpf.c#L82-L413). Generic
+ladder walks are bounded by nine rungs. The exact expanded Mitosis template
+uses a specialized 16-stage walk
 ([ladder.h](../../scheds/rust/scx_snake/src/bpf/ladder.h#L313-L370)).
 
 ### Placement result semantics

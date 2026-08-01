@@ -32,7 +32,7 @@ use clap::{Parser, ValueEnum};
 use control::{SchedulerRequest, SchedulerResponse};
 use crossbeam::channel::RecvTimeoutError;
 use inspection::{InspectionView, Inspector, SlotPolicy};
-use libbpf_rs::{MapCore as _, MapFlags, OpenObject, ProgramInput};
+use libbpf_rs::{AsRawLibbpf as _, MapCore as _, MapFlags, OpenObject, ProgramInput};
 use log::{debug, info, warn};
 use mask_tables::{dump_mask_tables, resolve_mask_tables, ResolvedMaskTable};
 use membership::{CellDirectory, MembershipManager};
@@ -712,9 +712,10 @@ struct RungTimingAccumulator {
 
 impl RungTimingAccumulator {
     fn record(&mut self, generation: u64, ladder: u32, rung: u32, elapsed_ns: u64) {
-        if ladder >= bpf_intf::snake_rung_ladder_SNAKE_NR_RUNG_LADDERS
-            || rung >= bpf_intf::SNAKE_MAX_RUNGS
-        {
+        let Some(limit) = rung_ladder_limit(ladder) else {
+            return;
+        };
+        if rung >= limit {
             return;
         }
         let metrics = self
@@ -737,7 +738,9 @@ impl RungTimingAccumulator {
     fn generation(&self, generation: u64) -> Result<BTreeMap<String, RungTimingMetrics>> {
         let mut result = BTreeMap::new();
         for ladder in 0..bpf_intf::snake_rung_ladder_SNAKE_NR_RUNG_LADDERS {
-            for rung in 0..bpf_intf::SNAKE_MAX_RUNGS {
+            let limit =
+                rung_ladder_limit(ladder).ok_or_else(|| anyhow!("unknown rung ladder {ladder}"))?;
+            for rung in 0..limit {
                 result.insert(
                     rung_timing_key(ladder, rung)?,
                     self.metrics
@@ -751,6 +754,17 @@ impl RungTimingAccumulator {
             }
         }
         Ok(result)
+    }
+}
+
+fn rung_ladder_limit(ladder: u32) -> Option<u32> {
+    match ladder {
+        bpf_intf::snake_rung_ladder_SNAKE_RUNG_LADDER_IDLE => Some(bpf_intf::SNAKE_MAX_RUNGS),
+        bpf_intf::snake_rung_ladder_SNAKE_RUNG_LADDER_ENQUEUE
+        | bpf_intf::snake_rung_ladder_SNAKE_RUNG_LADDER_DISPATCH => {
+            Some(bpf_intf::SNAKE_MAX_QUEUE_RUNGS)
+        }
+        _ => None,
     }
 }
 
@@ -1030,6 +1044,22 @@ fn validate_queue_callback_replacement(
     Ok(())
 }
 
+fn uses_expanded_mitosis_select(policy: &CompiledPolicy) -> bool {
+    policy.rungs.len() > policy::MAX_GENERIC_RUNGS
+}
+
+fn validate_select_cpu_variant_replacement(
+    active: &CompiledPolicy,
+    candidate: &CompiledPolicy,
+) -> Result<()> {
+    if uses_expanded_mitosis_select(active) != uses_expanded_mitosis_select(candidate) {
+        bail!(
+            "replacement changes the attachment-time select_cpu variant; restart Snake to apply it"
+        );
+    }
+    Ok(())
+}
+
 fn install_mask_tables(
     skel: &mut BpfSkel<'_>,
     slot: u32,
@@ -1303,19 +1333,21 @@ fn scope_label<'policy>(
                 .map(|table| table.name.as_str())
                 .with_context(|| format!("compiled rung references missing mask table {table_id}"))
         }
-        (Opcode::PickIdleQueueMask | Opcode::PickIdlePreferPrevious, InputSource::QueueCell) => {
-            match rung.data {
-                value if value == policy::QueueMaskKind::Primary as u64 => Ok("task_cell"),
-                value if value == policy::QueueMaskKind::Borrowable as u64 => {
-                    Ok("task_cell_borrowable")
-                }
-                value if value == policy::QueueMaskKind::LocalLlc as u64 => Ok("task_cell_llc"),
-                _ => bail!("queue-mask rung references unknown mask kind {}", rung.data),
+        (
+            Opcode::ClaimIdle | Opcode::PickIdleQueueMask | Opcode::PickIdlePreferPrevious,
+            InputSource::QueueCell,
+        ) => match rung.data {
+            value if value == policy::QueueMaskKind::Primary as u64 => Ok("task_cell"),
+            value if value == policy::QueueMaskKind::Borrowable as u64 => {
+                Ok("task_cell_borrowable")
             }
-        }
-        (Opcode::PickIdlePreferPrevious, InputSource::TaskAllowedRestricted) => {
-            Ok("task_allowed_restricted")
-        }
+            value if value == policy::QueueMaskKind::LocalLlc as u64 => Ok("task_cell_llc"),
+            _ => bail!("queue-mask rung references unknown mask kind {}", rung.data),
+        },
+        (
+            Opcode::ClaimIdle | Opcode::PickIdleQueueMask | Opcode::PickIdlePreferPrevious,
+            InputSource::TaskAllowedRestricted,
+        ) => Ok("task_allowed_restricted"),
         (_, InputSource::CpuPrev) => Ok("previous_cpu"),
         (_, InputSource::MaskTaskAllowed) => Ok("task_allowed"),
         (_, InputSource::TaskCell) => bail!("operation cannot consume a task-cell input"),
@@ -1770,6 +1802,33 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
         builder.obj_builder.debug(opts.verbose);
         let open_opts = opts.libbpf.clone().into_bpf_open_opts();
         let mut skel = scx_ops_open!(builder, open_object, snake_ops, open_opts)?;
+        let expanded_mitosis = uses_expanded_mitosis_select(&runtime.compiled);
+        let selected_select_cpu = if expanded_mitosis {
+            skel.progs.snake_select_cpu.set_autoload(false);
+            skel.progs.snake_select_cpu_expanded.set_autoload(true);
+            skel.progs
+                .snake_select_cpu_expanded
+                .as_libbpf_object()
+                .as_ptr()
+        } else {
+            skel.progs.snake_select_cpu.set_autoload(true);
+            skel.progs.snake_select_cpu_expanded.set_autoload(false);
+            skel.progs.snake_select_cpu.as_libbpf_object().as_ptr()
+        };
+        skel.struct_ops.snake_ops_mut().select_cpu = selected_select_cpu;
+        let selected_enqueue = if expanded_mitosis {
+            skel.progs.snake_enqueue.set_autoload(false);
+            skel.progs.snake_enqueue_expanded.set_autoload(true);
+            skel.progs
+                .snake_enqueue_expanded
+                .as_libbpf_object()
+                .as_ptr()
+        } else {
+            skel.progs.snake_enqueue.set_autoload(true);
+            skel.progs.snake_enqueue_expanded.set_autoload(false);
+            skel.progs.snake_enqueue.as_libbpf_object().as_ptr()
+        };
+        skel.struct_ops.snake_ops_mut().enqueue = selected_enqueue;
         let rodata = skel
             .maps
             .rodata_data
@@ -1777,6 +1836,7 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
             .context("BPF read-only data is unavailable")?;
         rodata.fairness_mode = opts.fairness as u32;
         rodata.queue_mode = queue_mode_for_topology(queue_topology);
+        rodata.expanded_mitosis_select = u32::from(expanded_mitosis);
         skel.maps
             .bss_data
             .as_mut()
@@ -1949,6 +2009,7 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
                         "replacement changes attachment-time task membership; restart Snake to apply it"
                     );
                 }
+                validate_select_cpu_variant_replacement(&previous_policy, policy)?;
                 validate_queue_callback_replacement(&previous_policy, policy)?;
                 let tables = resolve_mask_tables(policy)?;
                 activated_tables = Some(tables.clone());
@@ -2030,6 +2091,7 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
         if policy.membership != self.runtime.compiled.membership {
             bail!("candidate changes attachment-time task membership; restart Snake to apply it");
         }
+        validate_select_cpu_variant_replacement(&self.runtime.compiled, &policy)?;
         validate_queue_callback_replacement(&self.runtime.compiled, &policy)?;
         resolve_mask_tables(&policy).context("resolving candidate policy mask tables")?;
         Ok(runtime_policy::PolicyValidationResponse::from_policy(
@@ -3295,6 +3357,7 @@ scope = "task_allowed"
             "scx_lib_init_probe",
             "snake_dispatch",
             "snake_enqueue",
+            "snake_enqueue_expanded",
             "snake_exit",
             "snake_init",
             "snake_init_task",
@@ -3302,6 +3365,7 @@ scope = "task_allowed"
             "snake_runnable",
             "snake_running",
             "snake_select_cpu",
+            "snake_select_cpu_expanded",
             "snake_set_weight",
             "snake_stopping",
         ];
@@ -4440,7 +4504,12 @@ scope = "task_allowed"
         let normalized_mode = mode.split_whitespace().collect::<Vec<_>>().join(" ");
 
         assert!(main.contains("#include \"scheduler_mode.h\""));
-        assert!(normalized_mode.contains("static __noinline int scheduler_mode_enqueue("));
+        for symbol in [
+            "static __noinline int scheduler_mode_enqueue_generic(",
+            "static __noinline int scheduler_mode_enqueue_expanded(",
+        ] {
+            assert!(normalized_mode.contains(symbol));
+        }
         assert!(normalized_mode.contains("static __always_inline void scheduler_mode_dispatch("));
         assert_text_order(
             &mode,
@@ -4452,7 +4521,6 @@ scope = "task_allowed"
             ],
         );
         for (callback, queue, global) in [
-            ("enqueue", "queue_ladder_enqueue(", "fairness_enqueue("),
             ("dispatch", "queue_ladder_dispatch(", "fairness_dispatch("),
             (
                 "runnable",
@@ -4493,6 +4561,34 @@ scope = "task_allowed"
             );
         }
 
+        for symbol in [
+            "scheduler_mode_enqueue_generic(",
+            "scheduler_mode_enqueue_expanded(",
+        ] {
+            let mode_body = mode
+                .split_once(symbol)
+                .and_then(|(_, body)| body.split_once("\nstatic "))
+                .map(|(body, _)| body)
+                .unwrap_or_else(|| panic!("{symbol} should have one bounded body"));
+            assert!(mode_body.contains("queue_ladder_enqueue("));
+            assert!(mode_body.contains("fairness_enqueue("));
+        }
+
+        let enqueue_impl = main
+            .split_once("static __noinline void snake_enqueue_impl(")
+            .and_then(|(_, body)| body.split_once("void BPF_STRUCT_OPS(snake_enqueue"))
+            .map(|(body, _)| body)
+            .expect("snake enqueue implementation should be bounded");
+        for symbol in [
+            "scheduler_mode_enqueue_generic(",
+            "scheduler_mode_enqueue_expanded(",
+        ] {
+            assert!(enqueue_impl.contains(symbol));
+        }
+        assert!(!enqueue_impl.contains("queue_ladder_enqueue("));
+        assert!(!enqueue_impl.contains("fairness_enqueue("));
+        assert_eq!(enqueue_impl.matches("release_timed_callback(").count(), 1);
+
         for symbol in ["scheduler_mode_set_weight(", "scheduler_mode_init_task("] {
             assert!(mode.contains(symbol), "mode facade is missing {symbol}");
             assert!(main.contains(symbol), "main callback does not use {symbol}");
@@ -4500,7 +4596,7 @@ scope = "task_allowed"
         assert_text_order(
             &mode,
             &[
-                "scheduler_mode_enqueue(",
+                "scheduler_mode_enqueue_generic(",
                 "fairness_dispatch_slice(",
                 "try_enqueue_task_cell(",
                 "if (cell_enqueued < 0)",
@@ -4542,8 +4638,8 @@ scope = "task_allowed"
             ],
         );
         let select = main
-            .split_once("BPF_STRUCT_OPS(snake_select_cpu")
-            .and_then(|(_, body)| body.split_once("BPF_STRUCT_OPS(snake_enqueue"))
+            .split_once("static __noinline s32 snake_select_cpu_impl(")
+            .and_then(|(_, body)| body.split_once("s32 BPF_STRUCT_OPS(snake_select_cpu,"))
             .map(|(body, _)| body)
             .unwrap();
         assert!(!select.contains("scheduler_mode_"));
@@ -4567,14 +4663,15 @@ scope = "task_allowed"
         assert_eq!(post_acquire.matches("return ").count(), 1);
 
         let enqueue = main
-            .split_once("BPF_STRUCT_OPS(snake_enqueue")
-            .and_then(|(_, body)| body.split_once("BPF_STRUCT_OPS(snake_dispatch"))
+            .split_once("static __noinline void snake_enqueue_impl(")
+            .and_then(|(_, body)| body.split_once("void BPF_STRUCT_OPS(snake_enqueue"))
             .map(|(body, _)| body)
             .unwrap();
+        assert!(enqueue.contains("scheduler_mode_enqueue_expanded("));
         assert_text_order(
             enqueue,
             &[
-                "scheduler_mode_enqueue(",
+                "scheduler_mode_enqueue_generic(",
                 "if (ret && queue_topology_enabled())",
                 "snake queue enqueue failed",
                 "SNAKE_FINE_TIMING_ENQUEUE_FINISH",
@@ -4623,6 +4720,9 @@ scope = "task_allowed"
             "u64 wake_flags;",
             "u64 dispatch_flags;",
             "u64 callback_started_at;",
+            "u64 scope_started_at;",
+            "u32 local_llc_route_cpu;",
+            "u32 local_llc_cell_index;",
         ] {
             assert!(
                 normalized_ladder.contains(field),
@@ -4630,47 +4730,188 @@ scope = "task_allowed"
             );
         }
         assert!(!walk_context.contains('*'));
-        assert_eq!(walk_context.matches(';').count(), 5);
-        assert!(normalized_ladder.contains(
-            "static __noinline s32 walk_policy_ladder(struct snake_ladder_ctx *ctx, struct task_struct *p, struct snake_ladder_walk_args *walk_args)"
-        ));
+        assert_eq!(walk_context.matches(';').count(), 8);
         assert!(normalized_ladder.contains(
             "static __noinline s32 walk_policy_rung(struct snake_ladder_ctx *ctx, struct task_struct *p, u32 i, struct snake_ladder_walk_args *walk_args)"
         ));
-        let walk = ladder
-            .split_once("walk_policy_ladder(struct snake_ladder_ctx *ctx")
+        assert!(normalized_ladder.contains(
+            "static __noinline s32 walk_generic_policy_ladder(struct snake_ladder_ctx *ctx, struct task_struct *p, struct snake_ladder_walk_args *walk_args)"
+        ));
+        assert!(normalized_ladder.contains(
+            "static __noinline s32 walk_expanded_mitosis_ladder(struct snake_ladder_ctx *ctx, struct task_struct *p, struct snake_ladder_walk_args *walk_args)"
+        ));
+        let generic_walk = ladder
+            .split_once("walk_generic_policy_ladder(struct snake_ladder_ctx *ctx")
+            .and_then(|(_, body)| body.split_once("walk_expanded_mitosis_ladder("))
+            .map(|(body, _)| body)
+            .expect("generic policy walker should have one definition");
+        let atomic_walk = ladder
+            .split_once("walk_expanded_mitosis_ladder(struct snake_ladder_ctx *ctx")
             .and_then(|(_, body)| body.split_once("#endif"))
             .map(|(body, _)| body)
-            .expect("policy walker should have one definition");
-        let normalized_walk = walk.split_whitespace().collect::<Vec<_>>().join(" ");
-        for index in 0..bpf_intf::SNAKE_MAX_RUNGS {
-            let call = format!("walk_policy_rung(ctx, p, {index}, walk_args)");
-            assert_eq!(normalized_walk.matches(&call).count(), 1);
-            if index > 0 {
-                assert!(normalized_walk.contains(&format!("ctx->ladder->nr_rungs <= {index}")));
-            }
+            .expect("queue-atomic policy walker should have one definition");
+        let normalized_generic = generic_walk
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        let normalized_atomic = atomic_walk.split_whitespace().collect::<Vec<_>>().join(" ");
+        for index in 0..policy::MAX_GENERIC_RUNGS {
+            assert_eq!(
+                normalized_generic
+                    .matches(&format!("walk_policy_rung(ctx, p, {index}, walk_args)"))
+                    .count(),
+                1
+            );
         }
-        assert_eq!(
-            normalized_walk.matches("walk_policy_rung(ctx, p,").count(),
-            bpf_intf::SNAKE_MAX_RUNGS as usize
-        );
-        assert!(normalized_walk.contains("if (!ctx->ladder->nr_rungs) return -ENOENT;"));
-        assert!(!walk.contains("bpf_loop(SNAKE_MAX_RUNGS"));
-        assert!(!walk.contains("execute_rung(ctx, p, &rung, &args)"));
-        assert!(!walk.contains("rung_is_valid(&rung"));
-        assert!(!walk.contains("bpf_for(i, 0, SNAKE_MAX_RUNGS)"));
+        assert!(!generic_walk.contains("bpf_loop("));
+        assert!(!atomic_walk.contains("bpf_loop("));
+        for (base, kind) in [
+            (0, "SNAKE_QUEUE_MASK_LOCAL_LLC"),
+            (4, "SNAKE_QUEUE_MASK_PRIMARY"),
+            (8, "SNAKE_QUEUE_MASK_BORROWABLE"),
+        ] {
+            assert!(normalized_atomic.contains(&format!("ctx, p, {base}, {kind}, walk_args)")));
+        }
+        assert!(normalized_atomic.contains("ctx, p, 12, walk_args)"));
+        assert!(normalized_ladder.contains("expanded_mitosis_finish_stage("));
+        assert!(!atomic_walk.contains("ctx->ladder->rungs["));
+        assert!(normalized_ladder.contains(
+            "static __always_inline bool queue_atomic_rung_is_valid(const struct snake_rung *rung)"
+        ));
+        for obsolete in [
+            "SNAKE_EXPANDED_MITOSIS_",
+            "walk_expanded_mitosis_rung(",
+            "expanded_mitosis_spec(",
+            "snake_expanded_mitosis_loop_ctx",
+            "walk_expanded_mitosis_callback(",
+            "walk_policy_ladder(",
+        ] {
+            assert!(
+                !ladder.contains(obsolete),
+                "obsolete wide walker symbol remains: {obsolete}"
+            );
+        }
+        let prepare_validation = main
+            .split_once("validate_compiled_ladder(")
+            .and_then(|(_, body)| body.split_once("SEC(\"syscall\")"))
+            .map(|(body, _)| body)
+            .expect("ladder prepare validator should have one definition");
+        assert!(prepare_validation.contains("queue_atomic_rung_is_valid(&rung)"));
+        assert!(prepare_validation.contains("expanded_mitosis_rung_matches(&rung, i)"));
+        assert!(normalized_ladder
+            .contains("queue_args.random = rung->flags & SNAKE_RUNG_F_PICK_RANDOM;"));
 
         let select = main
-            .split_once("BPF_STRUCT_OPS(snake_select_cpu")
-            .and_then(|(_, body)| body.split_once("BPF_STRUCT_OPS(snake_enqueue"))
+            .split_once("static __noinline s32 snake_select_cpu_impl")
+            .and_then(|(_, body)| body.split_once("BPF_STRUCT_OPS(snake_select_cpu,"))
             .map(|(body, _)| body)
             .unwrap();
         let normalized_select = select.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(normalized_select.contains("struct snake_ladder_walk_args walk_args = {"));
-        assert!(normalized_select.contains("walk_policy_ladder(&ladder_ctx, p, &walk_args)"));
+        assert!(
+            normalized_select.contains("walk_expanded_mitosis_ladder(&ladder_ctx, p, &walk_args)")
+        );
+        assert!(
+            normalized_select.contains("walk_generic_policy_ladder(&ladder_ctx, p, &walk_args)")
+        );
         assert!(normalized_select.contains("dispatch_flags = walk_args.dispatch_flags;"));
         assert!(normalized_select.contains("queue_cell_index = walk_args.queue_cell_index;"));
-        assert!(!normalized_select.contains("walk_policy_ladder(&ladder_ctx, p, prev_cpu"));
+    }
+
+    #[test]
+    fn expanded_mitosis_unavailable_scopes_report_and_time_counted_rungs() {
+        let bpf_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bpf");
+        let ladder = fs::read_to_string(bpf_dir.join("ladder.h")).unwrap();
+        let unavailable = ladder
+            .split_once("expanded_mitosis_unavailable_scope(")
+            .and_then(|(_, body)| body.split_once("walk_expanded_mitosis_candidates("))
+            .map(|(body, _)| body)
+            .expect("expanded Mitosis unavailable-scope helper should have one definition");
+
+        assert_eq!(
+            unavailable
+                .matches("expanded_mitosis_record_unavailable_stage(")
+                .count(),
+            4,
+            "all four counted misses need a matching timing event"
+        );
+        assert!(unavailable.contains("scx_bpf_error("));
+        assert_eq!(unavailable.matches("scx_bpf_error(").count(), 1);
+
+        let normalized = ladder.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(normalized.contains(
+            "walk_expanded_mitosis_candidates( struct snake_ladder_ctx *ctx, struct task_struct *p, u32 base, const struct cpumask *candidates, struct snake_ladder_walk_args *walk_args)"
+        ));
+        assert!(normalized.contains("started_at = walk_args->scope_started_at;"));
+    }
+
+    #[test]
+    fn select_program_is_specialized_before_bpf_load() {
+        let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let bpf_main = fs::read_to_string(manifest.join("src/bpf/main.bpf.c")).unwrap();
+        let scheduler_mode = fs::read_to_string(manifest.join("src/bpf/scheduler_mode.h")).unwrap();
+        let userspace = fs::read_to_string(manifest.join("src/main.rs")).unwrap();
+        let normalized_bpf = bpf_main.split_whitespace().collect::<Vec<_>>().join(" ");
+
+        assert!(normalized_bpf.contains(
+            "static __noinline s32 snake_select_cpu_impl(struct task_struct *p, s32 prev_cpu, u64 wake_flags, bool expanded_mitosis)"
+        ));
+        assert!(normalized_bpf.contains(
+            "cpu = expanded_mitosis ? walk_expanded_mitosis_ladder(&ladder_ctx, p, &walk_args) : walk_generic_policy_ladder(&ladder_ctx, p, &walk_args);"
+        ));
+        assert!(bpf_main.contains("BPF_STRUCT_OPS(snake_select_cpu,"));
+        assert!(bpf_main.contains("BPF_STRUCT_OPS(snake_select_cpu_expanded,"));
+        assert!(bpf_main.contains("BPF_STRUCT_OPS(snake_enqueue_expanded,"));
+        assert!(normalized_bpf.contains(
+            "static __noinline void snake_enqueue_impl(struct task_struct *p, u64 enq_flags, bool expanded_mitosis)"
+        ));
+        assert!(scheduler_mode.contains("scheduler_mode_enqueue_generic("));
+        assert!(scheduler_mode.contains("scheduler_mode_enqueue_expanded("));
+        assert!(userspace.contains("snake_select_cpu_expanded.set_autoload(false)"));
+        assert!(userspace.contains("snake_select_cpu.set_autoload(false)"));
+        assert!(userspace.contains("snake_enqueue_expanded.set_autoload(false)"));
+        assert!(userspace.contains("snake_enqueue.set_autoload(false)"));
+        assert!(userspace.contains("snake_ops_mut().select_cpu = selected_select_cpu"));
+        assert!(userspace.contains("snake_ops_mut().enqueue = selected_enqueue"));
+        assert_text_order(
+            &userspace,
+            &[
+                "snake_ops_mut().select_cpu = selected_select_cpu",
+                "scx_ops_load!(skel, snake_ops, uei)",
+            ],
+        );
+    }
+
+    #[test]
+    fn select_cpu_variant_is_attachment_time_configuration() {
+        let generic = policy::compile_policy(policy_source()).unwrap();
+        let expanded =
+            policy::compile_policy(include_str!("../examples/mitosis-sim.toml")).unwrap();
+
+        assert!(!uses_expanded_mitosis_select(&generic));
+        assert!(uses_expanded_mitosis_select(&expanded));
+        assert!(validate_select_cpu_variant_replacement(&generic, &generic).is_ok());
+        assert!(validate_select_cpu_variant_replacement(&expanded, &expanded).is_ok());
+        let error = validate_select_cpu_variant_replacement(&generic, &expanded)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("attachment-time select_cpu variant"));
+        assert!(error.contains("restart Snake"));
+
+        let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let bpf_main = fs::read_to_string(manifest.join("src/bpf/main.bpf.c")).unwrap();
+        let userspace = fs::read_to_string(manifest.join("src/main.rs")).unwrap();
+        let normalized_bpf = bpf_main.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(normalized_bpf.contains(
+            "if (!!expanded_mitosis_select != (ladder->nr_rungs > SNAKE_MAX_GENERIC_RUNGS)) return -EINVAL;"
+        ));
+        assert_text_order(
+            &userspace,
+            &[
+                "rodata.expanded_mitosis_select = u32::from(uses_expanded_mitosis_select(&runtime.compiled));",
+                "scx_ops_load!(skel, snake_ops, uei)",
+            ],
+        );
     }
 
     #[test]
@@ -4685,10 +4926,11 @@ scope = "task_allowed"
             .map(|(body, _)| body)
             .expect("task-cell enqueue walker should have one definition");
 
-        assert!(normalized
-            .contains("bpf_loop(SNAKE_MAX_RUNGS, try_enqueue_task_cell_callback, &loop_ctx, 0)"));
         assert!(normalized.contains(
-            "if (i >= SNAKE_MAX_RUNGS || i >= loop_ctx->ladder_ctx.ladder->nr_rungs) return 1;"
+            "bpf_loop(SNAKE_MAX_GENERIC_RUNGS, try_enqueue_task_cell_callback, &loop_ctx, 0)"
+        ));
+        assert!(normalized.contains(
+            "if (i >= SNAKE_MAX_GENERIC_RUNGS || i >= loop_ctx->ladder_ctx.ladder->nr_rungs) return 1;"
         ));
         assert!(!enqueue_walk.contains("bpf_for(i, 0, SNAKE_MAX_RUNGS)"));
     }
@@ -5418,6 +5660,25 @@ scope = "task_allowed"
     }
 
     #[test]
+    fn rung_timing_accumulator_uses_each_ladders_abi_limit() {
+        let mut accumulator = RungTimingAccumulator::default();
+        accumulator.record(
+            7,
+            bpf_intf::snake_rung_ladder_SNAKE_RUNG_LADDER_ENQUEUE,
+            bpf_intf::SNAKE_MAX_QUEUE_RUNGS,
+            40,
+        );
+
+        let timing = accumulator.generation(7).expect("timing should aggregate");
+
+        assert_eq!(
+            timing.len(),
+            (bpf_intf::SNAKE_MAX_RUNGS + 2 * bpf_intf::SNAKE_MAX_QUEUE_RUNGS) as usize
+        );
+        assert!(!timing.contains_key(&format!("enqueue:{}", bpf_intf::SNAKE_MAX_QUEUE_RUNGS)));
+    }
+
+    #[test]
     fn encodes_the_exact_c_rung_layout_and_zeros_reserved() {
         let encoded = encode_rung(CompiledRung {
             opcode: Opcode::PickIdle,
@@ -5446,7 +5707,9 @@ scope = "task_allowed"
         let policy = policy::compile_policy(policy_source()).expect("policy should compile");
         let encoded = encode_ladder(&policy, 42).expect("ladder should encode");
 
-        assert_eq!(bpf_intf::SNAKE_ABI_VERSION, 28);
+        assert_eq!(bpf_intf::SNAKE_ABI_VERSION, 29);
+        assert_eq!(bpf_intf::SNAKE_MAX_RUNGS, 16);
+        assert_eq!(bpf_intf::snake_stat_SNAKE_NR_STATS, 212);
         assert_eq!(size_of::<bpf_intf::snake_callback_timing>(), 520);
         assert_eq!(offset_of!(bpf_intf::snake_callback_timing, total_ns), 0);
         assert_eq!(offset_of!(bpf_intf::snake_callback_timing, buckets), 8);
@@ -5565,7 +5828,7 @@ scope = "task_allowed"
         assert_field_type::<bpf_intf::snake_queue_timing_event, u32>(|value| {
             &value.depth_after_dispatch
         });
-        assert_eq!(size_of::<bpf_intf::snake_compiled_ladder>(), 632);
+        assert_eq!(size_of::<bpf_intf::snake_compiled_ladder>(), 800);
         assert_eq!(offset_of!(bpf_intf::snake_compiled_ladder, generation), 0);
         assert_eq!(
             offset_of!(bpf_intf::snake_compiled_ladder, policy_abi_version),
@@ -5583,19 +5846,19 @@ scope = "task_allowed"
         assert_eq!(offset_of!(bpf_intf::snake_compiled_ladder, rungs), 24);
         assert_eq!(
             offset_of!(bpf_intf::snake_compiled_ladder, nr_enqueue_rungs),
-            240
+            408
         );
         assert_eq!(
             offset_of!(bpf_intf::snake_compiled_ladder, nr_dispatch_rungs),
-            244
+            412
         );
         assert_eq!(
             offset_of!(bpf_intf::snake_compiled_ladder, enqueue_rungs),
-            248
+            416
         );
         assert_eq!(
             offset_of!(bpf_intf::snake_compiled_ladder, dispatch_rungs),
-            440
+            608
         );
         assert_eq!(encoded.generation, 42);
         assert_eq!(encoded.policy_abi_version, bpf_intf::SNAKE_ABI_VERSION);
@@ -5725,7 +5988,7 @@ scope = "task_cell"
         .unwrap();
         let encoded = encode_ladder(&policy, 9).unwrap();
 
-        assert_eq!(bpf_intf::SNAKE_ABI_VERSION, 28);
+        assert_eq!(bpf_intf::SNAKE_ABI_VERSION, 29);
         assert_eq!(encoded.nr_enqueue_rungs, 3);
         assert_eq!(encoded.enqueue_rungs[0].opcode, 5);
         assert_eq!(encoded.enqueue_rungs[0].input, 4);
@@ -5806,8 +6069,8 @@ scope = "task_allowed"
         let main = fs::read_to_string(bpf_dir.join("main.bpf.c")).unwrap();
         let queue_ladder = fs::read_to_string(bpf_dir.join("queue_ladder.h")).unwrap();
         let select = main
-            .split_once("BPF_STRUCT_OPS(snake_select_cpu")
-            .and_then(|(_, body)| body.split_once("BPF_STRUCT_OPS(snake_enqueue"))
+            .split_once("static __noinline s32 snake_select_cpu_impl(")
+            .and_then(|(_, body)| body.split_once("s32 BPF_STRUCT_OPS(snake_select_cpu,"))
             .map(|(body, _)| body)
             .unwrap();
 
@@ -6347,7 +6610,7 @@ scope = "task_cell"
         let cpu_pick = include_str!("bpf/cpu_pick.h");
         let ladder = include_str!("bpf/ladder.h");
 
-        assert!(intf.contains("#define SNAKE_ABI_VERSION 28"));
+        assert!(intf.contains("#define SNAKE_ABI_VERSION 29"));
         assert!(intf.contains("SNAKE_OP_PICK_IDLE_PREFER_PREVIOUS = 8"));
         assert!(intf.contains("SNAKE_INPUT_TASK_ALLOWED_RESTRICTED = 5"));
         assert!(intf.contains("SNAKE_QUEUE_MASK_LOCAL_LLC"));
@@ -6419,21 +6682,29 @@ scope = "task_cell"
 
         let retry = scheduler_mode
             .split_once("queue_try_direct_from_enqueue(")
-            .and_then(|(_, body)| body.split_once("scheduler_mode_enqueue("))
+            .and_then(|(_, body)| body.split_once("scheduler_mode_enqueue_generic("))
             .map(|(body, _)| body)
             .expect("cell enqueue should have one direct-placement retry helper");
         assert!(retry.contains("__COMPAT_is_enq_cpu_selected(enq_flags)"));
-        assert!(retry.contains("walk_policy_ladder(ctx, p, &walk_args)"));
+        assert!(retry.contains("walk_expanded_mitosis_ladder(ctx, p, &walk_args)"));
+        assert!(retry.contains("walk_generic_policy_ladder(ctx, p, &walk_args)"));
         assert!(retry.contains("queue_fairness_direct_primary("));
         assert!(retry.contains("queue_fairness_direct_borrow("));
         assert!(retry.contains("queue_fairness_direct_affinity("));
         assert!(retry.contains("scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE)"));
 
-        let enqueue = scheduler_mode
-            .split_once("scheduler_mode_enqueue(")
-            .map(|(_, body)| body)
-            .expect("scheduler mode enqueue should exist");
-        assert!(enqueue.contains("queue_try_direct_from_enqueue("));
+        let generic_enqueue = scheduler_mode
+            .split_once("scheduler_mode_enqueue_generic(")
+            .and_then(|(_, body)| body.split_once("scheduler_mode_enqueue_expanded("))
+            .map(|(body, _)| body)
+            .expect("generic scheduler mode enqueue should exist");
+        assert!(generic_enqueue.contains("callback_started_at, false"));
+        let expanded_enqueue = scheduler_mode
+            .split_once("scheduler_mode_enqueue_expanded(")
+            .and_then(|(_, body)| body.split_once("scheduler_mode_dispatch("))
+            .map(|(body, _)| body)
+            .expect("expanded scheduler mode enqueue should exist");
+        assert!(expanded_enqueue.contains("callback_started_at, true"));
     }
 
     #[test]

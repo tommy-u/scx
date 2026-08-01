@@ -24,20 +24,68 @@ dispatch = [
   { action = "consume", operation = "min_vtime", fallback = ["cpu", "cell_sibling"] },
 ]
 
-# Prefer the previous CPU at every locality level, then an idle core, the
-# previous idle CPU, and finally any idle CPU in that level.
+# Expose each Mitosis idle-selection stage separately so its attempts, hits,
+# and misses can be inspected before deciding whether to consolidate it.
 [[rung]]
-operation = "pick_idle_prefer_previous"
+operation = "claim_idle_core"
 scope = "task_cell_llc"
 
 [[rung]]
-operation = "pick_idle_prefer_previous"
+operation = "pick_idle_core"
+scope = "task_cell_llc"
+
+[[rung]]
+operation = "claim_idle"
+scope = "task_cell_llc"
+
+[[rung]]
+operation = "pick_idle"
+scope = "task_cell_llc"
+
+[[rung]]
+operation = "claim_idle_core"
 scope = "task_cell"
 
 [[rung]]
-operation = "pick_idle_prefer_previous"
+operation = "pick_idle_core"
+scope = "task_cell"
+
+[[rung]]
+operation = "claim_idle"
+scope = "task_cell"
+
+[[rung]]
+operation = "pick_idle"
+scope = "task_cell"
+
+[[rung]]
+operation = "claim_idle_core"
 scope = "task_cell_borrowable"
 
 [[rung]]
-operation = "pick_idle_prefer_previous"
+operation = "pick_idle_core"
+scope = "task_cell_borrowable"
+
+[[rung]]
+operation = "claim_idle"
+scope = "task_cell_borrowable"
+
+[[rung]]
+operation = "pick_idle"
+scope = "task_cell_borrowable"
+
+[[rung]]
+operation = "claim_idle_core"
+scope = "task_allowed_restricted"
+
+[[rung]]
+operation = "pick_idle_core"
+scope = "task_allowed_restricted"
+
+[[rung]]
+operation = "claim_idle"
+scope = "task_allowed_restricted"
+
+[[rung]]
+operation = "pick_idle"
 scope = "task_allowed_restricted"

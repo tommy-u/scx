@@ -12,7 +12,8 @@
 
 static __always_inline int queue_try_direct_from_enqueue(
 	struct snake_ladder_ctx *ctx, struct task_struct *p, u64 enq_flags,
-	const struct snake_fine_timing_ctx *fine, u64 callback_started_at)
+	const struct snake_fine_timing_ctx *fine, u64 callback_started_at,
+	bool expanded_mitosis)
 {
 	const struct snake_queue_rung *first;
 	struct snake_ladder_walk_args walk_args = {
@@ -21,6 +22,8 @@ static __always_inline int queue_try_direct_from_enqueue(
 		.wake_flags = 0,
 		.dispatch_flags = 0,
 		.callback_started_at = callback_started_at,
+		.local_llc_route_cpu = SNAKE_QUEUE_CELL_NONE,
+		.local_llc_cell_index = SNAKE_QUEUE_CELL_NONE,
 	};
 	s32 cpu, ret = 0;
 	u64 rung_started_at = 0;
@@ -41,7 +44,9 @@ static __always_inline int queue_try_direct_from_enqueue(
 	} else if (__COMPAT_is_enq_cpu_selected(enq_flags)) {
 		return 0;
 	}
-	cpu = walk_policy_ladder(ctx, p, &walk_args);
+	cpu = expanded_mitosis ?
+		      walk_expanded_mitosis_ladder(ctx, p, &walk_args) :
+		      walk_generic_policy_ladder(ctx, p, &walk_args);
 	if (cpu == -ENOENT)
 		goto out;
 	if (cpu < 0) {
@@ -79,9 +84,9 @@ out:
 
 /* Route enqueue through the active queue topology or global fairness policy. */
 static __noinline int
-scheduler_mode_enqueue(struct snake_ladder_ctx *ctx, struct task_struct *p,
-		       u64 enq_flags, const struct snake_fine_timing_ctx *fine,
-		       u64 callback_started_at)
+scheduler_mode_enqueue_generic(
+	struct snake_ladder_ctx *ctx, struct task_struct *p, u64 enq_flags,
+	const struct snake_fine_timing_ctx *fine, u64 callback_started_at)
 {
 	s32 cell_enqueued, ret;
 	u64 slice, stage_started_at;
@@ -90,7 +95,7 @@ scheduler_mode_enqueue(struct snake_ladder_ctx *ctx, struct task_struct *p,
 		if (queue_transition_active())
 			return queue_transition_enqueue(ctx, p, enq_flags, fine);
 		ret = queue_try_direct_from_enqueue(
-			ctx, p, enq_flags, fine, callback_started_at);
+			ctx, p, enq_flags, fine, callback_started_at, false);
 		if (ret < 0)
 			return ret;
 		if (ret > 0)
@@ -110,6 +115,44 @@ scheduler_mode_enqueue(struct snake_ladder_ctx *ctx, struct task_struct *p,
 	slice	      = fairness_dispatch_slice(ctx, p, true);
 	cell_enqueued = try_enqueue_task_cell(ctx, p, enq_flags, slice, fine,
 					      callback_started_at);
+	if (cell_enqueued < 0)
+		return cell_enqueued;
+	if (cell_enqueued > 0)
+		return 0;
+	return fairness_enqueue(ctx, p, enq_flags, fine);
+}
+
+static __noinline int scheduler_mode_enqueue_expanded(
+	struct snake_ladder_ctx *ctx, struct task_struct *p, u64 enq_flags,
+	const struct snake_fine_timing_ctx *fine, u64 callback_started_at)
+{
+	s32 cell_enqueued, ret;
+	u64 slice, stage_started_at;
+
+	if (queue_topology_enabled()) {
+		if (queue_transition_active())
+			return queue_transition_enqueue(ctx, p, enq_flags, fine);
+		ret = queue_try_direct_from_enqueue(
+			ctx, p, enq_flags, fine, callback_started_at, true);
+		if (ret < 0)
+			return ret;
+		if (ret > 0)
+			return 0;
+		ret = queue_ladder_enqueue(ctx, p, enq_flags, fine,
+					   callback_started_at);
+		if (ret == -EAGAIN)
+			return queue_transition_enqueue(ctx, p, enq_flags, fine);
+		if (ret)
+			return ret;
+		stage_started_at = fine_timing_start(fine);
+		fine_timing_finish(fine, SNAKE_FINE_TIMING_ENQUEUE_FINISH,
+				   stage_started_at);
+		return 0;
+	}
+
+	slice = fairness_dispatch_slice(ctx, p, true);
+	cell_enqueued = try_enqueue_task_cell(
+		ctx, p, enq_flags, slice, fine, callback_started_at);
 	if (cell_enqueued < 0)
 		return cell_enqueued;
 	if (cell_enqueued > 0)

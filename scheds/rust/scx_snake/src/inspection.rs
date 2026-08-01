@@ -697,7 +697,7 @@ fn opcode_reference(policy: &CompiledPolicy, rung: &CompiledRung) -> FieldRefere
         (
             Opcode::ClaimIdle,
             "Claim idle CPU",
-            "Claim the previous CPU when it is idle.",
+            "Claim the previous CPU when it is idle and belongs to the selected scope.",
         ),
         (
             Opcode::PickIdle,
@@ -727,7 +727,7 @@ fn opcode_reference(policy: &CompiledPolicy, rung: &CompiledRung) -> FieldRefere
         (
             Opcode::PickIdleQueueMask,
             "Pick from queue cell",
-            "Pick an idle CPU from the task cell's resolved primary or borrowable mask.",
+            "Pick an idle CPU from an eligible queue-cell scope or restricted task affinity.",
         ),
         (
             Opcode::PickIdlePreferPrevious,
@@ -900,7 +900,7 @@ fn data_reference(policy: &CompiledPolicy, rung: &CompiledRung) -> FieldReferenc
         Opcode::SyncWakeAffine => {
             format!("tables:{},{}", rung.data as u32, (rung.data >> 32) as u32)
         }
-        Opcode::PickIdleQueueMask | Opcode::PickIdlePreferPrevious
+        Opcode::ClaimIdle | Opcode::PickIdleQueueMask | Opcode::PickIdlePreferPrevious
             if rung.input == InputSource::QueueCell =>
         {
             format!("queue_mask:{}", rung.data)
@@ -922,7 +922,7 @@ fn data_reference(policy: &CompiledPolicy, rung: &CompiledRung) -> FieldReferenc
         Opcode::PickIdleMaskTable => 1,
         Opcode::PickRandomIdle if rung.input != InputSource::MaskTaskAllowed => 1,
         Opcode::SyncWakeAffine => 2,
-        Opcode::PickIdleQueueMask => 3,
+        Opcode::ClaimIdle | Opcode::PickIdleQueueMask if rung.input == InputSource::QueueCell => 3,
         Opcode::PickIdlePreferPrevious if rung.input == InputSource::QueueCell => 3,
         _ => 0,
     };
@@ -973,8 +973,15 @@ fn valid_rung(rung: CompiledRung, nr_mask_tables: usize) -> bool {
         || rung.flags == RUNG_FLAG_PICK_RANDOM | RUNG_FLAG_PICK_IDLE_CORE;
     (rung.opcode == Opcode::ClaimIdle
         && matches!(rung.flags, 0 | RUNG_FLAG_PICK_IDLE_CORE)
-        && rung.input == InputSource::CpuPrev
-        && rung.data == 0)
+        && ((rung.input == InputSource::CpuPrev && rung.data == 0)
+            || (rung.input == InputSource::QueueCell
+                && matches!(
+                    rung.data,
+                    value if value == QueueMaskKind::Primary as u64
+                        || value == QueueMaskKind::Borrowable as u64
+                        || value == QueueMaskKind::LocalLlc as u64
+                ))
+            || (rung.input == InputSource::TaskAllowedRestricted && rung.data == 0)))
         || (rung.opcode == Opcode::PickIdle
             && matches!(rung.flags, 0 | RUNG_FLAG_PICK_IDLE_CORE)
             && rung.input == InputSource::MaskTaskAllowed
@@ -1001,13 +1008,17 @@ fn valid_rung(rung: CompiledRung, nr_mask_tables: usize) -> bool {
                 || rung.flags == RUNG_FLAG_INTERSECT_TASK_ALLOWED | RUNG_FLAG_PICK_IDLE_CORE)
             && table)
         || (rung.opcode == Opcode::PickIdleQueueMask
-            && rung.input == InputSource::QueueCell
-            && queue_flags
-            && matches!(
-                rung.data,
-                value if value == QueueMaskKind::Primary as u64
-                    || value == QueueMaskKind::Borrowable as u64
-            ))
+            && (((rung.input == InputSource::QueueCell
+                && matches!(
+                    rung.data,
+                    value if value == QueueMaskKind::Primary as u64
+                        || value == QueueMaskKind::Borrowable as u64
+                ))
+                && queue_flags)
+                || (((rung.input == InputSource::QueueCell
+                    && rung.data == QueueMaskKind::LocalLlc as u64)
+                    || (rung.input == InputSource::TaskAllowedRestricted && rung.data == 0))
+                    && matches!(rung.flags, 0 | RUNG_FLAG_PICK_IDLE_CORE))))
         || (rung.opcode == Opcode::PickIdlePreferPrevious
             && rung.flags == 0
             && ((rung.input == InputSource::QueueCell
@@ -1056,24 +1067,22 @@ fn scope_name(policy: &CompiledPolicy, rung: &CompiledRung) -> String {
             .find(|table| u64::from(table.id) == rung.data)
             .map(|table| table.name.clone())
             .unwrap_or_else(|| format!("mask_table_{}", rung.data)),
-        (Opcode::PickIdleQueueMask | Opcode::PickIdlePreferPrevious, InputSource::QueueCell)
-            if rung.data == QueueMaskKind::Primary as u64 =>
-        {
-            "task_cell".into()
-        }
-        (Opcode::PickIdleQueueMask | Opcode::PickIdlePreferPrevious, InputSource::QueueCell)
-            if rung.data == QueueMaskKind::Borrowable as u64 =>
-        {
-            "task_cell_borrowable".into()
-        }
-        (Opcode::PickIdlePreferPrevious, InputSource::QueueCell)
-            if rung.data == QueueMaskKind::LocalLlc as u64 =>
-        {
-            "task_cell_llc".into()
-        }
-        (Opcode::PickIdlePreferPrevious, InputSource::TaskAllowedRestricted) => {
-            "task_allowed_restricted".into()
-        }
+        (
+            Opcode::ClaimIdle | Opcode::PickIdleQueueMask | Opcode::PickIdlePreferPrevious,
+            InputSource::QueueCell,
+        ) if rung.data == QueueMaskKind::Primary as u64 => "task_cell".into(),
+        (
+            Opcode::ClaimIdle | Opcode::PickIdleQueueMask | Opcode::PickIdlePreferPrevious,
+            InputSource::QueueCell,
+        ) if rung.data == QueueMaskKind::Borrowable as u64 => "task_cell_borrowable".into(),
+        (
+            Opcode::ClaimIdle | Opcode::PickIdleQueueMask | Opcode::PickIdlePreferPrevious,
+            InputSource::QueueCell,
+        ) if rung.data == QueueMaskKind::LocalLlc as u64 => "task_cell_llc".into(),
+        (
+            Opcode::ClaimIdle | Opcode::PickIdleQueueMask | Opcode::PickIdlePreferPrevious,
+            InputSource::TaskAllowedRestricted,
+        ) => "task_allowed_restricted".into(),
         (_, InputSource::CpuPrev) => "previous_cpu".into(),
         (_, InputSource::MaskTaskAllowed) => "task_allowed".into(),
         (_, InputSource::TaskCell) => "task_cell".into(),
@@ -1161,6 +1170,8 @@ layout = "cell"
 operation = "pick_random_idle_core"
 scope = "task_cell_borrowable"
 "#;
+
+    const MITOSIS_SIM_POLICY: &str = include_str!("../examples/mitosis-sim.toml");
 
     fn slot(slot: u32, generation: u64, source: &str, activated_at_ms: u64) -> SlotPolicy {
         SlotPolicy::new(
@@ -1307,6 +1318,43 @@ scope = "task_cell_borrowable"
             format!("0x{:08x}", RUNG_FLAG_PICK_RANDOM | RUNG_FLAG_PICK_IDLE_CORE)
         );
         assert_eq!(rung.data.selected.value, "queue_mask:2");
+    }
+
+    #[test]
+    fn mitosis_atomic_idle_rungs_round_trip_through_inspection() {
+        let inspector = Inspector::new(
+            slot(0, 4, MITOSIS_SIM_POLICY, 1_000),
+            FairnessMode::Vtime,
+            None,
+        );
+        let view = inspector.snapshot(metrics(4, 1), Vec::new());
+        let rungs = &view.slots[0].policy.as_ref().unwrap().rungs;
+
+        let expected_scopes = [
+            "task_cell_llc",
+            "task_cell",
+            "task_cell_borrowable",
+            "task_allowed_restricted",
+        ];
+        let expected_operations = [
+            "claim_idle_core",
+            "pick_idle_core",
+            "claim_idle",
+            "pick_idle",
+        ];
+        assert_eq!(rungs.len(), 16);
+        for (scope_index, scope) in expected_scopes.into_iter().enumerate() {
+            for (operation_index, operation) in expected_operations.into_iter().enumerate() {
+                let rung = &rungs[scope_index * 4 + operation_index];
+                assert_eq!(rung.operation, operation);
+                assert_eq!(rung.scope, scope);
+                assert!(valid_rung(
+                    policy::compile_policy(MITOSIS_SIM_POLICY).unwrap().rungs
+                        [scope_index * 4 + operation_index],
+                    0,
+                ));
+            }
+        }
     }
 
     #[test]
