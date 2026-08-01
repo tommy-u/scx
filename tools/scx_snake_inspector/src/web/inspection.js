@@ -3209,6 +3209,17 @@ export function nextQueueTopologyTab(selected, key) {
   return tabs[index].id;
 }
 
+export function queueTopologyRenderDelay(interaction = {}, now = Date.now()) {
+  if (interaction.pointerDown || interaction.helpOpen) {
+    return null;
+  }
+  const scrollingUntil = Number(interaction.scrollingUntil);
+  if (!Number.isFinite(scrollingUntil)) {
+    return 0;
+  }
+  return Math.max(0, scrollingUntil - now);
+}
+
 export function queueTopologyHelp() {
   return {
     dsq: "Dispatch queue identifier shown in hexadecimal; Kind decodes the ID family.",

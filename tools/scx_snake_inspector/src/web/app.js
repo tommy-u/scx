@@ -51,6 +51,7 @@ import {
   nextQueueTopologyTab,
   queueTopologyHelp,
   queueTopologyModel,
+  queueTopologyRenderDelay,
   queueTopologyTabModel,
   mergeQueueTimingTopology,
   nanosecondDurationClass,
@@ -200,6 +201,7 @@ const elements = {
   policyView: document.querySelector("#policyView"),
   queueFreshness: document.querySelector("#queueFreshness"),
   queueNotice: document.querySelector("#queueNotice"),
+  queueHelpTooltip: document.querySelector("#queueHelpTooltip"),
   queueTopology: document.querySelector("#queueTopology"),
   queueTopologyView: document.querySelector("#queueTopologyView"),
   primaryNav: document.querySelector("#primaryNav"),
@@ -318,6 +320,10 @@ const state = {
   queueTimingError: null,
   queueTimingLoading: false,
   queueTimingPending: false,
+  queueTopologyHelpTarget: null,
+  queueTopologyPointerDown: false,
+  queueTopologyRenderPending: false,
+  queueTopologyScrollingUntil: 0,
   queueTopologyTab: "activity",
   schedulerControl: null,
   schedulerControlError: null,
@@ -359,6 +365,8 @@ const state = {
   windowMs: initialWindowMs,
   zoom: 1,
 };
+
+let queueTopologyRenderTimer = null;
 
 configureWindowSelector();
 configureCallbackRangeSelector();
@@ -499,6 +507,11 @@ function bindControls() {
     }
   });
   elements.queueTopology.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && state.queueTopologyHelpTarget) {
+      event.preventDefault();
+      hideQueueHelpTooltip();
+      return;
+    }
     const tab = event.target.closest("[data-queue-tab]");
     if (!tab) {
       return;
@@ -539,29 +552,76 @@ function bindControls() {
     selectVtimeCounterTab(tabs[next], true);
   });
   elements.queueTopology.addEventListener("pointerover", (event) => {
+    const help = event.target.closest("[data-queue-help]");
+    if (help) {
+      showQueueHelpTooltip(help, event);
+    }
     const cell = event.target.closest(".dsq-transfer-cell");
     if (cell) {
       highlightDsqTransferCell(cell);
     }
   });
   elements.queueTopology.addEventListener("pointerout", (event) => {
+    const help = event.target.closest("[data-queue-help]");
+    if (help && !help.contains(event.relatedTarget) && document.activeElement !== help) {
+      hideQueueHelpTooltip();
+    }
     const table = event.target.closest(".dsq-transfer-heatmap");
     if (table && !table.contains(event.relatedTarget)) {
       clearDsqTransferHighlight(table);
     }
   });
+  elements.queueTopology.addEventListener("pointermove", (event) => {
+    if (event.target.closest("[data-queue-help]") === state.queueTopologyHelpTarget) {
+      positionQueueHelpTooltip(state.queueTopologyHelpTarget, event);
+    }
+  });
   elements.queueTopology.addEventListener("focusin", (event) => {
+    const help = event.target.closest("[data-queue-help]");
+    if (help) {
+      showQueueHelpTooltip(help);
+    }
     const cell = event.target.closest(".dsq-transfer-cell");
     if (cell) {
       highlightDsqTransferCell(cell);
     }
   });
   elements.queueTopology.addEventListener("focusout", (event) => {
+    const help = event.target.closest("[data-queue-help]");
+    if (help && !help.contains(event.relatedTarget)) {
+      hideQueueHelpTooltip();
+    }
     const table = event.target.closest(".dsq-transfer-heatmap");
     if (table && !table.contains(event.relatedTarget)) {
       clearDsqTransferHighlight(table);
     }
   });
+  elements.queueTopology.addEventListener("wheel", (event) => {
+    if (event.target.closest(".queue-topology-table-wrap")) {
+      markQueueTopologyScrolling();
+    }
+  }, { passive: true });
+  elements.queueTopology.addEventListener("scroll", (event) => {
+    if (event.target.closest?.(".queue-topology-table-wrap")) {
+      markQueueTopologyScrolling();
+      hideQueueHelpTooltip({ flush: false });
+    }
+  }, true);
+  elements.queueTopology.addEventListener("pointerdown", (event) => {
+    if (event.target.closest(".queue-topology-table-wrap")) {
+      state.queueTopologyPointerDown = true;
+    }
+  });
+  const releaseQueueTopologyPointer = () => {
+    if (!state.queueTopologyPointerDown) {
+      return;
+    }
+    state.queueTopologyPointerDown = false;
+    markQueueTopologyScrolling();
+    flushQueueTopologyRender();
+  };
+  document.addEventListener("pointerup", releaseQueueTopologyPointer);
+  document.addEventListener("pointercancel", releaseQueueTopologyPointer);
   document.querySelectorAll('input[name="cpuOrder"]').forEach((control) => {
     control.addEventListener("change", () => {
       state.orderMode = control.value;
@@ -1749,6 +1809,16 @@ function renderRoute({ focusHeading = false } = {}) {
   const parsed = parseInspectorRoute(window.location.hash);
   state.route = parsed.route;
   hideCellBarTooltip();
+  if (state.route !== "inspect/queue-topology") {
+    hideQueueHelpTooltip({ flush: false });
+    state.queueTopologyPointerDown = false;
+    state.queueTopologyRenderPending = false;
+    state.queueTopologyScrollingUntil = 0;
+    if (queueTopologyRenderTimer !== null) {
+      window.clearTimeout(queueTopologyRenderTimer);
+      queueTopologyRenderTimer = null;
+    }
+  }
   if (state.route !== "validate/testing") {
     hideTestingTooltip();
   }
@@ -3222,6 +3292,9 @@ function renderPolicySlots() {
 }
 
 function renderQueueTopologyView() {
+  if (deferQueueTopologyRender()) {
+    return;
+  }
   renderInspectionStatus(elements.queueNotice, elements.queueFreshness);
   if (!state.inspection) {
     elements.queueTopology.replaceChildren();
@@ -3307,8 +3380,97 @@ function renderQueueTabPanel(id, content) {
     >${content}</section>`;
 }
 
+const QUEUE_TOPOLOGY_SCROLL_IDLE_MS = 180;
+
+function scheduleQueueTopologyRender(delay) {
+  if (queueTopologyRenderTimer !== null) {
+    window.clearTimeout(queueTopologyRenderTimer);
+  }
+  queueTopologyRenderTimer = window.setTimeout(() => {
+    queueTopologyRenderTimer = null;
+    renderQueueTopologyView();
+  }, Math.max(16, Math.ceil(delay)));
+}
+
+function markQueueTopologyScrolling() {
+  state.queueTopologyScrollingUntil = Math.max(
+    state.queueTopologyScrollingUntil,
+    Date.now() + QUEUE_TOPOLOGY_SCROLL_IDLE_MS,
+  );
+  if (state.queueTopologyRenderPending && !state.queueTopologyPointerDown) {
+    scheduleQueueTopologyRender(QUEUE_TOPOLOGY_SCROLL_IDLE_MS);
+  }
+}
+
+function flushQueueTopologyRender() {
+  if (state.queueTopologyRenderPending) {
+    renderQueueTopologyView();
+  }
+}
+
+function deferQueueTopologyRender() {
+  const delay = queueTopologyRenderDelay({
+    scrollingUntil: state.queueTopologyScrollingUntil,
+    pointerDown: state.queueTopologyPointerDown,
+    helpOpen: state.queueTopologyHelpTarget !== null,
+  });
+  if (delay === 0) {
+    state.queueTopologyRenderPending = false;
+    if (queueTopologyRenderTimer !== null) {
+      window.clearTimeout(queueTopologyRenderTimer);
+      queueTopologyRenderTimer = null;
+    }
+    return false;
+  }
+  state.queueTopologyRenderPending = true;
+  if (delay !== null) {
+    scheduleQueueTopologyRender(delay);
+  }
+  return true;
+}
+
+function positionQueueHelpTooltip(target, event = null) {
+  const anchor = target.getBoundingClientRect();
+  const tooltip = elements.queueHelpTooltip;
+  const bounds = tooltip.getBoundingClientRect();
+  const anchorX = event?.clientX ?? anchor.left;
+  const anchorY = event?.clientY ?? anchor.bottom;
+  let left = anchorX + 12;
+  let top = anchorY + 12;
+  if (top + bounds.height > window.innerHeight - 8) {
+    top = (event?.clientY ?? anchor.top) - bounds.height - 10;
+  }
+  left = Math.min(left, window.innerWidth - bounds.width - 8);
+  tooltip.style.left = `${Math.max(8, left)}px`;
+  tooltip.style.top = `${Math.max(8, top)}px`;
+}
+
+function showQueueHelpTooltip(target, event = null) {
+  const text = target.dataset.queueHelp;
+  if (!text) {
+    return;
+  }
+  state.queueTopologyHelpTarget = target;
+  elements.queueHelpTooltip.textContent = text;
+  elements.queueHelpTooltip.setAttribute("aria-hidden", "false");
+  elements.queueHelpTooltip.classList.remove("hidden");
+  positionQueueHelpTooltip(target, event);
+}
+
+function hideQueueHelpTooltip({ flush = true } = {}) {
+  if (!state.queueTopologyHelpTarget && elements.queueHelpTooltip.classList.contains("hidden")) {
+    return;
+  }
+  state.queueTopologyHelpTarget = null;
+  elements.queueHelpTooltip.setAttribute("aria-hidden", "true");
+  elements.queueHelpTooltip.classList.add("hidden");
+  if (flush) {
+    flushQueueTopologyRender();
+  }
+}
+
 function queueTableHelp(label, text) {
-  return `<abbr class="queue-table-help" title="${escapeHtml(text)}">${escapeHtml(label)}</abbr>`;
+  return `<abbr class="queue-table-help" tabindex="0" data-queue-help="${escapeHtml(text)}" aria-describedby="queueHelpTooltip">${escapeHtml(label)}</abbr>`;
 }
 
 function renderResolvedQueueTopology() {

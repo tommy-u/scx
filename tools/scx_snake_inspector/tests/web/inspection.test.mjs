@@ -1796,8 +1796,16 @@ test("queue topology help explains DSQ identifiers and fairness applicability", 
 });
 
 test("queue topology renders accessible tab panels and header explainers", () => {
+  const page = readFileSync(
+    new URL("../../src/web/index.html", import.meta.url),
+    "utf8",
+  );
   const script = readFileSync(
     new URL("../../src/web/app.js", import.meta.url),
+    "utf8",
+  );
+  const styles = readFileSync(
+    new URL("../../src/web/style.css", import.meta.url),
     "utf8",
   );
 
@@ -1808,6 +1816,43 @@ test("queue topology renders accessible tab panels and header explainers", () =>
   assert.match(script, /queueTableHelp\("DSQ"/);
   assert.match(script, /queueTableHelp\("Kind"/);
   assert.match(script, /queueTableHelp\("Class"/);
+  assert.match(page, /id="queueHelpTooltip"[^>]*role="tooltip"/);
+  assert.match(script, /data-queue-help=/);
+  assert.match(script, /aria-describedby="queueHelpTooltip"/);
+  assert.match(styles, /\.queue-help-tooltip\s*\{/);
+});
+
+test("queue topology defers polled replacement during direct table interaction", () => {
+  assert.equal(typeof inspectionState.queueTopologyRenderDelay, "function");
+  if (typeof inspectionState.queueTopologyRenderDelay !== "function") {
+    return;
+  }
+
+  assert.equal(inspectionState.queueTopologyRenderDelay({}, 1_000), 0);
+  assert.equal(
+    inspectionState.queueTopologyRenderDelay({ scrollingUntil: 1_240 }, 1_000),
+    240,
+  );
+  assert.equal(
+    inspectionState.queueTopologyRenderDelay({ scrollingUntil: 900 }, 1_000),
+    0,
+  );
+  assert.equal(
+    inspectionState.queueTopologyRenderDelay({ pointerDown: true }, 1_000),
+    null,
+  );
+  assert.equal(
+    inspectionState.queueTopologyRenderDelay({ helpOpen: true }, 1_000),
+    null,
+  );
+
+  const script = readFileSync(
+    new URL("../../src/web/app.js", import.meta.url),
+    "utf8",
+  );
+  assert.match(script, /addEventListener\("wheel"/);
+  assert.match(script, /addEventListener\("scroll"/);
+  assert.match(script, /queueTopologyRenderDelay\(/);
 });
 
 test("callback page contains the fine timing panel host", () => {
