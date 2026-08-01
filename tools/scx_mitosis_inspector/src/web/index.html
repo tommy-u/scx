@@ -150,6 +150,30 @@
           </div>
         </section>
 
+        <section class="table-section" aria-labelledby="softirqHeading" data-feedback-key="Callbacks:Softirq-latency">
+          <div class="table-section-heading">
+            <h2 id="softirqHeading">Softirq activity</h2>
+            <p>Exact entry and duration counters</p>
+          </div>
+          <div class="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">Vector</th>
+                  <th scope="col">Total</th>
+                  <th scope="col">Rate / second</th>
+                  <th scope="col">Samples</th>
+                  <th scope="col">Mean (ns)</th>
+                  <th scope="col">p50 approx. (ns)</th>
+                  <th scope="col">p95 approx. (ns)</th>
+                  <th scope="col">p99 approx. (ns)</th>
+                </tr>
+              </thead>
+              <tbody id="softirqRows"></tbody>
+            </table>
+          </div>
+        </section>
+
         <section class="table-section" aria-labelledby="schedulerTimingHeading" data-feedback-key="Callbacks:Scheduler-latency">
           <div class="table-section-heading">
             <h2 id="schedulerTimingHeading">Scheduler latency</h2>

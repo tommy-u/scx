@@ -6,6 +6,7 @@ const rate = new Intl.NumberFormat("en-US", { maximumFractionDigits: 1 });
 const callbackTimingRows = document.querySelector("#callbackTimingRows");
 const schedulerTimingRows = document.querySelector("#schedulerTimingRows");
 const schedulerEventRows = document.querySelector("#schedulerEventRows");
+const softirqRows = document.querySelector("#softirqRows");
 const migrationRows = document.querySelector("#migrationRows");
 const cpuUtilizationRows = document.querySelector("#cpuUtilizationRows");
 const llcUtilizationRows = document.querySelector("#llcUtilizationRows");
@@ -71,6 +72,19 @@ function renderSchedulerEvents(events) {
     event.metric.replaceAll("_", " "),
     number.format(event.count),
     rate.format(event.rate_per_second),
+  ])));
+}
+
+function renderSoftirqs(rows) {
+  softirqRows.replaceChildren(...rows.map((row) => tableRow([
+    `${row.vector} ${row.name}`,
+    number.format(row.count),
+    rate.format(row.rate_per_second),
+    number.format(row.samples),
+    timingValue(row.mean_ns),
+    timingValue(row.p50_ns),
+    timingValue(row.p95_ns),
+    timingValue(row.p99_ns),
   ])));
 }
 
@@ -198,6 +212,7 @@ function render(snapshot) {
   document.querySelector("#refreshed").textContent = new Date().toLocaleTimeString();
   renderTimings(snapshot);
   renderSchedulerEvents(snapshot.scheduler_events);
+  renderSoftirqs(snapshot.softirqs);
   renderMigrations(snapshot.migrations);
   renderCpuBreakdown(snapshot);
   renderBpfPrograms(snapshot.bpf_program_stats);
