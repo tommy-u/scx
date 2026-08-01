@@ -71,6 +71,10 @@ function render(snapshot) {
   renderKeyValues(document.querySelector("#systemCpuRows"), snapshot.cpu, {
     busy_pct: pct, user_pct: pct, system_pct: pct, iowait_pct: pct, steal_pct: pct,
   });
+  renderKeyValues(document.querySelector("#schedExtRows"), snapshot.sched_ext, {
+    state: (value) => value,
+    switch_all: (value) => value ? "yes" : "no",
+  });
   renderPressure(snapshot.pressure);
   renderKeyValues(document.querySelector("#memoryRows"), snapshot.memory, {
     total_bytes: bytes,
