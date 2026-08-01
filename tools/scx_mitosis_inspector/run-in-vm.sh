@@ -10,9 +10,12 @@ cell_parent_arg=/workload.slice/workload-tw.slice
 cell_parent=/sys/fs/cgroup${cell_parent_arg}
 cell_names=(inspector-a.service inspector-b.service)
 workers_per_cell=${MITOSIS_WORKERS_PER_CELL:-4}
+waker_interval=${MITOSIS_WAKER_INTERVAL_SECONDS:-0.02}
 scheduler_log=/tmp/scx-mitosis.log
 scheduler_pid=
 workload_pids=()
+waker_fifo=/tmp/scx-mitosis-waker-$$
+waker_timer_fifo=/tmp/scx-mitosis-waker-timer-$$
 
 scheduler_args=(
     --exit-dump-len 1048576
@@ -29,6 +32,7 @@ cleanup() {
         kill "${workload_pids[@]}" 2>/dev/null || true
         wait "${workload_pids[@]}" 2>/dev/null || true
     fi
+    rm -f "${waker_fifo}" "${waker_timer_fifo}"
     if [[ -n ${scheduler_pid} ]]; then
         kill -INT "${scheduler_pid}" 2>/dev/null || true
         wait "${scheduler_pid}" 2>/dev/null || true
@@ -87,6 +91,24 @@ for cell in "${cell_names[@]}"; do
     }
 done
 
+mkfifo "${waker_fifo}" "${waker_timer_fifo}"
+bash -c '
+    echo "$$" >"$1/cgroup.procs"
+    exec 3<>"$2"
+    while IFS= read -r token <&3; do :; done
+' _ "${cell_parent}/${cell_names[0]}" "${waker_fifo}" &
+workload_pids+=("$!")
+bash -c '
+    echo "$$" >"$1/cgroup.procs"
+    exec 3<>"$2" 4<>"$3"
+    while :; do
+        IFS= read -r -t "$4" token <&4 || true
+        printf ".\n" >&3
+    done
+' _ "${cell_parent}/${cell_names[1]}" "${waker_fifo}" "${waker_timer_fifo}" "${waker_interval}" &
+workload_pids+=("$!")
+
 echo "scx_mitosis attached on $(nproc) CPUs with ${#cell_names[@]} workload cells"
 echo "dummy workloads: ${workers_per_cell} workers each in ${cell_names[*]}"
+echo "waker/wakee: one pipe handoff every ${waker_interval}s across ${cell_names[*]}"
 "${inspector}" --listen 0.0.0.0:44105
