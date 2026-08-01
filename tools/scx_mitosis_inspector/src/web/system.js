@@ -221,5 +221,11 @@ async function refresh() {
   }
 }
 
+window.addEventListener("mitosis:stats-reset", () => {
+  [pressureHistory, frequencyHistory, networkHistory, irqHistory, blockHistory]
+    .forEach((history) => history.clear());
+  drawHistory();
+});
+
 refresh();
 setInterval(refresh, 2000);
