@@ -3,7 +3,7 @@
 // This software may be used and distributed according to the terms of the
 // GNU General Public License version 2.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::mem::MaybeUninit;
 use std::os::fd::{AsRawFd, OwnedFd};
@@ -25,8 +25,9 @@ use crate::{
     build_callback_timing_rows, build_counters, build_cpu_runtime_rows, build_scheduler_event_rows,
     build_timing_metric_row, program_name_matches, project_cpu_runtime, summarize_callback_timing,
     BlockIoMetricsView, CallbackCounter, CallbackTimingCounters, CallbackTimingRow, CpuRuntimeRow,
-    DsqMetricsView, MigrationRow, SchedulerEventRow, SoftirqRow, TimingMetricRow, CALLBACK_NAMES,
-    CALLBACK_TIMING_BUCKETS, SCHEDULER_EVENT_NAMES, SOFTIRQ_NAMES,
+    DsqMetricsView, HardirqMetricsView, HardirqRow, InterruptCpuRow, MigrationRow,
+    SchedulerEventRow, SoftirqRow, TimingMetricRow, CALLBACK_NAMES, CALLBACK_TIMING_BUCKETS,
+    SCHEDULER_EVENT_NAMES, SOFTIRQ_NAMES,
 };
 
 const TARGET_NAMES: [&str; 5] = [
@@ -48,6 +49,12 @@ struct SoftirqMetrics {
     timing: CallbackTimingCounters,
 }
 
+#[derive(Clone)]
+struct SoftirqMetricsSnapshot {
+    rows: Vec<SoftirqMetrics>,
+    cpu_elapsed_ns: Vec<u64>,
+}
+
 #[derive(Clone, Default)]
 struct BlockIoMetrics {
     issue_events: u64,
@@ -59,6 +66,15 @@ struct BlockIoMetrics {
     unmatched_completions: u64,
     tracking_failures: u64,
     latency: CallbackTimingCounters,
+}
+
+#[derive(Clone, Default)]
+struct HardirqMetrics {
+    rows: BTreeMap<u32, SoftirqMetrics>,
+    cpu_elapsed_ns: Vec<u64>,
+    metrics_map_full: u64,
+    starts_map_full: u64,
+    unmatched_exits: u64,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -78,6 +94,8 @@ pub struct Snapshot {
     pub scheduler_events: Vec<SchedulerEventRow>,
     pub softirqs: Vec<SoftirqRow>,
     pub block_io: BlockIoMetricsView,
+    pub interrupt_cpu: Vec<InterruptCpuRow>,
+    pub hardirqs: HardirqMetricsView,
 }
 
 fn find_targets() -> Result<[TargetProgram; 5]> {
@@ -158,7 +176,8 @@ fn attach_programs(
     callback_timing_sample_rate: u32,
     event_timing_sample_rate: u32,
     block_io_supported: bool,
-) -> Result<(Vec<Link>, bool, bool)> {
+    hardirq_supported: bool,
+) -> Result<(Vec<Link>, bool, bool, bool)> {
     let mut links = vec![
         skel.progs.observe_select_cpu.attach_trace()?,
         skel.progs.observe_enqueue.attach_trace()?,
@@ -193,7 +212,8 @@ fn attach_programs(
     }
     let dsq_available = attach_dsq_programs(skel, &mut links);
     let block_io_available = block_io_supported && attach_block_io_programs(skel, &mut links);
-    Ok((links, dsq_available, block_io_available))
+    let hardirq_available = hardirq_supported && attach_hardirq_programs(skel, &mut links);
+    Ok((links, dsq_available, block_io_available, hardirq_available))
 }
 
 fn tracepoint_available(group: &str, event: &str) -> bool {
@@ -234,6 +254,35 @@ fn attach_block_io_programs(skel: &BpfSkel<'_>, links: &mut Vec<Link>) -> bool {
         }
     };
     links.extend([issue, complete]);
+    true
+}
+
+fn configure_hardirq_programs(open_skel: &mut crate::bpf_skel::OpenBpfSkel<'_>) -> bool {
+    let supported = tracepoint_available("irq", "irq_handler_entry")
+        && tracepoint_available("irq", "irq_handler_exit");
+    if !supported {
+        open_skel.progs.hirqo_entry.set_autoload(false);
+        open_skel.progs.hirqo_exit.set_autoload(false);
+    }
+    supported
+}
+
+fn attach_hardirq_programs(skel: &BpfSkel<'_>, links: &mut Vec<Link>) -> bool {
+    let entry = match skel.progs.hirqo_entry.attach() {
+        Ok(link) => link,
+        Err(error) => {
+            eprintln!("hard IRQ observer could not attach entry tracepoint: {error}");
+            return false;
+        }
+    };
+    let exit = match skel.progs.hirqo_exit.attach() {
+        Ok(link) => link,
+        Err(error) => {
+            eprintln!("hard IRQ observer could not attach exit tracepoint: {error}");
+            return false;
+        }
+    };
+    links.extend([entry, exit]);
     true
 }
 
@@ -340,42 +389,48 @@ fn read_scheduler_events(skel: &BpfSkel<'_>) -> Result<[u64; 9]> {
     Ok(totals)
 }
 
-fn read_softirq_metrics(skel: &BpfSkel<'_>) -> Result<Vec<SoftirqMetrics>> {
+fn read_softirq_metrics(skel: &BpfSkel<'_>) -> Result<SoftirqMetricsSnapshot> {
     const U64_BYTES: usize = std::mem::size_of::<u64>();
     const FIELD_COUNT: usize = 2 + CALLBACK_TIMING_BUCKETS;
 
-    (0..SOFTIRQ_NAMES.len())
-        .map(|vector| {
-            let key = (vector as u32).to_ne_bytes();
-            let values = skel
-                .maps
-                .softirq_observer_metrics
-                .lookup_percpu(&key, MapFlags::ANY)?
-                .with_context(|| {
-                    format!("softirq metrics entry {} missing", SOFTIRQ_NAMES[vector])
-                })?;
-            let mut count = 0_u64;
-            let mut timing = CallbackTimingCounters::default();
-            for value in values {
-                if value.len() < FIELD_COUNT * U64_BYTES {
-                    bail!("short softirq metrics value for {}", SOFTIRQ_NAMES[vector]);
-                }
-                let field = |index: usize| -> Result<u64> {
-                    let start = index * U64_BYTES;
-                    Ok(u64::from_ne_bytes(
-                        value[start..start + U64_BYTES].try_into()?,
-                    ))
-                };
-                count = count.saturating_add(field(0)?);
-                timing.total_ns = timing.total_ns.saturating_add(field(1)?);
-                for bucket in 0..CALLBACK_TIMING_BUCKETS {
-                    timing.buckets[bucket] =
-                        timing.buckets[bucket].saturating_add(field(2 + bucket)?);
-                }
+    let mut rows = Vec::with_capacity(SOFTIRQ_NAMES.len());
+    let mut cpu_elapsed_ns = Vec::<u64>::new();
+    for vector in 0..SOFTIRQ_NAMES.len() {
+        let key = (vector as u32).to_ne_bytes();
+        let values = skel
+            .maps
+            .softirq_observer_metrics
+            .lookup_percpu(&key, MapFlags::ANY)?
+            .with_context(|| format!("softirq metrics entry {} missing", SOFTIRQ_NAMES[vector]))?;
+        let mut count = 0_u64;
+        let mut timing = CallbackTimingCounters::default();
+        for (cpu, value) in values.into_iter().enumerate() {
+            if value.len() < FIELD_COUNT * U64_BYTES {
+                bail!("short softirq metrics value for {}", SOFTIRQ_NAMES[vector]);
             }
-            Ok(SoftirqMetrics { count, timing })
-        })
-        .collect()
+            let field = |index: usize| -> Result<u64> {
+                let start = index * U64_BYTES;
+                Ok(u64::from_ne_bytes(
+                    value[start..start + U64_BYTES].try_into()?,
+                ))
+            };
+            count = count.saturating_add(field(0)?);
+            let elapsed_ns = field(1)?;
+            timing.total_ns = timing.total_ns.saturating_add(elapsed_ns);
+            if cpu_elapsed_ns.len() <= cpu {
+                cpu_elapsed_ns.resize(cpu + 1, 0);
+            }
+            cpu_elapsed_ns[cpu] = cpu_elapsed_ns[cpu].saturating_add(elapsed_ns);
+            for bucket in 0..CALLBACK_TIMING_BUCKETS {
+                timing.buckets[bucket] = timing.buckets[bucket].saturating_add(field(2 + bucket)?);
+            }
+        }
+        rows.push(SoftirqMetrics { count, timing });
+    }
+    Ok(SoftirqMetricsSnapshot {
+        rows,
+        cpu_elapsed_ns,
+    })
 }
 
 fn build_softirq_rows(
@@ -484,6 +539,165 @@ fn build_block_io_view(
         latency_p95_ns: latency.p95_ns,
         latency_p99_ns: latency.p99_ns,
     }
+}
+
+fn read_hardirq_metrics(skel: &BpfSkel<'_>, available: bool) -> Result<HardirqMetrics> {
+    const U64_BYTES: usize = std::mem::size_of::<u64>();
+    const FIELD_COUNT: usize = 2 + CALLBACK_TIMING_BUCKETS;
+
+    if !available {
+        return Ok(HardirqMetrics::default());
+    }
+    let mut result = HardirqMetrics::default();
+    for key in skel.maps.hardirq_observer_metrics.keys() {
+        if key.len() != 4 {
+            bail!("invalid hard IRQ key size {}", key.len());
+        }
+        let irq = u32::from_ne_bytes(key[..4].try_into()?);
+        let Some(values) = skel
+            .maps
+            .hardirq_observer_metrics
+            .lookup_percpu(&key, MapFlags::ANY)?
+        else {
+            continue;
+        };
+        let mut metric = SoftirqMetrics {
+            count: 0,
+            timing: CallbackTimingCounters::default(),
+        };
+        for (cpu, value) in values.into_iter().enumerate() {
+            if value.len() < FIELD_COUNT * U64_BYTES {
+                bail!("short hard IRQ metrics value for IRQ {irq}");
+            }
+            let field = |index: usize| -> Result<u64> {
+                let start = index * U64_BYTES;
+                Ok(u64::from_ne_bytes(
+                    value[start..start + U64_BYTES].try_into()?,
+                ))
+            };
+            metric.count = metric.count.saturating_add(field(0)?);
+            let elapsed_ns = field(1)?;
+            metric.timing.total_ns = metric.timing.total_ns.saturating_add(elapsed_ns);
+            if result.cpu_elapsed_ns.len() <= cpu {
+                result.cpu_elapsed_ns.resize(cpu + 1, 0);
+            }
+            result.cpu_elapsed_ns[cpu] = result.cpu_elapsed_ns[cpu].saturating_add(elapsed_ns);
+            for bucket in 0..CALLBACK_TIMING_BUCKETS {
+                metric.timing.buckets[bucket] =
+                    metric.timing.buckets[bucket].saturating_add(field(2 + bucket)?);
+            }
+        }
+        result.rows.insert(irq, metric);
+    }
+
+    let key = 0_u32.to_ne_bytes();
+    if let Some(values) = skel
+        .maps
+        .hardirq_observer_health
+        .lookup_percpu(&key, MapFlags::ANY)?
+    {
+        for value in values {
+            if value.len() < 3 * U64_BYTES {
+                bail!("short hard IRQ health value");
+            }
+            result.metrics_map_full = result
+                .metrics_map_full
+                .saturating_add(u64::from_ne_bytes(value[..8].try_into()?));
+            result.starts_map_full = result
+                .starts_map_full
+                .saturating_add(u64::from_ne_bytes(value[8..16].try_into()?));
+            result.unmatched_exits = result
+                .unmatched_exits
+                .saturating_add(u64::from_ne_bytes(value[16..24].try_into()?));
+        }
+    }
+    Ok(result)
+}
+
+fn build_hardirq_view(
+    current: &HardirqMetrics,
+    previous: &HardirqMetrics,
+    elapsed: Duration,
+    available: bool,
+) -> HardirqMetricsView {
+    let seconds = elapsed.as_secs_f64();
+    let mut rows = current
+        .rows
+        .iter()
+        .map(|(&irq, metric)| {
+            let summary = summarize_callback_timing(&metric.timing);
+            let previous_count = previous.rows.get(&irq).map_or(0, |row| row.count);
+            HardirqRow {
+                irq,
+                count: metric.count,
+                rate_per_second: if seconds > 0.0 {
+                    metric.count.saturating_sub(previous_count) as f64 / seconds
+                } else {
+                    0.0
+                },
+                samples: summary.samples,
+                mean_ns: summary.mean_ns,
+                p50_ns: summary.p50_ns,
+                p95_ns: summary.p95_ns,
+                p99_ns: summary.p99_ns,
+            }
+        })
+        .collect::<Vec<_>>();
+    rows.sort_unstable_by_key(|row| std::cmp::Reverse(row.count));
+    HardirqMetricsView {
+        available,
+        metrics_map_full: current.metrics_map_full,
+        starts_map_full: current.starts_map_full,
+        unmatched_exits: current.unmatched_exits,
+        rows,
+    }
+}
+
+fn build_interrupt_cpu_rows(
+    current_softirq: &SoftirqMetricsSnapshot,
+    previous_softirq: &SoftirqMetricsSnapshot,
+    current_hardirq: &HardirqMetrics,
+    previous_hardirq: &HardirqMetrics,
+    elapsed: Duration,
+) -> Vec<InterruptCpuRow> {
+    let cpu_count = current_softirq
+        .cpu_elapsed_ns
+        .len()
+        .max(current_hardirq.cpu_elapsed_ns.len());
+    let elapsed_ns = elapsed.as_nanos() as f64;
+    (0..cpu_count)
+        .map(|cpu| {
+            let percentage = |current: &[u64], previous: &[u64]| {
+                if elapsed_ns > 0.0 {
+                    (current
+                        .get(cpu)
+                        .copied()
+                        .unwrap_or(0)
+                        .saturating_sub(previous.get(cpu).copied().unwrap_or(0))
+                        as f64
+                        / elapsed_ns
+                        * 100.0)
+                        .clamp(0.0, 100.0)
+                } else {
+                    0.0
+                }
+            };
+            let hardirq = percentage(
+                &current_hardirq.cpu_elapsed_ns,
+                &previous_hardirq.cpu_elapsed_ns,
+            );
+            let softirq = percentage(
+                &current_softirq.cpu_elapsed_ns,
+                &previous_softirq.cpu_elapsed_ns,
+            );
+            InterruptCpuRow {
+                cpu: cpu as u32,
+                hardirq_utilization_pct: hardirq,
+                softirq_utilization_pct: softirq,
+                total_utilization_pct: (hardirq + softirq).clamp(0.0, 100.0),
+            }
+        })
+        .collect()
 }
 
 fn read_callback_timings(skel: &BpfSkel<'_>) -> Result<Vec<CallbackTimingCounters>> {
@@ -712,6 +926,7 @@ pub fn run(
         .context("opening callback collector BPF object")?;
     set_targets(&mut open_skel, &targets).context("setting callback attach targets")?;
     let block_io_supported = configure_block_io_programs(&mut open_skel);
+    let hardirq_supported = configure_hardirq_programs(&mut open_skel);
     let rodata = open_skel
         .maps
         .rodata_data
@@ -722,11 +937,12 @@ pub fn run(
     let skel = open_skel
         .load()
         .context("loading callback collector BPF object")?;
-    let (_links, dsq_available, block_io_available) = attach_programs(
+    let (_links, dsq_available, block_io_available, hardirq_available) = attach_programs(
         &skel,
         callback_timing_sample_rate,
         event_timing_sample_rate,
         block_io_supported,
+        hardirq_supported,
     )
     .context("attaching callback observer programs")?;
 
@@ -735,6 +951,7 @@ pub fn run(
     let mut previous_scheduler_events = read_scheduler_events(&skel)?;
     let mut previous_softirqs = read_softirq_metrics(&skel)?;
     let mut previous_block_io = read_block_io_metrics(&skel, block_io_available)?;
+    let mut previous_hardirqs = read_hardirq_metrics(&skel, hardirq_available)?;
     let callback_timings = read_callback_timings(&skel)?;
     let wakeup_latency = read_wakeup_latency(&skel)?;
     let cpu_slice_duration = read_cpu_slice_duration(&skel)?;
@@ -772,12 +989,29 @@ pub fn run(
                 previous_scheduler_events,
                 Duration::ZERO,
             ),
-            softirqs: build_softirq_rows(&previous_softirqs, &previous_softirqs, Duration::ZERO),
+            softirqs: build_softirq_rows(
+                &previous_softirqs.rows,
+                &previous_softirqs.rows,
+                Duration::ZERO,
+            ),
             block_io: build_block_io_view(
                 &previous_block_io,
                 &previous_block_io,
                 Duration::ZERO,
                 block_io_available,
+            ),
+            interrupt_cpu: build_interrupt_cpu_rows(
+                &previous_softirqs,
+                &previous_softirqs,
+                &previous_hardirqs,
+                &previous_hardirqs,
+                Duration::ZERO,
+            ),
+            hardirqs: build_hardirq_view(
+                &previous_hardirqs,
+                &previous_hardirqs,
+                Duration::ZERO,
+                hardirq_available,
             ),
         };
     }
@@ -792,6 +1026,7 @@ pub fn run(
         let current_scheduler_events = read_scheduler_events(&skel)?;
         let current_softirqs = read_softirq_metrics(&skel)?;
         let current_block_io = read_block_io_metrics(&skel, block_io_available)?;
+        let current_hardirqs = read_hardirq_metrics(&skel, hardirq_available)?;
         let callback_timings = read_callback_timings(&skel)?;
         let wakeup_latency = read_wakeup_latency(&skel)?;
         let cpu_slice_duration = read_cpu_slice_duration(&skel)?;
@@ -824,8 +1059,8 @@ pub fn run(
             elapsed,
         );
         previous_scheduler_events = current_scheduler_events;
-        snapshot.softirqs = build_softirq_rows(&current_softirqs, &previous_softirqs, elapsed);
-        previous_softirqs = current_softirqs;
+        snapshot.softirqs =
+            build_softirq_rows(&current_softirqs.rows, &previous_softirqs.rows, elapsed);
         snapshot.block_io = build_block_io_view(
             &current_block_io,
             &previous_block_io,
@@ -833,6 +1068,21 @@ pub fn run(
             block_io_available,
         );
         previous_block_io = current_block_io;
+        snapshot.interrupt_cpu = build_interrupt_cpu_rows(
+            &current_softirqs,
+            &previous_softirqs,
+            &current_hardirqs,
+            &previous_hardirqs,
+            elapsed,
+        );
+        snapshot.hardirqs = build_hardirq_view(
+            &current_hardirqs,
+            &previous_hardirqs,
+            elapsed,
+            hardirq_available,
+        );
+        previous_softirqs = current_softirqs;
+        previous_hardirqs = current_hardirqs;
         previous_at = now;
     }
     Ok(())

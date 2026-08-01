@@ -67,6 +67,8 @@ fn snapshot() -> Snapshot {
         scheduler_events: Vec::new(),
         softirqs: Vec::new(),
         block_io: Default::default(),
+        interrupt_cpu: Vec::new(),
+        hardirqs: Default::default(),
     }
 }
 
@@ -196,6 +198,7 @@ async fn index_is_the_one_page_inspector() {
     assert!(html.contains("id=\"schedulerEventRows\""));
     assert!(html.contains("id=\"softirqRows\""));
     assert!(html.contains("id=\"blockIoRows\""));
+    assert!(html.contains("id=\"hardirqRows\""));
     assert!(html.contains("/assets/app.js"));
 }
 

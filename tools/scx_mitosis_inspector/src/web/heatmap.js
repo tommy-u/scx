@@ -142,6 +142,21 @@
     return { order, positions, runtimeNs, topology, utilizationPct };
   }
 
+  function buildInterruptUsage(topology, entries, order) {
+    const positions = new Map(order.map((cpu, index) => [cpu, index]));
+    const hardirqPct = new Float64Array(order.length);
+    const softirqPct = new Float64Array(order.length);
+    const totalPct = new Float64Array(order.length);
+    for (const entry of Array.isArray(entries) ? entries : []) {
+      const index = positions.get(cpuId(entry?.cpu));
+      if (index == null) continue;
+      hardirqPct[index] = Math.max(0, Number(entry.hardirq_utilization_pct) || 0);
+      softirqPct[index] = Math.max(0, Number(entry.softirq_utilization_pct) || 0);
+      totalPct[index] = Math.max(0, Number(entry.total_utilization_pct) || 0);
+    }
+    return { hardirqPct, order, positions, softirqPct, topology, totalPct };
+  }
+
   function buildGroupedUsage(usage, identityForCpu) {
     const cpuInfo = new Map(usage.topology.cpus.map((cpu) => [cpu.cpu, cpu]));
     const groups = [];
@@ -264,7 +279,9 @@
     const fitCell = (Math.max(320, viewportWidth) - 104) / count;
     const cellSize = Math.max(2, Math.min(9, fitCell)) * zoom;
     const usageHeight = Math.max(13, Math.min(26, cellSize * 2.5));
-    const usageTop = 20;
+    const irqHeight = Math.max(13, Math.min(26, cellSize * 2.5));
+    const irqTop = 20;
+    const usageTop = irqTop + irqHeight + 4;
     const coreHeight = Math.max(16, Math.min(24, cellSize * 2.5));
     const coreTop = usageTop + usageHeight + 4;
     const llcHeight = Math.max(16, Math.min(24, cellSize * 2.5));
@@ -276,6 +293,8 @@
       coreHeight,
       coreTop,
       height: Math.ceil(margins.top + matrixSize + 46),
+      irqHeight,
+      irqTop,
       llcHeight,
       llcTop,
       margins,
@@ -358,7 +377,7 @@
       context.fillStyle = infernoColor(normalizeCount(utilization, 100, scale));
       context.fillRect(margins.left + index * cellSize, usageTop, Math.ceil(cellSize), usageHeight);
     });
-    drawBandLabel(context, "CPU util", margins.left - 7, usageTop + usageHeight / 2);
+    drawBandLabel(context, "Task util", margins.left - 7, usageTop + usageHeight / 2);
     for (const boundary of topologyBoundaries(usage.topology, usage.order)) {
       const x = margins.left + boundary.index * cellSize;
       context.beginPath();
@@ -366,6 +385,29 @@
       context.strokeStyle = boundary.level === "llc" ? "#ffffff" : "#6f7f8b";
       context.moveTo(x, usageTop);
       context.lineTo(x, usageTop + usageHeight);
+      context.stroke();
+    }
+  }
+
+  function drawInterruptUsage(context, usage, geometry, scale) {
+    const { cellSize, irqHeight, irqTop, margins, matrixSize } = geometry;
+    const maximum = Math.max(1, ...usage.totalPct);
+    context.fillStyle = "#11161c";
+    context.fillRect(margins.left, irqTop, matrixSize, irqHeight);
+    usage.order.forEach((cpu, index) => {
+      const utilization = usage.totalPct[index];
+      if (utilization <= 0) return;
+      context.fillStyle = infernoColor(normalizeCount(utilization, maximum, scale));
+      context.fillRect(margins.left + index * cellSize, irqTop, Math.ceil(cellSize), irqHeight);
+    });
+    drawBandLabel(context, "IRQ util", margins.left - 7, irqTop + irqHeight / 2);
+    for (const boundary of topologyBoundaries(usage.topology, usage.order)) {
+      const x = margins.left + boundary.index * cellSize;
+      context.beginPath();
+      context.lineWidth = boundary.level === "llc" ? 2 : 1;
+      context.strokeStyle = boundary.level === "llc" ? "#ffffff" : "#6f7f8b";
+      context.moveTo(x, irqTop);
+      context.lineTo(x, irqTop + irqHeight);
       context.stroke();
     }
   }
@@ -513,7 +555,23 @@
   function draw() {
     if (!renderer) return;
     const matrix = buildMatrix(renderer.snapshot, renderer);
-    const usage = buildCpuUsage(matrix.topology, renderer.snapshot?.cpu_runtime, matrix.order);
+    const interruptUsage = buildInterruptUsage(
+      matrix.topology,
+      renderer.snapshot?.interrupt_cpu,
+      matrix.order,
+    );
+    const irqByCpu = new Map(interruptUsage.order.map((cpu, index) => [
+      cpu,
+      interruptUsage.totalPct[index],
+    ]));
+    const taskRuntime = (renderer.snapshot?.cpu_runtime || []).map((entry) => ({
+      ...entry,
+      utilization_pct: Math.max(
+        0,
+        Number(entry.utilization_pct || 0) - Number(irqByCpu.get(entry.cpu) || 0),
+      ),
+    }));
+    const usage = buildCpuUsage(matrix.topology, taskRuntime, matrix.order);
     const coreUsage = buildCoreUsage(usage);
     const llcUsage = buildLlcUsage(usage);
     const viewportWidth = Math.max(320, renderer.viewport?.clientWidth || 800);
@@ -549,17 +607,18 @@
     drawBoundaries(context, matrix, geometry);
     drawPinnedPair(context, matrix, geometry);
     drawAxes(context, matrix, geometry);
+    drawInterruptUsage(context, interruptUsage, geometry, renderer.scale);
     drawCpuUsage(context, usage, geometry, renderer.scale);
     drawGroupedUsage(context, coreUsage, geometry, "core", renderer.scale);
     drawGroupedUsage(context, llcUsage, geometry, "llc", renderer.scale);
     drawLlcAnnotations(context, matrix, geometry);
-    renderer.geometry = { ...geometry, coreUsage, llcUsage, matrix, usage };
+    renderer.geometry = { ...geometry, coreUsage, interruptUsage, llcUsage, matrix, usage };
     renderer.legendLow.textContent = number.format(matrix.minPositive);
     renderer.legendHigh.textContent = number.format(matrix.max);
     renderPairInspection(matrix);
     renderer.canvas.setAttribute(
       "aria-label",
-      `CPU migration heatmap with ${number.format(matrix.total)} transitions, CPU utilization, whole-core utilization, and LLC utilization across ${size} CPUs`,
+      `CPU migration heatmap with ${number.format(matrix.total)} transitions, IRQ utilization, task utilization, whole-core utilization, and LLC utilization across ${size} CPUs`,
     );
   }
 
@@ -605,6 +664,19 @@
     const column = Math.floor((canvasX - geometry.margins.left) / geometry.cellSize);
     const row = Math.floor((canvasY - geometry.margins.top) / geometry.cellSize);
     const size = geometry.matrix.order.length;
+    if (column >= 0 && column < size
+        && canvasY >= geometry.irqTop
+        && canvasY < geometry.irqTop + geometry.irqHeight) {
+      const cpu = geometry.interruptUsage.order[column];
+      renderer.tooltip.textContent = [
+        `CPU ${cpu} IRQ utilization`,
+        `Combined: ${geometry.interruptUsage.totalPct[column].toFixed(2)}%`,
+        `Hard IRQ: ${geometry.interruptUsage.hardirqPct[column].toFixed(2)}%`,
+        `Softirq: ${geometry.interruptUsage.softirqPct[column].toFixed(2)}%`,
+      ].join("\n");
+      positionTooltip(event);
+      return;
+    }
     if (column >= 0 && column < size
         && canvasY >= geometry.usageTop
         && canvasY < geometry.usageTop + geometry.usageHeight) {

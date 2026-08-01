@@ -74,6 +74,8 @@ async fn main() -> Result<()> {
         scheduler_events: Vec::new(),
         softirqs: Vec::new(),
         block_io: Default::default(),
+        interrupt_cpu: Vec::new(),
+        hardirqs: Default::default(),
     }));
     let (ready_tx, ready_rx) = mpsc::channel();
     let collector_state = state.clone();
