@@ -7,6 +7,7 @@ const callbackTimingRows = document.querySelector("#callbackTimingRows");
 const schedulerTimingRows = document.querySelector("#schedulerTimingRows");
 const schedulerEventRows = document.querySelector("#schedulerEventRows");
 const softirqRows = document.querySelector("#softirqRows");
+const blockIoRows = document.querySelector("#blockIoRows");
 const migrationRows = document.querySelector("#migrationRows");
 const cpuUtilizationRows = document.querySelector("#cpuUtilizationRows");
 const llcUtilizationRows = document.querySelector("#llcUtilizationRows");
@@ -86,6 +87,31 @@ function renderSoftirqs(rows) {
     timingValue(row.p95_ns),
     timingValue(row.p99_ns),
   ])));
+}
+
+function renderBlockIo(metrics) {
+  document.querySelector("#blockIoStatus").textContent = metrics.available
+    ? "Exact request probes active"
+    : "Block request tracepoints unavailable";
+  const value = (entry) => entry == null ? "--" : number.format(entry);
+  blockIoRows.replaceChildren(...[
+    ["Issue events", value(metrics.issue_events)],
+    ["Issue events / second", rate.format(metrics.issue_rate_per_second)],
+    ["Completion events", value(metrics.completion_events)],
+    ["Completion events / second", rate.format(metrics.completion_rate_per_second)],
+    ["Completed requests", value(metrics.completed_requests)],
+    ["Error events", value(metrics.error_events)],
+    ["Issued bytes", value(metrics.issued_bytes)],
+    ["Completed bytes", value(metrics.completed_bytes)],
+    ["Completed bytes / second", rate.format(metrics.completed_bytes_per_second)],
+    ["Unmatched completions", value(metrics.unmatched_completions)],
+    ["Tracking failures", value(metrics.tracking_failures)],
+    ["Latency samples", value(metrics.latency_samples)],
+    ["Latency mean (ns)", value(metrics.latency_mean_ns)],
+    ["Latency p50 approx. (ns)", value(metrics.latency_p50_ns)],
+    ["Latency p95 approx. (ns)", value(metrics.latency_p95_ns)],
+    ["Latency p99 approx. (ns)", value(metrics.latency_p99_ns)],
+  ].map(tableRow));
 }
 
 function renderMigrations(migrations) {
@@ -213,6 +239,7 @@ function render(snapshot) {
   renderTimings(snapshot);
   renderSchedulerEvents(snapshot.scheduler_events);
   renderSoftirqs(snapshot.softirqs);
+  renderBlockIo(snapshot.block_io);
   renderMigrations(snapshot.migrations);
   renderCpuBreakdown(snapshot);
   renderBpfPrograms(snapshot.bpf_program_stats);

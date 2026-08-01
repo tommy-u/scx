@@ -73,6 +73,7 @@ async fn main() -> Result<()> {
         dsq_metrics: Default::default(),
         scheduler_events: Vec::new(),
         softirqs: Vec::new(),
+        block_io: Default::default(),
     }));
     let (ready_tx, ready_rx) = mpsc::channel();
     let collector_state = state.clone();

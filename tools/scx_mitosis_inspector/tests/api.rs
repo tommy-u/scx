@@ -66,6 +66,7 @@ fn snapshot() -> Snapshot {
         dsq_metrics: Default::default(),
         scheduler_events: Vec::new(),
         softirqs: Vec::new(),
+        block_io: Default::default(),
     }
 }
 
@@ -194,6 +195,7 @@ async fn index_is_the_one_page_inspector() {
     assert!(html.contains("id=\"dsqMetricRows\""));
     assert!(html.contains("id=\"schedulerEventRows\""));
     assert!(html.contains("id=\"softirqRows\""));
+    assert!(html.contains("id=\"blockIoRows\""));
     assert!(html.contains("/assets/app.js"));
 }
 
