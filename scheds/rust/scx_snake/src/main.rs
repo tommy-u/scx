@@ -1664,6 +1664,20 @@ fn aggregate_raw_cell_stats(
                     id: cell.external_id,
                     index: cell.index,
                     runtime_ns: value(dense, bpf_intf::snake_cell_stat_SNAKE_CELL_STAT_RUNTIME_NS)?,
+                    runtime_ns_by_cpu: decode_per_cpu_stat(
+                        &raw[dense * nr_stats
+                            + bpf_intf::snake_cell_stat_SNAKE_CELL_STAT_RUNTIME_NS as usize],
+                    )?
+                    .into_iter()
+                    .enumerate()
+                    .filter_map(|(cpu, runtime_ns)| {
+                        (runtime_ns > 0).then(|| {
+                            u32::try_from(cpu)
+                                .map(|cpu| (cpu, runtime_ns))
+                                .context("CPU index does not fit u32")
+                        })
+                    })
+                    .collect::<Result<_>>()?,
                     primary_runtime_ns: value(
                         dense,
                         bpf_intf::snake_cell_stat_SNAKE_CELL_STAT_PRIMARY_RUNTIME_NS,
@@ -5505,6 +5519,12 @@ scope = "task_allowed"
             .collect()
     }
 
+    fn raw_percpu_cell_stats(cell_count: usize, cpu_count: usize) -> Vec<Vec<Vec<u8>>> {
+        (0..cell_count * bpf_intf::snake_cell_stat_SNAKE_NR_CELL_STATS as usize)
+            .map(|_| vec![0_u64.to_ne_bytes().to_vec(); cpu_count])
+            .collect()
+    }
+
     #[test]
     fn callback_timing_sample_rate_accepts_disabled_and_bounded_powers_of_two() {
         for value in ["0", "1", "2", "64", "4096"] {
@@ -7323,6 +7343,40 @@ scope = "task_cell_borrowable"
         assert_eq!(serialized["dispatch_rungs"]["1"]["selected"], 6);
         assert_eq!(serialized["dispatch_rungs"]["3"]["move_misses"], 3);
         assert_eq!(serialized["dispatch_rungs"]["2"]["fallback_hits"], 12);
+    }
+
+    #[test]
+    fn aggregates_cell_runtime_without_discarding_cpu_attribution() {
+        let topology = queue_topology::QueueTopology {
+            layout: policy::QueueLayout::Cell,
+            nr_clock_domains: 1,
+            cells: vec![queue_topology::QueueCell {
+                index: 0,
+                external_id: 7,
+                slot_epoch: 0,
+                cpu_weight: 100,
+                primary: BTreeSet::from([0, 2]),
+                borrowable: BTreeSet::new(),
+                normal_queues: vec![],
+            }],
+            cell_index_by_id: BTreeMap::from([(7, 0)]),
+            normal_queues: vec![],
+            cpu_queues: BTreeMap::new(),
+        };
+        let mut raw = raw_percpu_cell_stats(1, 3);
+        set_stat(
+            &mut raw,
+            bpf_intf::snake_cell_stat_SNAKE_CELL_STAT_RUNTIME_NS,
+            &[2_500, 0, 7_500],
+        );
+
+        let cells = aggregate_raw_cell_stats(&raw, &topology).unwrap();
+
+        assert_eq!(cells[&7].runtime_ns, 10_000);
+        assert_eq!(
+            cells[&7].runtime_ns_by_cpu,
+            BTreeMap::from([(0, 2_500), (2, 7_500)])
+        );
     }
 
     #[test]

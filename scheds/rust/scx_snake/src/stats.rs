@@ -197,6 +197,9 @@ pub struct CellMetrics {
     pub index: u32,
     #[stat(desc = "Runtime charged to tasks in this cell")]
     pub runtime_ns: u64,
+    #[stat(desc = "Per-CPU runtime charged to tasks in this cell", _om_skip)]
+    #[serde(default)]
+    pub runtime_ns_by_cpu: BTreeMap<u32, u64>,
     #[stat(desc = "Runtime consumed on CPUs owned by this cell")]
     pub primary_runtime_ns: u64,
     #[stat(desc = "Runtime this cell consumed on CPUs owned by other cells")]
@@ -222,6 +225,15 @@ impl CellMetrics {
             id: self.id,
             index: self.index,
             runtime_ns: self.runtime_ns.saturating_sub(previous.runtime_ns),
+            runtime_ns_by_cpu: self
+                .runtime_ns_by_cpu
+                .iter()
+                .filter_map(|(&cpu, &runtime_ns)| {
+                    let delta = runtime_ns
+                        .saturating_sub(previous.runtime_ns_by_cpu.get(&cpu).copied().unwrap_or(0));
+                    (delta > 0).then_some((cpu, delta))
+                })
+                .collect(),
             primary_runtime_ns: self
                 .primary_runtime_ns
                 .saturating_sub(previous.primary_runtime_ns),
@@ -1196,6 +1208,32 @@ mod tests {
     }
 
     #[test]
+    fn cell_delta_preserves_per_cpu_runtime_attribution() {
+        let previous = CellMetrics {
+            id: 7,
+            index: 2,
+            runtime_ns: 5_000,
+            runtime_ns_by_cpu: BTreeMap::from([(0, 1_000), (3, 4_000)]),
+            ..Default::default()
+        };
+        let current = CellMetrics {
+            id: 7,
+            index: 2,
+            runtime_ns: 6_000,
+            runtime_ns_by_cpu: BTreeMap::from([(0, 1_750), (3, 4_250)]),
+            ..Default::default()
+        };
+
+        let delta = current.delta(Some(&previous));
+
+        assert_eq!(delta.runtime_ns, 1_000);
+        assert_eq!(
+            delta.runtime_ns_by_cpu,
+            BTreeMap::from([(0, 750), (3, 250)])
+        );
+    }
+
+    #[test]
     fn generation_change_uses_the_new_generation_as_a_fresh_baseline() {
         let previous = Metrics {
             policy_generation: 7,
@@ -1260,5 +1298,28 @@ mod tests {
         assert_eq!(parsed["cpus"]["2"]["cpu"], 2);
         assert_eq!(parsed["cpus"]["2"]["runtime_ns"], 8_500);
         assert_eq!(parsed["rungs"]["0"]["operation"], "claim_idle");
+    }
+
+    #[test]
+    fn ndjson_exposes_per_cell_cpu_runtime() {
+        let metrics = Metrics {
+            cells: BTreeMap::from([(
+                7,
+                CellMetrics {
+                    id: 7,
+                    index: 2,
+                    runtime_ns: 10_000,
+                    runtime_ns_by_cpu: BTreeMap::from([(1, 2_500), (9, 7_500)]),
+                    ..Default::default()
+                },
+            )]),
+            ..Default::default()
+        };
+
+        let encoded = metrics.to_ndjson().expect("metrics should serialize");
+        let parsed: serde_json::Value = serde_json::from_str(encoded.trim_end()).unwrap();
+
+        assert_eq!(parsed["cells"]["7"]["runtime_ns_by_cpu"]["1"], 2_500);
+        assert_eq!(parsed["cells"]["7"]["runtime_ns_by_cpu"]["9"], 7_500);
     }
 }
