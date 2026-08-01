@@ -72,6 +72,35 @@ pub struct BlockIoMetricsView {
     pub latency_p99_ns: Option<u64>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+pub struct InterruptCpuRow {
+    pub cpu: u32,
+    pub hardirq_utilization_pct: f64,
+    pub softirq_utilization_pct: f64,
+    pub total_utilization_pct: f64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct HardirqRow {
+    pub irq: u32,
+    pub count: u64,
+    pub rate_per_second: f64,
+    pub samples: u64,
+    pub mean_ns: Option<u64>,
+    pub p50_ns: Option<u64>,
+    pub p95_ns: Option<u64>,
+    pub p99_ns: Option<u64>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct HardirqMetricsView {
+    pub available: bool,
+    pub metrics_map_full: u64,
+    pub starts_map_full: u64,
+    pub unmatched_exits: u64,
+    pub rows: Vec<HardirqRow>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CallbackTimingCounters {
     pub total_ns: u64,

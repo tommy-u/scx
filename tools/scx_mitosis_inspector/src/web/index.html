@@ -174,6 +174,30 @@
           </div>
         </section>
 
+        <section class="table-section" aria-labelledby="hardirqHeading" data-feedback-key="Callbacks:Hardirq-latency">
+          <div class="table-section-heading">
+            <h2 id="hardirqHeading">Hard IRQ activity</h2>
+            <p id="hardirqStatus">Checking kernel IRQ tracepoints</p>
+          </div>
+          <div class="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">IRQ</th>
+                  <th scope="col">Total</th>
+                  <th scope="col">Rate / second</th>
+                  <th scope="col">Samples</th>
+                  <th scope="col">Mean (ns)</th>
+                  <th scope="col">p50 approx. (ns)</th>
+                  <th scope="col">p95 approx. (ns)</th>
+                  <th scope="col">p99 approx. (ns)</th>
+                </tr>
+              </thead>
+              <tbody id="hardirqRows"></tbody>
+            </table>
+          </div>
+        </section>
+
         <section class="table-section" aria-labelledby="blockIoHeading" data-feedback-key="Callbacks:Block-IO">
           <div class="table-section-heading">
             <h2 id="blockIoHeading">Block I/O</h2>
@@ -272,7 +296,7 @@
           <div class="table-section-heading migration-heading">
             <div>
               <h2 id="migrationHeading">CPU migration matrix</h2>
-              <p>Source CPU by destination CPU, with CPU, whole-core, and LLC utilization</p>
+              <p>Source CPU by destination CPU, with IRQ, task, whole-core, and LLC utilization</p>
             </div>
             <div class="heatmap-heading-tools">
               <div class="legend" aria-label="Heat intensity legend">

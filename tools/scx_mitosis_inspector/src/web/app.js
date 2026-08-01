@@ -8,6 +8,7 @@ const schedulerTimingRows = document.querySelector("#schedulerTimingRows");
 const schedulerEventRows = document.querySelector("#schedulerEventRows");
 const softirqRows = document.querySelector("#softirqRows");
 const blockIoRows = document.querySelector("#blockIoRows");
+const hardirqRows = document.querySelector("#hardirqRows");
 const migrationRows = document.querySelector("#migrationRows");
 const cpuUtilizationRows = document.querySelector("#cpuUtilizationRows");
 const llcUtilizationRows = document.querySelector("#llcUtilizationRows");
@@ -112,6 +113,23 @@ function renderBlockIo(metrics) {
     ["Latency p95 approx. (ns)", value(metrics.latency_p95_ns)],
     ["Latency p99 approx. (ns)", value(metrics.latency_p99_ns)],
   ].map(tableRow));
+}
+
+function renderHardirqs(metrics) {
+  const losses = metrics.metrics_map_full + metrics.starts_map_full + metrics.unmatched_exits;
+  document.querySelector("#hardirqStatus").textContent = metrics.available
+    ? `Exact probes active - ${number.format(losses)} correlation losses`
+    : "Hard IRQ tracepoints unavailable";
+  hardirqRows.replaceChildren(...metrics.rows.map((row) => tableRow([
+    number.format(row.irq),
+    number.format(row.count),
+    rate.format(row.rate_per_second),
+    number.format(row.samples),
+    timingValue(row.mean_ns),
+    timingValue(row.p50_ns),
+    timingValue(row.p95_ns),
+    timingValue(row.p99_ns),
+  ])));
 }
 
 function renderMigrations(migrations) {
@@ -240,6 +258,7 @@ function render(snapshot) {
   renderSchedulerEvents(snapshot.scheduler_events);
   renderSoftirqs(snapshot.softirqs);
   renderBlockIo(snapshot.block_io);
+  renderHardirqs(snapshot.hardirqs);
   renderMigrations(snapshot.migrations);
   renderCpuBreakdown(snapshot);
   renderBpfPrograms(snapshot.bpf_program_stats);
