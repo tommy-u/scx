@@ -9,6 +9,8 @@ use std::time::Duration;
 
 use clap::Parser;
 
+use crate::testing::Fairness;
+
 #[derive(Debug, Parser)]
 #[command(name = "scx_snake_inspector", version, about)]
 pub struct Args {
@@ -39,6 +41,14 @@ pub struct Args {
     /// Runtime for each scheduler/workload combination.
     #[arg(long, default_value = "60s", value_parser = parse_duration)]
     pub testing_duration: Duration,
+
+    /// Run only this fairness mode; requires --testing-policy.
+    #[arg(long, requires = "enable_testing")]
+    pub testing_fairness: Option<Fairness>,
+
+    /// Run only this policy ID; requires --testing-fairness.
+    #[arg(long, requires = "enable_testing")]
+    pub testing_policy: Option<String>,
 
     /// Zero-based matrix shard assigned to this inspector.
     #[arg(long, default_value_t = 0)]
@@ -74,6 +84,9 @@ impl Args {
         }
         if self.enable_testing && self.testing_shard_index >= self.testing_shard_count {
             return Err("--testing-shard-index must be less than --testing-shard-count".into());
+        }
+        if self.testing_fairness.is_some() != self.testing_policy.is_some() {
+            return Err("--testing-fairness and --testing-policy must be used together".into());
         }
         Ok(())
     }

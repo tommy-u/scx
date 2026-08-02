@@ -68,6 +68,63 @@ fn matrix_groups_policies_beneath_each_compatible_fairness_mode() {
 }
 
 #[test]
+fn focused_matrix_contains_only_the_selected_fairness_policy_pair() {
+    let catalog = PolicyCatalog {
+        policies: vec![
+            policy("basic.toml", false),
+            policy("cell-queues.toml", true),
+        ],
+        invalid: Vec::new(),
+    };
+    let config = MatrixConfig::new(60, 0, 1)
+        .unwrap()
+        .with_target(&catalog, Fairness::Vtime, "basic.toml")
+        .unwrap();
+
+    let matrix = build_matrix(&catalog, config);
+
+    assert_eq!(matrix.groups.len(), 1);
+    assert_eq!(matrix.groups[0].fairness, Fairness::Vtime);
+    assert_eq!(matrix.groups[0].rows.len(), 1);
+    assert_eq!(matrix.groups[0].rows[0].policy_id, "basic.toml");
+    assert_eq!(matrix.groups[0].rows[0].cases.len(), 4);
+    assert_eq!(matrix.total_cases, 4);
+    assert_eq!(matrix.assigned_cases, 4);
+    assert!(matrix.groups[0].rows[0]
+        .cases
+        .iter()
+        .all(|case| case.id.starts_with("vtime/basic.toml/")));
+}
+
+#[test]
+fn focused_matrix_rejects_unknown_or_incompatible_policies() {
+    let catalog = PolicyCatalog {
+        policies: vec![
+            policy("basic.toml", false),
+            policy("cell-queues.toml", true),
+        ],
+        invalid: Vec::new(),
+    };
+
+    assert_eq!(
+        MatrixConfig::new(60, 0, 1)
+            .unwrap()
+            .with_target(&catalog, Fairness::Fifo, "missing.toml")
+            .unwrap_err()
+            .to_string(),
+        "testing policy missing.toml was not found"
+    );
+    assert_eq!(
+        MatrixConfig::new(60, 0, 1)
+            .unwrap()
+            .with_target(&catalog, Fairness::Fifo, "cell-queues.toml")
+            .unwrap_err()
+            .to_string(),
+        "testing policy cell-queues.toml is incompatible with fifo fairness"
+    );
+}
+
+#[test]
 fn matrix_rejects_short_runs_and_invalid_shards() {
     assert_eq!(
         MatrixConfig::new(59, 0, 1).unwrap_err().to_string(),

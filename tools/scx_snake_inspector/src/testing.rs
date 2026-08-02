@@ -4,6 +4,7 @@
 // GNU General Public License version 2.
 
 use anyhow::{bail, Context, Result};
+use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -74,7 +75,7 @@ pub fn discover_testing_catalog(snake_bin: &Path, policy_dir: &Path) -> Result<P
     Ok(catalog)
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, ValueEnum)]
 #[serde(rename_all = "snake_case")]
 pub enum Fairness {
     Fifo,
@@ -177,11 +178,18 @@ impl WorkloadCommand {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MatrixConfig {
     pub duration_secs: u64,
     pub shard_index: usize,
     pub shard_count: usize,
+    target: Option<MatrixTarget>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct MatrixTarget {
+    fairness: Fairness,
+    policy_id: String,
 }
 
 impl MatrixConfig {
@@ -199,7 +207,33 @@ impl MatrixConfig {
             duration_secs,
             shard_index,
             shard_count,
+            target: None,
         })
+    }
+
+    pub fn with_target(
+        mut self,
+        catalog: &PolicyCatalog,
+        fairness: Fairness,
+        policy_id: impl Into<String>,
+    ) -> Result<Self> {
+        let policy_id = policy_id.into();
+        let policy = catalog
+            .policies
+            .iter()
+            .find(|policy| policy.id == policy_id)
+            .ok_or_else(|| anyhow::anyhow!("testing policy {policy_id} was not found"))?;
+        if !compatible(policy, fairness) {
+            bail!(
+                "testing policy {policy_id} is incompatible with {} fairness",
+                fairness.as_str()
+            );
+        }
+        self.target = Some(MatrixTarget {
+            fairness,
+            policy_id,
+        });
+        Ok(self)
     }
 }
 
@@ -274,12 +308,24 @@ pub fn build_matrix(catalog: &PolicyCatalog, config: MatrixConfig) -> TestMatrix
     let mut ordinal = 0;
     let groups = Fairness::ALL
         .into_iter()
+        .filter(|fairness| {
+            config
+                .target
+                .as_ref()
+                .map_or(true, |target| target.fairness == *fairness)
+        })
         .map(|fairness| FairnessGroup {
             fairness,
             rows: policies
                 .iter()
                 .copied()
                 .filter(|policy| compatible(policy, fairness))
+                .filter(|policy| {
+                    config
+                        .target
+                        .as_ref()
+                        .map_or(true, |target| target.policy_id == policy.id)
+                })
                 .map(|policy| {
                     let skip_reason = skipped_policies.get(policy.id.as_str()).copied();
                     let cases = Workload::ALL
@@ -484,7 +530,7 @@ impl TestingController {
             return self
                 .import_dirs
                 .iter()
-                .map(|import_dir| aggregate_snapshot(catalog, self.config, import_dir))
+                .map(|import_dir| aggregate_snapshot(catalog, &self.config, import_dir))
                 .collect();
         }
         let run = self
@@ -492,7 +538,7 @@ impl TestingController {
             .lock()
             .map_err(|_| anyhow::anyhow!("testing controller lock is poisoned"))?;
         Ok(vec![run.clone().unwrap_or_else(|| {
-            TestRun::new(build_matrix(catalog, self.config))
+            TestRun::new(build_matrix(catalog, self.config.clone()))
         })])
     }
 
@@ -524,7 +570,7 @@ impl TestingController {
         {
             bail!("test run is already running");
         }
-        let mut run = TestRun::new(build_matrix(catalog, self.config));
+        let mut run = TestRun::new(build_matrix(catalog, self.config.clone()));
         run.start()?;
         self.stop_requested.store(false, Ordering::Release);
         if let Some(execution) = &self.execution {
@@ -672,10 +718,10 @@ impl TestingController {
 
 fn aggregate_snapshot(
     catalog: &PolicyCatalog,
-    config: MatrixConfig,
+    config: &MatrixConfig,
     import_dir: &Path,
 ) -> Result<TestRun> {
-    let mut aggregate = TestRun::new(build_matrix(catalog, config));
+    let mut aggregate = TestRun::new(build_matrix(catalog, config.clone()));
     aggregate.campaign_id = import_dir
         .file_name()
         .and_then(|name| name.to_str())
@@ -813,7 +859,7 @@ fn validate_imported_shard(
     expected: &HashMap<String, usize>,
     expected_catalog_fingerprint: &str,
     expected_campaign_id: Option<&str>,
-    config: MatrixConfig,
+    config: &MatrixConfig,
     shard_index: usize,
     path: &Path,
 ) -> Result<()> {

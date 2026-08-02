@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use clap::Parser;
 use scx_snake_inspector::cli::{parse_duration, parse_listen_address, Args};
+use scx_snake_inspector::testing::Fairness;
 
 #[test]
 fn durations_accept_milliseconds_seconds_minutes_and_hours() {
@@ -129,5 +130,46 @@ fn aggregate_view_accepts_multiple_campaign_directories() {
             std::path::PathBuf::from("/tmp/snake-campaign-6.13"),
             std::path::PathBuf::from("/tmp/snake-campaign-6.16"),
         ]
+    );
+}
+
+#[test]
+fn focused_testing_requires_and_parses_a_fairness_policy_pair() {
+    let focused = Args::try_parse_from([
+        "scx_snake_inspector",
+        "--enable-testing",
+        "--testing-fairness",
+        "vtime",
+        "--testing-policy",
+        "basic.toml",
+    ])
+    .unwrap();
+
+    assert_eq!(focused.testing_fairness, Some(Fairness::Vtime));
+    assert_eq!(focused.testing_policy.as_deref(), Some("basic.toml"));
+    assert!(focused.validate().is_ok());
+
+    let fairness_only = Args::try_parse_from([
+        "scx_snake_inspector",
+        "--enable-testing",
+        "--testing-fairness",
+        "fifo",
+    ])
+    .unwrap();
+    assert_eq!(
+        fairness_only.validate().unwrap_err(),
+        "--testing-fairness and --testing-policy must be used together"
+    );
+
+    let policy_only = Args::try_parse_from([
+        "scx_snake_inspector",
+        "--enable-testing",
+        "--testing-policy",
+        "basic.toml",
+    ])
+    .unwrap();
+    assert_eq!(
+        policy_only.validate().unwrap_err(),
+        "--testing-fairness and --testing-policy must be used together"
     );
 }

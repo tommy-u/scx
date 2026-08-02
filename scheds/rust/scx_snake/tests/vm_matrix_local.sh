@@ -10,6 +10,8 @@ snake_bin=${2:-${repo}/target/release/scx_snake}
 campaign_dir=${3:-/tmp/scx-snake-testing/campaign-$(date +%Y%m%d-%H%M%S)}
 source_policy_dir=${SNAKE_TESTING_POLICY_DIR:-${repo}/scheds/rust/scx_snake/examples}
 testing_profile=${SNAKE_TESTING_PROFILE:-default}
+testing_fairness=${SNAKE_TESTING_FAIRNESS:-}
+testing_policy=${SNAKE_TESTING_POLICY:-}
 vm_timeout_secs=${SNAKE_TESTING_VM_TIMEOUT_SECS:-}
 case_budget_secs=${SNAKE_TESTING_CASE_BUDGET_SECS:-105}
 vng=${VNG:-vng}
@@ -64,6 +66,19 @@ command -v timeout >/dev/null || fail "timeout is required"
 [[ ${case_budget_secs} =~ ^[1-9][0-9]*$ ]] || fail "SNAKE_TESTING_CASE_BUDGET_SECS must be positive"
 [[ -z ${vm_timeout_secs} || ${vm_timeout_secs} =~ ^[1-9][0-9]*$ ]] ||
     fail "SNAKE_TESTING_VM_TIMEOUT_SECS must be positive"
+if [[ -n ${testing_fairness} && -z ${testing_policy} ]] ||
+    [[ -z ${testing_fairness} && -n ${testing_policy} ]]; then
+    fail "SNAKE_TESTING_FAIRNESS and SNAKE_TESTING_POLICY must be used together"
+fi
+if [[ -n ${testing_fairness} ]]; then
+    case ${testing_fairness} in
+        fifo | vtime | eevdf) ;;
+        *) fail "unknown SNAKE_TESTING_FAIRNESS: ${testing_fairness}" ;;
+    esac
+    [[ ${testing_policy} != */* ]] || fail "SNAKE_TESTING_POLICY must be a direct policy ID"
+    [[ -f ${source_policy_dir}/${testing_policy} && ! -L ${source_policy_dir}/${testing_policy} ]] ||
+        fail "testing policy does not exist: ${testing_policy}"
+fi
 [[ -x ${inspector_bin} ]] || fail "inspector binary is not executable: ${inspector_bin}"
 [[ -x ${snake_bin} ]] || fail "Snake binary is not executable: ${snake_bin}"
 [[ -d ${source_policy_dir} ]] || fail "policy directory does not exist: ${source_policy_dir}"
@@ -96,8 +111,12 @@ inspector_bin=${snapshot_inspector}
 policy_dir=${snapshot_policies}
 policy_count=$(find "${policy_dir}" -maxdepth 1 -type f -name '*.toml' | wc -l)
 (( policy_count > 0 )) || fail "snapshot contains no TOML policies"
-# Every policy can contribute at most three fairness modes by four workloads.
-max_cases_per_shard=$(((policy_count * 12 + shard_count - 1) / shard_count))
+if [[ -n ${testing_fairness} ]]; then
+    max_cases_per_shard=$(((4 + shard_count - 1) / shard_count))
+else
+    # Every policy can contribute at most three fairness modes by four workloads.
+    max_cases_per_shard=$(((policy_count * 12 + shard_count - 1) / shard_count))
+fi
 if [[ -z ${vm_timeout_secs} ]]; then
     vm_timeout_secs=$((max_cases_per_shard * case_budget_secs + 180))
 fi
@@ -105,27 +124,52 @@ fi
 echo "Campaign: ${campaign_dir}"
 echo "Profile: ${testing_profile} (${shard_count} shards, ${guest_cpus} CPUs, ${guest_memory} memory each)"
 echo "Aggregate UI command:"
-printf '  %q --listen 127.0.0.1:8788 --snake-bin %q --policy-dir %q --enable-testing --testing-isolated --testing-duration 60s --testing-shard-count %q --testing-import-dir %q\n' \
-    "${inspector_bin}" "${snake_bin}" "${policy_dir}" \
-    "${shard_count}" "${campaign_dir}"
+aggregate_command=(
+    "${inspector_bin}"
+    --listen 127.0.0.1:8788
+    --snake-bin "${snake_bin}"
+    --policy-dir "${policy_dir}"
+    --enable-testing
+    --testing-isolated
+    --testing-duration 60s
+    --testing-shard-count "${shard_count}"
+)
+if [[ -n ${testing_fairness} ]]; then
+    aggregate_command+=(--testing-fairness "${testing_fairness}" --testing-policy "${testing_policy}")
+fi
+aggregate_command+=(--testing-import-dir "${campaign_dir}")
+printf '  '
+printf '%q ' "${aggregate_command[@]}"
+printf '\n'
 
 declare -a shard_pids
 for ((shard = 0; shard < shard_count; shard++)); do
     shard_dir=${campaign_dir}/shard-${shard}
     mkdir -p "${shard_dir}"
-    printf -v shard_command '%q %q %q %q %q %q %q' \
-        "${snapshot_shard}" \
-        "${inspector_bin}" \
-        "${snake_bin}" \
-        "${shard}" \
-        "${shard_count}" \
-        "${shard_dir}" \
+    shard_args=(
+        "${snapshot_shard}"
+        "${inspector_bin}"
+        "${snake_bin}"
+        "${shard}"
+        "${shard_count}"
+        "${shard_dir}"
         "${policy_dir}"
+    )
+    if [[ -n ${testing_fairness} ]]; then
+        shard_args+=("${testing_fairness}" "${testing_policy}")
+    fi
+    printf -v shard_command '%q ' "${shard_args[@]}"
+    shard_command=${shard_command% }
+    guest_script=${campaign_dir}/shard-${shard}-guest.sh
     printf -v vm_boot_command '%q --run --name %q --cpus %q --memory %q --user root --rwdir %q --exec %q' \
         "${vng}" "snake-shard-${shard}" "${guest_cpus}" "${guest_memory}" \
-        "${campaign_dir}" "${shard_command}"
-    printf -v guest_command 'SNAKE_TESTING_VM_BOOT_COMMAND=%q %s' \
-        "${vm_boot_command}" "${shard_command}"
+        "${campaign_dir}" "${guest_script}"
+    {
+        printf '#!/usr/bin/env bash\n'
+        printf 'export SNAKE_TESTING_VM_BOOT_COMMAND=%q\n' "${vm_boot_command}"
+        printf 'exec %s\n' "${shard_command}"
+    } >"${guest_script}"
+    chmod 0555 "${guest_script}"
     (
         rc=0
         marker=${campaign_dir}/shard-${shard}.exit
@@ -149,7 +193,7 @@ for ((shard = 0; shard < shard_count; shard++)); do
             --memory "${guest_memory}" \
             --user root \
             --rwdir "${campaign_dir}" \
-            --exec "${guest_command}" \
+            --exec "${guest_script}" \
             </dev/null &
         vm_pid=$!
         trap stop_vm INT TERM

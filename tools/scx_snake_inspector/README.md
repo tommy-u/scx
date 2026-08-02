@@ -208,6 +208,27 @@ per case plus a three-minute margin. Override the budget with
 `SNAKE_TESTING_CASE_BUDGET_SECS` or set the whole timeout with
 `SNAKE_TESTING_VM_TIMEOUT_SECS`. Campaign directories must be new or empty.
 
+To retest one fairness-policy pair across several kernels and guest sizes, use
+the focused launcher. Each kernel entry names a `vng` executable or wrapper;
+each VM-size entry supplies a CPU count and memory size. One guest runs the four
+workloads for each kernel-size combination, with up to four guests running in
+parallel by default:
+
+```bash
+SNAKE_TESTING_KERNELS='host=/usr/bin/vng 6.16=/path/to/vng-6.16 7.1=/path/to/vng-7.1' \
+SNAKE_TESTING_VM_SIZES='one=1:1G standard=8:4G' \
+  scheds/rust/scx_snake/tests/vm_matrix_focus.sh \
+  vtime basic.toml
+```
+
+The launcher writes one normal campaign directory per combination and a
+`summary.tsv` under the printed run root. It also prints an aggregate Inspector
+command that compares every result. Override concurrency with
+`SNAKE_TESTING_MAX_PARALLEL`; set `SNAKE_TESTING_DRY_RUN=1` to inspect all
+expanded commands without starting guests. The equivalent direct Inspector
+flags are `--testing-fairness` and `--testing-policy`; they must be used
+together, including when importing focused campaigns.
+
 The listen address is intentionally restricted to loopback. The page remains
 available while Snake is stopped and starts a fresh history whenever Snake's
 `enable_seq` changes.

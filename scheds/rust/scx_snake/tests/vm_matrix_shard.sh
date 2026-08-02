@@ -11,6 +11,8 @@ shard_index=${3:-0}
 shard_count=${4:-8}
 artifact_dir=${5:-${repo}/artifacts/snake-testing/shard-${shard_index}}
 policy_dir=${6:-${repo}/scheds/rust/scx_snake/examples}
+testing_fairness=${7:-}
+testing_policy=${8:-}
 listen=${SNAKE_TESTING_LISTEN:-127.0.0.1:8788}
 base_url=http://${listen}
 inspector_pid=
@@ -44,6 +46,21 @@ fi
 [[ -x ${inspector_bin} ]] || fail "inspector binary is not executable: ${inspector_bin}"
 [[ -x ${snake_bin} ]] || fail "Snake binary is not executable: ${snake_bin}"
 [[ -d ${policy_dir} ]] || fail "policy directory does not exist: ${policy_dir}"
+if [[ -n ${testing_fairness} && -z ${testing_policy} ]] ||
+    [[ -z ${testing_fairness} && -n ${testing_policy} ]]; then
+    fail "testing fairness and policy must be used together"
+fi
+testing_args=()
+if [[ -n ${testing_fairness} ]]; then
+    case ${testing_fairness} in
+        fifo | vtime | eevdf) ;;
+        *) fail "unknown testing fairness: ${testing_fairness}" ;;
+    esac
+    [[ ${testing_policy} != */* ]] || fail "testing policy must be a direct policy ID"
+    [[ -f ${policy_dir}/${testing_policy} && ! -L ${policy_dir}/${testing_policy} ]] ||
+        fail "testing policy does not exist: ${testing_policy}"
+    testing_args+=(--testing-fairness "${testing_fairness}" --testing-policy "${testing_policy}")
+fi
 command -v curl >/dev/null || fail "curl is required"
 command -v jq >/dev/null || fail "jq is required"
 
@@ -58,6 +75,7 @@ mkdir -p "${artifact_dir}"
     --testing-shard-index "${shard_index}" \
     --testing-shard-count "${shard_count}" \
     --testing-artifact-dir "${artifact_dir}" \
+    "${testing_args[@]}" \
     >"${artifact_dir}/inspector.log" 2>&1 &
 inspector_pid=$!
 

@@ -39,12 +39,23 @@ async fn main() -> Result<()> {
     let launcher = SnakeLauncher::new(&args.snake_bin, &args.policy_dir)?;
     let testing = if args.enable_testing {
         let duration_secs = args.testing_duration.as_secs();
+        let catalog = discover_testing_catalog(&args.snake_bin, &args.policy_dir)?;
         let matrix = MatrixConfig::new(
             duration_secs,
             args.testing_shard_index,
             args.testing_shard_count,
         )?;
-        let catalog = discover_testing_catalog(&args.snake_bin, &args.policy_dir)?;
+        let matrix = if let Some(fairness) = args.testing_fairness {
+            matrix.with_target(
+                &catalog,
+                fairness,
+                args.testing_policy.as_deref().ok_or_else(|| {
+                    anyhow::anyhow!("--testing-fairness requires --testing-policy")
+                })?,
+            )?
+        } else {
+            matrix
+        };
         let controller = TestingController::new(matrix).with_catalog(catalog);
         Some(if !args.testing_import_dir.is_empty() {
             controller.with_import_dirs(&args.testing_import_dir)

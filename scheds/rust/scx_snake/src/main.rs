@@ -5679,9 +5679,22 @@ scope = "task_allowed"
         assert!(local.contains("max_cases_per_shard="));
         assert!(local.contains("case_budget_secs="));
         assert!(local.contains(".status == \"skipped\""));
+        assert!(local.contains("testing_fairness=${SNAKE_TESTING_FAIRNESS:-}"));
+        assert!(local.contains("testing_policy=${SNAKE_TESTING_POLICY:-}"));
+        assert!(local.contains("shard_args+=(\"${testing_fairness}\" \"${testing_policy}\")"));
+        assert!(local.contains("--testing-fairness"));
+        assert!(local.contains("--testing-policy"));
+        assert!(local.contains("guest_script=${campaign_dir}/shard-${shard}-guest.sh"));
+        assert!(local.contains("--exec \"${guest_script}\""));
+        assert!(local.contains("chmod 0555 \"${guest_script}\""));
+        assert!(!local.contains("guest_command="));
         assert!(!local.contains("SNAKE_TESTING_VM_TIMEOUT_SECS:-2700"));
 
         assert!(shard.contains("policy_dir=${6:-"));
+        assert!(shard.contains("testing_fairness=${7:-}"));
+        assert!(shard.contains("testing_policy=${8:-}"));
+        assert!(shard.contains("--testing-fairness"));
+        assert!(shard.contains("--testing-policy"));
         assert!(shard.contains("assigned_cases=$(jq -er '.matrix.assigned_cases'"));
         assert!(shard.contains("duration_secs=$(jq -er '.matrix.duration_secs'"));
         assert!(shard.contains("case_budget_secs=$((duration_secs + 45))"));
