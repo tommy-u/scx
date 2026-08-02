@@ -97,6 +97,9 @@ run_case vtime_single_runner_rehome \
     "${script_dir}/vtime_single_runner_rehome.sh" "${snake_bin}"
 
 if (( $(nproc) >= 2 )); then
+    run_case vtime_managed_cell_churn \
+        "${script_dir}/vtime_managed_cell_churn.sh" "${snake_bin}" \
+        "${repo}/scheds/rust/scx_snake/examples/mitosis-sim.toml"
     run_case eevdf_mixed_affinity \
         env SNAKE_EEVDF_STALL_ARTIFACT="${artifact}/eevdf-mixed-affinity" \
         "${script_dir}/eevdf_stall_workload.sh" "${snake_bin}" \

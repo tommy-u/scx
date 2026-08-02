@@ -20,7 +20,8 @@ static __always_inline int queue_try_direct_from_enqueue(
 		.prev_cpu = scx_bpf_task_cpu(p),
 		.queue_cell_index = SNAKE_QUEUE_CELL_NONE,
 		.wake_flags = 0,
-		.dispatch_flags = 0,
+		.enqueue_flags = 0,
+		.select_flags = 0,
 		.callback_started_at = callback_started_at,
 		.local_llc_route_cpu = SNAKE_QUEUE_CELL_NONE,
 		.local_llc_cell_index = SNAKE_QUEUE_CELL_NONE,
@@ -54,12 +55,12 @@ static __always_inline int queue_try_direct_from_enqueue(
 		goto out;
 	}
 	if (explicit_direct &&
-	    (walk_args.dispatch_flags & SNAKE_SELECT_F_AFFINITY))
+	    (walk_args.select_flags & SNAKE_SELECT_F_AFFINITY))
 		goto out;
-	if (walk_args.dispatch_flags & SNAKE_SELECT_F_BORROWED)
+	if (walk_args.select_flags & SNAKE_SELECT_F_BORROWED)
 		ret = queue_fairness_direct_borrow(
 			ctx, p, cpu, walk_args.queue_cell_index, fine);
-	else if (walk_args.dispatch_flags & SNAKE_SELECT_F_AFFINITY)
+	else if (walk_args.select_flags & SNAKE_SELECT_F_AFFINITY)
 		ret = queue_fairness_direct_affinity(
 			ctx, p, cpu, walk_args.queue_cell_index, fine);
 	else

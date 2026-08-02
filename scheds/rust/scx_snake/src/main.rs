@@ -5143,7 +5143,8 @@ scope = "task_allowed"
             "s32 prev_cpu;",
             "u32 queue_cell_index;",
             "u64 wake_flags;",
-            "u64 dispatch_flags;",
+            "u64 enqueue_flags;",
+            "u64 select_flags;",
             "u64 callback_started_at;",
             "u64 scope_started_at;",
             "u32 local_llc_route_cpu;",
@@ -5155,7 +5156,7 @@ scope = "task_allowed"
             );
         }
         assert!(!walk_context.contains('*'));
-        assert_eq!(walk_context.matches(';').count(), 8);
+        assert_eq!(walk_context.matches(';').count(), 9);
         assert!(normalized_ladder.contains(
             "static __noinline s32 walk_policy_rung(struct snake_ladder_ctx *ctx, struct task_struct *p, u32 i, struct snake_ladder_walk_args *walk_args)"
         ));
@@ -5239,8 +5240,28 @@ scope = "task_allowed"
         assert!(
             normalized_select.contains("walk_generic_policy_ladder(&ladder_ctx, p, &walk_args)")
         );
-        assert!(normalized_select.contains("dispatch_flags = walk_args.dispatch_flags;"));
+        assert!(normalized_select.contains("enqueue_flags = walk_args.enqueue_flags;"));
+        assert!(normalized_select.contains("select_flags = walk_args.select_flags;"));
         assert!(normalized_select.contains("queue_cell_index = walk_args.queue_cell_index;"));
+    }
+
+    #[test]
+    fn transition_direct_dispatch_keeps_select_metadata_out_of_enqueue_flags() {
+        let bpf_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bpf");
+        let ladder = fs::read_to_string(bpf_dir.join("ladder.h")).unwrap();
+        let main = fs::read_to_string(bpf_dir.join("main.bpf.c")).unwrap();
+        let normalized_ladder = ladder.split_whitespace().collect::<Vec<_>>().join(" ");
+        let normalized_main = main.split_whitespace().collect::<Vec<_>>().join(" ");
+
+        assert!(normalized_ladder.contains("u64 enqueue_flags;"));
+        assert!(normalized_ladder.contains("u64 select_flags;"));
+        assert!(normalized_main.contains("enqueue_flags = walk_args.enqueue_flags;"));
+        assert!(normalized_main.contains("select_flags = walk_args.select_flags;"));
+        assert!(normalized_main.contains(
+            "ret = dsq_insert_local( p, cpu, fairness_dispatch_slice(&ladder_ctx, p, true), enqueue_flags, &fine_timing);"
+        ));
+        assert!(!normalized_main
+            .contains("fairness_dispatch_slice(&ladder_ctx, p, true), select_flags"));
     }
 
     #[test]

@@ -159,12 +159,14 @@ static __noinline s32 snake_select_cpu_impl(struct task_struct *p,
 		.prev_cpu	     = prev_cpu,
 		.queue_cell_index    = SNAKE_QUEUE_CELL_NONE,
 		.wake_flags	     = wake_flags,
-		.dispatch_flags	     = 0,
+		.enqueue_flags	     = 0,
+		.select_flags	     = 0,
 		.callback_started_at = callback_started_at,
 		.local_llc_route_cpu = SNAKE_QUEUE_CELL_NONE,
 		.local_llc_cell_index = SNAKE_QUEUE_CELL_NONE,
 	};
-	u64 dispatch_flags = 0;
+	u64 enqueue_flags = 0;
+	u64 select_flags = 0;
 	u64 fine_stage_started_at =
 		fine_timing_select_start(callback_started_at);
 	u64 select_started_at = bpf_ktime_get_ns();
@@ -189,7 +191,8 @@ static __noinline s32 snake_select_cpu_impl(struct task_struct *p,
 	cpu = expanded_mitosis ?
 		      walk_expanded_mitosis_ladder(&ladder_ctx, p, &walk_args) :
 		      walk_generic_policy_ladder(&ladder_ctx, p, &walk_args);
-	dispatch_flags	      = walk_args.dispatch_flags;
+	enqueue_flags	      = walk_args.enqueue_flags;
+	select_flags	      = walk_args.select_flags;
 	queue_cell_index      = walk_args.queue_cell_index;
 	fine_timing_finish_select(SNAKE_FINE_TIMING_SELECT_POLICY_LADDER,
 				  fine_stage_started_at);
@@ -197,7 +200,7 @@ static __noinline s32 snake_select_cpu_impl(struct task_struct *p,
 		if (queue_topology_enabled()) {
 			if (queue_transition_active())
 				goto direct_dispatch;
-			if (dispatch_flags & SNAKE_SELECT_F_BORROWED) {
+			if (select_flags & SNAKE_SELECT_F_BORROWED) {
 				fine_stage_started_at =
 					fine_timing_select_start(
 						callback_started_at);
@@ -224,12 +227,12 @@ static __noinline s32 snake_select_cpu_impl(struct task_struct *p,
 				goto out_success;
 			}
 			if (queue_direct_dispatch_enabled(&ladder_ctx) &&
-			    !(dispatch_flags & SCX_ENQ_PREEMPT)) {
+			    !(enqueue_flags & SCX_ENQ_PREEMPT)) {
 				if (!queue_cell_mode_enabled())
 					goto direct_dispatch;
 				fine_stage_started_at = fine_timing_select_start(
 					callback_started_at);
-				ret = dispatch_flags & SNAKE_SELECT_F_AFFINITY ?
+				ret = select_flags & SNAKE_SELECT_F_AFFINITY ?
 					      queue_fairness_direct_affinity(
 						      &ladder_ctx, p, cpu,
 						      queue_cell_index, &fine_timing) :
@@ -268,7 +271,7 @@ static __noinline s32 snake_select_cpu_impl(struct task_struct *p,
 		}
 	direct_dispatch:
 		if (fairness_is_ordered() &&
-		    (dispatch_flags & SCX_ENQ_PREEMPT)) {
+		    (enqueue_flags & SCX_ENQ_PREEMPT)) {
 			fine_stage_started_at =
 				fine_timing_select_start(callback_started_at);
 			stat_inc(
@@ -285,7 +288,7 @@ static __noinline s32 snake_select_cpu_impl(struct task_struct *p,
 			fine_timing_select_start(callback_started_at);
 		ret = dsq_insert_local(
 			p, cpu, fairness_dispatch_slice(&ladder_ctx, p, true),
-			dispatch_flags, &fine_timing);
+			enqueue_flags, &fine_timing);
 		fine_timing_finish_select(
 			SNAKE_FINE_TIMING_SELECT_DIRECT_INSERT,
 			fine_stage_started_at);
