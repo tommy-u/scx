@@ -114,6 +114,7 @@ pub struct CellStatsView {
     pub error: Option<String>,
     pub scope: &'static str,
     pub source_policy_generation: Option<u64>,
+    pub source_topology_generation: Option<u64>,
     pub window_ms: u64,
     pub observed_ms: u64,
     pub cells: Vec<CellStatsRowView>,
@@ -306,6 +307,7 @@ pub struct QueueTimingView {
 pub struct SnapshotView {
     pub sequence: u64,
     pub context: RuntimeContextView,
+    pub server_time_ms: u64,
     pub window_ms: u64,
     pub observed_ms: u64,
     pub total: u64,
@@ -939,6 +941,7 @@ impl Dashboard {
         Ok(SnapshotView {
             sequence: live.sequence,
             context: runtime_context(&live),
+            server_time_ms: unix_time_ms(),
             window_ms,
             observed_ms: view.observed_ms,
             total: view.total,
@@ -1031,11 +1034,17 @@ fn cell_stats_view(
     window: Option<&CellMetricWindow>,
 ) -> CellStatsView {
     let source_policy_generation = live.top_policy_generation;
+    let source_topology_generation = live
+        .inspection
+        .as_ref()
+        .and_then(|inspection| inspection.pointer("/topology_lifecycle/current_generation"))
+        .and_then(serde_json::Value::as_u64);
     let empty = |status, error| CellStatsView {
         status,
         error,
         scope: "all_snake_tasks",
         source_policy_generation,
+        source_topology_generation,
         window_ms,
         observed_ms: window.map_or(0, |window| window.observed_ms),
         cells: Vec::new(),
@@ -1137,6 +1146,7 @@ fn cell_stats_view(
         error: None,
         scope: "all_snake_tasks",
         source_policy_generation: Some(source_policy_generation),
+        source_topology_generation,
         window_ms,
         observed_ms: window.observed_ms,
         cells,

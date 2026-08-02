@@ -22,10 +22,13 @@ import {
   topologyBoundaries,
 } from "/assets/heatmap.js";
 import {
+  appendCellRebalanceSample,
   callbackSampleRateOptions,
   captureKeyedRenderState,
   cellLayoutDiagramModel,
   cellQueueFacts,
+  cellRebalanceAnalysisModel,
+  cellRebalanceSample,
   cellStatsModel,
   cellUtilizationModel,
   cellUtilizationSignature,
@@ -159,6 +162,12 @@ const elements = {
   cellUtilizationPanel: document.querySelector("#cellUtilizationPanel"),
   cellUtilizationNotice: document.querySelector("#cellUtilizationNotice"),
   cellUtilizationSummary: document.querySelector("#cellUtilizationSummary"),
+  rebalanceWindow: document.querySelector("#rebalanceWindow"),
+  rebalanceNotice: document.querySelector("#rebalanceNotice"),
+  rebalanceSummary: document.querySelector("#rebalanceSummary"),
+  rebalanceCandidate: document.querySelector("#rebalanceCandidate"),
+  rebalanceTrend: document.querySelector("#rebalanceTrend"),
+  rebalanceCells: document.querySelector("#rebalanceCells"),
   cellServiceWindow: document.querySelector("#cellServiceWindow"),
   capacityTaskLegend: document.querySelector("#capacityTaskLegend"),
   cellUtilizationGrid: document.querySelector("#cellUtilizationGrid"),
@@ -311,6 +320,8 @@ const state = {
   callbackRatePending: false,
   callbackRateDirty: false,
   cellWorkspaceTab: "layout",
+  cellRebalanceCurrent: null,
+  cellRebalanceSamples: [],
   cellUtilizationLastRenderAt: 0,
   cellUtilizationPendingModel: null,
   cellUtilizationRenderSignature: null,
@@ -1335,6 +1346,74 @@ function connectEvents() {
   });
 }
 
+function latestAppliedTopologyChange(lifecycle) {
+  return (lifecycle?.transitions || [])
+    .filter((transition) => transition.outcome === "applied")
+    .reduce((latest, transition) => Math.max(
+      latest,
+      Number(transition.completedAtMs) || 0,
+    ), 0) || null;
+}
+
+function activePolicyIdentity(inspection) {
+  const active = (inspection?.slots || []).find((slot) => (
+    slot.state === "active" || slot.slot === inspection?.active_slot
+  ));
+  const source = active?.policy?.source || JSON.stringify({
+    fairness: inspection?.fairness?.mode_name || null,
+    policy: active?.policy || null,
+  });
+  if (!source) {
+    return null;
+  }
+  let hash = 2_166_136_261;
+  for (let index = 0; index < source.length; index += 1) {
+    hash ^= source.charCodeAt(index);
+    hash = Math.imul(hash, 16_777_619);
+  }
+  return `${inspection?.fairness?.mode_name || "unknown"}:${(hash >>> 0).toString(16)}`;
+}
+
+function buildCellRebalanceCurrent(sampledAtMs = Date.now(), lifecycle = null) {
+  if (!state.snapshot || !state.inspection || !state.topology) {
+    return null;
+  }
+  const lifecycleModel = lifecycle || topologyLifecycleModel(
+    state.inspection.topology_lifecycle,
+  );
+  const utilization = cellUtilizationModel({
+    snapshot: state.snapshot,
+    inspection: state.inspection,
+    topology: state.topology,
+  });
+  const sample = cellRebalanceSample({
+    utilization,
+    context: state.snapshot.context || state.inspectionContext,
+    policyIdentity: activePolicyIdentity(state.inspection),
+    topologyGeneration: lifecycleModel.currentGeneration,
+    topologyChangedAtMs: latestAppliedTopologyChange(lifecycleModel),
+    sampledAtMs: Number(state.snapshot.server_time_ms) || sampledAtMs,
+  });
+  return {
+    snapshotSequence: state.snapshot.sequence,
+    inspectionSequence: state.inspectionSequence,
+    utilization,
+    sample,
+  };
+}
+
+function recordCellRebalanceSample(sampledAtMs = Date.now()) {
+  const current = buildCellRebalanceCurrent(sampledAtMs);
+  if (!current) {
+    return;
+  }
+  state.cellRebalanceCurrent = current;
+  state.cellRebalanceSamples = appendCellRebalanceSample(
+    state.cellRebalanceSamples,
+    current.sample,
+  );
+}
+
 function renderSnapshot() {
   const snapshot = state.snapshot;
   elements.totalMigrations.textContent = numberFormat.format(snapshot.total);
@@ -1362,6 +1441,7 @@ function renderSnapshot() {
   } else {
     hideNotice();
   }
+  recordCellRebalanceSample(state.lastSnapshotAt);
   renderRuntimeContext();
   renderHeatmap();
   if (state.route === "inspect/cells") {
@@ -4671,11 +4751,26 @@ function renderCells() {
     return;
   }
   if (state.cellWorkspaceTab === "utilization") {
-    renderCellUtilization(cellUtilizationModel({
+    const cache = state.cellRebalanceCurrent;
+    const current = cache?.snapshotSequence === state.snapshot?.sequence
+        && cache?.inspectionSequence === state.inspectionSequence
+      ? cache
+      : buildCellRebalanceCurrent(state.lastSnapshotAt || Date.now(), lifecycleModel);
+    const utilization = current?.utilization || cellUtilizationModel({
       snapshot: state.snapshot,
       inspection: state.inspection,
       topology: state.topology,
-    }));
+    });
+    const sample = current?.sample || cellRebalanceSample({ utilization });
+    state.cellRebalanceCurrent = current;
+    utilization.rebalance = cellRebalanceAnalysisModel({
+      utilization,
+      topology: state.topology,
+      sample,
+      samples: state.cellRebalanceSamples,
+      lifecycle: lifecycleModel,
+    });
+    renderCellUtilization(utilization);
     return;
   }
   renderWorkloadCellOptions();
@@ -4923,8 +5018,11 @@ function renderCellLayoutSummary(summary) {
     </dl>`;
 }
 
-function utilizationLlcLabel(llcId) {
-  return llcId == null ? "Unknown LLC" : `LLC ${llcId}`;
+function utilizationLlcLabel(llc) {
+  if (typeof llc !== "object" || llc === null) {
+    return llc == null ? "Unknown LLC" : `LLC ${llc}`;
+  }
+  return rebalanceLocationLabel(llc);
 }
 
 function utilizationCores(runtimeNs, observedMs) {
@@ -4956,11 +5054,12 @@ function renderCellServiceCpu(cpu) {
 }
 
 function renderCellServiceLlc(cell, llc) {
-  const label = utilizationLlcLabel(llc.llcId);
+  const label = utilizationLlcLabel(llc);
+  const renderKey = llc.topologyKey ?? llc.llcId ?? "unknown";
   const cpuCoverage = `${formatCount(llc.cpus.length)} active / ${formatCount(llc.topologyCpuCount)} CPUs`;
   return `
-    <details class="cell-service-llc" data-render-key="util-cell:${cell.id}:llc:${llc.llcId ?? "unknown"}">
-      <summary data-render-key="util-cell:${cell.id}:llc:${llc.llcId ?? "unknown"}:summary">
+    <details class="cell-service-llc" data-render-key="util-cell:${cell.id}:llc:${renderKey}">
+      <summary data-render-key="util-cell:${cell.id}:llc:${renderKey}:summary">
         <span class="utilization-identity"><strong>${escapeHtml(label)}</strong><small>${escapeHtml(cpuCoverage)}</small></span>
         ${renderServiceMeter(llc.capacityPct)}
         <span class="utilization-value"><strong>${formatUtilizationCores(llc.serviceCores)} CPUs</strong><small>${formatPercentage(llc.capacityPct)} full LLC · ${formatPercentage(llc.borrowedRuntimeNs * 100 / Math.max(1, llc.runtimeNs))} borrowed</small></span>
@@ -4972,11 +5071,12 @@ function renderCellServiceLlc(cell, llc) {
 }
 
 function renderCellOwnedLlc(cell, llc) {
-  const label = utilizationLlcLabel(llc.llcId);
+  const label = utilizationLlcLabel(llc);
+  const renderKey = llc.topologyKey ?? llc.llcId ?? "unknown";
   const coverage = `${formatCount(llc.cpuCount)} / ${formatCount(llc.topologyCpuCount)} owned CPUs sampled`;
   return `
-    <details class="host-capacity-llc cell-owned-capacity" data-render-key="util-owned:${cell.id}:llc:${llc.llcId ?? "unknown"}">
-      <summary data-render-key="util-owned:${cell.id}:llc:${llc.llcId ?? "unknown"}:summary">
+    <details class="host-capacity-llc cell-owned-capacity" data-render-key="util-owned:${cell.id}:llc:${renderKey}">
+      <summary data-render-key="util-owned:${cell.id}:llc:${renderKey}:summary">
         <span class="utilization-identity"><strong>${escapeHtml(label)}</strong><small>${escapeHtml(coverage)}</small></span>
         ${renderCapacityStack(llc)}
         <span class="utilization-value"><strong>${formatUtilizationPercentage(capacityBusyPct(llc))} busy</strong><small>${formatUtilizationPercentage(capacityIrqPct(llc))} IRQ</small></span>
@@ -5077,11 +5177,12 @@ function renderHostCpu(cpu) {
 }
 
 function renderHostLlc(llc) {
-  const label = utilizationLlcLabel(llc.llcId);
+  const label = utilizationLlcLabel(llc);
+  const renderKey = llc.topologyKey ?? llc.llcId ?? "unknown";
   const coverage = `${formatCount(llc.cpuCount)} / ${formatCount(llc.topologyCpuCount)} CPUs sampled`;
   return `
-    <details class="host-capacity-llc" data-render-key="host-llc:${llc.llcId ?? "unknown"}">
-      <summary data-render-key="host-llc:${llc.llcId ?? "unknown"}:summary">
+    <details class="host-capacity-llc" data-render-key="host-llc:${renderKey}">
+      <summary data-render-key="host-llc:${renderKey}:summary">
         <span class="utilization-identity"><strong>${escapeHtml(label)}</strong><small>${escapeHtml(coverage)}</small></span>
         ${renderCapacityStack(llc)}
         <span class="utilization-value"><strong>${formatUtilizationPercentage(capacityBusyPct(llc))} busy</strong><small>${formatUtilizationCores(utilizationCores(llc.snakeCapacityNs ?? 0, state.snapshot?.host_cpu_usage_observed_ms || 0))} Snake CPUs</small></span>
@@ -5090,6 +5191,225 @@ function renderHostLlc(llc) {
         ${llc.cpus.map(renderHostCpu).join("")}
       </div>
     </details>`;
+}
+
+function formatRebalancePressure(value) {
+  return Number.isFinite(value) ? formatPercentage(value) : "—";
+}
+
+function formatRebalanceRuntime(value) {
+  if (!Number.isFinite(value)) {
+    return "—";
+  }
+  return `${value < 0 ? "-" : ""}${formatRuntime(Math.abs(value))}`;
+}
+
+function rebalanceLocationLabel(location) {
+  if (location?.llcId == null) {
+    return "Unknown LLC";
+  }
+  const scope = [];
+  if (location.nodeId != null) scope.push(`node ${location.nodeId}`);
+  if (location.packageId != null) scope.push(`package ${location.packageId}`);
+  return `LLC ${location.llcId}${scope.length > 0 ? ` · ${scope.join(" · ")}` : ""}`;
+}
+
+function rebalanceUnitLabel(unit) {
+  const cpus = compactCpuList(unit.cpus);
+  if (unit.kind === "core") {
+    return `Core ${unit.core ?? "unknown"} · ${rebalanceLocationLabel(unit)} · CPUs ${cpus}`;
+  }
+  return `${rebalanceLocationLabel(unit)} · CPUs ${cpus}`;
+}
+
+function rebalanceTrendPath(points) {
+  return points.map((point, index) => {
+    const x = 2 + Math.max(0, Math.min(100, point.xPct)) * 0.96;
+    const y = 4 + Math.max(0, Math.min(100, point.yPct)) * 0.5;
+    return `${index === 0 ? "M" : "L"}${x.toFixed(2)} ${y.toFixed(2)}`;
+  }).join(" ");
+}
+
+function renderRebalanceTrendSvg(points, trend, colorIndex, label, compact = false) {
+  const seriesClass = `series-${colorIndex % 6}`;
+  const segments = new Map();
+  for (const point of points) {
+    const segment = segments.get(point.segment ?? 0) || [];
+    segment.push(point);
+    segments.set(point.segment ?? 0, segment);
+  }
+  const thresholdY = 4 + Math.max(
+    0,
+    Math.min(100, 100 - 100 * 100 / trend.scaleMaxPct),
+  ) * 0.5;
+  const markerLines = compact ? "" : trend.markers.map((marker) => {
+    const x = 2 + Math.max(0, Math.min(100, marker.xPct)) * 0.96;
+    return `<line class="rebalance-topology-marker ${escapeHtml(marker.outcome)}" x1="${x.toFixed(2)}" y1="3" x2="${x.toFixed(2)}" y2="55"><title>${escapeHtml(marker.label)}</title></line>`;
+  }).join("");
+  const paths = [...segments.values()].map((segment) => (
+    segment.length > 1 ? `<path d="${rebalanceTrendPath(segment)}"></path>` : ""
+  )).join("");
+  const pointsMarkup = [...segments.values()].flatMap((segment) => (
+    segment.length === 1 ? segment : []
+  )).map((point) => (
+    `<circle cx="${(2 + point.xPct * 0.96).toFixed(2)}" cy="${(4 + point.yPct * 0.5).toFixed(2)}" r="2.2"></circle>`
+  )).join("");
+  return `
+    <svg class="rebalance-trend-svg ${seriesClass}${compact ? " compact" : ""}"
+      viewBox="0 0 100 58" preserveAspectRatio="none" role="img"
+      aria-label="${escapeHtml(label)}">
+      <title>${escapeHtml(label)}</title>
+      <line class="rebalance-pressure-threshold" x1="2" y1="${thresholdY.toFixed(2)}" x2="98" y2="${thresholdY.toFixed(2)}"><title>100% modeled pressure</title></line>
+      ${markerLines}
+      ${paths}
+      ${pointsMarkup}
+    </svg>`;
+}
+
+function renderRebalanceTrend(model) {
+  const rows = model.trend.series.filter((series) => series.points.length > 0);
+  if (rows.length === 0) {
+    return '<p class="rebalance-empty">Collecting session pressure samples.</p>';
+  }
+  return `
+    <header class="rebalance-subheading">
+      <h4>Session pressure</h4>
+      <span>0–${escapeHtml(formatRebalancePressure(model.trend.scaleMaxPct))}</span>
+    </header>
+    <div class="rebalance-trend-rows">
+      ${rows.map((series) => {
+        const current = series.points[series.points.length - 1];
+        return `<div class="rebalance-trend-row">
+          <span class="rebalance-series-label series-${series.colorIndex % 6}"><i aria-hidden="true"></i><strong>${escapeHtml(series.label)}</strong></span>
+          ${renderRebalanceTrendSvg(
+            series.points,
+            model.trend,
+            series.colorIndex,
+            `${series.label} pressure over this browser session`,
+          )}
+          <strong>${escapeHtml(formatRebalancePressure(current.pressurePct))}</strong>
+        </div>`;
+      }).join("")}
+    </div>
+    ${model.trend.markers.length > 0
+      ? `<ul class="rebalance-marker-list" aria-label="Topology changes in this trend">
+          ${model.trend.markers.map((marker) => `<li><span class="${escapeHtml(marker.outcome)}" aria-hidden="true"></span><strong>${escapeHtml(marker.label)}</strong><time>${escapeHtml(formatTimestamp(marker.completedAtMs))}</time></li>`).join("")}
+        </ul>`
+      : ""}`;
+}
+
+function renderRebalanceCandidate(model) {
+  const candidate = model.candidate;
+  if (!candidate) {
+    return `<p class="rebalance-empty">${escapeHtml(model.candidateMessage || "No transfer candidate is available.")}</p>`;
+  }
+  return `
+    <div class="rebalance-candidate-route">
+      <span><small>Capacity donor</small><strong>${escapeHtml(candidate.sourceCell.label)}</strong></span>
+      <span class="rebalance-route-arrow" aria-hidden="true">→</span>
+      <span><small>Higher pressure</small><strong>${escapeHtml(candidate.targetCell.label)}</strong></span>
+      <span class="rebalance-unit"><small>Modeled transfer</small><strong>${escapeHtml(rebalanceUnitLabel(candidate.unit))}</strong></span>
+    </div>
+    <dl class="rebalance-candidate-facts">
+      <div tabindex="0" title="Effective CPU capacity carried by the complete core or LLC."><dt>Capacity moved</dt><dd>${formatUtilizationCores(candidate.capacityCores)} CPUs</dd></div>
+      <div tabindex="0" title="Difference between the highest and lowest modeled cell pressure."><dt>Pressure spread</dt><dd>${formatRebalancePressure(candidate.beforeSpreadPct)} → ${formatRebalancePressure(candidate.afterSpreadPct)}</dd></div>
+      <div><dt>Donor after</dt><dd>${formatRebalancePressure(candidate.sourcePressureAfterPct)}</dd></div>
+      <div><dt>Target after</dt><dd>${formatRebalancePressure(candidate.targetPressureAfterPct)}</dd></div>
+    </dl>`;
+}
+
+function renderRebalanceLlc(cell, llc, model, series) {
+  const llcSeries = series?.llcs.find((candidate) => (
+    candidate.topologyKey === llc.topologyKey
+  ));
+  const trend = llcSeries?.points || [];
+  return `
+    <div class="rebalance-llc-row">
+      <span><strong>${escapeHtml(rebalanceLocationLabel(llc))}</strong><small>${formatCount(llc.cpuCount)} owned CPUs</small></span>
+      ${renderRebalanceTrendSvg(
+        trend,
+        model.trend,
+        series?.colorIndex || 0,
+        `${cell.label} ${rebalanceLocationLabel(llc)} pressure`,
+        true,
+      )}
+      <span class="utilization-value"><strong>${formatRebalancePressure(llc.pressurePct)}</strong><small>${formatUtilizationCores(llc.demandCores)} / ${formatUtilizationCores(llc.effectiveCapacityCores)} CPUs</small></span>
+    </div>`;
+}
+
+function renderRebalanceCell(cell, model) {
+  const series = model.trend.series.find((candidate) => (
+    candidate.identityKey === cell.identityKey
+  ));
+  const points = series?.points || [];
+  const fill = Number.isFinite(cell.pressurePct)
+    ? Math.max(0, Math.min(100, cell.pressurePct))
+    : 0;
+  const missing = cell.missingCpus.length > 0
+    ? ` · missing CPUs ${compactCpuList(cell.missingCpus)}`
+    : "";
+  return `
+    <details class="rebalance-cell${cell.ready ? "" : " incomplete"}" data-render-key="rebalance-cell:${cell.id}">
+      <summary data-render-key="rebalance-cell:${cell.id}:summary">
+        <span class="utilization-identity"><strong>${escapeHtml(cell.label)}</strong><small>Cell ${formatCount(cell.id)} · ${formatCount(cell.sampledCpuCount)} / ${formatCount(cell.cpuCount)} CPUs sampled${escapeHtml(missing)}</small></span>
+        ${renderRebalanceTrendSvg(
+          points,
+          model.trend,
+          series?.colorIndex || 0,
+          `${cell.label} modeled pressure`,
+          true,
+        )}
+        <span class="rebalance-pressure-value"><strong>${formatRebalancePressure(cell.pressurePct)}</strong><span class="rebalance-pressure-meter" aria-hidden="true"><i style="--fill:${fill.toFixed(2)}%"></i></span><small>${escapeHtml(cell.ready ? "modeled pressure" : cell.statusMessage || "unavailable")}</small></span>
+      </summary>
+      <div class="rebalance-cell-body">
+        <dl class="rebalance-cell-grid">
+          <div tabindex="0" title="Cell runtime observed across every CPU where this cell executed."><dt>Demand</dt><dd>${formatUtilizationCores(cell.demandCores)} CPUs</dd><small>${escapeHtml(formatRebalanceRuntime(cell.demandNs))}</small></div>
+          <div tabindex="0" title="Owned CPU time remaining after other tasks, IRQs, SoftIRQ, steal, and unclassified time."><dt>Effective capacity</dt><dd>${formatUtilizationCores(cell.effectiveCapacityCores)} CPUs</dd><small>${escapeHtml(formatRebalanceRuntime(cell.effectiveCapacityNs))}</small></div>
+          <div tabindex="0" title="Owned CPU time consumed by other tasks, IRQs, SoftIRQ, steal, and unclassified work."><dt>Non-scheduler tax</dt><dd>${formatUtilizationCores(cell.taxCores)} CPUs</dd><small>${escapeHtml(formatRebalanceRuntime(cell.taxNs))}</small></div>
+          <div tabindex="0" title="Effective capacity minus observed cell demand; a negative value means modeled overload."><dt>Headroom</dt><dd>${formatUtilizationCores(cell.headroomCores)} CPUs</dd><small>${escapeHtml(formatRebalanceRuntime(cell.headroomNs))}</small></div>
+        </dl>
+        <section class="rebalance-llcs" aria-label="${escapeHtml(cell.label)} owned LLC pressure">
+          <h4>Owned LLC pressure</h4>
+          ${cell.llcs.length > 0
+            ? cell.llcs.map((llc) => renderRebalanceLlc(cell, llc, model, series)).join("")
+            : '<p class="rebalance-empty">No owned LLC capacity is available.</p>'}
+        </section>
+      </div>
+    </details>`;
+}
+
+function renderRebalanceAnalysis(model) {
+  if (!model) {
+    return;
+  }
+  const notice = model.available ? null : model.statusMessage;
+  if (notice && (elements.rebalanceNotice.dataset.message !== notice
+      || elements.rebalanceNotice.classList.contains("hidden"))) {
+    showElementNotice(elements.rebalanceNotice, notice, "info");
+    elements.rebalanceNotice.dataset.message = notice;
+  } else if (!notice && !elements.rebalanceNotice.classList.contains("hidden")) {
+    hideElementNotice(elements.rebalanceNotice);
+    delete elements.rebalanceNotice.dataset.message;
+  }
+  elements.rebalanceWindow.textContent = model.trend.sampleCount <= 1
+    ? "1 session sample · read only"
+    : `${formatDuration(model.trend.durationMs)} · ${formatCount(model.trend.sampleCount)} samples · read only`;
+  const candidateLabel = model.candidate
+    ? model.candidate.unit.kind === "core" ? "Whole core" : "Whole LLC"
+    : "None";
+  elements.rebalanceSummary.innerHTML = `
+    <div tabindex="0" title="Difference between the highest and lowest completely sampled cell pressure."><dt>Pressure spread</dt><dd>${formatRebalancePressure(model.spreadPct)}</dd></div>
+    <div><dt>Higher pressure</dt><dd>${model.hotCell ? `${escapeHtml(model.hotCell.label)} · ${formatRebalancePressure(model.hotCell.pressurePct)}` : "—"}</dd></div>
+    <div><dt>Lower pressure</dt><dd>${model.coldCell ? `${escapeHtml(model.coldCell.label)} · ${formatRebalancePressure(model.coldCell.pressurePct)}` : "—"}</dd></div>
+    <div><dt>Candidate</dt><dd>${escapeHtml(candidateLabel)}</dd></div>`;
+  elements.rebalanceCandidate.innerHTML = renderRebalanceCandidate(model);
+  elements.rebalanceTrend.innerHTML = renderRebalanceTrend(model);
+  replaceKeyedHtml(
+    elements.rebalanceCells,
+    model.cells.length > 0
+      ? model.cells.map((cell) => renderRebalanceCell(cell, model)).join("")
+      : '<p class="rebalance-empty">No cell pressure rows are available.</p>',
+  );
 }
 
 const CELL_UTILIZATION_RENDER_INTERVAL_MS = 1_000;
@@ -5151,6 +5471,7 @@ function renderCellUtilization(model, force = false) {
   if (elements.capacityTaskLegend.textContent !== model.host.taskCapacityLabel) {
     elements.capacityTaskLegend.textContent = model.host.taskCapacityLabel;
   }
+  renderRebalanceAnalysis(model.rebalance);
   elements.cellUtilizationSummary.innerHTML = `
     <div><dt>Cell service</dt><dd>${cellRuntimeNs === null ? "—" : `${formatUtilizationCores(utilizationCores(cellRuntimeNs, model.observedMs))} CPUs`}</dd></div>
     <div><dt>Snake capacity</dt><dd>${model.host.snakeOverlayReady ? `${formatUtilizationCores(utilizationCores(host.snakeCapacityNs ?? 0, hostObservedMs))} CPUs` : "—"}</dd></div>

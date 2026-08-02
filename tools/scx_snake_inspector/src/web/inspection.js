@@ -2178,6 +2178,23 @@ const HOST_UTILIZATION_FIELDS = [
   ["source_overage_ns", "sourceOverageNs"],
 ];
 
+function utilizationTopologyLocation(cpuInfo) {
+  const nodeId = finiteValue(cpuInfo?.node);
+  const packageId = finiteValue(cpuInfo?.package);
+  const llcId = finiteValue(cpuInfo?.llc);
+  const core = finiteValue(cpuInfo?.core);
+  const keyPart = (value) => value === null ? "unknown" : String(value);
+  const topologyKey = [nodeId, packageId, llcId].map(keyPart).join(":");
+  return {
+    nodeId,
+    packageId,
+    llcId,
+    core,
+    topologyKey,
+    coreTopologyKey: `${topologyKey}:${keyPart(core)}`,
+  };
+}
+
 function utilizationTopology(topology) {
   const cpus = new Map((topology?.cpus || []).map((cpu) => [Number(cpu.cpu), cpu]));
   const order = (topology?.topology_order || topology?.numeric_order || [])
@@ -2186,18 +2203,21 @@ function utilizationTopology(topology) {
   const cpuOrder = new Map(order.map((cpu, index) => [cpu, index]));
   const llcOrder = new Map();
   for (const cpu of order) {
-    const llc = finiteValue(cpus.get(cpu)?.llc);
-    if (llc !== null && !llcOrder.has(llc)) {
-      llcOrder.set(llc, llcOrder.size);
+    const location = utilizationTopologyLocation(cpus.get(cpu));
+    if (location.llcId !== null && !llcOrder.has(location.topologyKey)) {
+      llcOrder.set(location.topologyKey, llcOrder.size);
     }
   }
   return { cpus, cpuOrder, llcOrder };
 }
 
 function utilizationLlcSort(topology, left, right) {
-  const leftOrder = topology.llcOrder.get(left.llcId) ?? Number.MAX_SAFE_INTEGER;
-  const rightOrder = topology.llcOrder.get(right.llcId) ?? Number.MAX_SAFE_INTEGER;
+  const leftOrder = topology.llcOrder.get(left.topologyKey) ?? Number.MAX_SAFE_INTEGER;
+  const rightOrder = topology.llcOrder.get(right.topologyKey) ?? Number.MAX_SAFE_INTEGER;
   return leftOrder - rightOrder
+    || (left.nodeId ?? Number.MAX_SAFE_INTEGER) - (right.nodeId ?? Number.MAX_SAFE_INTEGER)
+    || (left.packageId ?? Number.MAX_SAFE_INTEGER)
+      - (right.packageId ?? Number.MAX_SAFE_INTEGER)
     || (left.llcId ?? Number.MAX_SAFE_INTEGER) - (right.llcId ?? Number.MAX_SAFE_INTEGER);
 }
 
@@ -2218,6 +2238,10 @@ function cellUtilizationRows(snapshot, inspection, topology, observedMs, host) {
     const ownedCpuIds = [...new Set((topologyCell?.primary_cpus || [])
       .map(Number)
       .filter((cpu) => Number.isSafeInteger(cpu) && cpu >= 0))];
+    const borrowableCpuIds = [...new Set((topologyCell?.borrowable_cpus || [])
+      .map(Number)
+      .filter((cpu) => Number.isSafeInteger(cpu) && cpu >= 0))];
+    const eligibleCpuIds = [...new Set([...ownedCpuIds, ...borrowableCpuIds])];
     const ownedCpuSet = new Set(ownedCpuIds);
     const byLlc = new Map();
     for (const [rawCpu, rawRuntime] of Object.entries(cell?.runtime_ns_by_cpu || {})) {
@@ -2227,13 +2251,13 @@ function cellUtilizationRows(snapshot, inspection, topology, observedMs, host) {
         continue;
       }
       const cpuInfo = topology.cpus.get(cpu);
-      const llcId = finiteValue(cpuInfo?.llc);
-      const key = llcId === null ? "unknown" : String(llcId);
-      const group = byLlc.get(key) || { llcId, runtimeNs: 0, cpus: [] };
+      const location = utilizationTopologyLocation(cpuInfo);
+      const key = location.topologyKey;
+      const group = byLlc.get(key) || { ...location, runtimeNs: 0, cpus: [] };
       group.runtimeNs += runtimeNs;
       group.cpus.push({
         cpu,
-        core: finiteValue(cpuInfo?.core),
+        ...location,
         runtimeNs,
         utilizationPct: observedNs > 0 ? runtimeNs * 100 / observedNs : null,
         placement: ownedCpuSet.has(cpu) ? "primary" : "borrowed",
@@ -2248,7 +2272,9 @@ function cellUtilizationRows(snapshot, inspection, topology, observedMs, host) {
         || left.cpu - right.cpu
       ));
       llc.topologyCpuCount = [...topology.cpus.values()]
-        .filter((cpu) => finiteValue(cpu.llc) === llc.llcId)
+        .filter((cpu) => (
+          utilizationTopologyLocation(cpu).topologyKey === llc.topologyKey
+        ))
         .length;
       llc.serviceCores = observedNs > 0 ? llc.runtimeNs / observedNs : null;
       llc.capacityPct = observedNs > 0 && llc.topologyCpuCount > 0
@@ -2266,6 +2292,8 @@ function cellUtilizationRows(snapshot, inspection, topology, observedMs, host) {
     return {
       id,
       label: labels.get(id) || `Cell ${id}`,
+      slotEpoch: Math.max(0, finiteValue(topologyCell?.slot_epoch) ?? 0),
+      eligibleCpuIds,
       runtimeNs,
       reportedRuntimeNs,
       reconciliationNs: reportedRuntimeNs - runtimeNs,
@@ -2295,8 +2323,7 @@ function normalizeHostCpu(row, topology, snakeOverlayReady) {
     normalized[target] = value === null ? null : Math.max(0, value);
   }
   const cpuInfo = topology.cpus.get(cpu);
-  normalized.llcId = finiteValue(cpuInfo?.llc);
-  normalized.core = finiteValue(cpuInfo?.core);
+  Object.assign(normalized, utilizationTopologyLocation(cpuInfo));
   normalized.idleWaitNs = (normalized.idleNs ?? 0) + (normalized.iowaitNs ?? 0);
   normalized.snakeCapacityNs = snakeOverlayReady
     ? Math.min(normalized.snakeNs ?? 0, normalized.taskNs ?? 0)
@@ -2335,15 +2362,21 @@ function sumHostRows(rows) {
 function hostLlcRows(cpus, topology, expectedCpuIds = null) {
   const byLlc = new Map();
   for (const cpu of expectedCpuIds || []) {
-    const llcId = finiteValue(topology.cpus.get(cpu)?.llc);
-    const key = llcId === null ? "unknown" : String(llcId);
+    const location = utilizationTopologyLocation(topology.cpus.get(cpu));
+    const key = location.topologyKey;
     if (!byLlc.has(key)) {
-      byLlc.set(key, { llcId, cpus: [] });
+      byLlc.set(key, { ...location, cpus: [] });
     }
   }
   for (const cpu of cpus) {
-    const key = cpu.llcId === null ? "unknown" : String(cpu.llcId);
-    const group = byLlc.get(key) || { llcId: cpu.llcId, cpus: [] };
+    const key = cpu.topologyKey;
+    const group = byLlc.get(key) || {
+      nodeId: cpu.nodeId,
+      packageId: cpu.packageId,
+      llcId: cpu.llcId,
+      topologyKey: cpu.topologyKey,
+      cpus: [],
+    };
     group.cpus.push(cpu);
     byLlc.set(key, group);
   }
@@ -2352,13 +2385,20 @@ function hostLlcRows(cpus, topology, expectedCpuIds = null) {
     cpuCount: llc.cpus.length,
     topologyCpuCount: expectedCpuIds === null
       ? [...topology.cpus.values()]
-        .filter((cpu) => finiteValue(cpu.llc) === llc.llcId)
+        .filter((cpu) => (
+          utilizationTopologyLocation(cpu).topologyKey === llc.topologyKey
+        ))
         .length
       : expectedCpuIds
-        .filter((cpu) => finiteValue(topology.cpus.get(cpu)?.llc) === llc.llcId)
+        .filter((cpu) => (
+          utilizationTopologyLocation(topology.cpus.get(cpu)).topologyKey
+            === llc.topologyKey
+        ))
         .length,
     wholeLlcCpuCount: [...topology.cpus.values()]
-      .filter((cpu) => finiteValue(cpu.llc) === llc.llcId)
+      .filter((cpu) => (
+        utilizationTopologyLocation(cpu).topologyKey === llc.topologyKey
+      ))
       .length,
     taskCapacityLabel: llc.cpus[0]?.taskCapacityLabel || "Task work",
     ...sumHostRows(llc.cpus),
@@ -2393,12 +2433,22 @@ export function cellUtilizationModel({ snapshot, inspection, topology } = {}) {
   const observedMs = Math.max(0, finiteValue(snapshot?.cell_stats?.observed_ms) ?? 0);
   const hostObservedMs = Math.max(0, finiteValue(snapshot?.host_cpu_usage_observed_ms) ?? 0);
   const rawCellStatus = String(snapshot?.cell_stats?.status || "unavailable");
+  const sourceTopologyGeneration = finiteValue(
+    snapshot?.cell_stats?.source_topology_generation,
+  );
+  const inspectionTopologyGeneration = finiteValue(
+    inspection?.topology_lifecycle?.current_generation,
+  );
+  const topologySynchronized = sourceTopologyGeneration === null
+    || sourceTopologyGeneration === inspectionTopologyGeneration;
   const rawCells = snapshot?.cell_stats?.cells || [];
   const cellLanesAvailable = rawCells
     .every((cell) => cell?.runtime_ns_by_cpu != null);
   const cellStatus = rawCellStatus !== "ready"
     ? rawCellStatus
-    : !cellLanesAvailable
+    : !topologySynchronized
+      ? "synchronizing"
+      : !cellLanesAvailable
       ? "unsupported"
       : observedMs <= 0
         ? "warming"
@@ -2447,6 +2497,8 @@ export function cellUtilizationModel({ snapshot, inspection, topology } = {}) {
     cellStatus,
     cellStatusLabel: cellStatus === "ready"
       ? "Cell service ready"
+      : cellStatus === "synchronizing"
+        ? "Synchronizing cell ownership with the sampled topology."
       : cellStatus === "unsupported"
         ? "Per-CPU cell service is unsupported by this Snake attachment."
         : cellStatus === "warming"
@@ -2470,7 +2522,634 @@ export function cellUtilizationModel({ snapshot, inspection, topology } = {}) {
 }
 
 export function cellUtilizationSignature(model) {
-  return JSON.stringify(model);
+  if (!model?.rebalance) {
+    return JSON.stringify(model);
+  }
+  const { rebalance, ...utilization } = model;
+  return JSON.stringify({
+    utilization,
+    rebalance: {
+      available: rebalance.available,
+      statusMessage: rebalance.statusMessage,
+      cells: rebalance.cells,
+      hotCell: rebalance.hotCell,
+      coldCell: rebalance.coldCell,
+      spreadPct: rebalance.spreadPct,
+      candidate: rebalance.candidate,
+      candidateMessage: rebalance.candidateMessage,
+      trend: {
+        endAtMs: rebalance.trend.endAtMs,
+        sampleCount: rebalance.trend.sampleCount,
+        scaleMaxPct: rebalance.trend.scaleMaxPct,
+        markers: rebalance.trend.markers,
+      },
+    },
+  });
+}
+
+const CELL_REBALANCE_HISTORY_MS = 5 * 60 * 1_000;
+const CELL_REBALANCE_SAMPLE_INTERVAL_MS = 1_000;
+const CELL_REBALANCE_MIN_CPU_COVERAGE = 0.9;
+const CELL_REBALANCE_TAX_FIELDS = [
+  "otherTaskCapacityNs",
+  "hardirqNs",
+  "softirqNs",
+  "stealNs",
+  "unclassifiedNs",
+];
+
+function cellRebalanceScopeKey(context, windowMs) {
+  const keyPart = (value) => {
+    const number = finiteValue(value);
+    return number === null ? "unknown" : String(number);
+  };
+  return [
+    keyPart(context?.scheduler_attach_seq),
+    keyPart(windowMs),
+  ].join(":");
+}
+
+function cellRebalanceTaxNs(row) {
+  return CELL_REBALANCE_TAX_FIELDS.reduce(
+    (total, field) => total + Math.max(0, finiteValue(row?.[field]) ?? 0),
+    0,
+  );
+}
+
+function cellRebalanceMetric(row, demandNs, observedNs, complete) {
+  const demand = Math.max(0, finiteValue(demandNs) ?? 0);
+  const totalCapacityNs = finiteValue(row?.totalNs);
+  const sampled = complete && totalCapacityNs !== null && totalCapacityNs > 0;
+  const taxNs = sampled ? cellRebalanceTaxNs(row) : null;
+  const effectiveCapacityNs = sampled
+    ? Math.max(0, totalCapacityNs - taxNs)
+    : null;
+  const ready = observedNs > 0 && effectiveCapacityNs !== null && effectiveCapacityNs > 0;
+  const headroomNs = ready ? effectiveCapacityNs - demand : null;
+  return {
+    ready,
+    demandNs: demand,
+    totalCapacityNs: sampled ? totalCapacityNs : null,
+    taxNs,
+    effectiveCapacityNs,
+    headroomNs,
+    demandCores: observedNs > 0 ? demand / observedNs : null,
+    taxCores: ready ? taxNs / observedNs : null,
+    effectiveCapacityCores: ready ? effectiveCapacityNs / observedNs : null,
+    headroomCores: ready ? headroomNs / observedNs : null,
+    pressurePct: ready ? demand * 100 / effectiveCapacityNs : null,
+  };
+}
+
+function cellRebalanceLlcKey(row) {
+  if (typeof row?.topologyKey === "string" && row.topologyKey !== "") {
+    return row.topologyKey;
+  }
+  const location = utilizationTopologyLocation({
+    node: row?.nodeId,
+    package: row?.packageId,
+    llc: row?.llcId,
+  });
+  return location.topologyKey;
+}
+
+export function cellRebalanceSample({
+  utilization,
+  context,
+  policyIdentity,
+  topologyGeneration,
+  topologyChangedAtMs,
+  sampledAtMs = Date.now(),
+} = {}) {
+  const sampleTimeMs = finiteValue(sampledAtMs) ?? Date.now();
+  const observedMs = Math.max(0, finiteValue(utilization?.observedMs) ?? 0);
+  const hostObservedMs = Math.max(0, finiteValue(utilization?.hostObservedMs) ?? 0);
+  const observedNs = observedMs * 1_000_000;
+  const aligned = observedMs > 0 && observedMs === hostObservedMs;
+  const samplesAvailable = utilization?.cellStatus === "ready"
+    && utilization?.hostStatus === "ready"
+    && utilization?.host?.snakeOverlayReady === true
+    && aligned;
+  const changedAtMs = finiteValue(topologyChangedAtMs);
+  const topologyWindowReady = changedAtMs === null
+    || sampleTimeMs - observedMs >= changedAtMs;
+  const accountedCpuIds = new Set((utilization?.cells || []).flatMap((cell) => (
+    (cell?.owned?.cpus || []).map((cpu) => cpu.cpu)
+  )));
+  const accountingCpuCount = Math.max(
+    1,
+    utilization?.host?.cpus?.length || accountedCpuIds.size,
+  );
+  const accountedCapacityNs = Math.max(
+    0,
+    finiteValue(utilization?.host?.total?.totalNs)
+      ?? (utilization?.cells || []).reduce(
+        (total, cell) => total + Math.max(0, finiteValue(cell?.owned?.total?.totalNs) ?? 0),
+        0,
+      ),
+  );
+  const sourceToleranceNs = Math.max(
+    accountingCpuCount * 10_000_000,
+    accountedCapacityNs * 0.001,
+  );
+  const attributionToleranceNs = Math.max(
+    accountingCpuCount * 1_000_000,
+    accountedCapacityNs * 0.001,
+  );
+  const cellLanesConserved = (utilization?.cells || []).every((cell) => {
+    const reconciliationNs = Math.abs(finiteValue(cell?.reconciliationNs) ?? 0);
+    const toleranceNs = Math.max(
+      Math.max(1, finiteValue(cell?.owned?.cpuCount) ?? 0) * 1_000_000,
+      Math.max(0, finiteValue(cell?.reportedRuntimeNs) ?? 0) * 0.001,
+    );
+    return reconciliationNs <= toleranceNs;
+  });
+  const accountingConserved = cellLanesConserved && (finiteValue(
+    utilization?.host?.total?.sourceOverageNs,
+  ) ?? 0) <= sourceToleranceNs
+    && (finiteValue(utilization?.host?.total?.cellOverageNs) ?? 0)
+      <= attributionToleranceNs
+    && (finiteValue(utilization?.host?.total?.unattributedSnakeNs) ?? 0)
+      <= attributionToleranceNs;
+  const available = samplesAvailable && topologyWindowReady && accountingConserved;
+  const unavailableMessage = !samplesAvailable
+    ? utilization?.cellStatus !== "ready"
+      ? utilization?.cellStatusLabel || "Cell service is unavailable."
+      : utilization?.hostStatus !== "ready"
+        ? utilization?.hostStatusLabel || "Host capacity is unavailable."
+        : "Cell service and host capacity windows are not aligned."
+    : !topologyWindowReady
+      ? "Waiting for a clean post-topology window before modeling rebalancing."
+      : !accountingConserved
+        ? "Waiting for cell and host accounting to reconcile before modeling rebalancing."
+      : null;
+  const cells = (utilization?.cells || []).map((cell) => {
+    const owned = cell?.owned || {};
+    const cpuCount = Math.max(0, finiteValue(owned.cpuCount) ?? 0);
+    const sampledCpuCount = Math.max(0, finiteValue(owned.sampledCpuCount) ?? 0);
+    const missingCpus = [...new Set((owned.missingCpus || [])
+      .map(Number)
+      .filter((cpu) => Number.isSafeInteger(cpu) && cpu >= 0))]
+      .sort((left, right) => left - right);
+    const complete = cpuCount > 0
+      && sampledCpuCount === cpuCount
+      && (owned.cpus || []).length === cpuCount
+      && missingCpus.length === 0
+      && (owned.cpus || []).every((cpu) => (
+        finiteValue(cpu?.totalNs) !== null
+          && finiteValue(cpu?.totalNs) >= observedNs * CELL_REBALANCE_MIN_CPU_COVERAGE
+      ));
+    const demandByLlc = new Map();
+    for (const llc of cell?.llcs || []) {
+      const key = cellRebalanceLlcKey(llc);
+      demandByLlc.set(
+        key,
+        (demandByLlc.get(key) || 0) + Math.max(0, finiteValue(llc?.runtimeNs) ?? 0),
+      );
+    }
+    const metric = cellRebalanceMetric(
+      owned.total,
+      finiteValue(cell?.reportedRuntimeNs, cell?.runtimeNs),
+      observedNs,
+      available && complete,
+    );
+    const llcs = (owned.llcs || []).map((llc) => {
+      const topologyKey = cellRebalanceLlcKey(llc);
+      const llcComplete = complete && (llc.cpus || []).every((cpu) => (
+        finiteValue(cpu?.totalNs) !== null && finiteValue(cpu?.totalNs) > 0
+      ));
+      return {
+        nodeId: finiteValue(llc?.nodeId),
+        packageId: finiteValue(llc?.packageId),
+        llcId: finiteValue(llc?.llcId),
+        topologyKey,
+        cpuCount: (llc.cpus || []).length,
+        ...cellRebalanceMetric(
+          llc,
+          demandByLlc.get(topologyKey) || 0,
+          observedNs,
+          available && llcComplete,
+        ),
+      };
+    });
+    const ready = available && complete && metric.ready;
+    return {
+      id: finiteValue(cell?.id),
+      label: cell?.label || `Cell ${cell?.id}`,
+      slotEpoch: Math.max(0, finiteValue(cell?.slotEpoch) ?? 0),
+      identityKey: `${cell?.id}:${Math.max(0, finiteValue(cell?.slotEpoch) ?? 0)}`,
+      statusMessage: !available
+        ? unavailableMessage
+        : !complete
+          ? "Owned CPU sampling is incomplete."
+          : !metric.ready
+            ? "Effective capacity is unavailable."
+            : null,
+      cpuCount,
+      sampledCpuCount,
+      missingCpus,
+      ...metric,
+      ready,
+      llcs,
+    };
+  }).filter((cell) => Number.isSafeInteger(cell.id) && cell.id >= 0);
+  return {
+    scopeKey: cellRebalanceScopeKey(context, utilization?.windowMs),
+    policyIdentity: policyIdentity || null,
+    policyGeneration: finiteValue(context?.policy_generation),
+    sampledAtMs: sampleTimeMs,
+    topologyGeneration: finiteValue(topologyGeneration),
+    topologyChangedAtMs: changedAtMs,
+    observedMs,
+    available,
+    statusMessage: unavailableMessage,
+    cells,
+  };
+}
+
+export function appendCellRebalanceSample(samples, sample, {
+  maxAgeMs = CELL_REBALANCE_HISTORY_MS,
+  sampleIntervalMs = CELL_REBALANCE_SAMPLE_INTERVAL_MS,
+} = {}) {
+  if (!sample || typeof sample.scopeKey !== "string") {
+    return Array.isArray(samples) ? samples.slice() : [];
+  }
+  const sampledAtMs = finiteValue(sample.sampledAtMs);
+  if (sampledAtMs === null) {
+    return Array.isArray(samples) ? samples.slice() : [];
+  }
+  const existing = Array.isArray(samples) ? samples : [];
+  const lastReady = existing.slice().reverse().find((entry) => entry?.available === true);
+  const policyIdentityChanged = lastReady?.policyIdentity
+    && sample.policyIdentity
+    && lastReady.policyIdentity !== sample.policyIdentity;
+  const policyChanged = lastReady
+    && lastReady.policyGeneration !== sample.policyGeneration;
+  const managedTopologyContinuation = policyChanged
+    && lastReady.topologyGeneration !== sample.topologyGeneration
+    && finiteValue(sample.topologyChangedAtMs) !== null;
+  const sameScope = existing.length > 0
+    && existing[existing.length - 1]?.scopeKey === sample.scopeKey
+    && !policyIdentityChanged
+    && (!sample.available || !policyChanged || managedTopologyContinuation);
+  const cutoff = sampledAtMs - Math.max(0, finiteValue(maxAgeMs) ?? 0);
+  const history = (sameScope ? existing : [])
+    .filter((entry) => entry?.scopeKey === sample.scopeKey)
+    .filter((entry) => {
+      const timestamp = finiteValue(entry?.sampledAtMs);
+      return timestamp !== null && timestamp >= cutoff && timestamp <= sampledAtMs;
+    })
+    .sort((left, right) => left.sampledAtMs - right.sampledAtMs);
+  const previous = history[history.length - 1];
+  const bucketStartedAtMs = finiteValue(previous?.bucketStartedAtMs, previous?.sampledAtMs);
+  if (previous && sampledAtMs - bucketStartedAtMs < sampleIntervalMs) {
+    history[history.length - 1] = { ...sample, bucketStartedAtMs };
+  } else {
+    history.push({ ...sample, bucketStartedAtMs: sampledAtMs });
+  }
+  return history;
+}
+
+function cellRebalanceSeriesPoints(history, pressureForSample) {
+  const points = [];
+  let segment = -1;
+  let open = false;
+  let previousSampleAtMs = null;
+  for (const entry of history) {
+    const sampledAtMs = finiteValue(entry?.sampledAtMs);
+    const pressurePct = pressureForSample(entry);
+    const gap = sampledAtMs !== null
+      && previousSampleAtMs !== null
+      && sampledAtMs - previousSampleAtMs > CELL_REBALANCE_SAMPLE_INTERVAL_MS * 2;
+    if (sampledAtMs !== null && Number.isFinite(pressurePct)) {
+      if (!open || gap) {
+        segment += 1;
+      }
+      points.push({ sampledAtMs, pressurePct, segment });
+      open = true;
+    } else {
+      open = false;
+    }
+    previousSampleAtMs = sampledAtMs;
+  }
+  return points;
+}
+
+function cellRebalanceTopologyUnits(cell, topology) {
+  const cpuInfo = new Map((topology?.cpus || []).map((cpu) => [Number(cpu.cpu), cpu]));
+  const inventory = { llc: new Map(), core: new Map() };
+  for (const cpu of topology?.cpus || []) {
+    const cpuId = Number(cpu.cpu);
+    const location = utilizationTopologyLocation(cpu);
+    if (!Number.isSafeInteger(cpuId) || cpuId < 0 || location.llcId === null) {
+      continue;
+    }
+    const llcCpus = inventory.llc.get(location.topologyKey) || [];
+    llcCpus.push(cpuId);
+    inventory.llc.set(location.topologyKey, llcCpus);
+    if (location.core !== null) {
+      const coreCpus = inventory.core.get(location.coreTopologyKey) || [];
+      coreCpus.push(cpuId);
+      inventory.core.set(location.coreTopologyKey, coreCpus);
+    }
+  }
+  const ownedSamples = new Map((cell?.owned?.cpus || []).map((cpu) => [cpu.cpu, cpu]));
+  const ownedIds = new Set(ownedSamples.keys());
+  const units = [];
+  for (const [kind, groups] of Object.entries(inventory)) {
+    for (const [topologyKey, cpuIds] of groups) {
+      const cpus = [...new Set(cpuIds)].sort((left, right) => left - right);
+      if (cpus.length === 0 || !cpus.every((cpu) => ownedIds.has(cpu))) {
+        continue;
+      }
+      const location = utilizationTopologyLocation(cpuInfo.get(cpus[0]));
+      const capacityNs = cpus.reduce((total, cpu) => {
+        const sample = ownedSamples.get(cpu);
+        const cpuTotalNs = Math.max(0, finiteValue(sample?.totalNs) ?? 0);
+        return total + Math.max(0, cpuTotalNs - cellRebalanceTaxNs(sample));
+      }, 0);
+      if (capacityNs <= 0) {
+        continue;
+      }
+      units.push({
+        kind,
+        topologyKey,
+        nodeId: location.nodeId,
+        packageId: location.packageId,
+        llcId: location.llcId,
+        core: kind === "core" ? location.core : null,
+        cpus,
+        capacityNs,
+      });
+    }
+  }
+  return units;
+}
+
+function cellPressureSpread(pressures) {
+  const values = pressures.filter(Number.isFinite);
+  return values.length >= 2 ? Math.max(...values) - Math.min(...values) : null;
+}
+
+function cellRebalanceCandidate(utilization, topology, sample) {
+  const readyCells = sample.cells.filter((cell) => cell.ready);
+  const currentById = new Map(readyCells.map((cell) => [cell.id, cell]));
+  const utilizationById = new Map((utilization?.cells || []).map((cell) => [cell.id, cell]));
+  const beforeSpreadPct = cellPressureSpread(readyCells.map((cell) => cell.pressurePct));
+  const beforeMaxPressurePct = Math.max(...readyCells.map((cell) => cell.pressurePct));
+  if (beforeSpreadPct === null || beforeSpreadPct <= 0) {
+    return null;
+  }
+  const candidates = [];
+  for (const source of readyCells) {
+    const sourceUtilization = utilizationById.get(source.id);
+    for (const target of readyCells) {
+      if (source.id === target.id || target.pressurePct <= source.pressurePct) {
+        continue;
+      }
+      const targetEligibleCpus = new Set(
+        utilizationById.get(target.id)?.eligibleCpuIds || [],
+      );
+      for (const unit of cellRebalanceTopologyUnits(sourceUtilization, topology)) {
+        if (!unit.cpus.every((cpu) => targetEligibleCpus.has(cpu))) {
+          continue;
+        }
+        if (source.cpuCount - unit.cpus.length < 1) {
+          continue;
+        }
+        const sourceCapacityNs = source.effectiveCapacityNs - unit.capacityNs;
+        const targetCapacityNs = target.effectiveCapacityNs + unit.capacityNs;
+        if (sourceCapacityNs <= 0 || targetCapacityNs <= 0) {
+          continue;
+        }
+        const pressures = readyCells.map((cell) => {
+          if (cell.id === source.id) {
+            return cell.demandNs * 100 / sourceCapacityNs;
+          }
+          if (cell.id === target.id) {
+            return cell.demandNs * 100 / targetCapacityNs;
+          }
+          return currentById.get(cell.id)?.pressurePct;
+        });
+        const afterSpreadPct = cellPressureSpread(pressures);
+        const improvementPct = beforeSpreadPct - afterSpreadPct;
+        if (!Number.isFinite(afterSpreadPct)
+            || Math.max(...pressures) > beforeMaxPressurePct + 0.000001
+            || improvementPct <= 0.000001) {
+          continue;
+        }
+        const { capacityNs, ...transferUnit } = unit;
+        candidates.push({
+          sourceCell: {
+            id: source.id,
+            label: source.label,
+            pressurePct: source.pressurePct,
+          },
+          targetCell: {
+            id: target.id,
+            label: target.label,
+            pressurePct: target.pressurePct,
+          },
+          unit: transferUnit,
+          capacityNs,
+          capacityCores: sample.observedMs > 0
+            ? unit.capacityNs / (sample.observedMs * 1_000_000)
+            : null,
+          beforeSpreadPct,
+          afterSpreadPct,
+          improvementPct,
+          sourcePressureAfterPct: source.demandNs * 100 / sourceCapacityNs,
+          targetPressureAfterPct: target.demandNs * 100 / targetCapacityNs,
+        });
+      }
+    }
+  }
+  candidates.sort((left, right) => (
+    right.improvementPct - left.improvementPct
+    || left.unit.cpus.length - right.unit.cpus.length
+    || (left.unit.kind === "core" ? 0 : 1) - (right.unit.kind === "core" ? 0 : 1)
+    || left.sourceCell.id - right.sourceCell.id
+    || left.targetCell.id - right.targetCell.id
+    || left.unit.cpus[0] - right.unit.cpus[0]
+  ));
+  return candidates[0] || null;
+}
+
+function cellRebalanceTrend(samples, sample, lifecycle) {
+  const history = appendCellRebalanceSample(samples, sample)
+    .filter((entry) => entry.scopeKey === sample.scopeKey);
+  const startAtMs = history[0]?.sampledAtMs ?? sample.sampledAtMs;
+  const endAtMs = history[history.length - 1]?.sampledAtMs ?? sample.sampledAtMs;
+  const durationMs = Math.max(0, endAtMs - startAtMs);
+  const cellKeys = [];
+  for (const entry of [...sample.cells, ...history.flatMap((item) => item.cells || [])]) {
+    const identityKey = entry.identityKey
+      || `${entry.id}:${Math.max(0, finiteValue(entry.slotEpoch) ?? 0)}`;
+    if (!cellKeys.includes(identityKey)) {
+      cellKeys.push(identityKey);
+    }
+  }
+  const rawSeries = cellKeys.map((identityKey, colorIndex) => {
+    const matchesIdentity = (cell) => (
+      (cell.identityKey || `${cell.id}:${Math.max(0, finiteValue(cell.slotEpoch) ?? 0)}`)
+        === identityKey
+    );
+    const current = sample.cells.find(matchesIdentity)
+      || history.flatMap((entry) => entry.cells || []).find(matchesIdentity);
+    const cellId = current?.id ?? null;
+    const points = cellRebalanceSeriesPoints(history, (entry) => {
+      const cell = (entry.cells || []).find(matchesIdentity);
+      return cell?.ready ? cell.pressurePct : null;
+    });
+    const llcKeys = [];
+    for (const entry of history) {
+      const cell = (entry.cells || []).find(matchesIdentity);
+      for (const llc of cell?.llcs || []) {
+        if (!llcKeys.includes(llc.topologyKey)) {
+          llcKeys.push(llc.topologyKey);
+        }
+      }
+    }
+    const llcs = llcKeys.map((topologyKey) => {
+      const currentLlc = current?.llcs?.find((llc) => llc.topologyKey === topologyKey)
+        || history
+          .flatMap((entry) => entry.cells || [])
+          .filter(matchesIdentity)
+          .flatMap((cell) => cell.llcs || [])
+          .find((llc) => llc.topologyKey === topologyKey);
+      return {
+        topologyKey,
+        llcId: currentLlc?.llcId ?? null,
+        nodeId: currentLlc?.nodeId ?? null,
+        packageId: currentLlc?.packageId ?? null,
+        points: cellRebalanceSeriesPoints(history, (entry) => {
+          const cell = (entry.cells || []).find(matchesIdentity);
+          const llc = cell?.llcs?.find((candidate) => candidate.topologyKey === topologyKey);
+          return llc?.ready ? llc.pressurePct : null;
+        }),
+      };
+    });
+    return {
+      cellId,
+      identityKey,
+      slotEpoch: current?.slotEpoch ?? 0,
+      label: current?.label || `Cell ${cellId}`,
+      colorIndex,
+      points,
+      llcs,
+    };
+  });
+  const maximum = rawSeries.reduce((seriesMaximum, series) => Math.max(
+    seriesMaximum,
+    ...series.points.map((point) => point.pressurePct),
+    ...series.llcs.flatMap((llc) => llc.points.map((point) => point.pressurePct)),
+  ), 0);
+  const scaleMaxPct = Math.max(100, Math.ceil(maximum / 25) * 25);
+  const position = (point) => ({
+    ...point,
+    xPct: durationMs > 0 ? (point.sampledAtMs - startAtMs) * 100 / durationMs : 100,
+    yPct: Math.max(0, Math.min(100, 100 - point.pressurePct * 100 / scaleMaxPct)),
+  });
+  const series = rawSeries.map((entry) => ({
+    ...entry,
+    points: entry.points.map(position),
+    llcs: entry.llcs.map((llc) => ({ ...llc, points: llc.points.map(position) })),
+  }));
+  const markers = (lifecycle?.transitions || []).flatMap((transition) => {
+    const completedAtMs = finiteValue(
+      transition?.completedAtMs,
+      transition?.completed_at_ms,
+    );
+    if (completedAtMs === null || completedAtMs < startAtMs || completedAtMs > endAtMs) {
+      return [];
+    }
+    const outcomeLabel = transition?.outcomeLabel || transition?.outcome || "Topology change";
+    const generationLabel = transition?.generationLabel
+      || (transition?.to_generation == null
+        ? `Generation ${transition?.from_generation ?? "unknown"} unchanged`
+        : `Generation ${transition?.from_generation ?? "unknown"} to ${transition.to_generation}`);
+    return [{
+      id: finiteValue(transition?.id),
+      completedAtMs,
+      outcome: transition?.outcome || "unknown",
+      label: `${outcomeLabel} · ${generationLabel}`,
+      xPct: durationMs > 0 ? (completedAtMs - startAtMs) * 100 / durationMs : 100,
+    }];
+  }).sort((left, right) => left.completedAtMs - right.completedAtMs);
+  const sampleCount = history.filter((entry) => (
+    (entry.cells || []).some((cell) => cell?.ready && Number.isFinite(cell.pressurePct))
+  )).length;
+  return {
+    startAtMs,
+    endAtMs,
+    durationMs,
+    scaleMaxPct,
+    sampleCount,
+    totalSampleCount: history.length,
+    series,
+    markers,
+  };
+}
+
+export function cellRebalanceAnalysisModel({
+  utilization,
+  context,
+  policyIdentity,
+  topology,
+  topologyGeneration,
+  topologyChangedAtMs,
+  lifecycle,
+  sample,
+  samples = [],
+  sampledAtMs = Date.now(),
+} = {}) {
+  const current = sample || cellRebalanceSample({
+    utilization,
+    context,
+    policyIdentity,
+    topologyGeneration,
+    topologyChangedAtMs,
+    sampledAtMs,
+  });
+  const readyCells = current.cells.filter((cell) => cell.ready);
+  const allCellsReady = current.available
+    && current.cells.length > 0
+    && readyCells.length === current.cells.length;
+  const byPressure = readyCells.slice().sort((left, right) => (
+    left.pressurePct - right.pressurePct || left.id - right.id
+  ));
+  const coldCell = allCellsReady && byPressure.length >= 2 ? byPressure[0] : null;
+  const hotCell = allCellsReady && byPressure.length >= 2
+    ? byPressure[byPressure.length - 1]
+    : null;
+  const spreadPct = allCellsReady
+    ? cellPressureSpread(readyCells.map((cell) => cell.pressurePct))
+    : null;
+  const candidate = allCellsReady && readyCells.length >= 2
+    ? cellRebalanceCandidate(utilization, topology, current)
+    : null;
+  const statusMessage = current.statusMessage || (!allCellsReady
+    ? "Waiting for complete owned CPU samples from every cell."
+    : null);
+  return {
+    available: allCellsReady,
+    statusMessage,
+    sample: current,
+    cells: current.cells,
+    eligibleCellCount: readyCells.length,
+    hotCell,
+    coldCell,
+    spreadPct,
+    candidate,
+    candidateMessage: !allCellsReady
+      ? statusMessage
+      : readyCells.length < 2
+        ? "At least two completely sampled cells are required for a transfer candidate."
+        : candidate === null
+          ? "No currently eligible whole-core or whole-LLC move reduces the pressure spread."
+          : null,
+    trend: cellRebalanceTrend(samples, current, lifecycle),
+  };
 }
 
 const TOPOLOGY_OUTCOME_LABELS = {

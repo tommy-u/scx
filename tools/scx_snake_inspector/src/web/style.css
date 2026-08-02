@@ -3627,6 +3627,417 @@ button:focus-visible {
   padding: 18px 13px;
 }
 
+.rebalance-analysis-section > .notice {
+  margin: 12px 13px 0;
+}
+
+.rebalance-summary {
+  margin: 0;
+  padding: 10px 13px;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-muted);
+}
+
+.rebalance-summary > div {
+  min-width: 0;
+  padding: 0 13px;
+  border-left: 1px solid var(--border);
+}
+
+.rebalance-summary > div:first-child {
+  padding-left: 0;
+  border-left: 0;
+}
+
+.rebalance-summary dt,
+.rebalance-candidate-facts dt,
+.rebalance-cell-grid dt {
+  color: var(--muted);
+  font-size: 0.56rem;
+  font-weight: 720;
+  text-transform: uppercase;
+}
+
+.rebalance-summary dd,
+.rebalance-candidate-facts dd,
+.rebalance-cell-grid dd {
+  margin: 3px 0 0;
+  overflow-wrap: anywhere;
+  font-size: 0.7rem;
+  font-weight: 730;
+  font-variant-numeric: tabular-nums;
+}
+
+.rebalance-candidate {
+  border-bottom: 1px solid var(--border);
+}
+
+.rebalance-candidate-route {
+  min-width: 0;
+  padding: 11px 13px;
+  display: grid;
+  grid-template-columns: minmax(130px, 0.7fr) 20px minmax(130px, 0.7fr) minmax(220px, 1.6fr);
+  align-items: center;
+  gap: 10px;
+  background: var(--success-bg);
+}
+
+.rebalance-candidate-route > span:not(.rebalance-route-arrow) {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.rebalance-candidate-route small,
+.rebalance-cell-grid small,
+.rebalance-llc-row small {
+  color: var(--muted);
+  font-size: 0.57rem;
+}
+
+.rebalance-candidate-route strong {
+  overflow-wrap: anywhere;
+  font-size: 0.69rem;
+}
+
+.rebalance-route-arrow {
+  color: var(--active);
+  font-size: 1rem;
+  font-weight: 750;
+  text-align: center;
+}
+
+.rebalance-unit {
+  padding-left: 13px;
+  border-left: 1px solid var(--success-border);
+}
+
+.rebalance-candidate-facts {
+  margin: 0;
+  padding: 9px 13px;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  background: var(--surface-subtle);
+}
+
+.rebalance-candidate-facts > div {
+  min-width: 0;
+  padding: 0 13px;
+  border-left: 1px solid var(--border);
+}
+
+.rebalance-candidate-facts > div:first-child {
+  padding-left: 0;
+  border-left: 0;
+}
+
+.rebalance-subheading {
+  min-height: 34px;
+  padding: 7px 13px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.rebalance-subheading h4 {
+  margin: 0;
+  font-size: 0.61rem;
+  text-transform: uppercase;
+}
+
+.rebalance-subheading span {
+  color: var(--muted);
+  font-size: 0.58rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.rebalance-trend-rows {
+  padding: 5px 13px 9px;
+}
+
+.rebalance-trend-row {
+  min-height: 64px;
+  display: grid;
+  grid-template-columns: minmax(120px, 0.55fr) minmax(220px, 2.4fr) minmax(58px, 0.3fr);
+  align-items: center;
+  gap: 13px;
+}
+
+.rebalance-trend-row + .rebalance-trend-row {
+  border-top: 1px solid var(--border);
+}
+
+.rebalance-trend-row > strong {
+  font-size: 0.68rem;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.rebalance-marker-list {
+  margin: 0;
+  padding: 7px 13px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 0.57rem;
+  list-style: none;
+}
+
+.rebalance-marker-list li {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.rebalance-marker-list li > span {
+  width: 2px;
+  height: 13px;
+  flex: 0 0 auto;
+  background: var(--accent);
+}
+
+.rebalance-marker-list li > span.rejected {
+  background: var(--danger);
+}
+
+.rebalance-marker-list li > span.deferred {
+  background: var(--waiting);
+}
+
+.rebalance-marker-list strong {
+  overflow-wrap: anywhere;
+  color: var(--ink);
+  font-size: inherit;
+}
+
+.rebalance-marker-list time {
+  white-space: nowrap;
+}
+
+.rebalance-series-label {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.rebalance-series-label i {
+  width: 9px;
+  height: 9px;
+  flex: 0 0 auto;
+  background: var(--rebalance-series);
+}
+
+.rebalance-series-label strong {
+  overflow-wrap: anywhere;
+  font-size: 0.65rem;
+}
+
+.series-0 { --rebalance-series: var(--cell-owned); }
+.series-1 { --rebalance-series: var(--cell-borrowed); }
+.series-2 { --rebalance-series: var(--cell-warning); }
+.series-3 { --rebalance-series: var(--cell-critical); }
+.series-4 { --rebalance-series: var(--cell-other); }
+.series-5 { --rebalance-series: var(--accent); }
+
+.rebalance-trend-svg {
+  width: 100%;
+  height: 58px;
+  display: block;
+  color: var(--rebalance-series);
+  background: var(--surface-subtle);
+}
+
+.rebalance-trend-svg.compact {
+  height: 40px;
+  background: transparent;
+}
+
+.rebalance-trend-svg path {
+  fill: none;
+  stroke: currentcolor;
+  stroke-width: 2;
+  vector-effect: non-scaling-stroke;
+}
+
+.rebalance-trend-svg circle {
+  fill: currentcolor;
+  vector-effect: non-scaling-stroke;
+}
+
+.rebalance-pressure-threshold {
+  stroke: var(--border-strong);
+  stroke-dasharray: 3 3;
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
+
+.rebalance-topology-marker {
+  stroke: var(--accent);
+  stroke-dasharray: 2 3;
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
+
+.rebalance-topology-marker.rejected {
+  stroke: var(--danger);
+}
+
+.rebalance-topology-marker.deferred {
+  stroke: var(--waiting);
+}
+
+.rebalance-cells {
+  border-top: 1px solid var(--border);
+}
+
+.rebalance-cell + .rebalance-cell {
+  border-top: 1px solid var(--border);
+}
+
+.rebalance-cell > summary {
+  min-height: 66px;
+  padding: 7px 13px;
+  display: grid;
+  grid-template-columns: 14px minmax(150px, 0.7fr) minmax(180px, 1.5fr) minmax(110px, 0.5fr);
+  align-items: center;
+  gap: 13px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.rebalance-cell > summary::-webkit-details-marker {
+  display: none;
+}
+
+.rebalance-cell > summary::before {
+  content: "+";
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 750;
+}
+
+.rebalance-cell[open] > summary::before {
+  content: "-";
+}
+
+.rebalance-cell.incomplete > summary {
+  background: var(--warning-bg);
+}
+
+.rebalance-pressure-value {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+  text-align: right;
+}
+
+.rebalance-pressure-value > strong {
+  font-size: 0.72rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.rebalance-pressure-value > small {
+  color: var(--muted);
+  font-size: 0.56rem;
+}
+
+.rebalance-pressure-meter {
+  width: 100%;
+  height: 5px;
+  overflow: hidden;
+  background: var(--surface-muted);
+  border: 1px solid var(--border);
+}
+
+.rebalance-pressure-meter i {
+  width: var(--fill);
+  height: 100%;
+  display: block;
+  background: var(--rebalance-series, var(--cell-owned));
+}
+
+.rebalance-cell-body {
+  border-top: 1px solid var(--border);
+}
+
+.rebalance-cell-grid {
+  margin: 0;
+  padding: 10px 40px;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  background: var(--surface-muted);
+}
+
+.rebalance-cell-grid > div {
+  min-width: 0;
+  display: grid;
+  align-content: start;
+  padding: 0 13px;
+  border-left: 1px solid var(--border);
+}
+
+.rebalance-cell-grid > div:first-child {
+  padding-left: 0;
+  border-left: 0;
+}
+
+.rebalance-llcs > h4 {
+  min-height: 32px;
+  margin: 0;
+  padding: 8px 40px;
+  color: var(--muted);
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  font-size: 0.57rem;
+  text-transform: uppercase;
+}
+
+.rebalance-llc-row {
+  min-height: 50px;
+  padding: 4px 40px;
+  display: grid;
+  grid-template-columns: minmax(150px, 0.65fr) minmax(180px, 1.5fr) minmax(100px, 0.45fr);
+  align-items: center;
+  gap: 13px;
+}
+
+.rebalance-llc-row + .rebalance-llc-row {
+  border-top: 1px solid var(--border);
+}
+
+.rebalance-llc-row > span:first-child {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.rebalance-llc-row > span:first-child strong {
+  overflow-wrap: anywhere;
+  font-size: 0.64rem;
+}
+
+.rebalance-empty {
+  margin: 0;
+  padding: 14px 13px;
+  color: var(--muted);
+  font-size: 0.66rem;
+}
+
+.rebalance-summary [tabindex="0"]:focus-visible,
+.rebalance-candidate-facts [tabindex="0"]:focus-visible,
+.rebalance-cell-grid [tabindex="0"]:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
 .cells-layout {
   padding: 20px clamp(12px, 3vw, 40px) 32px;
   display: grid;
@@ -4945,6 +5356,79 @@ button:focus-visible {
 
   .cell-utilization-summary > div:nth-child(-n + 2) {
     border-top: 0;
+  }
+
+  .rebalance-summary,
+  .rebalance-candidate-facts,
+  .rebalance-cell-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .rebalance-summary > div,
+  .rebalance-summary > div:first-child,
+  .rebalance-candidate-facts > div,
+  .rebalance-candidate-facts > div:first-child,
+  .rebalance-cell-grid > div,
+  .rebalance-cell-grid > div:first-child {
+    padding: 8px;
+    border-top: 1px solid var(--border);
+    border-left: 0;
+  }
+
+  .rebalance-summary > div:nth-child(-n + 2),
+  .rebalance-candidate-facts > div:nth-child(-n + 2),
+  .rebalance-cell-grid > div:nth-child(-n + 2) {
+    border-top: 0;
+  }
+
+  .rebalance-candidate-route {
+    grid-template-columns: minmax(0, 1fr) 20px minmax(0, 1fr);
+  }
+
+  .rebalance-unit {
+    padding: 9px 0 0;
+    grid-column: 1 / -1;
+    border-top: 1px solid var(--success-border);
+    border-left: 0;
+  }
+
+  .rebalance-trend-row {
+    grid-template-columns: minmax(0, 1fr) minmax(58px, 0.3fr);
+    gap: 7px;
+  }
+
+  .rebalance-trend-row > .rebalance-trend-svg {
+    grid-row: 2;
+    grid-column: 1 / -1;
+  }
+
+  .rebalance-cell > summary {
+    grid-template-columns: 14px minmax(0, 1fr) minmax(84px, 0.4fr);
+    gap: 8px;
+  }
+
+  .rebalance-cell > summary > .rebalance-trend-svg {
+    grid-row: 2;
+    grid-column: 2 / -1;
+  }
+
+  .rebalance-cell-grid {
+    padding: 6px 13px;
+  }
+
+  .rebalance-llcs > h4 {
+    padding-inline: 13px;
+  }
+
+  .rebalance-llc-row {
+    padding: 5px 13px;
+    grid-template-columns: minmax(0, 1fr) minmax(92px, 0.45fr);
+    gap: 7px;
+  }
+
+  .rebalance-llc-row > .rebalance-trend-svg {
+    grid-row: 2;
+    grid-column: 1 / -1;
   }
 
   .cell-utilization-heading {

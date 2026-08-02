@@ -426,6 +426,17 @@
         <section class="cell-workspace-panel cell-utilization-panel" id="cellUtilizationPanel" role="tabpanel" aria-labelledby="cellUtilizationTab" tabindex="0" hidden data-feedback-key="Cells:Utilization">
           <p class="notice hidden" id="cellUtilizationNotice" role="status"></p>
           <dl class="cell-utilization-summary" id="cellUtilizationSummary" aria-label="Utilization summary"></dl>
+          <section class="cell-utilization-section rebalance-analysis-section" aria-labelledby="rebalanceAnalysisTitle" data-feedback-key="Cells:Rebalancing-analysis">
+            <header class="cell-utilization-heading">
+              <h3 id="rebalanceAnalysisTitle">Rebalancing analysis</h3>
+              <span id="rebalanceWindow">Collecting session trend</span>
+            </header>
+            <p class="notice hidden" id="rebalanceNotice" role="status"></p>
+            <dl class="rebalance-summary" id="rebalanceSummary" aria-label="Current cell pressure"></dl>
+            <div class="rebalance-candidate" id="rebalanceCandidate"></div>
+            <div class="rebalance-trend" id="rebalanceTrend" aria-label="Cell pressure trend"></div>
+            <div class="rebalance-cells" id="rebalanceCells"></div>
+          </section>
           <section class="cell-utilization-section" aria-labelledby="cellServiceTitle">
             <header class="cell-utilization-heading">
               <h3 id="cellServiceTitle">Cell service</h3>

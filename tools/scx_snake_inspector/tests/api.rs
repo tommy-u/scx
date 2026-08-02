@@ -230,6 +230,7 @@ fn queue_topology_snapshot(generation: u64) -> Value {
             "primary_cpus": [0, 1]
         }]
     });
+    snapshot["topology_lifecycle"] = json!({"current_generation": generation});
     snapshot
 }
 
@@ -337,6 +338,7 @@ fn utilization_reconciles_cell_service_with_host_cpu_capacity() {
     );
 
     let snapshot = dashboard.snapshot(1_000).unwrap();
+    assert!(snapshot.server_time_ms > 0);
 
     assert_eq!(
         snapshot.cell_stats.cells[0].runtime_ns_by_cpu,
@@ -487,6 +489,7 @@ fn dashboard_stats_reset_rebases_all_histories_without_changing_scope() {
     assert!(snapshot.cpu_usage.is_empty());
     assert_eq!(snapshot.cpu_usage_observed_ms, 0);
     assert_eq!(snapshot.cell_stats.source_policy_generation, None);
+    assert_eq!(snapshot.cell_stats.source_topology_generation, None);
     assert!(snapshot.cell_stats.cells.is_empty());
     assert!(dashboard.callback_timing_lifetime().callbacks.is_empty());
     assert_eq!(
@@ -537,6 +540,7 @@ fn cell_stats_derive_window_metrics_from_top_deltas_and_queue_topology() {
     assert_eq!(stats["status"], "ready");
     assert_eq!(stats["scope"], "all_snake_tasks");
     assert_eq!(stats["source_policy_generation"], 7);
+    assert_eq!(stats["source_topology_generation"], 7);
     assert_eq!(stats["window_ms"], 1_000);
     assert_eq!(stats["observed_ms"], 1_000);
     assert_eq!(cell["id"], 3);

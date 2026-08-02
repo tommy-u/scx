@@ -9,8 +9,11 @@ import test from "node:test";
 import * as inspectionState from "../../src/web/inspection.js";
 
 import {
+  appendCellRebalanceSample,
   callbackSampleRateOptions,
   cellLayoutDiagramModel,
+  cellRebalanceAnalysisModel,
+  cellRebalanceSample,
   cellUtilizationModel,
   cellUtilizationSignature,
   cellWorkspaceTabModel,
@@ -2165,6 +2168,82 @@ test("cell utilization keeps host pressure visible when cell CPU lanes are unsup
   assert.equal(model.host.llcs.length, 1);
 });
 
+test("cell utilization keeps repeated numeric LLC IDs separate by node and package", () => {
+  const hostCpu = (cpu) => ({
+    cpu,
+    total_ns: 1_000_000_000,
+    task_ns: 200_000_000,
+    snake_ns: 200_000_000,
+    cell_ns: 200_000_000,
+    other_task_ns: 0,
+    hardirq_ns: 0,
+    softirq_ns: 0,
+    idle_ns: 800_000_000,
+    iowait_ns: 0,
+    steal_ns: 0,
+  });
+  const model = cellUtilizationModel({
+    snapshot: {
+      window_ms: 10_000,
+      cell_stats: {
+        status: "ready",
+        observed_ms: 1_000,
+        cells: [{
+          id: 7,
+          runtime_ns: 400_000_000,
+          runtime_ns_by_cpu: { 0: 200_000_000, 1: 200_000_000 },
+        }],
+      },
+      cpu_usage_observed_ms: 1_000,
+      host_cpu_usage_observed_ms: 1_000,
+      host_cpu_usage: [hostCpu(0), hostCpu(1)],
+    },
+    inspection: {
+      cells: [{ id: 7 }],
+      queue_topology: { cells: [{ external_id: 7, primary_cpus: [0, 1] }] },
+    },
+    topology: {
+      topology_order: [0, 1],
+      cpus: [
+        { cpu: 0, node: 0, package: 0, llc: 0, core: 0 },
+        { cpu: 1, node: 1, package: 1, llc: 0, core: 0 },
+      ],
+    },
+  });
+
+  assert.deepEqual(model.host.llcs.map((llc) => llc.topologyKey), ["0:0:0", "1:1:0"]);
+  assert.deepEqual(
+    model.cells[0].owned.llcs.map((llc) => llc.topologyKey),
+    ["0:0:0", "1:1:0"],
+  );
+  assert.deepEqual(model.cells[0].llcs.map((llc) => llc.topologyKey), ["0:0:0", "1:1:0"]);
+});
+
+test("cell utilization waits for browser topology to match the sampled generation", () => {
+  const model = cellUtilizationModel({
+    snapshot: {
+      cell_stats: {
+        status: "ready",
+        source_topology_generation: 13,
+        observed_ms: 1_000,
+        cells: [{ id: 7, runtime_ns: 10, runtime_ns_by_cpu: { 0: 10 } }],
+      },
+      cpu_usage_observed_ms: 1_000,
+      host_cpu_usage_observed_ms: 1_000,
+      host_cpu_usage: [{ cpu: 0, total_ns: 1_000, task_ns: 10, snake_ns: 10 }],
+    },
+    inspection: {
+      topology_lifecycle: { current_generation: 12 },
+      queue_topology: { cells: [{ external_id: 7, primary_cpus: [0] }] },
+    },
+    topology: { topology_order: [0], cpus: [{ cpu: 0, llc: 0, core: 0 }] },
+  });
+
+  assert.equal(model.cellStatus, "synchronizing");
+  assert.equal(model.cells.length, 0);
+  assert.match(model.cellStatusLabel, /topology/i);
+});
+
 test("host capacity clamps the Snake overlay and reports source overage", () => {
   const model = cellUtilizationModel({
     snapshot: {
@@ -2231,6 +2310,490 @@ test("host capacity does not split stale Snake runtime from a newer host window"
   assert.equal(model.host.total.otherTaskCapacityNs, 600);
   assert.match(model.warnings.join(" "), /not aligned/);
   assert.doesNotMatch(model.warnings.join(" "), /exceeds/);
+});
+
+function rebalanceCpu(cpu, { llcId, core, taxNs = 100_000_000 } = {}) {
+  return {
+    cpu,
+    nodeId: 0,
+    packageId: 0,
+    llcId,
+    core,
+    topologyKey: `0:0:${llcId}`,
+    coreTopologyKey: `0:0:${llcId}:${core}`,
+    totalNs: 1_000_000_000,
+    otherTaskCapacityNs: taxNs / 2,
+    hardirqNs: taxNs / 4,
+    softirqNs: taxNs / 4,
+    stealNs: 0,
+    unclassifiedNs: 0,
+  };
+}
+
+function rebalanceFixture({ incomplete = false, hotDemandNs = 1_400_000_000 } = {}) {
+  const coldCpus = [
+    rebalanceCpu(0, { llcId: 0, core: 0 }),
+    rebalanceCpu(1, { llcId: 0, core: 0 }),
+    rebalanceCpu(2, { llcId: 0, core: 1 }),
+    rebalanceCpu(3, { llcId: 0, core: 1 }),
+  ];
+  const sampledColdCpus = incomplete ? coldCpus.slice(1) : coldCpus;
+  const hotCpus = [
+    rebalanceCpu(4, { llcId: 1, core: 2 }),
+    rebalanceCpu(5, { llcId: 1, core: 2 }),
+  ];
+  const sum = (cpus, field) => cpus.reduce((total, cpu) => total + cpu[field], 0);
+  const owned = (cpus, expected, llcId) => ({
+    cpuCount: expected.length,
+    sampledCpuCount: cpus.length,
+    missingCpus: expected.filter((cpu) => !cpus.some((sample) => sample.cpu === cpu)),
+    cpus,
+    llcs: [{
+      llcId,
+      topologyKey: `0:0:${llcId}`,
+      cpus,
+      totalNs: sum(cpus, "totalNs"),
+      otherTaskCapacityNs: sum(cpus, "otherTaskCapacityNs"),
+      hardirqNs: sum(cpus, "hardirqNs"),
+      softirqNs: sum(cpus, "softirqNs"),
+      stealNs: 0,
+      unclassifiedNs: 0,
+    }],
+    total: {
+      totalNs: sum(cpus, "totalNs"),
+      otherTaskCapacityNs: sum(cpus, "otherTaskCapacityNs"),
+      hardirqNs: sum(cpus, "hardirqNs"),
+      softirqNs: sum(cpus, "softirqNs"),
+      stealNs: 0,
+      unclassifiedNs: 0,
+    },
+  });
+  const utilization = {
+    cellStatus: "ready",
+    hostStatus: "ready",
+    observedMs: 1_000,
+    hostObservedMs: 1_000,
+    windowMs: 10_000,
+    host: { snakeOverlayReady: true },
+    cells: [
+      {
+        id: 1,
+        label: "cold.slice",
+        slotEpoch: 1,
+        eligibleCpuIds: [0, 1, 2, 3, 4, 5, 6, 7],
+        runtimeNs: 200_000_000,
+        llcs: [{ llcId: 0, topologyKey: "0:0:0", runtimeNs: 200_000_000 }],
+        owned: owned(sampledColdCpus, [0, 1, 2, 3], 0),
+      },
+      {
+        id: 2,
+        label: "hot.slice",
+        slotEpoch: 2,
+        eligibleCpuIds: [0, 1, 2, 3, 4, 5, 6, 7],
+        runtimeNs: hotDemandNs,
+        llcs: [{ llcId: 1, topologyKey: "0:0:1", runtimeNs: hotDemandNs }],
+        owned: owned(hotCpus, [4, 5], 1),
+      },
+    ],
+  };
+  const topology = {
+    topology_order: [0, 1, 2, 3, 4, 5],
+    cpus: [
+      { cpu: 0, node: 0, package: 0, llc: 0, core: 0 },
+      { cpu: 1, node: 0, package: 0, llc: 0, core: 0 },
+      { cpu: 2, node: 0, package: 0, llc: 0, core: 1 },
+      { cpu: 3, node: 0, package: 0, llc: 0, core: 1 },
+      { cpu: 4, node: 0, package: 0, llc: 1, core: 2 },
+      { cpu: 5, node: 0, package: 0, llc: 1, core: 2 },
+    ],
+  };
+  return { utilization, topology };
+}
+
+test("cell rebalancing models demand against capacity after non-scheduler tax", () => {
+  const { utilization } = rebalanceFixture();
+  const sample = cellRebalanceSample({
+    utilization,
+    context: { scheduler_attach_seq: 4, policy_generation: 9 },
+    topologyGeneration: 12,
+    sampledAtMs: 1_000,
+  });
+
+  assert.equal(sample.scopeKey, "4:10000");
+  assert.equal(sample.topologyGeneration, 12);
+  assert.equal(sample.cells[0].ready, true);
+  assert.equal(sample.cells[0].demandNs, 200_000_000);
+  assert.equal(sample.cells[0].taxNs, 400_000_000);
+  assert.equal(sample.cells[0].effectiveCapacityNs, 3_600_000_000);
+  assert.equal(sample.cells[0].headroomNs, 3_400_000_000);
+  assert.ok(Math.abs(sample.cells[0].pressurePct - 5.555555) < 0.00001);
+  assert.equal(sample.cells[1].taxNs, 200_000_000);
+  assert.equal(sample.cells[1].effectiveCapacityNs, 1_800_000_000);
+  assert.ok(Math.abs(sample.cells[1].pressurePct - 77.777777) < 0.00001);
+  assert.equal(sample.cells[0].llcs[0].effectiveCapacityNs, 3_600_000_000);
+});
+
+test("cell rebalancing recommends the least disruptive improving whole-core move", () => {
+  const { utilization, topology } = rebalanceFixture();
+  const sample = cellRebalanceSample({
+    utilization,
+    context: { scheduler_attach_seq: 4, policy_generation: 9 },
+    topologyGeneration: 12,
+    sampledAtMs: 2_000,
+  });
+  const model = cellRebalanceAnalysisModel({ utilization, topology, sample, samples: [sample] });
+
+  assert.equal(model.available, true);
+  assert.ok(Math.abs(model.spreadPct - 72.222222) < 0.00001);
+  assert.equal(model.hotCell.id, 2);
+  assert.equal(model.coldCell.id, 1);
+  assert.equal(model.candidate.sourceCell.id, 1);
+  assert.equal(model.candidate.targetCell.id, 2);
+  assert.equal(model.candidate.unit.kind, "core");
+  assert.deepEqual(model.candidate.unit.cpus, [0, 1]);
+  assert.equal(model.candidate.capacityNs, 1_800_000_000);
+  assert.ok(model.candidate.afterSpreadPct < model.candidate.beforeSpreadPct);
+  assert.ok(Math.abs(model.candidate.improvementPct - 44.444444) < 0.00001);
+});
+
+test("cell rebalancing can choose a whole LLC when it improves balance and leaves capacity", () => {
+  const { utilization, topology } = rebalanceFixture({ hotDemandNs: 4_000_000_000 });
+  const extraCpus = [
+    rebalanceCpu(6, { llcId: 2, core: 3 }),
+    rebalanceCpu(7, { llcId: 2, core: 3 }),
+  ];
+  topology.topology_order.push(6, 7);
+  topology.cpus.push(
+    { cpu: 6, node: 0, package: 0, llc: 2, core: 3 },
+    { cpu: 7, node: 0, package: 0, llc: 2, core: 3 },
+  );
+  const cold = utilization.cells[0];
+  cold.owned.cpus.push(...extraCpus);
+  cold.owned.cpuCount += 2;
+  cold.owned.sampledCpuCount += 2;
+  cold.owned.total.totalNs += 2_000_000_000;
+  cold.owned.total.otherTaskCapacityNs += 100_000_000;
+  cold.owned.total.hardirqNs += 50_000_000;
+  cold.owned.total.softirqNs += 50_000_000;
+  cold.owned.llcs.push({
+    llcId: 2,
+    topologyKey: "0:0:2",
+    cpus: extraCpus,
+    totalNs: 2_000_000_000,
+    otherTaskCapacityNs: 100_000_000,
+    hardirqNs: 50_000_000,
+    softirqNs: 50_000_000,
+    stealNs: 0,
+    unclassifiedNs: 0,
+  });
+  const sample = cellRebalanceSample({
+    utilization,
+    context: { scheduler_attach_seq: 4, policy_generation: 9 },
+    topologyGeneration: 12,
+    sampledAtMs: 2_000,
+  });
+  const model = cellRebalanceAnalysisModel({ utilization, topology, sample, samples: [sample] });
+
+  assert.equal(model.candidate.unit.kind, "llc");
+  assert.equal(model.candidate.unit.llcId, 0);
+  assert.deepEqual(model.candidate.unit.cpus, [0, 1, 2, 3]);
+});
+
+test("cell rebalancing excludes incompletely sampled ownership", () => {
+  const { utilization, topology } = rebalanceFixture({ incomplete: true });
+  const sample = cellRebalanceSample({
+    utilization,
+    context: { scheduler_attach_seq: 4, policy_generation: 9 },
+    topologyGeneration: 12,
+    sampledAtMs: 2_000,
+  });
+  const model = cellRebalanceAnalysisModel({ utilization, topology, sample, samples: [sample] });
+
+  assert.equal(sample.cells[0].ready, false);
+  assert.deepEqual(sample.cells[0].missingCpus, [0]);
+  assert.equal(model.candidate, null);
+  assert.match(model.candidateMessage, /every cell/i);
+});
+
+test("cell rebalancing blocks global candidates when any third cell is incomplete", () => {
+  const { utilization, topology } = rebalanceFixture();
+  const sample = cellRebalanceSample({
+    utilization,
+    context: { scheduler_attach_seq: 4, policy_generation: 9 },
+    topologyGeneration: 12,
+    sampledAtMs: 2_000,
+  });
+  sample.cells.push({
+    id: 3,
+    label: "unknown.slice",
+    identityKey: "3:1",
+    slotEpoch: 1,
+    ready: false,
+    statusMessage: "Owned CPU sampling is incomplete.",
+    cpuCount: 2,
+    sampledCpuCount: 0,
+    missingCpus: [6, 7],
+    llcs: [],
+  });
+  const model = cellRebalanceAnalysisModel({ utilization, topology, sample, samples: [sample] });
+
+  assert.equal(model.eligibleCellCount, 2);
+  assert.equal(model.spreadPct, null);
+  assert.equal(model.candidate, null);
+  assert.match(model.statusMessage, /every cell/i);
+});
+
+test("cell rebalancing rejects partial CPU windows and non-conserving accounting", () => {
+  const partial = rebalanceFixture().utilization;
+  partial.cells[0].owned.cpus[0].totalNs = 400_000_000;
+  const partialSample = cellRebalanceSample({
+    utilization: partial,
+    context: { scheduler_attach_seq: 4, policy_generation: 9 },
+    topologyGeneration: 12,
+    sampledAtMs: 2_000,
+  });
+  assert.equal(partialSample.cells[0].ready, false);
+
+  const rounded = rebalanceFixture().utilization;
+  rounded.host.total = {
+    sourceOverageNs: 50_000_000,
+    unattributedSnakeNs: 5_000_000,
+  };
+  assert.equal(cellRebalanceSample({
+    utilization: rounded,
+    context: { scheduler_attach_seq: 4, policy_generation: 9 },
+    topologyGeneration: 12,
+    sampledAtMs: 2_000,
+  }).available, true);
+
+  const unreconciled = rebalanceFixture().utilization;
+  unreconciled.cells[0].reportedRuntimeNs = 300_000_000;
+  unreconciled.cells[0].reconciliationNs = 100_000_000;
+  assert.equal(cellRebalanceSample({
+    utilization: unreconciled,
+    context: { scheduler_attach_seq: 4, policy_generation: 9 },
+    topologyGeneration: 12,
+    sampledAtMs: 2_000,
+  }).available, false);
+
+  const nonConserving = rebalanceFixture().utilization;
+  nonConserving.host.total = { unattributedSnakeNs: 1_000_000_000 };
+  const nonConservingSample = cellRebalanceSample({
+    utilization: nonConserving,
+    context: { scheduler_attach_seq: 4, policy_generation: 9 },
+    topologyGeneration: 12,
+    sampledAtMs: 2_000,
+  });
+  assert.equal(nonConservingSample.available, false);
+  assert.match(nonConservingSample.statusMessage, /accounting to reconcile/i);
+});
+
+test("cell rebalancing only proposes CPUs already eligible to the target", () => {
+  const { utilization, topology } = rebalanceFixture();
+  utilization.cells[1].eligibleCpuIds = [4, 5];
+  const sample = cellRebalanceSample({
+    utilization,
+    context: { scheduler_attach_seq: 4, policy_generation: 9 },
+    topologyGeneration: 12,
+    sampledAtMs: 2_000,
+  });
+  const model = cellRebalanceAnalysisModel({ utilization, topology, sample, samples: [sample] });
+
+  assert.equal(model.candidate, null);
+  assert.match(model.candidateMessage, /currently eligible/i);
+});
+
+test("cell rebalancing waits for a clean window after an applied topology change", () => {
+  const { utilization } = rebalanceFixture();
+  const mixed = cellRebalanceSample({
+    utilization,
+    context: { scheduler_attach_seq: 4, policy_generation: 9 },
+    topologyGeneration: 13,
+    topologyChangedAtMs: 2_500,
+    sampledAtMs: 3_000,
+  });
+  const clean = cellRebalanceSample({
+    utilization,
+    context: { scheduler_attach_seq: 4, policy_generation: 9 },
+    topologyGeneration: 13,
+    topologyChangedAtMs: 2_500,
+    sampledAtMs: 3_500,
+  });
+
+  assert.equal(mixed.available, false);
+  assert.match(mixed.statusMessage, /clean post-topology window/i);
+  assert.equal(clean.available, true);
+});
+
+test("cell rebalancing history replaces rapid samples, expires old data, and resets scope", () => {
+  const base = {
+    scopeKey: "4:9:10000",
+    topologyGeneration: 12,
+    sampledAtMs: 1_000_000,
+    cells: [],
+  };
+  let history = appendCellRebalanceSample([], base);
+  history = appendCellRebalanceSample(history, { ...base, sampledAtMs: 1_000_500 });
+  assert.deepEqual(history.map((sample) => sample.sampledAtMs), [1_000_500]);
+
+  history = appendCellRebalanceSample(history, { ...base, sampledAtMs: 1_001_500 });
+  assert.deepEqual(history.map((sample) => sample.sampledAtMs), [1_000_500, 1_001_500]);
+
+  history = appendCellRebalanceSample(history, { ...base, sampledAtMs: 1_301_501 });
+  assert.deepEqual(history.map((sample) => sample.sampledAtMs), [1_301_501]);
+
+  history = appendCellRebalanceSample(history, {
+    ...base,
+    scopeKey: "5:1:10000",
+    sampledAtMs: 1_302_501,
+  });
+  assert.deepEqual(history.map((sample) => sample.scopeKey), ["5:1:10000"]);
+});
+
+test("cell rebalancing history advances buckets under a continuous sub-second stream", () => {
+  let history = [];
+  for (let sampledAtMs = 0; sampledAtMs <= 5_000; sampledAtMs += 250) {
+    history = appendCellRebalanceSample(history, {
+      scopeKey: "4:9:10000",
+      topologyGeneration: 12,
+      sampledAtMs,
+      cells: [],
+    });
+  }
+
+  assert.equal(history.length, 6);
+  assert.deepEqual(
+    history.map((sample) => sample.sampledAtMs),
+    [750, 1_750, 2_750, 3_750, 4_750, 5_000],
+  );
+});
+
+test("cell rebalancing history spans managed topology generations but resets other policy changes", () => {
+  const base = {
+    scopeKey: "4:10000",
+    policyIdentity: "vtime:managed-source",
+    policyGeneration: 9,
+    topologyGeneration: 11,
+    topologyChangedAtMs: null,
+    sampledAtMs: 1_000,
+    available: true,
+    cells: [],
+  };
+  let history = appendCellRebalanceSample([], base);
+  history = appendCellRebalanceSample(history, {
+    ...base,
+    policyGeneration: 10,
+    topologyGeneration: 12,
+    topologyChangedAtMs: 1_500,
+    sampledAtMs: 2_000,
+  });
+  assert.equal(history.length, 2);
+
+  history = appendCellRebalanceSample(history, {
+    ...base,
+    policyGeneration: 11,
+    topologyGeneration: 12,
+    sampledAtMs: 3_000,
+  });
+  assert.equal(history.length, 1);
+  assert.equal(history[0].policyGeneration, 11);
+
+  history = appendCellRebalanceSample([base], {
+    ...base,
+    policyIdentity: "vtime:different-source",
+    policyGeneration: 10,
+    topologyGeneration: 12,
+    topologyChangedAtMs: 1_500,
+    sampledAtMs: 2_000,
+  });
+  assert.equal(history.length, 1);
+  assert.equal(history[0].policyIdentity, "vtime:different-source");
+});
+
+test("cell rebalancing trends keep reused cell slots in separate series", () => {
+  const { utilization, topology } = rebalanceFixture();
+  const current = cellRebalanceSample({
+    utilization,
+    context: { scheduler_attach_seq: 4, policy_generation: 10 },
+    topologyGeneration: 12,
+    sampledAtMs: 2_000,
+  });
+  const earlier = {
+    ...current,
+    policyGeneration: 9,
+    topologyGeneration: 11,
+    sampledAtMs: 1_000,
+    cells: current.cells.map((cell) => cell.id === 1 ? {
+      ...cell,
+      label: "previous.slice",
+      slotEpoch: 0,
+      identityKey: "1:0",
+    } : cell),
+  };
+  const model = cellRebalanceAnalysisModel({
+    utilization,
+    topology,
+    sample: current,
+    samples: [earlier, current],
+  });
+
+  const reused = model.trend.series.filter((series) => series.cellId === 1);
+  assert.equal(reused.length, 2);
+  assert.deepEqual(reused.map((series) => series.points.length), [1, 1]);
+});
+
+test("cell rebalancing trends share a scale and align topology transitions", () => {
+  const { utilization, topology } = rebalanceFixture();
+  const current = cellRebalanceSample({
+    utilization,
+    context: { scheduler_attach_seq: 4, policy_generation: 9 },
+    topologyGeneration: 12,
+    sampledAtMs: 3_000,
+  });
+  const earlier = {
+    ...current,
+    sampledAtMs: 1_000,
+    topologyGeneration: 11,
+    cells: [{
+      ...current.cells[0],
+      pressurePct: 50,
+      llcs: [{ ...current.cells[0].llcs[0], pressurePct: 40 }],
+    }],
+  };
+  const unavailable = {
+    ...current,
+    sampledAtMs: 2_000,
+    available: false,
+    cells: current.cells.map((cell) => ({ ...cell, ready: false, pressurePct: null })),
+  };
+  const model = cellRebalanceAnalysisModel({
+    utilization,
+    topology,
+    sample: current,
+    samples: [earlier, unavailable, current],
+    lifecycle: {
+      transitions: [{
+        id: 7,
+        completedAtMs: 2_000,
+        outcome: "applied",
+        outcomeLabel: "Applied",
+        generationLabel: "Generation 11 to 12",
+      }],
+    },
+  });
+
+  assert.equal(model.trend.durationMs, 2_000);
+  assert.equal(model.trend.scaleMaxPct, 100);
+  assert.equal(model.trend.series.find((series) => series.cellId === 1).points.length, 2);
+  assert.deepEqual(
+    model.trend.series.find((series) => series.cellId === 1).points
+      .map((point) => point.segment),
+    [0, 1],
+  );
+  assert.equal(model.trend.series.find((series) => series.cellId === 2).points.length, 1);
+  assert.equal(model.trend.sampleCount, 2);
+  assert.equal(model.trend.markers[0].xPct, 50);
+  assert.match(model.trend.markers[0].label, /Generation 11 to 12/);
 });
 
 test("cell layout diagram joins cells with LLC-scoped normal and affinity DSQs", () => {
@@ -3210,6 +3773,20 @@ test("Cells page renders a live cell and DSQ layout diagram", () => {
   assert.match(page, /id="cellChangesTab"[^>]*role="tab"/);
   assert.match(page, /id="cellLayoutPanel"[^>]*role="tabpanel"/);
   assert.match(page, /id="cellUtilizationPanel"[^>]*role="tabpanel"/);
+  assert.equal(
+    (page.match(/<section class="cell-utilization-section/g) || []).length,
+    3,
+  );
+  for (const fragment of [
+    'id="rebalanceWindow"',
+    'id="rebalanceNotice"',
+    'id="rebalanceSummary"',
+    'id="rebalanceCandidate"',
+    'id="rebalanceTrend"',
+    'id="rebalanceCells"',
+  ]) {
+    assert.match(page, new RegExp(fragment), `missing ${fragment}`);
+  }
   assert.match(page, /id="cellChangesPanel"[^>]*role="tabpanel"/);
   assert.match(page, /id="topologyTransitionList"/);
   assert.match(script, /cellLayoutDiagramModel/);
@@ -3217,6 +3794,10 @@ test("Cells page renders a live cell and DSQ layout diagram", () => {
   assert.match(script, /renderCellUtilization/);
   assert.match(script, /CELL_UTILIZATION_RENDER_INTERVAL_MS = 1_000/);
   assert.match(script, /cellUtilizationSignature/);
+  assert.match(script, /cellRebalanceAnalysisModel/);
+  assert.match(script, /appendCellRebalanceSample/);
+  assert.match(script, /renderRebalanceAnalysis/);
+  assert.match(script, /llc\.topologyKey \?\? llc\.llcId/);
   assert.match(script, /:summary"/);
   assert.match(script, /topologyLifecycleModel/);
   assert.match(script, /renderTopologyTransitions/);
@@ -3238,6 +3819,8 @@ test("Cells page renders a live cell and DSQ layout diagram", () => {
   assert.match(stylesheet, /\.cell-layout-summary/);
   assert.match(stylesheet, /\.cell-utilization-grid/);
   assert.match(stylesheet, /\.capacity-stack/);
+  assert.match(stylesheet, /\.rebalance-trend-svg\s*\{[^}]*height:\s*58px/s);
+  assert.match(stylesheet, /\.rebalance-cell-grid/);
   assert.match(stylesheet, /@media \(min-width: 761px\) and \(max-width: 1200px\)[\s\S]*\.cell-utilization-summary\s*\{[^}]*repeat\(4,/);
   assert.match(stylesheet, /\.cell-topology-band/);
   assert.match(stylesheet, /\.cell-llc-cluster/);
