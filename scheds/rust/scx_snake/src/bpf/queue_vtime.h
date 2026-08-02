@@ -5,6 +5,8 @@
 #include "queue.h"
 #include "fairness.h"
 
+#define SNAKE_VTIME_CAS_RETRIES 16
+
 struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
 	__type(key, u32);
@@ -46,60 +48,90 @@ queue_domain_now(struct snake_vtime_domain *domain,
 	if (!domain)
 		return 0;
 	started_at = fine_timing_start(fine);
-	bpf_spin_lock(&domain->lock);
-	now = domain->vtime_now;
-	bpf_spin_unlock(&domain->lock);
+	now = READ_ONCE(domain->vtime_now);
 	stage = queue_domain_read_stage(fine);
 	if (stage < SNAKE_NR_FINE_TIMING_STAGES)
 		fine_timing_finish(fine, stage, started_at);
 	return now;
 }
 
-static __always_inline u64
-queue_domain_run_start(struct snake_vtime_domain *domain, u64 vruntime,
+static __always_inline int
+queue_domain_run_start(const struct snake_ladder_ctx *ctx,
+		       struct snake_vtime_domain *domain, u64 vruntime,
+		       u64 *adjusted_vruntime,
 		       const struct snake_fine_timing_ctx *fine)
 {
-	u64 started_at;
-	u32 stage;
+	u64  adjusted, desired, observed, previous, started_at;
+	u32  stage;
+	int  attempt, ret = 0;
 	bool advanced = false;
 
-	if (!domain)
-		return vruntime;
+	if (!domain || !adjusted_vruntime)
+		return -EINVAL;
 	started_at = fine_timing_start(fine);
-	bpf_spin_lock(&domain->lock);
-	vruntime = fairness_vtime_run_start(vruntime, domain->vtime_now);
-	if (time_before(domain->vtime_now, vruntime)) {
-		domain->vtime_now = vruntime;
-		advanced = true;
+	observed = READ_ONCE(domain->vtime_now);
+	bpf_for(attempt, 0, SNAKE_VTIME_CAS_RETRIES) {
+		adjusted = fairness_vtime_run_start(vruntime, observed);
+		desired  = observed;
+		if (time_before(observed, adjusted))
+			desired = adjusted;
+		previous = __sync_val_compare_and_swap(&domain->vtime_now,
+						   observed, desired);
+		if (previous == observed) {
+			advanced = desired != observed;
+			*adjusted_vruntime = adjusted;
+			goto out;
+		}
+		stat_inc(ctx, SNAKE_STAT_VTIME_CLOCK_CAS_RETRIES);
+		observed = previous;
 	}
-	bpf_spin_unlock(&domain->lock);
+	stat_inc(ctx, SNAKE_STAT_VTIME_CLOCK_CAS_EXHAUSTIONS);
+	adjusted = fairness_vtime_run_start(vruntime, observed);
+	if (time_before(observed, adjusted))
+		ret = -EAGAIN;
+	else
+		*adjusted_vruntime = adjusted;
+out:
 	stage = advanced ? SNAKE_FINE_TIMING_RUNNING_CELL_CLOCK_RUN_START_ADVANCE :
 			   SNAKE_FINE_TIMING_RUNNING_CELL_CLOCK_RUN_START_NOOP;
 	fine_timing_finish(fine, stage, started_at);
-	return vruntime;
+	return ret;
 }
 
-static __always_inline bool
-queue_domain_advance(struct snake_vtime_domain *domain, u64 candidate,
+static __always_inline int
+queue_domain_advance(const struct snake_ladder_ctx *ctx,
+		     struct snake_vtime_domain *domain, u64 candidate,
 		     const struct snake_fine_timing_ctx *fine)
 {
-	u64 started_at;
-	u32 stage;
+	u64  observed, previous, started_at;
+	u32  stage;
+	int  attempt, ret = 0;
 	bool advanced = false;
 
 	if (!domain)
-		return false;
+		return -EINVAL;
 	started_at = fine_timing_start(fine);
-	bpf_spin_lock(&domain->lock);
-	if (time_before(domain->vtime_now, candidate)) {
-		domain->vtime_now = candidate;
-		advanced = true;
+	observed = READ_ONCE(domain->vtime_now);
+	bpf_for(attempt, 0, SNAKE_VTIME_CAS_RETRIES) {
+		if (!time_before(observed, candidate))
+			goto out;
+		previous = __sync_val_compare_and_swap(&domain->vtime_now,
+						   observed, candidate);
+		if (previous == observed) {
+			advanced = true;
+			goto out;
+		}
+		stat_inc(ctx, SNAKE_STAT_VTIME_CLOCK_CAS_RETRIES);
+		observed = previous;
 	}
-	bpf_spin_unlock(&domain->lock);
+	stat_inc(ctx, SNAKE_STAT_VTIME_CLOCK_CAS_EXHAUSTIONS);
+	if (time_before(observed, candidate))
+		ret = -EAGAIN;
+out:
 	stage = advanced ? SNAKE_FINE_TIMING_RUNNING_AFFINITY_CLOCK_ADVANCE :
 			   SNAKE_FINE_TIMING_RUNNING_AFFINITY_CLOCK_NOOP;
 	fine_timing_finish(fine, stage, started_at);
-	return advanced;
+	return ret;
 }
 
 static __always_inline u64 queue_translate_vruntime(u64 vruntime, u64 old_now,
@@ -421,7 +453,9 @@ static __always_inline int queue_fairness_running(
 	struct snake_task_runtime *runtime = fairness_task(ctx, p, false);
 	struct snake_vtime_domain *domain;
 	struct snake_cpu_queue	  *cpuq;
+	u64			   adjusted_vruntime;
 	u32			   active_weight, cpu;
+	int			   ret;
 
 	active_weight = runtime && runtime->active_weight ?
 				runtime->active_weight :
@@ -454,7 +488,11 @@ static __always_inline int queue_fairness_running(
 	domain = queue_cell_domain(runtime->cell_index);
 	if (!domain)
 		return -EINVAL;
-	runtime->vruntime = queue_domain_run_start(domain, runtime->vruntime, fine);
+	ret = queue_domain_run_start(ctx, domain, runtime->vruntime,
+				     &adjusted_vruntime, fine);
+	if (ret)
+		return ret;
+	runtime->vruntime = adjusted_vruntime;
 	if (runtime->queue_class == SNAKE_QUEUE_CLASS_AFFINITY) {
 		if (queue_fairness_prepare_affinity(ctx, runtime,
 						    cpuq->owner_cell_index, fine))
@@ -462,7 +500,10 @@ static __always_inline int queue_fairness_running(
 		domain = queue_cell_domain(cpuq->owner_cell_index);
 		if (!domain)
 			return -EINVAL;
-		queue_domain_advance(domain, runtime->affinity_vruntime, fine);
+		ret = queue_domain_advance(ctx, domain,
+				   runtime->affinity_vruntime, fine);
+		if (ret)
+			return ret;
 	}
 	/* select_cpu() may be followed directly by running() when prev is kept. */
 	task_route_clear_selected_cpu(runtime);

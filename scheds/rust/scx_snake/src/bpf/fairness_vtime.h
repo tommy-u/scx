@@ -10,7 +10,13 @@ struct snake_vtime_domain {
 	struct bpf_spin_lock lock;
 	u32		     pad;
 	u64		     vtime_now;
+	u64		     cacheline_pad[6];
 };
+
+_Static_assert(sizeof(struct snake_vtime_domain) == 64,
+	       "VTIME domains must occupy one 64-byte cacheline stride");
+_Static_assert(__builtin_offsetof(struct snake_vtime_domain, vtime_now) % 8 == 0,
+	       "VTIME clock must remain aligned for 64-bit atomics");
 
 struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);

@@ -543,6 +543,8 @@ test("VTIME debug model summarizes the active generation without inventing thres
         vtime_cpu_enqueues: 10,
         vtime_cpu_dispatches: 8,
         vtime_credit_clamps: 25,
+        vtime_clock_cas_retries: 7,
+        vtime_clock_cas_exhaustions: 0,
         vtime_accounting_errors: 2,
         vtime_equal_head_ties: 5,
         vtime_direct_runtime_ns: 20,
@@ -596,6 +598,8 @@ test("VTIME debug model summarizes the active generation without inventing thres
   assert.deepEqual(model.dispatchRungs.map((rung) => rung.index), [0, 2]);
   assert.ok(model.counters.relevant.some((counter) => counter.key === "select_calls"));
   assert.ok(model.counters.relevant.some((counter) => counter.key === "vtime_credit_clamps"));
+  assert.ok(model.counters.relevant.some((counter) => counter.key === "vtime_clock_cas_retries"));
+  assert.ok(model.counters.relevant.some((counter) => counter.key === "vtime_clock_cas_exhaustions"));
   assert.ok(model.counters.inactive.some((counter) => counter.key === "fifo_shared_enqueues"));
   assert.ok(model.counters.inactive.some((counter) => counter.key === "eevdf_lag_clamps"));
   assert.ok(!model.counters.inactive.some((counter) => counter.key.startsWith("vtime_")));
@@ -619,6 +623,8 @@ test("VTIME debug model summarizes the active generation without inventing thres
         vtime_cpu_enqueues: 6,
         vtime_cpu_dispatches: 4,
         vtime_credit_clamps: 20,
+        vtime_clock_cas_retries: 3,
+        vtime_clock_cas_exhaustions: 0,
         vtime_accounting_errors: 1,
         vtime_equal_head_ties: 1,
       },
@@ -637,6 +643,20 @@ test("VTIME debug model summarizes the active generation without inventing thres
     equalHeadTies: 2,
     accountingErrors: 0.5,
   });
+  const retryCounter = sampled.counters.relevant.find(
+    (counter) => counter.key === "vtime_clock_cas_retries",
+  );
+  const exhaustionCounter = sampled.counters.relevant.find(
+    (counter) => counter.key === "vtime_clock_cas_exhaustions",
+  );
+  assert.deepEqual(
+    { value: retryCounter.value, rate: retryCounter.rate },
+    { value: 7, rate: 2 },
+  );
+  assert.deepEqual(
+    { value: exhaustionCounter.value, rate: exhaustionCounter.rate },
+    { value: 0, rate: 0 },
+  );
   assert.equal(inspectionModule.vtimeDebugModel(current).rates.enqueues, null);
   previous.context.policy_generation = 8;
   assert.equal(inspectionModule.vtimeDebugModel(current, {

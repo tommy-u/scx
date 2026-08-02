@@ -8,6 +8,108 @@ use scx_snake::fairness::{
     EEVDF_SLICE_NS, VTIME_MIN_SLICE_NS, VTIME_SLICE_NS,
 };
 
+#[derive(Debug, Eq, PartialEq)]
+enum RunStartCasResult {
+    Complete {
+        vruntime: u64,
+        frontier: u64,
+        advanced: bool,
+        exhausted: bool,
+    },
+    RequiredAdvanceExhausted {
+        observed: u64,
+        desired: u64,
+    },
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum MaxCasResult {
+    Complete {
+        frontier: u64,
+        advanced: bool,
+        exhausted: bool,
+    },
+    RequiredAdvanceExhausted {
+        observed: u64,
+        candidate: u64,
+    },
+}
+
+fn model_run_start_cas(
+    vruntime: u64,
+    initial_observation: u64,
+    cas_observations: &[u64],
+) -> RunStartCasResult {
+    let mut observed = initial_observation;
+
+    for &previous in cas_observations {
+        let adjusted = vtime_run_start(vruntime, observed);
+        let desired = later_vtime_frontier(observed, adjusted);
+
+        if previous == observed {
+            return RunStartCasResult::Complete {
+                vruntime: adjusted,
+                frontier: desired,
+                advanced: desired != observed,
+                exhausted: false,
+            };
+        }
+        observed = previous;
+    }
+
+    let adjusted = vtime_run_start(vruntime, observed);
+    let desired = later_vtime_frontier(observed, adjusted);
+    if desired == observed {
+        RunStartCasResult::Complete {
+            vruntime: adjusted,
+            frontier: observed,
+            advanced: false,
+            exhausted: true,
+        }
+    } else {
+        RunStartCasResult::RequiredAdvanceExhausted { observed, desired }
+    }
+}
+
+fn model_max_cas(
+    candidate: u64,
+    initial_observation: u64,
+    cas_observations: &[u64],
+) -> MaxCasResult {
+    let mut observed = initial_observation;
+
+    for &previous in cas_observations {
+        if later_vtime_frontier(observed, candidate) == observed {
+            return MaxCasResult::Complete {
+                frontier: observed,
+                advanced: false,
+                exhausted: false,
+            };
+        }
+        if previous == observed {
+            return MaxCasResult::Complete {
+                frontier: candidate,
+                advanced: true,
+                exhausted: false,
+            };
+        }
+        observed = previous;
+    }
+
+    if later_vtime_frontier(observed, candidate) == observed {
+        MaxCasResult::Complete {
+            frontier: observed,
+            advanced: false,
+            exhausted: true,
+        }
+    } else {
+        MaxCasResult::RequiredAdvanceExhausted {
+            observed,
+            candidate,
+        }
+    }
+}
+
 #[test]
 fn fifo_is_the_default_fairness_mode() {
     assert_eq!(FairnessMode::default(), FairnessMode::Fifo);
@@ -120,6 +222,88 @@ fn run_start_reclamps_vtime_after_a_long_queue_wait() {
     assert_eq!(run_start, CELL_FRONTIER - VTIME_SLICE_NS);
     let reclamped_projected = project_vtime(run_start, slice, slice, 0, BASE_WEIGHT).unwrap();
     assert!(reclamped_projected > AFFINITY_HEAD);
+}
+
+#[test]
+fn failed_noop_cas_reclamps_against_the_returned_frontier() {
+    let stale_frontier = 100_000_000;
+    let current_frontier = 200_000_000;
+    let vruntime = stale_frontier;
+
+    assert_eq!(vtime_run_start(vruntime, stale_frontier), vruntime);
+    assert_eq!(
+        vtime_run_start(vruntime, current_frontier),
+        current_frontier - VTIME_SLICE_NS
+    );
+}
+
+#[test]
+fn lockless_run_start_model_revalidates_races_and_fails_closed_on_exhaustion() {
+    let stale = 100_000_000;
+    let current = 200_000_000;
+    let ahead = 300_000_000;
+
+    assert_eq!(
+        model_run_start_cas(stale, stale, &[current, current]),
+        RunStartCasResult::Complete {
+            vruntime: current - VTIME_SLICE_NS,
+            frontier: current,
+            advanced: false,
+            exhausted: false,
+        }
+    );
+    assert_eq!(
+        model_run_start_cas(ahead, stale, &[current, current]),
+        RunStartCasResult::Complete {
+            vruntime: ahead,
+            frontier: ahead,
+            advanced: true,
+            exhausted: false,
+        }
+    );
+    assert_eq!(
+        model_run_start_cas(stale, stale, &[current]),
+        RunStartCasResult::Complete {
+            vruntime: current - VTIME_SLICE_NS,
+            frontier: current,
+            advanced: false,
+            exhausted: true,
+        }
+    );
+    assert_eq!(
+        model_run_start_cas(ahead, stale, &[current]),
+        RunStartCasResult::RequiredAdvanceExhausted {
+            observed: current,
+            desired: ahead,
+        }
+    );
+    assert_eq!(
+        model_max_cas(ahead, stale, &[current]),
+        MaxCasResult::RequiredAdvanceExhausted {
+            observed: current,
+            candidate: ahead,
+        }
+    );
+    assert_eq!(
+        model_max_cas(current, stale, &[ahead]),
+        MaxCasResult::Complete {
+            frontier: ahead,
+            advanced: false,
+            exhausted: true,
+        }
+    );
+
+    let before_wrap = u64::MAX - 1_000_000;
+    let after_wrap = 1_000_000;
+    assert_eq!(
+        model_run_start_cas(after_wrap, before_wrap, &[before_wrap]),
+        RunStartCasResult::Complete {
+            vruntime: after_wrap,
+            frontier: after_wrap,
+            advanced: true,
+            exhausted: false,
+        }
+    );
 }
 
 #[test]

@@ -1542,6 +1542,10 @@ fn aggregate_raw_stats(
         vtime_direct_runtime_ns: value(bpf_intf::snake_stat_SNAKE_STAT_VTIME_DIRECT_RUNTIME_NS),
         vtime_queued_runtime_ns: value(bpf_intf::snake_stat_SNAKE_STAT_VTIME_QUEUED_RUNTIME_NS),
         vtime_credit_clamps: value(bpf_intf::snake_stat_SNAKE_STAT_VTIME_CREDIT_CLAMPS),
+        vtime_clock_cas_retries: value(bpf_intf::snake_stat_SNAKE_STAT_VTIME_CLOCK_CAS_RETRIES),
+        vtime_clock_cas_exhaustions: value(
+            bpf_intf::snake_stat_SNAKE_STAT_VTIME_CLOCK_CAS_EXHAUSTIONS,
+        ),
         vtime_accounting_errors: value(bpf_intf::snake_stat_SNAKE_STAT_VTIME_ACCOUNTING_ERRORS),
         vtime_equal_head_ties: value(bpf_intf::snake_stat_SNAKE_STAT_VTIME_EQUAL_HEAD_TIES),
         eevdf_eligible_enqueues: value(bpf_intf::snake_stat_SNAKE_STAT_EEVDF_ELIGIBLE_ENQUEUES),
@@ -4387,7 +4391,7 @@ scope = "task_allowed"
 
         type VtimeDomain = bpf_skel::types::snake_vtime_domain;
         type EevdfDomain = bpf_skel::types::snake_eevdf_domain;
-        assert_eq!(size_of::<VtimeDomain>(), 16);
+        assert_eq!(size_of::<VtimeDomain>(), 64);
         assert_eq!(offset_of!(VtimeDomain, lock), 0);
         assert_eq!(offset_of!(VtimeDomain, pad), 4);
         assert_eq!(offset_of!(VtimeDomain, vtime_now), 8);
@@ -4510,8 +4514,19 @@ scope = "task_allowed"
     }
 
     #[test]
-    fn cell_vtime_clock_access_is_centralized_and_timed() {
+    fn cell_vtime_clock_access_is_centralized_timed_and_lockless() {
         let vtime = include_str!("bpf/queue_vtime.h");
+        let clock_wrappers = vtime
+            .split_once("static __always_inline u64\nqueue_domain_now(")
+            .and_then(|(_, body)| {
+                body.split_once("static __always_inline u64 queue_translate_vruntime(")
+            })
+            .map(|(body, _)| body)
+            .expect("cell clock wrappers should be contiguous");
+        let normalized_clock_wrappers = clock_wrappers
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
         let running = vtime
             .split_once("static __always_inline int queue_fairness_running(")
             .and_then(|(_, body)| {
@@ -4547,6 +4562,18 @@ scope = "task_allowed"
         assert!(running.contains("queue_domain_advance("));
         assert!(!running.contains("domain->vtime_now"));
         assert!(!running.contains("bpf_spin_lock"));
+
+        assert!(clock_wrappers.contains("READ_ONCE(domain->vtime_now)"));
+        assert!(clock_wrappers.contains("bpf_for(attempt, 0, SNAKE_VTIME_CAS_RETRIES)"));
+        assert!(clock_wrappers.contains("__sync_val_compare_and_swap"));
+        assert!(normalized_clock_wrappers.contains("observed = previous"));
+        assert!(normalized_clock_wrappers.contains("desired = observed"));
+        assert!(clock_wrappers.contains("fairness_vtime_run_start(vruntime, observed)"));
+        assert!(clock_wrappers.contains("SNAKE_STAT_VTIME_CLOCK_CAS_RETRIES"));
+        assert!(clock_wrappers.contains("SNAKE_STAT_VTIME_CLOCK_CAS_EXHAUSTIONS"));
+        assert!(normalized_clock_wrappers.contains("ret = -EAGAIN"));
+        assert!(running.contains("if (ret)"));
+        assert!(!clock_wrappers.contains("bpf_spin_lock"));
     }
 
     #[test]
@@ -6113,7 +6140,12 @@ scope = "task_allowed"
 
         assert_eq!(bpf_intf::SNAKE_ABI_VERSION, 29);
         assert_eq!(bpf_intf::SNAKE_MAX_RUNGS, 16);
-        assert_eq!(bpf_intf::snake_stat_SNAKE_NR_STATS, 212);
+        assert_eq!(bpf_intf::snake_stat_SNAKE_STAT_VTIME_CLOCK_CAS_RETRIES, 212);
+        assert_eq!(
+            bpf_intf::snake_stat_SNAKE_STAT_VTIME_CLOCK_CAS_EXHAUSTIONS,
+            213
+        );
+        assert_eq!(bpf_intf::snake_stat_SNAKE_NR_STATS, 214);
         assert_eq!(size_of::<bpf_intf::snake_callback_timing>(), 520);
         assert_eq!(offset_of!(bpf_intf::snake_callback_timing, total_ns), 0);
         assert_eq!(offset_of!(bpf_intf::snake_callback_timing, buckets), 8);

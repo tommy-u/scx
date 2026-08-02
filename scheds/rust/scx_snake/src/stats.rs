@@ -330,6 +330,10 @@ pub struct Metrics {
     pub vtime_queued_runtime_ns: u64,
     #[stat(desc = "VTIME sleeper credits clamped to one virtual slice")]
     pub vtime_credit_clamps: u64,
+    #[stat(desc = "VTIME cell-clock compare-and-swap retries")]
+    pub vtime_clock_cas_retries: u64,
+    #[stat(desc = "VTIME cell-clock operations which exhausted the CAS retry budget")]
+    pub vtime_clock_cas_exhaustions: u64,
     #[stat(desc = "VTIME state and runtime accounting errors")]
     pub vtime_accounting_errors: u64,
     #[stat(desc = "Equal cell and affinity VTIME heads resolved by alternating ties")]
@@ -450,6 +454,12 @@ impl Metrics {
             vtime_credit_clamps: self
                 .vtime_credit_clamps
                 .saturating_sub(previous.vtime_credit_clamps),
+            vtime_clock_cas_retries: self
+                .vtime_clock_cas_retries
+                .saturating_sub(previous.vtime_clock_cas_retries),
+            vtime_clock_cas_exhaustions: self
+                .vtime_clock_cas_exhaustions
+                .saturating_sub(previous.vtime_clock_cas_exhaustions),
             vtime_accounting_errors: self
                 .vtime_accounting_errors
                 .saturating_sub(previous.vtime_accounting_errors),
@@ -548,7 +558,7 @@ impl Metrics {
                 "  select latency ns total: {} | average: {} | cumulative max: {}\n",
                 "  cell rehomes: {} | deferred rehomes: {} | queue preemptions/stale runs: {}/{} | borrow yields: {}\n",
                 "  VTIME enqueues: {} (per-CPU: {}) | dispatches: {} (per-CPU: {}) | strict sync queues: {}\n",
-                "  VTIME direct/queued runtime ns: {}/{} | credit clamps: {} | accounting errors: {} | equal-head ties: {}\n",
+                "  VTIME direct/queued runtime ns: {}/{} | credit clamps: {} | clock CAS retries/exhaustions: {}/{} | accounting errors: {} | equal-head ties: {}\n",
                 "  EEVDF eligible/future enqueues: {}/{} | promotions: {} | forced advances: {} | dispatches: {}\n",
                 "  EEVDF strict sync queues: {} | direct/queued runtime ns: {}/{} | lag/run-start clamps: {}/{} | accounting errors: {}\n",
                 "  rungs:\n"
@@ -586,6 +596,8 @@ impl Metrics {
             self.vtime_direct_runtime_ns,
             self.vtime_queued_runtime_ns,
             self.vtime_credit_clamps,
+            self.vtime_clock_cas_retries,
+            self.vtime_clock_cas_exhaustions,
             self.vtime_accounting_errors,
             self.vtime_equal_head_ties,
             self.eevdf_eligible_enqueues,
@@ -1059,6 +1071,8 @@ mod tests {
             queue_borrow_yields: 4,
             vtime_cpu_enqueues: 20,
             vtime_cpu_dispatches: 19,
+            vtime_clock_cas_retries: 18,
+            vtime_clock_cas_exhaustions: 2,
             ..Default::default()
         };
         let current = Metrics {
@@ -1080,6 +1094,8 @@ mod tests {
             queue_borrow_yields: 0,
             vtime_cpu_enqueues: 2,
             vtime_cpu_dispatches: 1,
+            vtime_clock_cas_retries: 1,
+            vtime_clock_cas_exhaustions: 0,
             ..Default::default()
         };
 
@@ -1103,6 +1119,8 @@ mod tests {
         assert_eq!(delta.queue_borrow_yields, 0);
         assert_eq!(delta.vtime_cpu_enqueues, 0);
         assert_eq!(delta.vtime_cpu_dispatches, 0);
+        assert_eq!(delta.vtime_clock_cas_retries, 0);
+        assert_eq!(delta.vtime_clock_cas_exhaustions, 0);
     }
 
     #[test]

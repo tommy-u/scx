@@ -2,12 +2,32 @@
 
 Date: 2026-08-01
 
-## Decision
+## Current implementation
+
+The original lockless prototype described below was replaced with a CAS-based
+implementation after the historical A/B. Cell-clock reads use `READ_ONCE()`,
+while writers use the same bounded 64-bit compare-and-swap pattern as LAVD.
+Snake's run-start path also performs a no-op CAS when it does not advance the
+clock. That validates the observed frontier before returning a task VTIME and
+prevents a stale read from bypassing the sleeper-credit clamp.
+
+Each cell clock occupies a 64-byte map-value stride so adjacent cells do not
+false-share a cache line on this host. CAS losses and retry-budget exhaustions
+are exported as scheduler counters. A still-required update after 16 losses
+returns `-EAGAIN` rather than silently dropping the frontier update. An initial
+live smoke test loaded successfully and observed low failed-CAS incidence, zero
+retry-budget exhaustions, and zero VTIME, invalid, or membership errors.
+
+This smoke test establishes verifier acceptance and low observed contention. It
+does not establish a throughput win, and the historical VM results below are
+not an A/B measurement of the current CAS implementation.
+
+## Prior experiment decision
 
 Keep cell VTIME clock reads serialized. Lockless reads cut the exact wrapper
 latency roughly in half, but the A/B workload did not demonstrate a safe system
 win and showed a large, variable shift away from wakeup-heavy switch work. The
-runtime implementation was restored to the locked version after the experiment.
+runtime implementation was restored to the locked version after that experiment.
 
 ## Method
 
@@ -71,12 +91,12 @@ not controlled enough to call the service-mix shift causal.
 
 ## Interpretation
 
-The new wrapper timing does not support the original multi-microsecond shared
-clock hypothesis on this workload. A locked read costs about 80-94 ns here.
+The historical wrapper timing does not support the original multi-microsecond
+shared clock hypothesis on this workload. A locked read costs about 80-94 ns here.
 Removing serialization saves roughly 40-54 ns, but permits CPUs to make VTIME
 clamp and translation decisions from different frontier observations. Given
 the small local saving, the workload shift, and the physical-pinning caveat,
-the experiment does not justify deploying the lockless path.
+that experiment did not justify deploying the first lockless path.
 
 Raw artifacts, including policies, binary hashes, topology, callback timing,
 fine timing, inspection snapshots, stress-ng output, and logs are under:

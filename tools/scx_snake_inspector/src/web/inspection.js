@@ -3463,6 +3463,8 @@ const POLICY_COUNTER_CATALOG = [
   ["vtime_direct_runtime_ns", "Direct runtime (ns)", "vtime"],
   ["vtime_queued_runtime_ns", "Queued runtime (ns)", "vtime"],
   ["vtime_credit_clamps", "Credit clamps", "vtime"],
+  ["vtime_clock_cas_retries", "Cell clock CAS retries", "vtime_queue"],
+  ["vtime_clock_cas_exhaustions", "Cell clock CAS exhaustions", "vtime_queue"],
   ["vtime_accounting_errors", "VTIME accounting errors", "vtime"],
   ["vtime_equal_head_ties", "Equal-head ties", "vtime_queue"],
   ["eevdf_eligible_enqueues", "EEVDF eligible enqueues", "eevdf"],
