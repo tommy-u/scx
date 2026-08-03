@@ -91,13 +91,21 @@ slice_shrink_on_enqueue(const struct snake_ladder_ctx *ctx, s32 cpu,
 			struct snake_task_runtime *waiter)
 {
 	struct task_struct *current;
+	struct task_struct *trusted;
 
 	if (!READ_ONCE(slice_shrinking_enabled) || !waiter || cpu < 0 ||
 	    cpu >= nr_cpu_ids)
 		return;
+	bpf_rcu_read_lock();
 	current = __COMPAT_scx_bpf_cpu_curr(cpu);
-	if (current && !(current->flags & PF_IDLE))
-		slice_shrink_apply(ctx, current, waiter->avg_runtime_ns);
+	if (current && !(current->flags & PF_IDLE)) {
+		trusted = bpf_task_from_pid(current->pid);
+		if (trusted) {
+			slice_shrink_apply(ctx, trusted, waiter->avg_runtime_ns);
+			bpf_task_release(trusted);
+		}
+	}
+	bpf_rcu_read_unlock();
 }
 
 static __always_inline void

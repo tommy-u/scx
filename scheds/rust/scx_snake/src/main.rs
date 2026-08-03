@@ -5182,6 +5182,8 @@ scope = "task_cell"
         assert!(shrinking.contains("SNAKE_STAT_SLICE_SHRINK_MIN"));
         assert!(shrinking.contains("SNAKE_STAT_SLICE_SHRINK_PROPORTIONAL"));
         assert!(shrinking.contains("SNAKE_STAT_SLICE_SHRINK_MAX"));
+        assert!(shrinking.contains("bpf_task_from_pid(current->pid)"));
+        assert!(shrinking.contains("bpf_task_release(trusted)"));
         assert!(shrinking.contains("runtime->service_budget -= removed"));
     }
 
