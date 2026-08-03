@@ -123,6 +123,10 @@ pub fn validate_policy_file(path: &Path) -> ValidationReport {
             });
         }
     };
+    validate_policy_source(&source)
+}
+
+pub fn validate_policy_source(source: &str) -> ValidationReport {
     let mut policy = match policy::compile_policy(&source) {
         Ok(policy) => policy,
         Err(error) => {

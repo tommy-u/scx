@@ -357,6 +357,18 @@ From the repository root:
 cargo test -p scx_snake
 cargo build --release -p scx_snake
 
+sudo ./target/release/scx_snake --profile mitosis-sim --stats 1
+```
+
+`--profile mitosis-sim` uses VTIME automatically. Its policy is embedded in the
+binary at build time from
+[`examples/mitosis-sim.toml`](examples/mitosis-sim.toml), so the TOML file does
+not need to be distributed with the executable. The checked-in TOML remains the
+single source of truth; changing it requires rebuilding Snake.
+
+To launch a custom policy file instead:
+
+```bash
 sudo ./target/release/scx_snake \
   --policy scheds/rust/scx_snake/examples/kernel-default.toml \
   --fairness fifo \
@@ -364,8 +376,8 @@ sudo ./target/release/scx_snake \
   --stats 1
 ```
 
-FIFO is the default. VTIME is required by queue profiles, including the
-production-canary `mitosis-sim.toml` profile. Other custom VTIME policies and the
+FIFO remains the default when `--fairness` is omitted for a custom `--policy`
+file. VTIME is required by queue policies. Other custom VTIME policies and the
 `--fairness eevdf` mode remain experimental; changing fairness requires a
 restart. EEVDF's affinity-constrained forward-progress test passes,
 but its nice-level weighted-share validation is not yet correct. See
@@ -518,9 +530,16 @@ Inspect the compiled ladder and resolved mask tables without attaching BPF:
 
 ```bash
 ./target/release/scx_snake \
+  --profile mitosis-sim \
+  --dump-compiled-policy
+
+./target/release/scx_snake \
   --policy scheds/rust/scx_snake/examples/kernel-default-sim.toml \
   --dump-compiled-policy
 ```
+
+Both `--dump-compiled-policy` and `--validate-policy` accept either `--profile`
+or `--policy`. Live `--update-policy` remains file-based.
 
 ## Statistics
 
