@@ -199,10 +199,19 @@ fn ssh_destination_from_environment() -> String {
 }
 
 fn hostname_from_environment() -> String {
-    std::env::var("HOSTNAME")
-        .ok()
-        .filter(|hostname| !hostname.is_empty())
-        .unwrap_or_else(|| "localhost".into())
+    let environment = std::env::var("HOSTNAME").ok();
+    let kernel = std::fs::read_to_string("/proc/sys/kernel/hostname").ok();
+    resolve_hostname(environment.as_deref(), kernel.as_deref())
+}
+
+fn resolve_hostname(environment: Option<&str>, kernel: Option<&str>) -> String {
+    environment
+        .into_iter()
+        .chain(kernel)
+        .map(str::trim)
+        .find(|hostname| !hostname.is_empty())
+        .unwrap_or("localhost")
+        .into()
 }
 
 fn secure_web_app_hostname(hostname: &str) -> String {
@@ -284,5 +293,18 @@ mod tests {
                 "www.edge.x2p.facebook.net",
             ],
         );
+    }
+
+    #[test]
+    fn hostname_resolution_uses_the_kernel_name_without_an_environment_value() {
+        assert_eq!(
+            resolve_hostname(None, Some("devbig008.atn3.facebook.com\n")),
+            "devbig008.atn3.facebook.com"
+        );
+        assert_eq!(
+            resolve_hostname(Some(""), Some("host.example\n")),
+            "host.example"
+        );
+        assert_eq!(resolve_hostname(None, Some("\n")), "localhost");
     }
 }
