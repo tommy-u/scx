@@ -29,5 +29,7 @@ runtime counters -> EWMA demand -> proportional reallocation -> banked publish
 
 - Implemented: admission, holdout, effective-cpuset bounds, EWMA tracking,
   weighted banked publication, stats gauges, and focused VM coverage.
-- Final bar: bare-metal reload and repeated pinned/unpinned stress workload
-  create/stop/recreate while checking scheduler and kernel errors.
+- Validated: rapid VM cgroup churn, bidirectional EWMA resizing, and bare-metal
+  create/stop/recreate for unpinned, cross-LLC pinned, CPU, and fork workloads.
+  Same-name reuse advanced slot epochs; Snake stayed attached with clean kernel
+  logs. Inspector and Snake run on the verified release binaries at port 44102.
