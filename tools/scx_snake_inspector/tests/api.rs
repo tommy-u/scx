@@ -227,6 +227,7 @@ fn queue_topology_snapshot(generation: u64) -> Value {
         "cells": [{
             "external_id": 3,
             "index": 1,
+            "slot_epoch": 4,
             "primary_cpus": [0, 1]
         }]
     });
@@ -267,11 +268,18 @@ fn cell_metrics(runtime_ns: u64) -> CellMetricCounters {
     CellMetricCounters {
         id: 3,
         index: 1,
+        slot_epoch: Some(4),
+        primary_cpu_count: Some(2),
+        utilization_pct: active.then_some(50.0),
+        ewma_utilization_pct: active.then_some(42.0),
+        borrowed_pct: active.then_some(25.0),
+        lent_pct: active.then_some(10.0),
         runtime_ns,
         runtime_ns_by_cpu: None,
         primary_runtime_ns: runtime_ns * 3 / 4,
         borrowed_runtime_ns: runtime_ns / 4,
         lent_runtime_ns: runtime_ns / 4,
+        foreign_affinity_runtime_ns: Some(runtime_ns / 8),
         normal_enqueues: if active { 80 } else { 0 },
         affinity_enqueues: if active { 20 } else { 0 },
         normal_dispatches: if active { 50 } else { 0 },
@@ -545,8 +553,13 @@ fn cell_stats_derive_window_metrics_from_top_deltas_and_queue_topology() {
     assert_eq!(stats["observed_ms"], 1_000);
     assert_eq!(cell["id"], 3);
     assert_eq!(cell["index"], 1);
+    assert_eq!(cell["slot_epoch"], 4);
     assert_eq!(cell["primary_cpu_count"], 2);
+    assert_eq!(cell["utilization_pct"], 50.0);
+    assert_eq!(cell["ewma_utilization_pct"], 42.0);
+    assert_eq!(cell["lent_pct"], 10.0);
     assert_eq!(cell["runtime_ns"], 1_000_000_000_u64);
+    assert_eq!(cell["foreign_affinity_runtime_ns"], 125_000_000_u64);
     assert_eq!(cell["service_cores"], 1.0);
     assert_eq!(cell["service_share_pct"], 100.0);
     assert_eq!(cell["primary_pct"], 75.0);

@@ -558,6 +558,9 @@ static __always_inline int queue_fairness_stopping(struct snake_ladder_ctx *ctx,
 			      SNAKE_CELL_STAT_BORROWED_RUNTIME_NS, delta);
 		cell_stat_add(ctx, runtime->run_owner_cell_index,
 			      SNAKE_CELL_STAT_LENT_RUNTIME_NS, delta);
+		if (runtime->run_queue_class == SNAKE_QUEUE_CLASS_AFFINITY)
+			cell_stat_add(ctx, runtime->run_owner_cell_index,
+				      SNAKE_CELL_STAT_FOREIGN_AFFINITY_RUNTIME_NS, delta);
 	}
 	stat_add(ctx,
 		 runtime->run_direct ? SNAKE_STAT_VTIME_DIRECT_RUNTIME_NS :

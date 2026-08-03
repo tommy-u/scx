@@ -84,12 +84,16 @@ pub enum CellStatsStatus {
 pub struct CellStatsRowView {
     pub id: u32,
     pub index: u32,
+    pub slot_epoch: Option<u32>,
     pub primary_cpu_count: usize,
+    pub utilization_pct: Option<f64>,
+    pub ewma_utilization_pct: Option<f64>,
     pub runtime_ns: u64,
     pub runtime_ns_by_cpu: Option<BTreeMap<u32, u64>>,
     pub primary_runtime_ns: u64,
     pub borrowed_runtime_ns: u64,
     pub lent_runtime_ns: u64,
+    pub foreign_affinity_runtime_ns: Option<u64>,
     pub normal_enqueues: u64,
     pub affinity_enqueues: u64,
     pub normal_dispatches: u64,
@@ -99,6 +103,7 @@ pub struct CellStatsRowView {
     pub service_share_pct: Option<f64>,
     pub primary_pct: Option<f64>,
     pub borrowed_pct: Option<f64>,
+    pub lent_pct: Option<f64>,
     pub owned_utilization_pct: Option<f64>,
     pub enqueue_rate_per_second: Option<f64>,
     pub dispatch_rate_per_second: Option<f64>,
@@ -1025,6 +1030,8 @@ struct CellStatsTopology {
 struct CellStatsTopologyCell {
     external_id: u32,
     index: u32,
+    #[serde(default)]
+    slot_epoch: Option<u32>,
     primary_cpus: Vec<u32>,
 }
 
@@ -1134,8 +1141,15 @@ fn cell_stats_view(
                 )),
             );
         }
+        if topology_cell.slot_epoch.is_some()
+            && cell.slot_epoch.is_some()
+            && topology_cell.slot_epoch != cell.slot_epoch
+        {
+            return empty(CellStatsStatus::Synchronizing, None);
+        }
         cells.push(cell_stats_row(
             cell,
+            topology_cell.slot_epoch,
             topology_cell.primary_cpus.len(),
             service_runtime_ns,
             window.observed_ms,
@@ -1155,6 +1169,7 @@ fn cell_stats_view(
 
 fn cell_stats_row(
     cell: &CellMetricCounters,
+    topology_slot_epoch: Option<u32>,
     primary_cpu_count: usize,
     service_runtime_ns: u64,
     observed_ms: u64,
@@ -1168,12 +1183,16 @@ fn cell_stats_row(
     CellStatsRowView {
         id: cell.id,
         index: cell.index,
+        slot_epoch: cell.slot_epoch.or(topology_slot_epoch),
         primary_cpu_count,
+        utilization_pct: cell.utilization_pct,
+        ewma_utilization_pct: cell.ewma_utilization_pct,
         runtime_ns: cell.runtime_ns,
         runtime_ns_by_cpu: cell.runtime_ns_by_cpu.clone(),
         primary_runtime_ns: cell.primary_runtime_ns,
         borrowed_runtime_ns: cell.borrowed_runtime_ns,
         lent_runtime_ns: cell.lent_runtime_ns,
+        foreign_affinity_runtime_ns: cell.foreign_affinity_runtime_ns,
         normal_enqueues: cell.normal_enqueues,
         affinity_enqueues: cell.affinity_enqueues,
         normal_dispatches: cell.normal_dispatches,
@@ -1182,7 +1201,13 @@ fn cell_stats_row(
         service_cores: (observed_ns > 0.0).then(|| cell.runtime_ns as f64 / observed_ns),
         service_share_pct: percentage(cell.runtime_ns, service_runtime_ns),
         primary_pct: percentage(cell.primary_runtime_ns, cell.runtime_ns),
-        borrowed_pct: percentage(cell.borrowed_runtime_ns, cell.runtime_ns),
+        borrowed_pct: cell
+            .borrowed_pct
+            .or_else(|| percentage(cell.borrowed_runtime_ns, cell.runtime_ns)),
+        lent_pct: cell.lent_pct.or_else(|| {
+            (owned_capacity_ns > 0.0)
+                .then(|| cell.lent_runtime_ns as f64 * 100.0 / owned_capacity_ns)
+        }),
         owned_utilization_pct: (owned_capacity_ns > 0.0).then(|| {
             (cell.primary_runtime_ns as f64 + cell.lent_runtime_ns as f64) * 100.0
                 / owned_capacity_ns

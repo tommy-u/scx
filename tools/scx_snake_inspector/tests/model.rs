@@ -188,10 +188,17 @@ fn cell_metrics(id: u32, runtime_ns: u64, normal_dispatches: u64) -> CellMetricC
     CellMetricCounters {
         id,
         index: id + 10,
+        slot_epoch: Some(1),
+        primary_cpu_count: Some(2),
+        utilization_pct: Some(25.0),
+        ewma_utilization_pct: Some(20.0),
+        borrowed_pct: Some(5.0),
+        lent_pct: Some(2.5),
         runtime_ns,
         primary_runtime_ns: runtime_ns / 2,
         borrowed_runtime_ns: runtime_ns / 4,
         lent_runtime_ns: runtime_ns / 8,
+        foreign_affinity_runtime_ns: Some(runtime_ns / 16),
         normal_enqueues: normal_dispatches + 2,
         affinity_enqueues: 1,
         normal_dispatches,
@@ -350,6 +357,37 @@ fn cell_metric_history_preserves_sparse_per_cpu_runtime() {
         window.cells[&2].runtime_ns_by_cpu,
         Some(BTreeMap::from([(0, 35), (3, 75), (7, 50)]))
     );
+}
+
+#[test]
+fn cell_metric_history_keeps_latest_gauges_and_rebases_reused_slots() {
+    let mut history = CellMetricHistory::new(5_000);
+    let mut baseline = cell_metrics(2, 0, 0);
+    baseline.ewma_utilization_pct = None;
+    history.ingest(0, 4, 7, &BTreeMap::from([(2, baseline)]));
+
+    let mut first = cell_metrics(2, 160, 1);
+    first.ewma_utilization_pct = Some(40.0);
+    let mut second = cell_metrics(2, 80, 1);
+    second.ewma_utilization_pct = Some(55.0);
+    history.ingest(250, 4, 7, &BTreeMap::from([(2, first)]));
+    history.ingest(500, 4, 7, &BTreeMap::from([(2, second)]));
+
+    let accumulated = history.view(500, 500).unwrap().unwrap();
+    assert_eq!(accumulated.cells[&2].runtime_ns, 240);
+    assert_eq!(accumulated.cells[&2].foreign_affinity_runtime_ns, Some(15));
+    assert_eq!(accumulated.cells[&2].ewma_utilization_pct, Some(55.0));
+
+    let mut reused = cell_metrics(2, 32, 1);
+    reused.slot_epoch = Some(2);
+    reused.ewma_utilization_pct = Some(12.0);
+    history.ingest(750, 4, 7, &BTreeMap::from([(2, reused)]));
+
+    let current = history.view(750, 1_000).unwrap().unwrap();
+    assert_eq!(current.cells[&2].slot_epoch, Some(2));
+    assert_eq!(current.cells[&2].runtime_ns, 32);
+    assert_eq!(current.cells[&2].foreign_affinity_runtime_ns, Some(2));
+    assert_eq!(current.cells[&2].ewma_utilization_pct, Some(12.0));
 }
 
 #[test]

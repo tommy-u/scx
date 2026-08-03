@@ -1672,6 +1672,7 @@ fn aggregate_raw_cell_stats(
                 CellMetrics {
                     id: cell.external_id,
                     index: cell.index,
+                    slot_epoch: cell.slot_epoch,
                     primary_cpu_count: u32::try_from(cell.primary.len())
                         .context("cell primary CPU count does not fit u32")?,
                     utilization_pct: 0.0,
@@ -1704,6 +1705,10 @@ fn aggregate_raw_cell_stats(
                     lent_runtime_ns: value(
                         dense,
                         bpf_intf::snake_cell_stat_SNAKE_CELL_STAT_LENT_RUNTIME_NS,
+                    )?,
+                    foreign_affinity_runtime_ns: value(
+                        dense,
+                        bpf_intf::snake_cell_stat_SNAKE_CELL_STAT_FOREIGN_AFFINITY_RUNTIME_NS,
                     )?,
                     normal_enqueues: value(
                         dense,
@@ -7540,6 +7545,34 @@ scope = "task_cell"
     }
 
     #[test]
+    fn queue_runtime_accounts_foreign_affinity_to_the_cpu_owner() {
+        let queue_vtime = include_str!("bpf/queue_vtime.h");
+        let stopping = queue_vtime
+            .split_once("static __always_inline int queue_fairness_stopping(")
+            .and_then(|(_, body)| body.split_once("#endif"))
+            .map(|(body, _)| body)
+            .expect("queue stopping should have one definition");
+        let foreign = stopping
+            .split_once("if (runtime->run_cell_index == runtime->run_owner_cell_index)")
+            .and_then(|(_, body)| body.split_once("\n\tstat_add(ctx,"))
+            .map(|(body, _)| body)
+            .expect("foreign runtime accounting should be bounded");
+
+        let affinity = foreign
+            .split_once("runtime->run_queue_class == SNAKE_QUEUE_CLASS_AFFINITY")
+            .map(|(_, body)| body)
+            .expect("foreign affinity accounting should be conditional");
+        assert!(affinity.contains("runtime->run_owner_cell_index"));
+        assert!(affinity.contains("SNAKE_CELL_STAT_FOREIGN_AFFINITY_RUNTIME_NS"));
+        assert_eq!(
+            stopping
+                .matches("SNAKE_CELL_STAT_FOREIGN_AFFINITY_RUNTIME_NS")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
     fn mitosis_preferred_idle_rung_uses_the_kernel_style_claim_order() {
         let intf = include_str!("bpf/intf.h");
         let cpu_pick = include_str!("bpf/cpu_pick.h");
@@ -7924,7 +7957,7 @@ scope = "task_cell_borrowable"
             cells: vec![queue_topology::QueueCell {
                 index: 0,
                 external_id: 7,
-                slot_epoch: 0,
+                slot_epoch: 9,
                 cpu_weight: 100,
                 primary: BTreeSet::from([0, 2]),
                 borrowable: BTreeSet::new(),
@@ -7940,10 +7973,17 @@ scope = "task_cell_borrowable"
             bpf_intf::snake_cell_stat_SNAKE_CELL_STAT_RUNTIME_NS,
             &[2_500, 0, 7_500],
         );
+        set_stat(
+            &mut raw,
+            bpf_intf::snake_cell_stat_SNAKE_CELL_STAT_FOREIGN_AFFINITY_RUNTIME_NS,
+            &[0, 400, 0],
+        );
 
         let cells = aggregate_raw_cell_stats(&raw, &topology).unwrap();
 
+        assert_eq!(cells[&7].slot_epoch, 9);
         assert_eq!(cells[&7].runtime_ns, 10_000);
+        assert_eq!(cells[&7].foreign_affinity_runtime_ns, 400);
         assert_eq!(
             cells[&7].runtime_ns_by_cpu,
             BTreeMap::from([(0, 2_500), (2, 7_500)])

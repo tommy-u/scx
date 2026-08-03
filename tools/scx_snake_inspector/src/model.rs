@@ -46,16 +46,30 @@ pub struct CpuUsageWindow {
     pub observed_ms: u64,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct CellMetricCounters {
     pub id: u32,
     pub index: u32,
+    #[serde(default)]
+    pub slot_epoch: Option<u32>,
+    #[serde(default)]
+    pub primary_cpu_count: Option<u32>,
+    #[serde(default)]
+    pub utilization_pct: Option<f64>,
+    #[serde(default)]
+    pub ewma_utilization_pct: Option<f64>,
+    #[serde(default)]
+    pub borrowed_pct: Option<f64>,
+    #[serde(default)]
+    pub lent_pct: Option<f64>,
     pub runtime_ns: u64,
     #[serde(default)]
     pub runtime_ns_by_cpu: Option<BTreeMap<u32, u64>>,
     pub primary_runtime_ns: u64,
     pub borrowed_runtime_ns: u64,
     pub lent_runtime_ns: u64,
+    #[serde(default)]
+    pub foreign_affinity_runtime_ns: Option<u64>,
     pub normal_enqueues: u64,
     pub affinity_enqueues: u64,
     pub normal_dispatches: u64,
@@ -68,7 +82,14 @@ impl CellMetricCounters {
         Self {
             id: self.id,
             index: self.index,
+            slot_epoch: self.slot_epoch,
+            primary_cpu_count: self.primary_cpu_count,
+            utilization_pct: self.utilization_pct,
+            ewma_utilization_pct: self.ewma_utilization_pct,
+            borrowed_pct: self.borrowed_pct,
+            lent_pct: self.lent_pct,
             runtime_ns_by_cpu: self.runtime_ns_by_cpu.as_ref().map(|_| BTreeMap::new()),
+            foreign_affinity_runtime_ns: self.foreign_affinity_runtime_ns.map(|_| 0),
             ..Self::default()
         }
     }
@@ -89,6 +110,13 @@ impl CellMetricCounters {
             .borrowed_runtime_ns
             .saturating_add(other.borrowed_runtime_ns);
         self.lent_runtime_ns = self.lent_runtime_ns.saturating_add(other.lent_runtime_ns);
+        self.foreign_affinity_runtime_ns = match (
+            self.foreign_affinity_runtime_ns,
+            other.foreign_affinity_runtime_ns,
+        ) {
+            (Some(total), Some(value)) => Some(total.saturating_add(value)),
+            _ => None,
+        };
         self.normal_enqueues = self.normal_enqueues.saturating_add(other.normal_enqueues);
         self.affinity_enqueues = self
             .affinity_enqueues
@@ -113,6 +141,7 @@ impl CellMetricCounters {
             && self.primary_runtime_ns == 0
             && self.borrowed_runtime_ns == 0
             && self.lent_runtime_ns == 0
+            && self.foreign_affinity_runtime_ns.unwrap_or(0) == 0
             && self.normal_enqueues == 0
             && self.affinity_enqueues == 0
             && self.normal_dispatches == 0
@@ -171,7 +200,7 @@ pub struct HostCpuTimeWindow {
     pub observed_ms: u64,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct CellMetricWindow {
     pub scheduler_attach_seq: u64,
     pub policy_generation: u64,
@@ -277,6 +306,15 @@ impl CellMetricHistory {
             return;
         }
         self.last_sample_at_ms = Some(at_ms);
+
+        for bin in &mut self.bins {
+            bin.cells.retain(|id, previous| {
+                cells
+                    .get(id)
+                    .is_some_and(|current| current.slot_epoch == previous.slot_epoch)
+            });
+        }
+        self.bins.retain(|bin| !bin.cells.is_empty());
 
         self.latest_cells = cells
             .iter()

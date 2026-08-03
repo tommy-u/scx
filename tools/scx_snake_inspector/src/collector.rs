@@ -178,7 +178,7 @@ struct SnakeMetrics {
     cells: Option<BTreeMap<u32, CellMetricCounters>>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct SnakeTopStats {
     pub policy_generation: u64,
     pub cpus: BTreeMap<u32, u64>,

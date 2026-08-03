@@ -195,6 +195,8 @@ pub struct CellMetrics {
     pub id: u32,
     #[stat(desc = "Dense queue and clock index", _om_skip)]
     pub index: u32,
+    #[stat(desc = "Reuse epoch for the external task-cell ID", _om_skip)]
+    pub slot_epoch: u32,
     #[stat(desc = "CPUs primarily owned by this cell")]
     #[serde(default)]
     pub primary_cpu_count: u32,
@@ -221,6 +223,8 @@ pub struct CellMetrics {
     pub borrowed_runtime_ns: u64,
     #[stat(desc = "Runtime other cells consumed on CPUs owned by this cell")]
     pub lent_runtime_ns: u64,
+    #[stat(desc = "Affinity-constrained runtime from other cells on CPUs owned by this cell")]
+    pub foreign_affinity_runtime_ns: u64,
     #[stat(desc = "Tasks inserted into normal cell queues")]
     pub normal_enqueues: u64,
     #[stat(desc = "Tasks inserted into affinity queues")]
@@ -235,10 +239,14 @@ pub struct CellMetrics {
 
 impl CellMetrics {
     fn delta(&self, previous: Option<&Self>) -> Self {
-        let previous = previous.cloned().unwrap_or_default();
+        let previous = previous
+            .filter(|previous| previous.slot_epoch == self.slot_epoch)
+            .cloned()
+            .unwrap_or_default();
         Self {
             id: self.id,
             index: self.index,
+            slot_epoch: self.slot_epoch,
             primary_cpu_count: self.primary_cpu_count,
             utilization_pct: self.utilization_pct,
             ewma_utilization_pct: self.ewma_utilization_pct,
@@ -263,6 +271,9 @@ impl CellMetrics {
             lent_runtime_ns: self
                 .lent_runtime_ns
                 .saturating_sub(previous.lent_runtime_ns),
+            foreign_affinity_runtime_ns: self
+                .foreign_affinity_runtime_ns
+                .saturating_sub(previous.foreign_affinity_runtime_ns),
             normal_enqueues: self
                 .normal_enqueues
                 .saturating_sub(previous.normal_enqueues),
@@ -1272,25 +1283,57 @@ mod tests {
         let previous = CellMetrics {
             id: 7,
             index: 2,
+            slot_epoch: 4,
             runtime_ns: 5_000,
             runtime_ns_by_cpu: BTreeMap::from([(0, 1_000), (3, 4_000)]),
+            foreign_affinity_runtime_ns: 400,
             ..Default::default()
         };
         let current = CellMetrics {
             id: 7,
             index: 2,
+            slot_epoch: 4,
             runtime_ns: 6_000,
             runtime_ns_by_cpu: BTreeMap::from([(0, 1_750), (3, 4_250)]),
+            foreign_affinity_runtime_ns: 650,
             ..Default::default()
         };
 
         let delta = current.delta(Some(&previous));
 
+        assert_eq!(delta.slot_epoch, 4);
         assert_eq!(delta.runtime_ns, 1_000);
+        assert_eq!(delta.foreign_affinity_runtime_ns, 250);
         assert_eq!(
             delta.runtime_ns_by_cpu,
             BTreeMap::from([(0, 750), (3, 250)])
         );
+    }
+
+    #[test]
+    fn cell_delta_rebases_when_a_slot_epoch_changes() {
+        let previous = CellMetrics {
+            id: 7,
+            index: 2,
+            slot_epoch: 4,
+            runtime_ns: 5_000,
+            foreign_affinity_runtime_ns: 400,
+            ..Default::default()
+        };
+        let current = CellMetrics {
+            id: 7,
+            index: 2,
+            slot_epoch: 5,
+            runtime_ns: 900,
+            foreign_affinity_runtime_ns: 75,
+            ..Default::default()
+        };
+
+        let delta = current.delta(Some(&previous));
+
+        assert_eq!(delta.slot_epoch, 5);
+        assert_eq!(delta.runtime_ns, 900);
+        assert_eq!(delta.foreign_affinity_runtime_ns, 75);
     }
 
     #[test]
