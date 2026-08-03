@@ -66,6 +66,8 @@ fn kallsyms_lookup_matches_the_exact_nonzero_symbol() {
 fn snake_top_stats_decode_cpu_and_optional_cell_metrics_together() {
     let payload = serde_json::json!({
         "policy_generation": 4,
+        "managed_rebalance_count": 2,
+        "managed_last_rebalance_at_ms": 1_700_000_000_123_u64,
         "select_calls": 99,
         "cpus": {
             "0": {"cpu": 0, "runtime_ns": 1250},
@@ -98,6 +100,8 @@ fn snake_top_stats_decode_cpu_and_optional_cell_metrics_together() {
 
     let decoded = decode_top_stats(payload).unwrap();
     assert_eq!(decoded.policy_generation, 4);
+    assert_eq!(decoded.managed_rebalance_count, 2);
+    assert_eq!(decoded.managed_last_rebalance_at_ms, 1_700_000_000_123);
     assert_eq!(
         decoded.cpus,
         std::collections::BTreeMap::from([(0, 1250), (7, 8750)])
@@ -120,6 +124,8 @@ fn snake_top_stats_decode_cpu_and_optional_cell_metrics_together() {
         "cpus": {"0": {"cpu": 0, "runtime_ns": 1}}
     }))
     .unwrap();
+    assert_eq!(absent.managed_rebalance_count, 0);
+    assert_eq!(absent.managed_last_rebalance_at_ms, 0);
     assert!(absent.cells.is_none());
     let empty = decode_top_stats(serde_json::json!({
         "policy_generation": 4,

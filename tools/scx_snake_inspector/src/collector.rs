@@ -174,6 +174,10 @@ struct SnakeCpuMetrics {
 struct SnakeMetrics {
     policy_generation: u64,
     #[serde(default)]
+    managed_rebalance_count: u64,
+    #[serde(default)]
+    managed_last_rebalance_at_ms: u64,
+    #[serde(default)]
     cpus: BTreeMap<u32, SnakeCpuMetrics>,
     cells: Option<BTreeMap<u32, CellMetricCounters>>,
 }
@@ -181,6 +185,8 @@ struct SnakeMetrics {
 #[derive(Clone, Debug, PartialEq)]
 pub struct SnakeTopStats {
     pub policy_generation: u64,
+    pub managed_rebalance_count: u64,
+    pub managed_last_rebalance_at_ms: u64,
     pub cpus: BTreeMap<u32, u64>,
     pub cells: Option<BTreeMap<u32, CellMetricCounters>>,
 }
@@ -209,6 +215,8 @@ pub fn decode_top_stats(value: serde_json::Value) -> anyhow::Result<SnakeTopStat
     }
     Ok(SnakeTopStats {
         policy_generation: metrics.policy_generation,
+        managed_rebalance_count: metrics.managed_rebalance_count,
+        managed_last_rebalance_at_ms: metrics.managed_last_rebalance_at_ms,
         cpus,
         cells: metrics.cells,
     })
@@ -702,11 +710,13 @@ pub fn run_collector(
                     if top_stats_connection.observe_success() {
                         dashboard.reset_top_metrics(now_ms);
                     }
-                    dashboard.ingest_top_metrics(
+                    dashboard.ingest_top_metrics_with_rebalances(
                         now_ms,
                         metrics.policy_generation,
                         &metrics.cpus,
                         metrics.cells.as_ref(),
+                        metrics.managed_rebalance_count,
+                        metrics.managed_last_rebalance_at_ms,
                     );
                     set_cpu_usage_error(&dashboard, &mut last_cpu_usage_error, None);
                 }

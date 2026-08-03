@@ -5565,6 +5565,13 @@ function renderCellUtilization(model, force = false) {
     elements.capacityTaskLegend.textContent = model.host.taskCapacityLabel;
   }
   renderRebalanceAnalysis(model.rebalance);
+  const managedRebalanceSummary = model.managedCells
+      || model.managedRebalanceCount > 0
+      || model.managedLastRebalanceAtMs > 0
+    ? `
+    <div><dt>Managed rebalances</dt><dd>${formatCount(model.managedRebalanceCount)}</dd></div>
+    <div><dt>Last managed rebalance</dt><dd>${escapeHtml(formatTimestamp(model.managedLastRebalanceAtMs))}</dd></div>`
+    : "";
   elements.cellUtilizationSummary.innerHTML = `
     <div><dt>Cell service</dt><dd>${cellRuntimeNs === null ? "—" : `${formatUtilizationCores(utilizationCores(cellRuntimeNs, model.observedMs))} CPUs`}</dd></div>
     <div><dt>Snake capacity</dt><dd>${model.host.snakeOverlayReady ? `${formatUtilizationCores(utilizationCores(host.snakeCapacityNs ?? 0, hostObservedMs))} CPUs` : "—"}</dd></div>
@@ -5573,7 +5580,8 @@ function renderCellUtilization(model, force = false) {
     <div><dt>Hard IRQ</dt><dd>${formatUtilizationCores(utilizationCores(host.hardirqNs ?? 0, hostObservedMs))} CPUs</dd></div>
     <div><dt>SoftIRQ</dt><dd>${formatUtilizationCores(utilizationCores(host.softirqNs ?? 0, hostObservedMs))} CPUs</dd></div>
     <div><dt>Accounting overage</dt><dd>${accountingOverageNs === null ? "—" : `${formatUtilizationCores(utilizationCores(accountingOverageNs, hostObservedMs))} CPUs`}</dd></div>
-    <div><dt>Host window</dt><dd>${hostObservedMs > 0 ? escapeHtml(formatDuration(hostObservedMs)) : "—"}</dd></div>`;
+    <div><dt>Host window</dt><dd>${hostObservedMs > 0 ? escapeHtml(formatDuration(hostObservedMs)) : "—"}</dd></div>
+    ${managedRebalanceSummary}`;
   replaceKeyedHtml(
     elements.cellUtilizationGrid,
     model.cellStatus === "ready"

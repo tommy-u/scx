@@ -318,6 +318,8 @@ pub struct SnapshotView {
     pub total: u64,
     pub rate_per_second: f64,
     pub active_pairs: usize,
+    pub managed_rebalance_count: u64,
+    pub managed_last_rebalance_at_ms: u64,
     pub scheduler: SchedulerView,
     pub scope: TaskScope,
     pub collector_error: Option<String>,
@@ -346,6 +348,8 @@ struct LiveData {
     host_ticks_per_second: Option<u64>,
     top_policy_generation: Option<u64>,
     top_cells_present: Option<bool>,
+    managed_rebalance_count: u64,
+    managed_last_rebalance_at_ms: u64,
     sequence: u64,
     scheduler: SchedulerView,
     scope: TaskScope,
@@ -390,6 +394,8 @@ impl Dashboard {
                 host_ticks_per_second: None,
                 top_policy_generation: None,
                 top_cells_present: None,
+                managed_rebalance_count: 0,
+                managed_last_rebalance_at_ms: 0,
                 sequence: 0,
                 scheduler: SchedulerView {
                     name: String::new(),
@@ -455,6 +461,8 @@ impl Dashboard {
             live.host_ticks_per_second = None;
             live.top_policy_generation = None;
             live.top_cells_present = None;
+            live.managed_rebalance_count = 0;
+            live.managed_last_rebalance_at_ms = 0;
             live.sequence = live.sequence.wrapping_add(1);
             live.sequence
         };
@@ -474,6 +482,8 @@ impl Dashboard {
             live.host_ticks_per_second = None;
             live.top_policy_generation = None;
             live.top_cells_present = None;
+            live.managed_rebalance_count = 0;
+            live.managed_last_rebalance_at_ms = 0;
             live.inspection = None;
             live.inspection_error = None;
             live.inspection_sequence = live.inspection_sequence.wrapping_add(1);
@@ -509,6 +519,8 @@ impl Dashboard {
             live.host_ticks_per_second = None;
             live.top_policy_generation = None;
             live.top_cells_present = None;
+            live.managed_rebalance_count = 0;
+            live.managed_last_rebalance_at_ms = 0;
             live.sequence = live.sequence.wrapping_add(1);
             live.sequence
         };
@@ -563,6 +575,18 @@ impl Dashboard {
         runtime_ns: &BTreeMap<u32, u64>,
         cells: Option<&BTreeMap<u32, CellMetricCounters>>,
     ) {
+        self.ingest_top_metrics_with_rebalances(at_ms, policy_generation, runtime_ns, cells, 0, 0);
+    }
+
+    pub fn ingest_top_metrics_with_rebalances(
+        &self,
+        at_ms: u64,
+        policy_generation: u64,
+        runtime_ns: &BTreeMap<u32, u64>,
+        cells: Option<&BTreeMap<u32, CellMetricCounters>>,
+        managed_rebalance_count: u64,
+        managed_last_rebalance_at_ms: u64,
+    ) {
         let sequence = {
             let mut live = self.live.write().expect("dashboard lock poisoned");
             let generation_changed = live
@@ -577,6 +601,10 @@ impl Dashboard {
             live.cpu_now_ms = at_ms;
             live.top_policy_generation = Some(policy_generation);
             live.top_cells_present = Some(cells.is_some());
+            live.managed_rebalance_count = live
+                .managed_rebalance_count
+                .saturating_add(managed_rebalance_count);
+            live.managed_last_rebalance_at_ms = managed_last_rebalance_at_ms;
             if let Some(cells) = cells {
                 let scheduler_attach_seq = live.scheduler.enable_seq;
                 live.cell_history
@@ -952,6 +980,8 @@ impl Dashboard {
             total: view.total,
             rate_per_second,
             active_pairs: cells.len(),
+            managed_rebalance_count: live.managed_rebalance_count,
+            managed_last_rebalance_at_ms: live.managed_last_rebalance_at_ms,
             scheduler: live.scheduler.clone(),
             scope: live.scope.clone(),
             collector_error: live.collector_error.clone(),

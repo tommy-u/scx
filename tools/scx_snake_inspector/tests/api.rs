@@ -574,6 +574,22 @@ fn cell_stats_derive_window_metrics_from_top_deltas_and_queue_topology() {
 }
 
 #[test]
+fn managed_rebalance_stats_accumulate_with_top_deltas_and_reset() {
+    let dashboard = dashboard();
+    dashboard.ingest_top_metrics_with_rebalances(0, 7, &BTreeMap::from([(0, 0)]), None, 1, 100);
+    dashboard.ingest_top_metrics_with_rebalances(250, 7, &BTreeMap::from([(0, 0)]), None, 2, 200);
+
+    let snapshot = dashboard.snapshot(1_000).unwrap();
+    assert_eq!(snapshot.managed_rebalance_count, 3);
+    assert_eq!(snapshot.managed_last_rebalance_at_ms, 200);
+
+    dashboard.reset_top_metrics(300);
+    let reset = dashboard.snapshot(1_000).unwrap();
+    assert_eq!(reset.managed_rebalance_count, 0);
+    assert_eq!(reset.managed_last_rebalance_at_ms, 0);
+}
+
+#[test]
 fn cell_stats_distinguish_policy_mode_support_and_generation_sync() {
     let dashboard = dashboard();
     dashboard.set_scheduler("snake", true, 4);

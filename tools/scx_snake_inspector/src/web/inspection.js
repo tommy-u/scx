@@ -2494,6 +2494,15 @@ export function cellUtilizationModel({ snapshot, inspection, topology } = {}) {
       .map((cell) => `${cell.label} differs from its CPU lanes by ${cell.reconciliationNs} ns.`),
   ].filter(Boolean);
   return {
+    managedCells: inspection?.topology_lifecycle?.managed === true,
+    managedRebalanceCount: Math.max(
+      0,
+      finiteValue(snapshot?.managed_rebalance_count) ?? 0,
+    ),
+    managedLastRebalanceAtMs: Math.max(
+      0,
+      finiteValue(snapshot?.managed_last_rebalance_at_ms) ?? 0,
+    ),
     cellStatus,
     cellStatusLabel: cellStatus === "ready"
       ? "Cell service ready"

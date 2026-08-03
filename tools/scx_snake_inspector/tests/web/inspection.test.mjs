@@ -2090,6 +2090,8 @@ test("cell utilization conserves service through LLC and CPU rollups", () => {
   const model = cellUtilizationModel({
     snapshot: {
       window_ms: 10_000,
+      managed_rebalance_count: 3,
+      managed_last_rebalance_at_ms: 1_700_000_000_123,
       cell_stats: {
         status: "ready",
         observed_ms: 1_000,
@@ -2170,6 +2172,8 @@ test("cell utilization conserves service through LLC and CPU rollups", () => {
   });
 
   assert.equal(model.cellStatus, "ready");
+  assert.equal(model.managedRebalanceCount, 3);
+  assert.equal(model.managedLastRebalanceAtMs, 1_700_000_000_123);
   assert.equal(model.cellAttributionReady, true);
   assert.equal(model.hostStatus, "ready");
   assert.equal(model.cells[0].label, "batch.slice");
@@ -3849,6 +3853,8 @@ test("Cells page renders a live cell and DSQ layout diagram", () => {
   assert.match(script, /renderCellPlacementAtlas/);
   assert.match(script, /cellUtilizationModel/);
   assert.match(script, /renderCellUtilization/);
+  assert.match(script, /Managed rebalances/);
+  assert.match(script, /Last managed rebalance/);
   assert.match(script, /CELL_UTILIZATION_RENDER_INTERVAL_MS = 1_000/);
   assert.match(script, /cellUtilizationSignature/);
   assert.match(script, /cellRebalanceAnalysisModel/);
