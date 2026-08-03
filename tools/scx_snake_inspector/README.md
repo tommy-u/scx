@@ -13,8 +13,9 @@ The embedded interface is organized by purpose rather than a fixed view count:
 - **Overview** summarizes host pressure, scheduler outcomes, workload context,
   and the highest-impact tuning signals.
 - **Observe** contains **Placement**, which shows CPU utilization and migration
-  paths, and **Callback performance**, which shows sampled callback percentiles
-  and independent fine-grained captures.
+  paths with logical-CPU, physical-core, LLC, and host-tax lanes, and **Callback
+  performance**, which shows sampled callback percentiles and independent
+  fine-grained captures.
 - **Configure** contains **Scheduler & policies**, which catalogs validated
   policies, previews launch impact, and controls start, stop, and restart.
 - **Inspect** contains **Policy ladders**, **Queue topology**, and **Cells & tasks**
@@ -32,7 +33,7 @@ The embedded interface is organized by purpose rather than a fixed view count:
   saturation, waker/wakee switching, mixed affinity, and fork/yield churn.
 
 The Project pages are curated presentations of the review under
-[`docs/snake-review/`](../../docs/snake-review/README.md); that repository report
+[`scheds/rust/scx_snake/docs/snake-review/`](../../scheds/rust/scx_snake/docs/snake-review/README.md); that repository report
 remains authoritative. **Feedback** is a separate drawer that collects
 section-level notes as one copyable transcript. Notes remain in browser session
 storage for the current tab and are never sent to the inspector backend.
@@ -59,6 +60,18 @@ loaded there; the complete command remains visible before **Restart Snake** is
 pressed. Fairness, task membership, queue topology, cells, weights, CPU masks,
 and DSQ layout are attachment-time state and require a reload. Callback
 sampling, fine-grained timing, and workload cell assignments are dynamic.
+Managed reconciliation and demand-EWMA settings are also live when the active
+policy enables managed-cell resizing. The VTIME base slice and pinned-waiter
+slice-shrinking enable, minimum, maximum, and runtime multiplier are live BPF
+parameters.
+
+Live parameter edits are not persisted as launch arguments or written back to
+the policy. Restart reloads managed-cell values from the selected TOML. BPF
+slice values return to their scheduler defaults: 5000 us base slice, shrinking
+disabled, 500 us minimum, 4000 us maximum, and multiplier 2. Reapply intentional
+non-default BPF values after a restart, and update the policy file when a
+managed-cell tuning change should survive one.
+
 **Reset all stats** atomically switches Snake to
 a cleared statistics bank at the same policy generation, rebases the
 inspector's rolling histories, and clears fine-grained capture history. It
@@ -81,6 +94,28 @@ and zoom apply to both **Placement** visualizations. **Policy ladders** and
 stats target; **Placement** remains available with older compatible schedulers.
 **Callback performance** reports an unsupported state when the active Snake
 build predates callback histograms.
+
+Placement aggregates SMT siblings into physical-core tiles before presenting
+whole-core utilization, so core capacity is not inferred from a single logical
+CPU. A separate host-tax lane combines `/proc/stat` CPU accounting with Snake's
+per-CPU runtime and shows capacity spent outside Snake, including other tasks,
+hard and soft IRQ work, steal time, and any residual. The lane is withheld when
+the host and scheduler sample windows do not match. Cell demand and rebalance
+views use capacity after this non-scheduler tax rather than treating every
+online CPU as fully available to Snake.
+
+## Production use
+
+The Inspector supports a guarded, single-host Snake canary; it does not make the
+scheduler production-ready. Keep rollback independent of the web application.
+Current scheduler caveats include observer errors that can detach Snake,
+unsupported CPU hotplug, and the lack of cross-cell pulling for work that is
+already queued. Use the Inspector to watch queue age, cell 0 capacity, rebalance
+frequency, slice-shrink counters, and invalid/accounting errors during a canary,
+then detach or restart Snake through the prepared rollback path if a gate fails.
+See the scheduler README's
+[production canary status](../../scheds/rust/scx_snake/README.md#production-canary-status)
+for the current boundary.
 
 Snake defaults callback timing to 1/64. **Callback performance** can change the
 rate from disabled through every callback to 1/4096 without restarting Snake. A

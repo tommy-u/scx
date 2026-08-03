@@ -40,7 +40,7 @@ scope = "task_allowed"
         serde_json::from_slice(&output.stdout).expect("validation should emit JSON");
     assert_eq!(report["schema_version"], 1);
     assert_eq!(report["valid"], true);
-    assert_eq!(report["abi_version"], 29);
+    assert_eq!(report["abi_version"], 31);
     assert_eq!(report["limits"]["placement_rungs"], 16);
     assert_eq!(report["limits"]["generic_placement_rungs"], 9);
     assert_eq!(report["limits"]["queue_rungs"], 8);
@@ -73,7 +73,7 @@ unexpected = true
         serde_json::from_slice(&output.stdout).expect("validation failure should emit JSON");
     assert_eq!(report["schema_version"], 1);
     assert_eq!(report["valid"], false);
-    assert_eq!(report["abi_version"], 29);
+    assert_eq!(report["abi_version"], 31);
     assert_eq!(report["error"]["code"], "invalid_policy_toml");
     assert!(report["error"]["message"]
         .as_str()

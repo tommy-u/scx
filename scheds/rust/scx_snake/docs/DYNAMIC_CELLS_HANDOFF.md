@@ -2,8 +2,9 @@
 
 ## Goal
 
-Make `mitosis-sim.toml` create cells for live child cgroups, admit unpinned
-workloads like Mitosis, and optionally resize cell CPU ownership from EWMA demand.
+Make `mitosis-sim.toml` create cells for live child cgroups, preserve capacity
+for cell 0, admit unpinned workloads like Mitosis, and optionally resize cell CPU
+ownership from EWMA demand.
 
 ## Design
 
@@ -20,6 +21,9 @@ runtime counters -> EWMA demand -> proportional reallocation -> banked publish
 - `cell0_min_cpus` reserves CPUs without taking a child's last exclusive CPU.
 - Resizing is opt-in under `[managed_cells.resizing]`; identity is
   `(cell_id, slot_epoch)` and counter baselines include the active BPF bank.
+- The demand controller samples primary, borrowed, and lent execution, smooths
+  capacity-normalized utilization with an EWMA, and reallocates only when the
+  configured spread threshold and cooldown allow it.
 - Structural publication keeps Snake's drain/stage/flip/quiesce transaction.
   Same-identity resizing keeps stable cell/LLC DSQs live, then BPF drains shards
   that lost all consumers. It briefly closes custom enqueue and uses the global
@@ -34,11 +38,39 @@ runtime counters -> EWMA demand -> proportional reallocation -> banked publish
   bank before running.
 - Live discovery uses a stable cpuset snapshot; transient cgroup churn keeps the
   active topology and retries.
+- The Mitosis profile drains orphaned same-cell shards before normal dispatch and
+  steals from sibling LLC shards after local candidates are exhausted. Borrowing
+  still applies only to newly runnable placement; it does not pull queued work
+  across cells.
+- Pinned-waiter VTIME slice shrinking is a separate live BPF control. It shortens
+  the running task's remaining slice using waiter runtime and configured minimum,
+  maximum, and multiplier bounds.
+
+## Operations
+
+- Managed reconciliation and EWMA controls can be changed live, but restart
+  reloads them from `mitosis-sim.toml`; live Inspector changes are not written
+  back to disk.
+- VTIME slice controls are process-local and not part of the TOML policy. Restart
+  restores a 5000 us base slice and disables shrinking with 500 us minimum,
+  4000 us maximum, and multiplier 2. Reapply intended non-default values after
+  attach.
+- CPU hotplug is unsupported while Snake is attached. Attachment-time queue and
+  ownership topology does not follow CPUs going online or offline.
+- An inspection or metrics failure can currently unwind the scheduler loop.
+  Treat the Inspector as an observer, not as the canary rollback mechanism.
+- This implementation is suitable for a guarded, noncritical single-host canary
+  with independent rollback. It is not production-ready until observer failures
+  are isolated, hotplug is supported or safely rejected, cross-cell queued-work
+  forward progress has a complete contract, and workload/churn rollout gates have
+  been exercised.
 
 ## Status
 
-- Implemented: admission, holdout, effective-cpuset bounds, EWMA tracking,
-  weighted banked publication, stats gauges, and focused VM coverage.
+- Implemented: managed admission, cell 0 holdout, effective-cpuset bounds,
+  demand EWMA tracking and rebalancing, weighted banked publication,
+  orphan draining, sibling-LLC stealing, VTIME slice controls, stats gauges, and
+  focused VM coverage.
 - Validated: rapid VM cgroup churn, bidirectional EWMA resizing, and bare-metal
   create/stop/recreate for unpinned, cross-LLC pinned, CPU, and fork workloads.
   Same-name reuse advanced slot epochs; Snake stayed attached with clean kernel

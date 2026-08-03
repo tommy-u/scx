@@ -6,8 +6,10 @@
 declarative scheduling policy. It intentionally keeps task scheduling simple so
 that the userspace-to-BPF policy interface is the part under study.
 
-This is an experimental mechanism, not a general-purpose scheduler. Do not use
-it for production workloads.
+This is an experimental mechanism, not a general-purpose scheduler. The
+Mitosis simulation is ready for a guarded, single-host production canary with
+noncritical workloads and an exercised rollback path. It is not ready for an
+unrestricted production rollout; see [Production canary status](#production-canary-status).
 
 The focused references are:
 
@@ -178,19 +180,25 @@ attachment and on each reconciliation interval. The nearest available non-empty
 CPUs available to the child. A non-empty configured `cpuset.cpus` is a hard cell
 constraint, while an empty or unavailable configured list creates an unpinned
 cell. Snake synthesizes both the cell and membership assignment, then distributes
-unclaimed CPUs among cell 0 and unpinned cells.
+unclaimed CPUs among cell 0 and unpinned cells. `cell0_min_cpus` reserves a
+minimum holdout for unassigned and host work without taking the last exclusive
+CPU from a constrained child. Optional managed-cell resizing samples primary,
+borrowed, and lent runtime, smooths utilization with an EWMA, and republishes
+CPU ownership only when the configured demand spread and cooldown permit it.
 Existing children keep stable IDs; a reused slot advances its epoch. Descendants
 remain in the direct child's cell while their own narrower cpusets continue to
 constrain task execution. See
 [`examples/managed-cell-llc.toml`](examples/managed-cell-llc.toml).
 
-[`examples/mitosis-sim.toml`](examples/mitosis-sim.toml) is the Production
+[`examples/mitosis-sim.toml`](examples/mitosis-sim.toml) is the production-canary
 managed-cell profile. It combines dynamic child-cgroup cells, cell/LLC queues,
 Mitosis-style preferred idle selection, cell-aware direct dispatch, borrowing,
 expanded `min_vtime` dispatch, same-cell sibling-LLC stealing, orphan draining,
 EWMA demand rebalancing, and optional pinned-waiter slice shrinking. The
 Inspector can update the VTIME base slice and shrinking thresholds without
-restarting Snake.
+restarting Snake. Shrinking shortens a running task's remaining VTIME slice when
+an affinity-constrained waiter targets its CPU; it is disabled by default while
+latency and context-switch tradeoffs are measured.
 
 Its preferred idle selection is expanded into 16 observable placement rungs.
 LLC-local, primary, borrowable, and restricted-affinity scopes each run
@@ -257,6 +265,35 @@ another cell. Same-cell orphan draining and sibling-LLC stealing preserve work
 conservation across that cell's own shards, but a policy can still hit the
 sched_ext runnable-task watchdog while other cells' CPUs are idle. Size weights
 for the workload's sustained runnable demand.
+
+## Production canary status
+
+Snake has the placement, managed-cell admission, cell 0 holdout, demand-EWMA
+rebalancing, drain/steal, and waiter-aware VTIME controls needed to compare one
+guarded host with `scx_mitosis`. Keep the first deployment to noncritical work,
+monitor queue age and invalid/accounting counters, and retain a tested detach and
+restart rollback.
+
+The current blockers to declaring it production-ready are operational rather
+than a missing core Mitosis placement feature:
+
+- An inspection or metrics error can still unwind the scheduler request loop and
+  detach Snake. Do not make Inspector availability part of the canary's safety
+  path.
+- Borrowing claims idle CPUs for newly runnable work; it does not pull queued
+  work across cells. A severely undersized cell can therefore approach the
+  sched_ext watchdog while another cell has idle capacity.
+- CPU hotplug is unsupported. Queue descriptors, ownership, and DSQs reflect the
+  topology at attachment; do not online or offline CPUs while Snake is attached.
+- Live parameter changes are process-local. On restart, managed reconciliation
+  and EWMA settings reload from the selected TOML policy. The VTIME base slice
+  returns to 5000 us and slice shrinking returns to disabled with 500 us minimum,
+  4000 us maximum, and multiplier 2. Put intended managed-cell values in the
+  policy and reapply any non-default BPF slice settings after every restart.
+
+Broader rollout still requires hotplug rejection or support, observer-failure
+isolation, sustained workload and churn campaigns, and exercised canary/rollback
+procedures across the target host topologies.
 
 ## How scheduling works
 
@@ -328,7 +365,7 @@ sudo ./target/release/scx_snake \
 ```
 
 FIFO is the default. VTIME is required by queue profiles, including the
-Production `mitosis-sim.toml` profile. Other custom VTIME policies and the
+production-canary `mitosis-sim.toml` profile. Other custom VTIME policies and the
 `--fairness eevdf` mode remain experimental; changing fairness requires a
 restart. EEVDF's affinity-constrained forward-progress test passes,
 but its nice-level weighted-share validation is not yet correct. See

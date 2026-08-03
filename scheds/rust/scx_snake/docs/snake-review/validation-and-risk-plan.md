@@ -10,9 +10,9 @@ Confidence: high. Impact: top-level fairness mode cannot be trusted.
 
 The project records that pinned nice-level tasks receive approximately equal
 service instead of expected weighted shares
-([FAIRNESS.md](../../scheds/rust/scx_snake/docs/FAIRNESS.md#L3-L6)). Current CI runs
+([FAIRNESS.md](../FAIRNESS.md#L3-L6)). Current CI runs
 the EEVDF affinity-forward-progress case but not the weighted-share contract
-([ci.yml](../../.github/workflows/ci.yml#L376-L384)).
+([ci.yml](../../../../../.github/workflows/ci.yml#L376-L384)).
 
 Gate:
 
@@ -23,42 +23,43 @@ Gate:
 - require equal-weight, two-weight, three-weight, sleeper, yield, and affinity
   cases before enabling it.
 
-#### Static queue cells are intentionally not work-conserving
+#### Cross-cell queued backlog is intentionally not work-conserving
 
 Confidence: high. Impact: Mitosis parity and production forward progress.
 
-Direct borrowing helps newly runnable work, but an already queued normal task is
-not stolen by another cell. An undersized cell can hit the sched_ext watchdog while
-foreign CPUs are idle
-([QUEUE_POLICY.md](../../scheds/rust/scx_snake/docs/QUEUE_POLICY.md#L83-L90)).
+Direct borrowing helps newly runnable work. Same-cell sibling stealing and orphan
+draining now recover work across one cell's LLC shards, but an already queued
+normal task is never stolen by another cell. An undersized cell can still hit the
+sched_ext watchdog while foreign CPUs are idle
+([QUEUE_POLICY.md](../QUEUE_POLICY.md#L83-L90)).
 
-This is documented behavior, not a small hidden bug. Near-term safety should add
-overload warnings based on queue age/depth and reject obvious capacity mistakes.
-Full resolution requires dynamic ownership or an explicit cross-cell queued-work
-policy with clock semantics.
+This is documented behavior, not a small hidden bug. Demand rebalancing can move
+ownership for sustained skew, but it cannot rescue backlog quickly enough to be a
+general watchdog guarantee. Near-term safety requires queue-age/depth warnings and
+admission/rejection of obviously unsafe capacity plans. Full resolution requires
+an explicit cross-cell queued-work policy with clock semantics or a specified
+controlled detach before watchdog exposure.
 
-#### CPU hotplug and dynamic owner changes lack safe contracts
+#### CPU hotplug has no safe contract
 
-Confidence: high. Impact: current topology support and future Mitosis mode.
+Confidence: high. Impact: attachment-time topology can become invalid while Snake
+is running.
 
-Managed cell ID reuse can retarget stale annotations, and changing a CPU owner can
-reinterpret queued affinity VTIME in the wrong cell clock. No dynamic topology work
-should ship until epoch/retirement and affinity-clock invariants are tested. See
-[Mitosis compatibility](mitosis-compatibility.md#critical-semantic-decisions).
-
-Current hotplug is also undefined: queue descriptors and custom DSQs are
+Managed identity epochs, complete banks, structural drain, and affinity-queue
+checks now provide a contract for managed CPU-owner changes. They do not make CPU
+hotplug safe. Queue descriptors and custom DSQs are
 attachment-time state, and Snake registers no CPU online/offline callbacks
-([main.bpf.c](../../scheds/rust/scx_snake/src/bpf/main.bpf.c#L498-L507)). Until a
-drain/reassignment design exists, explicitly reject or document hotplug as
-unsupported and test that contract.
+([main.bpf.c](../../src/bpf/main.bpf.c#L887-L895)). Until a
+hotplug transaction exists, detect online-mask change and perform a controlled
+detach, or explicitly prohibit hotplug operationally and test that contract.
 
 #### Diagnostic failure can stop the scheduler
 
 `inspection()` performs task storage and `/proc` inspection for every tracked task
 and propagates a non-disappearance error
-([main.rs](../../scheds/rust/scx_snake/src/main.rs#L2144-L2202)). The scheduler
+([main.rs](../../src/main.rs#L3060-L3119)). The scheduler
 request loop uses `?` on `metrics()` and `inspection()`
-([main.rs](../../scheds/rust/scx_snake/src/main.rs#L2223-L2229)), so an observer
+([main.rs](../../src/main.rs#L3885-L3891)), so an observer
 failure can unwind the scheduler and detach it.
 
 Required behavior:
@@ -70,12 +71,24 @@ Required behavior:
 
 ## P1: high-priority correctness and scale risks
 
+### Managed task identity has a polling window
+
+Direct-child identity, exclusions, stable IDs, and slot epochs are implemented,
+but descendant task membership is written through recurring userspace scans. A
+new thread or cgroup move may therefore run temporarily with cell 0 or its former
+assignment. Epoch validation prevents reuse aliasing; it does not remove this
+visibility delay.
+
+Required campaigns measure fork/exec and cgroup-move exposure at high churn. A
+production decision must either accept and bound the window or move identity
+inheritance/refresh into a cgroup-native BPF path.
+
 ### Membership clear failure is not retried
 
 The removal path forgets the task and retained pidfd before clearing managed task
 storage. A non-exit error is logged, but the next reconciliation has no state with
 which to retry
-([membership.rs](../../scheds/rust/scx_snake/src/membership.rs#L107-L121)). A stale
+([membership.rs](../../src/membership.rs#L107-L121)). A stale
 managed cell can later become visible when a manual override is cleared.
 
 Required behavior: retain known task and pidfd until clear succeeds or task exit is
@@ -115,14 +128,14 @@ scan timing before optimizing VTIME.
 ### Timing transport can bias the measurement and delay control
 
 Fine and rung ring-buffer output failures are ignored
-([main.h](../../scheds/rust/scx_snake/src/bpf/main.h#L249-L263),
-[main.h](../../scheds/rust/scx_snake/src/bpf/main.h#L354-L368)). Userspace drains
+([main.h](../../src/bpf/main.h#L249-L263),
+[main.h](../../src/bpf/main.h#L354-L368)). Userspace drains
 4,096-event batches until it sees a short batch, without a per-loop maximum. Under
 sustained sampling this can monopolize the scheduler loop.
 
 Add emitted/dropped counters per stream, cap drain batches per loop iteration, and
-make rung streaming independently sampled or enabled. The current DSQ WIP should
-emit one detailed event and derive aggregate views in userspace.
+make rung streaming independently sampled or enabled. Detailed DSQ events should
+remain single-source, with aggregate views derived in userspace.
 
 ## P2: bounded defects and debt
 
@@ -150,34 +163,40 @@ be test inputs, not prose maintained independently.
 
 ## Existing validation inventory
 
-Roadmap update (2026-07-31): inspector Rust/JavaScript tests now run in normal CI,
-the repository has a manually dispatched sharded VM workflow with frozen inputs,
-and three local 140-case campaigns completed with zero failures across the recorded
-kernels. EEVDF mixed-affinity and fork/yield progress cases also run in CI. These
-are meaningful failure and forward-progress gains, but they do not measure weighted
-shares, throughput, latency, or LLC placement balance.
+Assessment update (2026-08-03): Inspector Rust/JavaScript tests run in normal CI.
+The repository has a manually dispatched sharded VM workflow with frozen inputs,
+plus focused managed scripts for workload child discovery, resizing, churn/reuse,
+queued affinity during cpuset changes, sibling-LLC stealing, and orphan draining.
+The standalone orphan-drain causality test preserves one exact binary and policy,
+then proves the no-drain case strands depth one through the watchdog window while
+the drain-enabled case empties the same queue and completes.
+EEVDF mixed-affinity and fork/yield progress cases also run in CI. These are
+meaningful mechanism and forward-progress gains, but they do not measure weighted
+shares, throughput, latency, production-scale convergence, or long soak behavior.
 
 Approximate source-level inventory at review time:
 
 | Surface | Count or coverage |
 | --- | --- |
-| Snake Rust `#[test]` functions | 191 committed; 2 more in current WIP |
-| Snake privileged VM shell scripts | 12 |
-| Inspector Rust tests | 95 |
-| Inspector JavaScript tests | 104 committed; 2 more in current WIP |
+| Snake Rust test attributes | approximately 368 |
+| Snake privileged VM shell scripts | 26 |
+| Inspector Rust test attributes | approximately 152 |
+| Inspector JavaScript `test()` cases | approximately 214 |
 | Mitosis Rust tests | 67 |
-| Mitosis shell/ktstr integration files | 6 |
+| Mitosis integration files | 5 shell scripts and 2 ktstr test files |
 
 Snake's VM scripts cover FIFO fallback, VTIME cells, queue ladders, borrowing,
-maximum cells, mixed affinity, low-weight yield, and live rehome. The combined
+maximum cells, mixed affinity, low-weight yield, live rehome, managed lifecycle,
+resizing, reuse, queued affinity, orphan drain, and sibling stealing. The combined
 gauntlet deliberately excludes EEVDF
-([FAIRNESS.md](../../scheds/rust/scx_snake/docs/FAIRNESS.md#L348-L370)). Normal CI
+([FAIRNESS.md](../FAIRNESS.md#L348-L370)). Normal CI
 also runs a generic Snake stress case and checks activation, expected rung activity,
 and kernel errors
-([ci.yml](../../.github/workflows/ci.yml#L245-L290)).
+([ci.yml](../../../../../.github/workflows/ci.yml#L245-L290)).
 
-The main gaps are live BPF/model equivalence, failure injection, browser DOM smoke,
-multi-client scale, hotplug, and systematic performance curves.
+The main gaps are weighted-share correctness, observer and transition fault
+injection, browser DOM smoke, multi-client and large-host scale, hotplug, long
+managed-control soak, and exercised rollback.
 
 ### Remaining automation gaps
 
@@ -190,15 +209,15 @@ cargo check --all-targets --manifest-path tools/scx_snake_inspector/Cargo.toml
 node --test tools/scx_snake_inspector/tests/web/*.test.mjs
 ```
 
-The 104 committed JavaScript tests exercise pure models and some source/markup
-contracts; they do not run a browser. Add a small headless suite for five workflows:
+The JavaScript tests exercise pure models and source/markup contracts; they do not
+run a browser. Add a small headless suite for five workflows:
 route navigation, disclosure/focus survival through polls, unapplied selector state,
 policy apply/restart behavior, and cell task expansion.
 
 The sharded Snake VM matrix is still manually dispatched. Run a short FIFO/VTIME
-subset for relevant pull requests and schedule the full matrix nightly. Mitosis CI currently starts an
-empty managed parent but does not exercise lifecycle, cpuset changes, borrowing,
-draining, or rebalancing; parity work needs those tests as phase gates.
+and managed subset for relevant pull requests and schedule the full matrix nightly.
+The focused managed scripts cover core mechanisms, but production evidence still
+needs multi-kernel scheduling, fault injection, scale, soak, and rollback gates.
 
 ## Test architecture
 
@@ -269,27 +288,25 @@ VM tests; more VM tests do not replace observer and controller scale measurement
 
 ## Mitosis-mode campaigns
 
-Port or parameterize the contracts in Mitosis's cell churn, exclusion, isolation,
-affinity load-balance, smoke, and cell-0 starvation tests. Add:
+Focused VM scripts now cover direct-child workloads, cpuset-driven resizing,
+create/delete/reuse, queued-affinity accounting, same-cell sibling stealing, and
+orphan draining. Remaining campaigns should emphasize gaps that those happy-path
+mechanism tests do not close:
 
-- child delete/recreate with the same path and a new inode;
+- high-rate fork/exec and cgroup moves that quantify the userspace polling window;
 - create/delete and descendant propagation racing complete-bank publication;
-- cell-slot epoch reuse while stale task/queue state exists;
 - sleeping task wake after its former slot and clock have been reused;
-- cgroup move while sleeping, running, on normal DSQ, on affinity DSQ, and borrowed;
-- cpuset swaps under CPU-bound load;
-- infeasible new-child admission remains in cell 0 with an explicit health error;
-- cpuset read failure after a confirmed or unprovable generation change causes
-  controlled detach instead of retaining potentially invalid owners;
-- existing-cell cpuset shrink either retains a still-valid plan or causes the
-  specified controlled detach;
-- sleeper wake after source-clock reuse starts at neutral destination lag and
-  records the epoch-fallback counter;
-- final CPU removed from an LLC shard with queued work;
-- demand skew, reversal, idle decay, and burst/no-oscillation;
-- failed inactive-bank validation leaves the complete active
-  policy/resource/identity-binding configuration untouched;
-- restart/detach while cgroups and cpusets churn.
+- cgroup move while sleeping, running, queued normal, queued affinity, and borrowed;
+- cpuset swaps and infeasible admission under sustained CPU-bound load;
+- injected cpuset read/parse/permission failures with an explicit retain, reject,
+  or controlled-detach result;
+- failure at every inactive-bank validation, drain, publish, reader-quiescence,
+  and membership boundary, proving the active bank remains coherent;
+- long demand skew, reversal, idle decay, and burst/no-oscillation runs with
+  quantitative ownership-churn bounds;
+- CPU online/offline detection and the selected support-or-detach contract;
+- observer faults, scheduler restart, and rollback while cgroups and cpusets churn;
+- target-host scale and soak with Inspector absent, connected, and multi-client.
 
 ## Performance matrix
 
@@ -357,12 +374,14 @@ Production readiness should not be declared until all of the following are true:
 2. every declared resource policy has a forward-progress/work-conservation contract;
 3. CPU hotplug is either supported or safely rejected;
 4. diagnostics cannot affect scheduler lifetime;
-5. privileged CI runs the important FIFO, VTIME, queue, and EEVDF contracts;
-6. scale curves exist for target CPU/cell/task counts with and without inspector;
-7. dump, metrics, and alerts identify stalls, drops, topology generations, and
+5. polling-based managed identity is either replaced or its fork/move exposure is
+   measured and accepted for the target workload;
+6. privileged CI runs the important FIFO, VTIME, queue, and EEVDF contracts;
+7. scale curves exist for target CPU/cell/task counts with and without inspector;
+8. dump, metrics, and alerts identify stalls, drops, topology generations, and
    rebalancing decisions;
-8. canary and rollback procedures have been exercised under workload and churn;
-9. documentation, protocol fixtures, UI availability, and implementation agree.
+9. canary and rollback procedures have been exercised under workload and churn;
+10. documentation, protocol fixtures, UI availability, and implementation agree.
 
 ## Operational completeness estimate
 
@@ -371,17 +390,18 @@ These scores measure validation and rollout readiness, not feature implementatio
 | Area | Complete |
 | --- | ---: |
 | Static Snake policy/unit validation | 92% |
-| FIFO/VTIME VM validation | 82% |
+| FIFO/VTIME VM validation | 88% |
 | Automated CI coverage of the VM suite | 55% |
 | EEVDF validation | 45% |
-| Inspector API/model validation | 88% |
+| Inspector API/model validation | 92% |
 | Inspector real-browser validation | 20% |
-| Dynamic Mitosis-parity validation | 15% |
+| Dynamic Mitosis-parity validation | 70% |
 | Performance regression coverage | 20% |
-| Production rollout/runbook readiness | 15% |
-| **Overall production validation readiness** | **approximately 40%** |
+| Production rollout/runbook readiness | 20% |
+| **Overall production validation readiness** | **approximately 45%** |
 
 The fastest material improvements are scheduled use of the existing sharded VM
-matrix, one controlled kernel-default versus simulation workload with LLC-balance
-and performance output, real-browser smoke, and a fault-injected
-complete-configuration publication harness before dynamic cells are implemented.
+matrix, observer and transition fault injection, one controlled kernel-default
+versus simulation workload with LLC-balance and performance output, real-browser
+smoke, a long managed-control soak, and an exercised detach/restart rollback on a
+noncritical canary host.

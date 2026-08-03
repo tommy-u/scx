@@ -21,7 +21,7 @@ Recommended changes are intentionally conservative:
 
 The inspector partially parses policy and matches scheduler error text to decide
 whether a candidate is dynamic or restart-required
-([api.rs](../../tools/scx_snake_inspector/src/api.rs#L843-L893)). That makes copy
+([api.rs](../../../../../tools/scx_snake_inspector/src/api.rs#L843-L893)). That makes copy
 changes into behavior changes.
 
 Add a serde-only result:
@@ -50,7 +50,7 @@ not a shared scheduler abstraction.
 
 `collector.rs` repeats stats connection setup, operation names, argument shapes,
 and response decoding for every action
-([collector.rs](../../tools/scx_snake_inspector/src/collector.rs#L676-L941)).
+([collector.rs](../../../../../tools/scx_snake_inspector/src/collector.rs#L676-L941)).
 Deadlines are also inconsistent: transport uses roughly one second while HTTP
 handlers wait 5, 15, or 20 seconds, and policy replacement may wait several
 seconds for slot quiescence.
@@ -76,9 +76,9 @@ the connection instead of letting layers disagree about whether work is still li
 ### 3. Inspection data crosses a loosely typed boundary
 
 The scheduler constructs typed inspection structures
-([inspection.rs](../../scheds/rust/scx_snake/src/inspection.rs#L20-L258)). The
+([inspection.rs](../../src/inspection.rs#L20-L258)). The
 inspector receives `serde_json::Value`, validates only a shallow outer shape
-([collector.rs](../../tools/scx_snake_inspector/src/collector.rs#L159-L193)), stores
+([collector.rs](../../../../../tools/scx_snake_inspector/src/collector.rs#L159-L193)), stores
 and clones it, then reparses subsets independently in dashboard and API code.
 
 Create a small `scx_snake_protocol` crate containing serde DTOs only. It should not
@@ -161,7 +161,7 @@ Avoid traits and a generic compiler framework.
 
 `snake_task_runtime` mixes global fairness, queue routing, run accounting, direct
 borrow state, rehome state, and timing samples
-([fairness.h](../../scheds/rust/scx_snake/src/bpf/fairness.h#L7-L41)). Make ownership
+([fairness.h](../../src/bpf/fairness.h#L7-L41)). Make ownership
 visible with nested structs inside the same task-storage value:
 
 ```c
@@ -285,7 +285,7 @@ add a non-attaching validation command. This is both correctness and UX work.
 
 Every callback performs two active-slot lookups and increments/decrements a per-CPU
 reader counter
-([main.h](../../scheds/rust/scx_snake/src/bpf/main.h#L170-L212)). This is the cost
+([main.h](../../src/bpf/main.h#L170-L212)). This is the cost
 of safe live updates. Fine timing already measures ladder acquisition. Change it
 only if measured p95/p99 is material; do not weaken the update invariant for a
 theoretical win.
@@ -294,7 +294,7 @@ theoretical win.
 
 When a local cell/LLC normal queue is empty, dispatch scans every normal shard of
 the cell and peeks each head
-([queue_fairness.h](../../scheds/rust/scx_snake/src/bpf/queue_fairness.h#L529-L627)).
+([queue_fairness.h](../../src/bpf/queue_fairness.h#L529-L627)).
 The current timing stages already group this cost by queue fanout.
 
 If measurements show a problem, add an active-shard bitmap and rotating cursor or
