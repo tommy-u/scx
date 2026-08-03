@@ -1210,13 +1210,17 @@ fn cell_stats_row(
         .saturating_add(cell.affinity_dispatches);
     let observed_ns = observed_ms as f64 * 1_000_000.0;
     let owned_capacity_ns = primary_cpu_count as f64 * observed_ns;
+    let demand_ewma_ready = cell.demand_ewma_ready == Some(1);
     CellStatsRowView {
         id: cell.id,
         index: cell.index,
         slot_epoch: cell.slot_epoch.or(topology_slot_epoch),
         primary_cpu_count,
-        utilization_pct: cell.utilization_pct,
-        ewma_utilization_pct: cell.ewma_utilization_pct,
+        utilization_pct: (owned_capacity_ns > 0.0)
+            .then(|| cell.runtime_ns as f64 * 100.0 / owned_capacity_ns),
+        ewma_utilization_pct: demand_ewma_ready
+            .then_some(cell.ewma_utilization_pct)
+            .flatten(),
         runtime_ns: cell.runtime_ns,
         runtime_ns_by_cpu: cell.runtime_ns_by_cpu.clone(),
         primary_runtime_ns: cell.primary_runtime_ns,
@@ -1231,13 +1235,9 @@ fn cell_stats_row(
         service_cores: (observed_ns > 0.0).then(|| cell.runtime_ns as f64 / observed_ns),
         service_share_pct: percentage(cell.runtime_ns, service_runtime_ns),
         primary_pct: percentage(cell.primary_runtime_ns, cell.runtime_ns),
-        borrowed_pct: cell
-            .borrowed_pct
-            .or_else(|| percentage(cell.borrowed_runtime_ns, cell.runtime_ns)),
-        lent_pct: cell.lent_pct.or_else(|| {
-            (owned_capacity_ns > 0.0)
-                .then(|| cell.lent_runtime_ns as f64 * 100.0 / owned_capacity_ns)
-        }),
+        borrowed_pct: percentage(cell.borrowed_runtime_ns, cell.runtime_ns),
+        lent_pct: (owned_capacity_ns > 0.0)
+            .then(|| cell.lent_runtime_ns as f64 * 100.0 / owned_capacity_ns),
         owned_utilization_pct: (owned_capacity_ns > 0.0).then(|| {
             (cell.primary_runtime_ns as f64 + cell.lent_runtime_ns as f64) * 100.0
                 / owned_capacity_ns

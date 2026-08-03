@@ -190,6 +190,7 @@ fn cell_metrics(id: u32, runtime_ns: u64, normal_dispatches: u64) -> CellMetricC
         index: id + 10,
         slot_epoch: Some(1),
         primary_cpu_count: Some(2),
+        demand_ewma_ready: Some(1),
         utilization_pct: Some(25.0),
         ewma_utilization_pct: Some(20.0),
         borrowed_pct: Some(5.0),
@@ -363,6 +364,7 @@ fn cell_metric_history_preserves_sparse_per_cpu_runtime() {
 fn cell_metric_history_keeps_latest_gauges_and_rebases_reused_slots() {
     let mut history = CellMetricHistory::new(5_000);
     let mut baseline = cell_metrics(2, 0, 0);
+    baseline.demand_ewma_ready = Some(0);
     baseline.ewma_utilization_pct = None;
     history.ingest(0, 4, 7, &BTreeMap::from([(2, baseline)]));
 
@@ -377,6 +379,7 @@ fn cell_metric_history_keeps_latest_gauges_and_rebases_reused_slots() {
     assert_eq!(accumulated.cells[&2].runtime_ns, 240);
     assert_eq!(accumulated.cells[&2].foreign_affinity_runtime_ns, Some(15));
     assert_eq!(accumulated.cells[&2].ewma_utilization_pct, Some(55.0));
+    assert_eq!(accumulated.cells[&2].demand_ewma_ready, Some(1));
 
     let mut reused = cell_metrics(2, 32, 1);
     reused.slot_epoch = Some(2);

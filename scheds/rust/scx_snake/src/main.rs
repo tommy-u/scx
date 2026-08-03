@@ -1834,6 +1834,7 @@ fn aggregate_raw_cell_stats(
                     slot_epoch: cell.slot_epoch,
                     primary_cpu_count: u32::try_from(cell.primary.len())
                         .context("cell primary CPU count does not fit u32")?,
+                    demand_ewma_ready: 0,
                     utilization_pct: 0.0,
                     ewma_utilization_pct: 0.0,
                     borrowed_pct: 0.0,
@@ -1893,6 +1894,17 @@ fn aggregate_raw_cell_stats(
             ))
         })
         .collect()
+}
+
+fn apply_demand_gauges(metrics: &mut CellMetrics, gauges: demand::DemandGauges) {
+    let Some(ewma_pct) = gauges.ewma_pct else {
+        return;
+    };
+    metrics.demand_ewma_ready = 1;
+    metrics.utilization_pct = gauges.util_pct;
+    metrics.ewma_utilization_pct = ewma_pct;
+    metrics.borrowed_pct = gauges.borrowed_pct;
+    metrics.lent_pct = gauges.lent_pct;
 }
 
 fn read_raw_stats(skel: &BpfSkel<'_>, slot: u32) -> Result<Vec<Vec<Vec<u8>>>> {
@@ -2392,10 +2404,7 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
                     let Some(cell_metrics) = metrics.cells.get_mut(&cell.external_id) else {
                         continue;
                     };
-                    cell_metrics.utilization_pct = gauges.util_pct;
-                    cell_metrics.ewma_utilization_pct = gauges.ewma_pct.unwrap_or(0.0);
-                    cell_metrics.borrowed_pct = gauges.borrowed_pct;
-                    cell_metrics.lent_pct = gauges.lent_pct;
+                    apply_demand_gauges(cell_metrics, gauges);
                 }
             }
         }
@@ -8470,6 +8479,28 @@ scope = "task_cell"
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn demand_gauges_are_published_only_after_the_ewma_is_initialized() {
+        let mut metrics = CellMetrics::default();
+        apply_demand_gauges(&mut metrics, demand::DemandGauges::default());
+        assert_eq!(metrics.demand_ewma_ready, 0);
+
+        apply_demand_gauges(
+            &mut metrics,
+            demand::DemandGauges {
+                util_pct: 50.0,
+                borrowed_pct: 25.0,
+                lent_pct: 10.0,
+                ewma_pct: Some(42.0),
+            },
+        );
+        assert_eq!(metrics.demand_ewma_ready, 1);
+        assert_eq!(metrics.utilization_pct, 50.0);
+        assert_eq!(metrics.ewma_utilization_pct, 42.0);
+        assert_eq!(metrics.borrowed_pct, 25.0);
+        assert_eq!(metrics.lent_pct, 10.0);
     }
 
     #[test]

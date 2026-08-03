@@ -55,6 +55,8 @@ pub struct CellMetricCounters {
     #[serde(default)]
     pub primary_cpu_count: Option<u32>,
     #[serde(default)]
+    pub demand_ewma_ready: Option<u32>,
+    #[serde(default)]
     pub utilization_pct: Option<f64>,
     #[serde(default)]
     pub ewma_utilization_pct: Option<f64>,
@@ -84,6 +86,7 @@ impl CellMetricCounters {
             index: self.index,
             slot_epoch: self.slot_epoch,
             primary_cpu_count: self.primary_cpu_count,
+            demand_ewma_ready: self.demand_ewma_ready,
             utilization_pct: self.utilization_pct,
             ewma_utilization_pct: self.ewma_utilization_pct,
             borrowed_pct: self.borrowed_pct,

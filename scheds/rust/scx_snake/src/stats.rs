@@ -200,6 +200,9 @@ pub struct CellMetrics {
     #[stat(desc = "CPUs primarily owned by this cell")]
     #[serde(default)]
     pub primary_cpu_count: u32,
+    #[stat(desc = "Whether the demand controller has an initialized EWMA")]
+    #[serde(default)]
+    pub demand_ewma_ready: u32,
     #[stat(desc = "Instantaneous cell CPU utilization percentage")]
     #[serde(default)]
     pub utilization_pct: f64,
@@ -248,6 +251,7 @@ impl CellMetrics {
             index: self.index,
             slot_epoch: self.slot_epoch,
             primary_cpu_count: self.primary_cpu_count,
+            demand_ewma_ready: self.demand_ewma_ready,
             utilization_pct: self.utilization_pct,
             ewma_utilization_pct: self.ewma_utilization_pct,
             borrowed_pct: self.borrowed_pct,
@@ -695,14 +699,16 @@ impl Metrics {
             }
         }
         for cell in self.cells.values() {
+            let demand = if cell.demand_ewma_ready != 0 {
+                format!("controller EWMA {:.1}%", cell.ewma_utilization_pct)
+            } else {
+                "demand gauges unavailable".to_owned()
+            };
             output.push_str(&format!(
-                "    cell {}: primary CPUs {} | util/ewma {:.1}/{:.1}% | borrowed/lent {:.1}/{:.1}% | runtime {} | primary {} | borrowed {} | lent {} | normal/affinity enqueues {}/{} | dispatches {}/{} | clock transitions {}\n",
+                "    cell {}: primary CPUs {} | {} | runtime {} | primary {} | borrowed {} | lent {} | normal/affinity enqueues {}/{} | dispatches {}/{} | clock transitions {}\n",
                 cell.id,
                 cell.primary_cpu_count,
-                cell.utilization_pct,
-                cell.ewma_utilization_pct,
-                cell.borrowed_pct,
-                cell.lent_pct,
+                demand,
                 cell.runtime_ns,
                 cell.primary_runtime_ns,
                 cell.borrowed_runtime_ns,
@@ -1287,6 +1293,7 @@ mod tests {
             runtime_ns: 5_000,
             runtime_ns_by_cpu: BTreeMap::from([(0, 1_000), (3, 4_000)]),
             foreign_affinity_runtime_ns: 400,
+            demand_ewma_ready: 0,
             ..Default::default()
         };
         let current = CellMetrics {
@@ -1296,6 +1303,7 @@ mod tests {
             runtime_ns: 6_000,
             runtime_ns_by_cpu: BTreeMap::from([(0, 1_750), (3, 4_250)]),
             foreign_affinity_runtime_ns: 650,
+            demand_ewma_ready: 1,
             ..Default::default()
         };
 
@@ -1304,6 +1312,7 @@ mod tests {
         assert_eq!(delta.slot_epoch, 4);
         assert_eq!(delta.runtime_ns, 1_000);
         assert_eq!(delta.foreign_affinity_runtime_ns, 250);
+        assert_eq!(delta.demand_ewma_ready, 1);
         assert_eq!(
             delta.runtime_ns_by_cpu,
             BTreeMap::from([(0, 750), (3, 250)])

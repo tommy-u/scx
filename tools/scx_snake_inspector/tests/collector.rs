@@ -79,6 +79,7 @@ fn snake_top_stats_decode_cpu_and_optional_cell_metrics_together() {
                 "index": 1,
                 "slot_epoch": 6,
                 "primary_cpu_count": 2,
+                "demand_ewma_ready": 1,
                 "utilization_pct": 50.0,
                 "ewma_utilization_pct": 42.0,
                 "borrowed_pct": 30.0,
@@ -110,6 +111,7 @@ fn snake_top_stats_decode_cpu_and_optional_cell_metrics_together() {
     assert_eq!(cells[&3].id, 3);
     assert_eq!(cells[&3].slot_epoch, Some(6));
     assert_eq!(cells[&3].primary_cpu_count, Some(2));
+    assert_eq!(cells[&3].demand_ewma_ready, Some(1));
     assert_eq!(cells[&3].utilization_pct, Some(50.0));
     assert_eq!(cells[&3].ewma_utilization_pct, Some(42.0));
     assert_eq!(cells[&3].foreign_affinity_runtime_ns, Some(75));
@@ -160,6 +162,7 @@ fn snake_top_stats_distinguishes_older_cell_metrics_without_cpu_attribution() {
     let cell = &decoded.cells.unwrap()[&3];
     assert_eq!(cell.runtime_ns_by_cpu, None);
     assert_eq!(cell.slot_epoch, None);
+    assert_eq!(cell.demand_ewma_ready, None);
     assert_eq!(cell.ewma_utilization_pct, None);
     assert_eq!(cell.foreign_affinity_runtime_ns, None);
 }

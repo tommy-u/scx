@@ -270,6 +270,7 @@ fn cell_metrics(runtime_ns: u64) -> CellMetricCounters {
         index: 1,
         slot_epoch: Some(4),
         primary_cpu_count: Some(2),
+        demand_ewma_ready: Some(u32::from(active)),
         utilization_pct: active.then_some(50.0),
         ewma_utilization_pct: active.then_some(42.0),
         borrowed_pct: active.then_some(25.0),
@@ -557,7 +558,7 @@ fn cell_stats_derive_window_metrics_from_top_deltas_and_queue_topology() {
     assert_eq!(cell["primary_cpu_count"], 2);
     assert_eq!(cell["utilization_pct"], 50.0);
     assert_eq!(cell["ewma_utilization_pct"], 42.0);
-    assert_eq!(cell["lent_pct"], 10.0);
+    assert_eq!(cell["lent_pct"], 12.5);
     assert_eq!(cell["runtime_ns"], 1_000_000_000_u64);
     assert_eq!(cell["foreign_affinity_runtime_ns"], 125_000_000_u64);
     assert_eq!(cell["service_cores"], 1.0);
@@ -571,6 +572,38 @@ fn cell_stats_derive_window_metrics_from_top_deltas_and_queue_topology() {
     assert_eq!(cell["affinity_dispatch_share_pct"], 50.0);
     assert_eq!(cell["transition_rate_per_second"], 10.0);
     assert_eq!(cell["transitions_per_1k_dispatches"], 100.0);
+}
+
+#[test]
+fn cell_stats_hide_uninitialized_demand_ewma_and_derive_window_gauges() {
+    let dashboard = dashboard();
+    dashboard.set_scheduler("snake", true, 4);
+    dashboard.set_inspection_at(0, Some(queue_topology_snapshot(7)), None);
+    dashboard.ingest_top_metrics(
+        0,
+        7,
+        &BTreeMap::from([(0, 0), (1, 0)]),
+        Some(&BTreeMap::from([(3, cell_metrics(0))])),
+    );
+    let mut counters = cell_metrics(1_000_000_000);
+    counters.demand_ewma_ready = Some(0);
+    counters.utilization_pct = Some(0.0);
+    counters.ewma_utilization_pct = Some(0.0);
+    counters.borrowed_pct = Some(0.0);
+    counters.lent_pct = Some(0.0);
+    dashboard.ingest_top_metrics(
+        1_000,
+        7,
+        &BTreeMap::from([(0, 500_000_000), (1, 500_000_000)]),
+        Some(&BTreeMap::from([(3, counters)])),
+    );
+
+    let snapshot = serde_json::to_value(dashboard.snapshot(1_000).unwrap()).unwrap();
+    let cell = &snapshot["cell_stats"]["cells"][0];
+    assert_eq!(cell["utilization_pct"], 50.0);
+    assert_eq!(cell["ewma_utilization_pct"], Value::Null);
+    assert_eq!(cell["borrowed_pct"], 25.0);
+    assert_eq!(cell["lent_pct"], 12.5);
 }
 
 #[test]
