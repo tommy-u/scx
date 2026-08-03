@@ -14,10 +14,10 @@ Snake deliberately separates four concerns:
 
 That split is the strongest part of the design. The hot path never parses TOML,
 constructs topology objects, or waits for userspace. The README states this purpose
-directly ([README](../../scheds/rust/scx_snake/README.md#L5-L10)), and the lowering
-pipeline is visible in the compiler ([policy.rs](../../scheds/rust/scx_snake/src/policy.rs#L339-L400)),
-mask resolver ([mask_tables.rs](../../scheds/rust/scx_snake/src/mask_tables.rs#L25-L113)),
-and fixed ABI encoder ([main.rs](../../scheds/rust/scx_snake/src/main.rs#L245-L333)).
+directly ([README](../../README.md#L5-L10)), and the lowering
+pipeline is visible in the compiler ([policy.rs](../../src/policy.rs#L339-L400)),
+mask resolver ([mask_tables.rs](../../src/mask_tables.rs#L25-L113)),
+and fixed ABI encoder ([main.rs](../../src/main.rs#L245-L333)).
 
 ## Component and state ownership
 
@@ -38,12 +38,12 @@ and fixed ABI encoder ([main.rs](../../scheds/rust/scx_snake/src/main.rs#L245-L3
 
 Primary evidence:
 
-- policy and queue model: [policy.rs](../../scheds/rust/scx_snake/src/policy.rs#L20-L124)
-- active slots and per-CPU reader pins: [main.h](../../scheds/rust/scx_snake/src/bpf/main.h#L89-L212)
-- queue topology: [queue_topology.rs](../../scheds/rust/scx_snake/src/queue_topology.rs#L39-L90)
-- task-cell storage: [task_cells.rs](../../scheds/rust/scx_snake/src/task_cells.rs#L99-L138)
-- fairness storage and clocks: [fairness.h](../../scheds/rust/scx_snake/src/bpf/fairness.h#L7-L82)
-- scheduler control requests: [control.rs](../../scheds/rust/scx_snake/src/control.rs#L34-L74)
+- policy and queue model: [policy.rs](../../src/policy.rs#L20-L124)
+- active slots and per-CPU reader pins: [main.h](../../src/bpf/main.h#L89-L212)
+- queue topology: [queue_topology.rs](../../src/queue_topology.rs#L39-L90)
+- task-cell storage: [task_cells.rs](../../src/task_cells.rs#L99-L138)
+- fairness storage and clocks: [fairness.h](../../src/bpf/fairness.h#L7-L82)
+- scheduler control requests: [control.rs](../../src/control.rs#L34-L74)
 
 ## Compile and publish path
 
@@ -70,13 +70,13 @@ The update protocol is sound in concept:
 - every callback pins one slot with a per-CPU reader count;
 - userspace waits for the old slot's readers before reusing it.
 
-See [runtime_policy.rs](../../scheds/rust/scx_snake/src/runtime_policy.rs#L112-L167),
-[main.h](../../scheds/rust/scx_snake/src/bpf/main.h#L170-L212), and the scheduler-side
-replacement path [main.rs](../../scheds/rust/scx_snake/src/main.rs#L1551-L1639).
+See [runtime_policy.rs](../../src/runtime_policy.rs#L112-L167),
+[main.h](../../src/bpf/main.h#L170-L212), and the scheduler-side
+replacement path [main.rs](../../src/main.rs#L1551-L1639).
 
 The important boundary is that queue topology and membership policy are rejected
 when a live replacement would change them
-([main.rs](../../scheds/rust/scx_snake/src/main.rs#L1563-L1579)). This prevents an
+([main.rs](../../src/main.rs#L1563-L1579)). This prevents an
 apparently atomic ladder update from silently invalidating live DSQ contents.
 
 ## Scheduling callback sequence
@@ -115,10 +115,10 @@ sequenceDiagram
 ```
 
 The callback implementation is concentrated in
-[main.bpf.c](../../scheds/rust/scx_snake/src/bpf/main.bpf.c#L82-L413). Generic
+[main.bpf.c](../../src/bpf/main.bpf.c#L82-L413). Generic
 ladder walks are bounded by nine rungs. The exact expanded Mitosis template
 uses a specialized 16-stage walk
-([ladder.h](../../scheds/rust/scx_snake/src/bpf/ladder.h#L313-L370)).
+([ladder.h](../../src/bpf/ladder.h#L313-L370)).
 
 ### Placement result semantics
 
@@ -131,7 +131,7 @@ A non-negative ladder result is not always a direct dispatch:
 - all-rung exhaustion returns an affinity-safe hint.
 
 Those distinctions are explicit in
-[main.bpf.c](../../scheds/rust/scx_snake/src/bpf/main.bpf.c#L111-L218).
+[main.bpf.c](../../src/bpf/main.bpf.c#L111-L218).
 
 ## Fairness and queue topology
 
@@ -144,7 +144,7 @@ Snake supports three top-level fairness modes:
 Queue topology is available only with VTIME. It creates normal cell queues and a
 per-CPU affinity escape queue. In `cell_llc`, normal storage is sharded by populated
 cell/LLC pairs, but every shard of one cell shares the same cell clock
-([FAIRNESS.md](../../scheds/rust/scx_snake/docs/FAIRNESS.md#L129-L157)).
+([FAIRNESS.md](../FAIRNESS.md#L129-L157)).
 
 ```mermaid
 flowchart TB
@@ -182,19 +182,19 @@ Queue-mode cell declarations are converted into:
 - normal queue descriptors and per-CPU routing descriptors.
 
 The allocation algorithm is pure Rust and separately tested
-([cell_allocation.rs](../../scheds/rust/scx_snake/src/cell_allocation.rs#L24-L136));
+([cell_allocation.rs](../../src/cell_allocation.rs#L24-L136));
 queue construction is also isolated
-([queue_topology.rs](../../scheds/rust/scx_snake/src/queue_topology.rs#L131-L230)).
+([queue_topology.rs](../../src/queue_topology.rs#L131-L230)).
 
 Manual annotation uses `PIDFD_THREAD` to update BPF task storage and avoids TID
 reuse races. It does not provide inheritance or batching
-([CELL_POLICY.md](../../scheds/rust/scx_snake/docs/CELL_POLICY.md#L163-L182)).
+([CELL_POLICY.md](../CELL_POLICY.md#L163-L182)).
 
 Managed membership is materially different from Mitosis. Snake recursively reads
 `cgroup.threads` under explicitly assigned trees, retains pidfds, and reconciles
 at a configured interval
-([membership.rs](../../scheds/rust/scx_snake/src/membership.rs#L85-L149),
-[membership.rs](../../scheds/rust/scx_snake/src/membership.rs#L209-L275)). It does
+([membership.rs](../../src/membership.rs#L85-L149),
+[membership.rs](../../src/membership.rs#L209-L275)). It does
 not make a direct child cgroup into a cell automatically, and task identity still
 travels through per-thread task-storage writes.
 
@@ -216,7 +216,7 @@ stateDiagram-v2
 
 The unavoidable old-queue execution is an explicit semantic choice, not hidden
 state loss. The next enqueue translates bounded lag between independent clocks
-([CELL_POLICY.md](../../scheds/rust/scx_snake/docs/CELL_POLICY.md#L129-L140)).
+([CELL_POLICY.md](../CELL_POLICY.md#L129-L140)).
 
 ## Inspector architecture
 
@@ -235,10 +235,10 @@ flowchart LR
 
 The collector polls migration and top-level statistics at 250 ms, inspection at
 roughly one second, and policies at five seconds
-([collector.rs](../../tools/scx_snake_inspector/src/collector.rs#L357-L438)). The
+([collector.rs](../../../../../tools/scx_snake_inspector/src/collector.rs#L357-L438)). The
 browser opens an SSE stream for activity while polling several inspection views
 independently
-([app.js](../../tools/scx_snake_inspector/src/web/app.js#L313-L336)).
+([app.js](../../../../../tools/scx_snake_inspector/src/web/app.js#L313-L336)).
 
 The inspector intentionally uses a small stack: Rust/Axum/Tokio on the backend and
 plain ES modules, HTML, CSS, Canvas, and SSE in the browser. It is not a framework

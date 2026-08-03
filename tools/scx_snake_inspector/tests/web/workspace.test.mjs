@@ -29,19 +29,19 @@ const themeScript = readFileSync(
   "utf8",
 );
 const reviewIndex = readFileSync(
-  new URL("../../../../docs/snake-review/README.md", import.meta.url),
+  new URL("../../../../scheds/rust/scx_snake/docs/snake-review/README.md", import.meta.url),
   "utf8",
 );
 const featureReview = readFileSync(
-  new URL("../../../../docs/snake-review/feature-completeness.md", import.meta.url),
+  new URL("../../../../scheds/rust/scx_snake/docs/snake-review/feature-completeness.md", import.meta.url),
   "utf8",
 );
 const validationReview = readFileSync(
-  new URL("../../../../docs/snake-review/validation-and-risk-plan.md", import.meta.url),
+  new URL("../../../../scheds/rust/scx_snake/docs/snake-review/validation-and-risk-plan.md", import.meta.url),
   "utf8",
 );
 const mitosisReview = readFileSync(
-  new URL("../../../../docs/snake-review/mitosis-compatibility.md", import.meta.url),
+  new URL("../../../../scheds/rust/scx_snake/docs/snake-review/mitosis-compatibility.md", import.meta.url),
   "utf8",
 );
 
@@ -784,32 +784,32 @@ test("project navigation is available in both desktop and mobile explorers", () 
 });
 
 test("project roadmap exposes the dated review scores without drifting from the report", () => {
-  const reviewDate = reviewIndex.match(/^Roadmap update: (.+)$/m)?.[1];
-  const baselineCommit = reviewIndex.match(/^Roadmap baseline: `([0-9a-f]+)`$/m)?.[1];
-  assert.ok(reviewDate, "roadmap update missing from report");
-  assert.ok(baselineCommit, "roadmap baseline missing from report");
+  const reviewDate = reviewIndex.match(/^Assessment date: (.+)$/m)?.[1];
+  const baselineCommit = reviewIndex.match(/^Current baseline: `([0-9a-f]+)`$/m)?.[1];
+  assert.ok(reviewDate, "assessment date missing from report");
+  assert.ok(baselineCommit, "current baseline missing from report");
   assert.match(page, /data-view="project\/roadmap"/);
   assert.match(page, new RegExp(`data-assessment-date="${reviewDate}"`));
   assert.match(page, new RegExp(`data-assessment-commit="${baselineCommit}"`));
   assert.match(page, /Engineering estimate, not test coverage/);
-  assert.match(page, /docs\/snake-review\/README\.md/);
+  assert.match(page, /scheds\/rust\/scx_snake\/docs\/snake-review\/README\.md/);
 
   const scores = new Map([
-    ["experimental-completeness", [85, "Snake experimental feature implementation", reviewIndex]],
-    ["production-readiness", [35, "Snake production readiness", reviewIndex]],
-    ["mitosis-parity", [55, "Overall end-to-end Mitosis behavior parity", reviewIndex]],
-    ["rollout-validation", [40, "Overall production validation readiness", validationReview]],
+    ["experimental-completeness", [90, "Snake experimental feature implementation", reviewIndex]],
+    ["production-readiness", [45, "Snake production readiness", reviewIndex]],
+    ["mitosis-parity", [85, "Overall end-to-end Mitosis behavior parity", reviewIndex]],
+    ["rollout-validation", [45, "Overall production validation readiness", validationReview]],
     ["policy-engine", [95, "Policy engine", featureReview]],
     ["placement", [92, "Placement", featureReview]],
-    ["observability", [92, "Observability", featureReview]],
-    ["lifecycle", [88, "Lifecycle", featureReview]],
-    ["inspector", [87, "Inspector", featureReview]],
-    ["validation", [84, "Validation/testing", featureReview]],
-    ["queue-features", [82, "Queue features", featureReview]],
-    ["topology", [76, "Topology", featureReview]],
+    ["observability", [94, "Observability", featureReview]],
+    ["lifecycle", [92, "Lifecycle", featureReview]],
+    ["inspector", [90, "Inspector", featureReview]],
+    ["validation", [87, "Validation/testing", featureReview]],
+    ["queue-features", [90, "Queue features", featureReview]],
+    ["topology", [84, "Topology", featureReview]],
     ["fairness", [74, "Fairness", featureReview]],
-    ["static-identity", [68, "Task identity/cgroups within declared static scope", featureReview]],
-    ["dynamic-identity", [22, "Mitosis-style dynamic identity and lifecycle", featureReview]],
+    ["static-identity", [84, "Task identity/cgroups within declared scope", featureReview]],
+    ["dynamic-identity", [78, "Mitosis-style dynamic identity and lifecycle", featureReview]],
   ]);
 
   for (const [key, [value, reportLabel, source]] of scores) {
@@ -830,15 +830,15 @@ test("roadmap completion bars expose their numeric meaning to assistive technolo
   for (const [key, value] of [
     ["policy-engine", 95],
     ["placement", 92],
-    ["observability", 92],
-    ["lifecycle", 88],
-    ["inspector", 87],
-    ["validation", 84],
-    ["queue-features", 82],
-    ["topology", 76],
+    ["observability", 94],
+    ["lifecycle", 92],
+    ["inspector", 90],
+    ["validation", 87],
+    ["queue-features", 90],
+    ["topology", 84],
     ["fairness", 74],
-    ["static-identity", 68],
-    ["dynamic-identity", 22],
+    ["static-identity", 84],
+    ["dynamic-identity", 78],
   ]) {
     assert.match(
       page,
@@ -850,10 +850,10 @@ test("roadmap completion bars expose their numeric meaning to assistive technolo
 
 test("Mitosis diagram percentages retain stable keys and report provenance", () => {
   for (const [key, value, label] of [
-    ["mitosis-static-data-plane", 73, "Static scheduling data plane"],
-    ["mitosis-dynamic-control", 58, "Dynamic cell/resource control"],
-    ["mitosis-operations", 70, "Operations and diagnostics"],
-    ["mitosis-overall", 70, "Weighted end-to-end behavior"],
+    ["mitosis-static-data-plane", 88, "Static scheduling data plane"],
+    ["mitosis-dynamic-control", 82, "Dynamic cell/resource control"],
+    ["mitosis-operations", 82, "Operations and diagnostics"],
+    ["mitosis-overall", 85, "Weighted end-to-end behavior"],
   ]) {
     assert.match(
       page,
@@ -869,56 +869,44 @@ test("Mitosis diagram percentages retain stable keys and report provenance", () 
   const equivalent = page.match(
     /<table[^>]+data-diagram-equivalent="mitosis-capability-coverage"[\s\S]*?<\/table>/,
   )?.[0] || "";
-  for (const value of ["73%", "58%", "70%", "70% ±5"]) {
+  for (const value of ["88%", "82%", "85% ±5"]) {
     assert.match(equivalent, new RegExp(value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   }
 });
 
-test("project roadmap leads with prioritized goals before concrete features", () => {
+test("project roadmap leads with launch goals and keeps open work synchronized", () => {
   assert.match(reviewIndex, /## Roadmap priorities/);
   assert.match(page, /id="roadmapGoals"[\s\S]*id="roadmapFeatures"/);
   for (const priority of ["P0", "P1", "P2", "P3"]) {
     assert.match(page, new RegExp(`data-priority="${priority}"`));
     assert.match(page, new RegExp(`${priority}[^<]+`));
   }
-  for (const [goal, label, priority] of [
-    ["correctness-forward-progress", "Correctness & forward progress", "P0"],
-    ["production-readiness", "Production readiness & safe operations", "P0"],
-    ["kernel-parity-evidence", "Kernel-default simulation evidence", "P1"],
-    ["mitosis-parity", "Feature parity with Mitosis", "P1"],
-    ["inspector-scalability", "Inspector scalability & contracts", "P1"],
-    ["validation-rollout", "Validation & rollout evidence", "P1"],
-    ["policy-research", "Policy research & selective prior art", "P2"],
+  for (const [goal, priority] of [
+    ["correctness-forward-progress", "P0"],
+    ["production-readiness", "P0"],
+    ["scale-soak-rollback", "P1"],
+    ["mitosis-parity", "P1"],
+    ["inspector-scalability", "P1"],
+    ["validation-rollout", "P1"],
+    ["policy-research", "P2"],
   ]) {
     assert.match(
       page,
       new RegExp(`data-goal-key="${goal}"[^>]+data-priority="${priority}"`),
     );
-    const escapedLabel = label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    assert.match(
-      reviewIndex,
-      new RegExp(`\\| ${escapedLabel} \\| \\*\\*${priority}\\*\\* \\|`),
-      `${goal} priority drifted from report`,
-    );
   }
-  for (const [feature, priority] of [
-    ["eevdf-shares", "P0"],
-    ["queued-work-progress", "P0"],
-    ["hotplug-contract", "P0"],
-    ["observer-isolation", "P0"],
-    ["kernel-sim-parity", "P1"],
-    ["llc-balance-evidence", "P1"],
-    ["cgroup-identity", "P1"],
-    ["complete-config-bank", "P1"],
-    ["queue-drain", "P1"],
-    ["cpuset-allocation", "P1"],
-    ["inspector-scaling", "P1"],
-    ["typed-protocol", "P1"],
-    ["browser-vm-ci", "P1"],
-    ["demand-controller", "P2"],
-    ["numa-distance-order", "P2"],
-    ["pinned-latency", "P3"],
-    ["pick-two", "P3"],
+  for (const [feature, roadmapKey, priority] of [
+    ["observer-isolation", "observer-isolation", "P0"],
+    ["queued-work-progress", "queued-cross-cell-progress", "P0"],
+    ["hotplug-contract", "hotplug-contract", "P0"],
+    ["eevdf-shares", "eevdf-shares", "P0"],
+    ["cgroup-identity", "identity-hardening", "P1"],
+    ["scale-soak-rollback", "scale-soak-rollback", "P1"],
+    ["browser-vm-ci", "browser-vm-ci", "P1"],
+    ["inspector-scaling", "inspector-scaling", "P1"],
+    ["typed-protocol", "typed-protocol", "P2"],
+    ["numa-distance-order", "numa-distance-order", "P2"],
+    ["pick-two", "pick-two", "P3"],
   ]) {
     const featureBlock = page.match(
       new RegExp(`<article[^>]+data-feature-key="${feature}"[\\s\\S]*?<\\/article>`),
@@ -926,9 +914,12 @@ test("project roadmap leads with prioritized goals before concrete features", ()
     assert.match(featureBlock, new RegExp(`data-priority="${priority}"`), `${feature} missing ${priority} sticker`);
     assert.match(
       reviewIndex,
-      new RegExp("\\| `" + feature + "` \\|[^\\n]+\\| \\*\\*" + priority + "\\*\\* \\|"),
-      `${feature} priority drifted from report`,
+      new RegExp("\\| `" + roadmapKey + "` \\|[^\\n]+\\| \\*\\*" + priority + "\\*\\* \\|"),
+      `${feature} priority drifted from report key ${roadmapKey}`,
     );
+    if (feature !== roadmapKey) {
+      assert.match(featureBlock, new RegExp(`data-roadmap-key="${roadmapKey}"`));
+    }
   }
 });
 
@@ -936,10 +927,11 @@ test("roadmap distinguishes landed work from missing performance evidence", () =
   const progress = page.match(
     /<section[^>]+id="roadmapProgress"[\s\S]*?<\/section>/,
   )?.[0] || "";
-  assert.match(progress, /Global LLC VTIME queues/);
-  assert.match(progress, /previous whole-idle-core claim/i);
-  assert.match(progress, /Three frozen 140-case campaigns completed with zero failures/);
-  assert.match(progress, /not fairness, performance, or LLC balance/);
+  assert.match(progress, /Managed lifecycle/);
+  assert.match(progress, /cell-0 holdout/);
+  assert.match(progress, /orphan draining, and sibling stealing/);
+  assert.match(progress, /Pinned-latency and fairness evidence remains open/);
+  assert.match(progress, /Sparse scale, browser, soak, and rollback evidence remains/);
 });
 
 test("roadmap exposes stable release-blocker and ordered milestone keys", () => {
@@ -954,11 +946,11 @@ test("roadmap exposes stable release-blocker and ordered milestone keys", () => 
 
   const milestones = [
     "correctness-gates",
-    "dynamic-cgroup-identity",
-    "fixed-resource-envelope",
-    "cpuset-cell0-allocation",
-    "drain-live-publication",
-    "demand-rebalance",
+    "cross-cell-backlog",
+    "hotplug-contract",
+    "identity-hardening",
+    "scale-soak",
+    "canary-rollback",
     "hardening",
   ];
   const positions = milestones.map((milestone) => {

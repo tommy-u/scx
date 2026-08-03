@@ -863,20 +863,20 @@
         </div>
       </section>
 
-      <section class="view-panel hidden project-view" id="roadmapView" data-view="project/roadmap" aria-labelledby="roadmapTitle" data-assessment-date="2026-07-31" data-assessment-commit="97afd17f8731a04e6d614f5370c76948e2775b74">
+      <section class="view-panel hidden project-view" id="roadmapView" data-view="project/roadmap" aria-labelledby="roadmapTitle" data-assessment-date="2026-08-03" data-assessment-commit="c365457b">
         <header class="view-heading">
           <div>
             <h2 id="roadmapTitle">Roadmap</h2>
             <p>Completion estimates, priority judgments, and the path toward Mitosis parity</p>
           </div>
-          <span class="project-snapshot-label">Roadmap update · 2026-07-31 · 97afd17f</span>
+          <span class="project-snapshot-label">Assessment · 2026-08-03 · c365457b</span>
         </header>
 
         <div class="project-page">
           <section class="project-assessment-note" aria-label="Assessment provenance" data-feedback-key="Project:Roadmap-provenance">
             <strong>Engineering estimate, not test coverage.</strong>
-            <span>This roadmap refreshes the original 2026-07-29 review. Priority stickers are engineering judgments, not delivery commitments.</span>
-            <span>Source: <code>docs/snake-review/README.md</code></span>
+            <span>This assessment covers the managed control plane now in the baseline. Priority stickers distinguish launch gates from parity, hardening, and evidence work.</span>
+            <span>Source: <code>scheds/rust/scx_snake/docs/snake-review/README.md</code></span>
           </section>
 
           <section class="project-section" aria-labelledby="roadmapHeadlineTitle" data-feedback-key="Project:Roadmap-headline-scores">
@@ -885,20 +885,20 @@
                 <span class="project-eyebrow">Headline assessment</span>
                 <h3 id="roadmapHeadlineTitle">How complete is Snake?</h3>
               </div>
-              <p>Feature breadth is substantially ahead of production validation and dynamic control.</p>
+              <p>Managed control is broadly implemented; operational contracts and production evidence now set the readiness ceiling.</p>
             </header>
             <div class="roadmap-headline-grid">
-              <article class="roadmap-headline-score" data-score-key="experimental-completeness" data-score-value="85">
-                <span>Experimental platform</span><strong>85%</strong><p>Declared policy and observability scope</p>
+              <article class="roadmap-headline-score" data-score-key="experimental-completeness" data-score-value="90">
+                <span>Experimental platform</span><strong>90%</strong><p>Policy, managed resources, and observability</p>
               </article>
-              <article class="roadmap-headline-score roadmap-score-caution" data-score-key="production-readiness" data-score-value="35">
-                <span>Production readiness</span><strong>35%</strong><p>Correctness, scale, soak, and rollout</p>
+              <article class="roadmap-headline-score roadmap-score-caution" data-score-key="production-readiness" data-score-value="45">
+                <span>Production readiness</span><strong>45%</strong><p>Lifecycle contracts, scale, soak, and rollback</p>
               </article>
-              <article class="roadmap-headline-score" data-score-key="mitosis-parity" data-score-value="55">
-                <span>Mitosis behavior parity</span><strong>55% <small>±5</small></strong><p>Static data plane is ahead of control plane</p>
+              <article class="roadmap-headline-score" data-score-key="mitosis-parity" data-score-value="85">
+                <span>Mitosis behavior parity</span><strong>85% <small>±5</small></strong><p>Managed simulation is runnable, not production-certified</p>
               </article>
-              <article class="roadmap-headline-score roadmap-score-caution" data-score-key="rollout-validation" data-score-value="40">
-                <span>Rollout validation</span><strong>40%</strong><p>Automation and production evidence</p>
+              <article class="roadmap-headline-score roadmap-score-caution" data-score-key="rollout-validation" data-score-value="45">
+                <span>Rollout validation</span><strong>45%</strong><p>Automation and production evidence</p>
               </article>
             </div>
           </section>
@@ -914,15 +914,15 @@
             <div class="roadmap-score-list">
               <div class="roadmap-score-row" data-score-key="policy-engine" data-score-value="95"><div><span>Policy engine</span><strong>95%</strong></div><progress max="100" value="95" aria-label="Policy engine completion: 95 percent">95%</progress></div>
               <div class="roadmap-score-row" data-score-key="placement" data-score-value="92"><div><span>Placement</span><strong>92%</strong></div><progress max="100" value="92" aria-label="Placement completion: 92 percent">92%</progress></div>
-              <div class="roadmap-score-row" data-score-key="observability" data-score-value="92"><div><span>Observability</span><strong>92%</strong></div><progress max="100" value="92" aria-label="Observability completion: 92 percent">92%</progress></div>
-              <div class="roadmap-score-row" data-score-key="lifecycle" data-score-value="88"><div><span>Lifecycle and control</span><strong>88%</strong></div><progress max="100" value="88" aria-label="Lifecycle and control completion: 88 percent">88%</progress></div>
-              <div class="roadmap-score-row" data-score-key="inspector" data-score-value="87"><div><span>Inspector</span><strong>87%</strong></div><progress max="100" value="87" aria-label="Inspector completion: 87 percent">87%</progress></div>
-              <div class="roadmap-score-row" data-score-key="validation" data-score-value="84"><div><span>Validation and testing</span><strong>84%</strong></div><progress max="100" value="84" aria-label="Validation and testing completion: 84 percent">84%</progress></div>
-              <div class="roadmap-score-row" data-score-key="queue-features" data-score-value="82"><div><span>Queue features</span><strong>82%</strong></div><progress max="100" value="82" aria-label="Queue features completion: 82 percent">82%</progress></div>
-              <div class="roadmap-score-row" data-score-key="topology" data-score-value="76"><div><span>Topology</span><strong>76%</strong></div><progress max="100" value="76" aria-label="Topology completion: 76 percent">76%</progress></div>
+              <div class="roadmap-score-row" data-score-key="observability" data-score-value="94"><div><span>Observability</span><strong>94%</strong></div><progress max="100" value="94" aria-label="Observability completion: 94 percent">94%</progress></div>
+              <div class="roadmap-score-row" data-score-key="lifecycle" data-score-value="92"><div><span>Lifecycle and control</span><strong>92%</strong></div><progress max="100" value="92" aria-label="Lifecycle and control completion: 92 percent">92%</progress></div>
+              <div class="roadmap-score-row" data-score-key="inspector" data-score-value="90"><div><span>Inspector</span><strong>90%</strong></div><progress max="100" value="90" aria-label="Inspector completion: 90 percent">90%</progress></div>
+              <div class="roadmap-score-row" data-score-key="validation" data-score-value="87"><div><span>Validation and testing</span><strong>87%</strong></div><progress max="100" value="87" aria-label="Validation and testing completion: 87 percent">87%</progress></div>
+              <div class="roadmap-score-row" data-score-key="queue-features" data-score-value="90"><div><span>Queue features</span><strong>90%</strong></div><progress max="100" value="90" aria-label="Queue features completion: 90 percent">90%</progress></div>
+              <div class="roadmap-score-row" data-score-key="topology" data-score-value="84"><div><span>Topology</span><strong>84%</strong></div><progress max="100" value="84" aria-label="Topology completion: 84 percent">84%</progress></div>
               <div class="roadmap-score-row" data-score-key="fairness" data-score-value="74"><div><span>Fairness</span><strong>74%</strong></div><progress max="100" value="74" aria-label="Fairness completion: 74 percent">74%</progress></div>
-              <div class="roadmap-score-row" data-score-key="static-identity" data-score-value="68"><div><span>Static task identity and cgroups</span><strong>68%</strong></div><progress max="100" value="68" aria-label="Static task identity and cgroups completion: 68 percent">68%</progress></div>
-              <div class="roadmap-score-row" data-score-key="dynamic-identity" data-score-value="22"><div><span>Mitosis-style dynamic identity</span><strong>22%</strong></div><progress max="100" value="22" aria-label="Mitosis-style dynamic identity completion: 22 percent">22%</progress></div>
+              <div class="roadmap-score-row" data-score-key="static-identity" data-score-value="84"><div><span>Task identity and cgroups</span><strong>84%</strong></div><progress max="100" value="84" aria-label="Task identity and cgroups completion: 84 percent">84%</progress></div>
+              <div class="roadmap-score-row" data-score-key="dynamic-identity" data-score-value="78"><div><span>Mitosis-style dynamic identity</span><strong>78%</strong></div><progress max="100" value="78" aria-label="Mitosis-style dynamic identity completion: 78 percent">78%</progress></div>
             </div>
           </section>
 
@@ -935,35 +935,37 @@
               <p>Implemented mechanisms are separated from the evidence still needed.</p>
             </header>
             <div class="roadmap-goal-grid">
-              <article class="roadmap-goal"><h4>Global LLC VTIME queues</h4><p>LLC sharding, bounded remote scans, preallocated task state, and direct dispatch landed. Throughput and tail-latency benefit remain unmeasured.</p></article>
-              <article class="roadmap-goal"><h4>Placement simulations</h4><p>Direct dispatch, the previous whole-idle-core claim, the kernel-default nine-stage ladder, and Mitosis-sim's 16 visible idle-selection stages landed. Restricted-task topology gating and residual LLC skew remain.</p></article>
-              <article class="roadmap-goal"><h4>VTIME and LLC diagnostics</h4><p>LLC/core utilization, credit-clamp rates, routing mix, and queue timing now expose the behavior needed for comparison.</p></article>
-              <article class="roadmap-goal"><h4>Durable inspector control</h4><p>Remote start/restart errors are visible and web assets are cache-safe. Real-browser and large-host cost coverage remain.</p></article>
-              <article class="roadmap-goal"><h4>VM campaigns</h4><p>Three frozen 140-case campaigns completed with zero failures. They test failure and progress, not fairness, performance, or LLC balance.</p></article>
+              <article class="roadmap-goal"><h4>Managed lifecycle</h4><p>Direct-child reconciliation, exclusions, stable IDs, slot epochs, and a managed workload fixture are implemented. Immediate fork and move identity remains polling-bound.</p></article>
+              <article class="roadmap-goal" data-feature-key="cpuset-allocation"><h4>Resource allocation</h4><p>Effective-cpuset claims, deterministic ownership, cell-0 holdout, and infeasible-plan rejection are implemented. CPU hotplug remains unsupported.</p></article>
+              <article class="roadmap-goal" data-feature-key="demand-controller"><h4>Dynamic control</h4><p>Elapsed-time demand samples, EWMA, thresholds, cooldowns, rebalances, and live telemetry are implemented. Long production-scale soak remains open.</p></article>
+              <article class="roadmap-goal" data-feature-key="complete-config-bank"><h4>Banked publication</h4><p>Policy, managed topology, masks, descriptors, and routes stage together; old readers quiesce before reuse.</p></article>
+              <article class="roadmap-goal" data-feature-key="queue-drain"><h4>Queue recovery</h4><p>Structural drain, in-place resize, orphan draining, and sibling stealing are implemented. Already queued work still cannot cross cell boundaries.</p></article>
+              <article class="roadmap-goal" data-feature-key="pinned-latency"><h4>Latency controls</h4><p>Live VTIME base-slice and pinned-waiter shrinking controls are implemented. Pinned-latency and fairness evidence remains open.</p></article>
+              <article class="roadmap-goal"><h4>Inspector and validation</h4><p>Managed capacity, rebalance, physical-core, host-tax, churn, resize, drain, and steal coverage landed. Sparse scale, browser, soak, and rollback evidence remains.</p></article>
             </div>
           </section>
 
           <section class="project-section" id="roadmapGoals" aria-labelledby="roadmapGoalsTitle" data-feedback-key="Project:Roadmap-goals">
             <header class="project-section-heading">
               <div>
-                <span class="project-eyebrow">High-level goals</span>
-                <h3 id="roadmapGoalsTitle">What the project is trying to achieve</h3>
+                <span class="project-eyebrow">Launch goals</span>
+                <h3 id="roadmapGoalsTitle">What must be proven next</h3>
               </div>
               <div class="priority-legend" aria-label="Priority legend">
-                <span class="priority-badge priority-p0" data-priority="P0">P0 · Release blocker</span>
-                <span class="priority-badge priority-p1" data-priority="P1">P1 · Major enabler</span>
-                <span class="priority-badge priority-p2" data-priority="P2">P2 · Follow-on</span>
-                <span class="priority-badge priority-p3" data-priority="P3">P3 · Exploratory</span>
+                <span class="priority-badge priority-p0" data-priority="P0">P0 · Beyond guarded canary</span>
+                <span class="priority-badge priority-p1" data-priority="P1">P1 · Parity and confidence</span>
+                <span class="priority-badge priority-p2" data-priority="P2">P2 · Hardening</span>
+                <span class="priority-badge priority-p3" data-priority="P3">P3 · Evidence-gated research</span>
               </div>
             </header>
             <div class="roadmap-goal-grid">
-              <article class="roadmap-goal" data-goal-key="correctness-forward-progress" data-priority="P0"><span class="priority-badge priority-p0">P0</span><h4>Correctness &amp; forward progress</h4><p>Prove weighted fairness and guarantee that runnable work cannot strand.</p></article>
-              <article class="roadmap-goal" data-goal-key="production-readiness" data-priority="P0"><span class="priority-badge priority-p0">P0</span><h4>Production readiness &amp; safe operations</h4><p>Isolate observers, define hotplug behavior, and build safe fallback contracts.</p></article>
-              <article class="roadmap-goal" data-goal-key="kernel-parity-evidence" data-priority="P1"><span class="priority-badge priority-p1">P1</span><h4>Kernel-default simulation evidence</h4><p>Finish the topology-gating contract and measure placement balance before adding more stealing policy.</p></article>
-              <article class="roadmap-goal" data-goal-key="mitosis-parity" data-priority="P1"><span class="priority-badge priority-p1">P1</span><h4>Feature parity with Mitosis</h4><p>Add dynamic cgroup identity, resource ownership, drain, and demand control without weakening Snake transactions.</p></article>
-              <article class="roadmap-goal" data-goal-key="inspector-scalability" data-priority="P1"><span class="priority-badge priority-p1">P1</span><h4>Inspector scalability &amp; contracts</h4><p>Bound large-host costs and replace duplicated wire interpretation with typed interfaces.</p></article>
-              <article class="roadmap-goal" data-goal-key="validation-rollout" data-priority="P1"><span class="priority-badge priority-p1">P1</span><h4>Validation &amp; rollout evidence</h4><p>Gate changes with browser, VM, churn, performance, and failure-injection campaigns.</p></article>
-              <article class="roadmap-goal" data-goal-key="policy-research" data-priority="P2"><span class="priority-badge priority-p2">P2</span><h4>Policy research &amp; selective prior art</h4><p>Pull in narrowly useful ideas only when measurements justify the added semantics.</p></article>
+              <article class="roadmap-goal" data-goal-key="correctness-forward-progress" data-priority="P0"><span class="priority-badge priority-p0">P0</span><h4>Correctness &amp; forward progress</h4><p>Define the cross-cell backlog contract and fix or remove exposed EEVDF weighted shares.</p></article>
+              <article class="roadmap-goal" data-goal-key="production-readiness" data-priority="P0"><span class="priority-badge priority-p0">P0</span><h4>Production readiness &amp; safe operations</h4><p>Isolate observer failures and support or safely reject CPU hotplug.</p></article>
+              <article class="roadmap-goal" data-goal-key="scale-soak-rollback" data-priority="P1"><span class="priority-badge priority-p1">P1</span><h4>Scale, soak &amp; rollback evidence</h4><p>Prove target-host behavior under sustained load, restart, detach, and rollback.</p></article>
+              <article class="roadmap-goal" data-goal-key="mitosis-parity" data-priority="P1"><span class="priority-badge priority-p1">P1</span><h4>Feature parity with Mitosis</h4><p>Bound or close polling windows across fork, exec, cgroup moves, and slot reuse.</p></article>
+              <article class="roadmap-goal" data-goal-key="inspector-scalability" data-priority="P1"><span class="priority-badge priority-p1">P1</span><h4>Inspector scalability &amp; contracts</h4><p>Make collection and rendering sparse before testing 1,024-CPU hosts.</p></article>
+              <article class="roadmap-goal" data-goal-key="validation-rollout" data-priority="P1"><span class="priority-badge priority-p1">P1</span><h4>Validation &amp; rollout evidence</h4><p>Schedule managed VM coverage and add real-browser workflows to CI.</p></article>
+              <article class="roadmap-goal" data-goal-key="policy-research" data-priority="P2"><span class="priority-badge priority-p2">P2</span><h4>Policy research &amp; selective prior art</h4><p>Add distance ordering or approximate selection only after measured evidence.</p></article>
             </div>
           </section>
 
@@ -976,22 +978,16 @@
               <p>Priority reflects dependency and risk reduction, not estimated effort.</p>
             </header>
             <div class="roadmap-feature-list">
-              <article data-feature-key="eevdf-shares" data-blocker-key="eevdf-weighted-fairness"><span class="priority-badge priority-p0" data-priority="P0">P0</span><div><h4>Correct EEVDF weighted shares</h4><p>Fix or disable the mode until nice-weight service ratios pass mandatory VM validation.</p></div></article>
-              <article data-feature-key="queued-work-progress" data-blocker-key="queued-work-conservation"><span class="priority-badge priority-p0" data-priority="P0">P0</span><div><h4>Queued-work forward progress</h4><p>Prevent an undersized cell backlog from stalling while foreign CPUs are idle.</p></div></article>
-              <article data-feature-key="hotplug-contract" data-blocker-key="hotplug-dynamic-owner-contract"><span class="priority-badge priority-p0" data-priority="P0">P0</span><div><h4>Hotplug and dynamic-topology contract</h4><p>Define safe behavior before CPU ownership or topology can change live.</p></div></article>
               <article data-feature-key="observer-isolation" data-blocker-key="observer-isolation"><span class="priority-badge priority-p0" data-priority="P0">P0</span><div><h4>Observer isolation</h4><p>Ensure inspection and client failures cannot unwind the scheduler loop.</p></div></article>
-              <article data-feature-key="kernel-sim-parity"><span class="priority-badge priority-p1" data-priority="P1">P1</span><div><h4>Finish kernel-default simulation parity</h4><p>Gate topology rungs for restricted tasks, skip redundant NUMA work on one-node hosts, and document remaining differences.</p></div></article>
-              <article data-feature-key="llc-balance-evidence"><span class="priority-badge priority-p1" data-priority="P1">P1</span><div><h4>Measure LLC placement balance</h4><p>Compare per-LLC utilization spread, migrations, throughput, and tail latency against kernel default under one fixed workload.</p></div></article>
-              <article data-feature-key="cgroup-identity"><span class="priority-badge priority-p1" data-priority="P1">P1</span><div><h4>Cgroup-native identity</h4><p>Give direct children stable logical identities inherited in BPF.</p></div></article>
-              <article data-feature-key="complete-config-bank"><span class="priority-badge priority-p1" data-priority="P1">P1</span><div><h4>Complete configuration bank</h4><p>Publish policy, resources, and identity bindings as one coherent old-or-new transaction.</p></div></article>
-              <article data-feature-key="cpuset-allocation"><span class="priority-badge priority-p1" data-priority="P1">P1</span><div><h4>Cpuset-aware allocation and cell 0</h4><p>Compute feasible plans with explicit admission and fail-safe behavior.</p></div></article>
-              <article data-feature-key="queue-drain"><span class="priority-badge priority-p1" data-priority="P1">P1</span><div><h4>Queue drain and live owner moves</h4><p>Quiesce backlog, readers, running tasks, and clock epochs before resource reuse.</p></div></article>
+              <article data-feature-key="queued-work-progress" data-roadmap-key="queued-cross-cell-progress" data-blocker-key="queued-work-conservation"><span class="priority-badge priority-p0" data-priority="P0">P0</span><div><h4>Cross-cell queued-backlog contract</h4><p>Guarantee progress, reject unsafe demand, or alert and detach before watchdog exposure.</p></div></article>
+              <article data-feature-key="hotplug-contract" data-blocker-key="hotplug-dynamic-owner-contract"><span class="priority-badge priority-p0" data-priority="P0">P0</span><div><h4>CPU hotplug contract</h4><p>Handle online-mask changes transactionally or detect them and detach safely.</p></div></article>
+              <article data-feature-key="eevdf-shares" data-blocker-key="eevdf-weighted-fairness"><span class="priority-badge priority-p0" data-priority="P0">P0</span><div><h4>Correct EEVDF weighted shares</h4><p>Fix or remove the exposed mode until nice-weight service ratios pass mandatory VM validation.</p></div></article>
+              <article data-feature-key="cgroup-identity" data-roadmap-key="identity-hardening"><span class="priority-badge priority-p1" data-priority="P1">P1</span><div><h4>Managed identity hardening</h4><p>Close or bound polling windows across fork, exec, cgroup moves, and slot reuse.</p></div></article>
+              <article data-feature-key="scale-soak-rollback"><span class="priority-badge priority-p1" data-priority="P1">P1</span><div><h4>Scale, soak, and rollback evidence</h4><p>Pass target-host scale curves, sustained soak, canary rollback, and restart-under-load campaigns.</p></div></article>
+              <article data-feature-key="browser-vm-ci"><span class="priority-badge priority-p1" data-priority="P1">P1</span><div><h4>Browser and privileged VM CI</h4><p>Schedule managed VM coverage across supported kernels and run real-browser workflows in CI.</p></div></article>
               <article data-feature-key="inspector-scaling"><span class="priority-badge priority-p1" data-priority="P1">P1</span><div><h4>Inspector large-host scaling</h4><p>Remove CPU-pair full-map scans, dense browser work, and duplicated polling.</p></div></article>
-              <article data-feature-key="typed-protocol"><span class="priority-badge priority-p1" data-priority="P1">P1</span><div><h4>Typed Snake protocol</h4><p>Parse inspection payloads once and stop inferring behavior from human error text.</p></div></article>
-              <article data-feature-key="browser-vm-ci"><span class="priority-badge priority-p1" data-priority="P1">P1</span><div><h4>Complete browser, VM, and failure CI</h4><p>Add real-browser smoke, scheduled VM campaigns, and fault injection around the existing model tests and sharded workflow.</p></div></article>
-              <article data-feature-key="demand-controller"><span class="priority-badge priority-p2" data-priority="P2">P2</span><div><h4>Demand EWMA and rebalance</h4><p>Move CPUs only after identity, publication, allocation, and drain are safe.</p></div></article>
+              <article data-feature-key="typed-protocol"><span class="priority-badge priority-p2" data-priority="P2">P2</span><div><h4>Typed Snake protocol</h4><p>Replace repeated loose JSON and error-string inference with shared DTOs and structured codes.</p></div></article>
               <article data-feature-key="numa-distance-order"><span class="priority-badge priority-p2" data-priority="P2">P2</span><div><h4>Distance-ordered NUMA candidates</h4><p>Adapt LAVD's bounded topology ordering as an explicit policy operation.</p></div></article>
-              <article data-feature-key="pinned-latency"><span class="priority-badge priority-p3" data-priority="P3">P3</span><div><h4>Pinned-task latency control</h4><p>Benchmark before importing waiter-aware slice shrinking.</p></div></article>
               <article data-feature-key="pick-two"><span class="priority-badge priority-p3" data-priority="P3">P3</span><div><h4>Pick-two remote balancing</h4><p>Consider only as an explicit approximate policy after a load signal exists.</p></div></article>
             </div>
           </section>
@@ -1002,35 +998,35 @@
                 <span class="project-eyebrow">Parity map</span>
                 <h3 id="mitosisCoverageTitle">Where Mitosis parity stands</h3>
               </div>
-              <p>Static queues and clocks are much further along than dynamic identity and resource control.</p>
+              <p>The scheduling data plane and managed resource loop are implemented; identity semantics and operational proof remain incomplete.</p>
             </header>
             <div class="project-diagram-scroll">
               <svg class="project-diagram project-capability-diagram" data-diagram-key="mitosis-capability-coverage" role="group" aria-labelledby="mitosisCapabilityTitle mitosisCapabilityDesc" viewBox="0 0 1160 390">
                 <title id="mitosisCapabilityTitle">Mitosis capability coverage</title>
-                <desc id="mitosisCapabilityDesc">Snake has present cell and affinity queues, live managed-cell lifecycle, partial cpuset, borrowing, and latency behavior, and a missing demand controller. Static data-plane parity is 73 percent, dynamic control is 58 percent, operations are 70 percent, and overall parity is 70 percent plus or minus five.</desc>
+                <desc id="mitosisCapabilityDesc">Snake has managed lifecycle, cpuset allocation, demand control, cell and affinity queues, same-cell recovery, latency controls, and diagnostics. Static data-plane parity is 88 percent, dynamic control is 82 percent, operations are 82 percent, and overall parity is 85 percent plus or minus five.</desc>
                 <a href="#/inspect/cells" tabindex="0" focusable="true" aria-label="Inspect cells and tasks for lifecycle and identity"><g class="project-diagram-node project-capability-partial project-diagram-linked"><rect x="20" y="35" width="250" height="82" rx="8"></rect><text x="145" y="69" text-anchor="middle">Lifecycle &amp; identity</text><text class="project-diagram-status" x="145" y="94" text-anchor="middle">PARTIAL</text></g></a>
-                <a href="#/inspect/cells" tabindex="0" focusable="true" aria-label="Inspect cells for cpuset allocation"><g class="project-diagram-node project-capability-partial project-diagram-linked"><rect x="305" y="35" width="250" height="82" rx="8"></rect><text x="430" y="69" text-anchor="middle">Cpuset allocation</text><text class="project-diagram-status" x="430" y="94" text-anchor="middle">PARTIAL</text></g></a>
-                <a href="#/overview" tabindex="0" focusable="true" aria-label="Open Overview for current resource counters"><g class="project-diagram-node project-capability-missing project-diagram-linked"><rect x="590" y="35" width="250" height="82" rx="8"></rect><text x="715" y="69" text-anchor="middle">Demand controller</text><text class="project-diagram-status" x="715" y="94" text-anchor="middle">MISSING</text></g></a>
+                <a href="#/inspect/cells" tabindex="0" focusable="true" aria-label="Inspect cells for cpuset allocation"><g class="project-diagram-node project-capability-present project-diagram-linked"><rect x="305" y="35" width="250" height="82" rx="8"></rect><text x="430" y="69" text-anchor="middle">Cpuset allocation</text><text class="project-diagram-status" x="430" y="94" text-anchor="middle">PRESENT</text></g></a>
+                <a href="#/overview" tabindex="0" focusable="true" aria-label="Open Overview for demand and rebalance state"><g class="project-diagram-node project-capability-present project-diagram-linked"><rect x="590" y="35" width="250" height="82" rx="8"></rect><text x="715" y="69" text-anchor="middle">Demand controller</text><text class="project-diagram-status" x="715" y="94" text-anchor="middle">PRESENT</text></g></a>
                 <a href="#/inspect/queue-topology" tabindex="0" focusable="true" aria-label="Inspect cell and LLC queues"><g class="project-diagram-node project-capability-present project-diagram-linked"><rect x="875" y="35" width="250" height="82" rx="8"></rect><text x="1000" y="69" text-anchor="middle">Cell / LLC queues</text><text class="project-diagram-status" x="1000" y="94" text-anchor="middle">PRESENT</text></g></a>
                 <a href="#/inspect/queue-topology" tabindex="0" focusable="true" aria-label="Inspect affinity queues"><g class="project-diagram-node project-capability-present project-diagram-linked"><rect x="20" y="145" width="250" height="82" rx="8"></rect><text x="145" y="179" text-anchor="middle">Affinity queues</text><text class="project-diagram-status" x="145" y="204" text-anchor="middle">PRESENT</text></g></a>
                 <a href="#/inspect/queue-topology" tabindex="0" focusable="true" aria-label="Inspect borrowing and queue routing"><g class="project-diagram-node project-capability-partial project-diagram-linked"><rect x="305" y="145" width="250" height="82" rx="8"></rect><text x="430" y="179" text-anchor="middle">Wake / enqueue borrowing</text><text class="project-diagram-status" x="430" y="204" text-anchor="middle">PARTIAL</text></g></a>
-                <a href="#/observe/callbacks" tabindex="0" focusable="true" aria-label="Inspect latency and callback timing"><g class="project-diagram-node project-capability-partial project-diagram-linked"><rect x="590" y="145" width="250" height="82" rx="8"></rect><text x="715" y="179" text-anchor="middle">Pinned latency control</text><text class="project-diagram-status" x="715" y="204" text-anchor="middle">PARTIAL</text></g></a>
-                <a href="#/debugging/scheduler" tabindex="0" focusable="true" aria-label="Open debugging and diagnostics"><g class="project-diagram-node project-capability-present project-diagram-linked"><rect x="875" y="145" width="250" height="82" rx="8"></rect><text x="1000" y="179" text-anchor="middle">Metrics &amp; inspection</text><text class="project-diagram-status" x="1000" y="204" text-anchor="middle">PRESENT · managed gaps</text></g></a>
-                <g class="project-parity-score" data-score-key="mitosis-static-data-plane" data-score-value="73"><text x="145" y="300" text-anchor="middle">Static data plane</text><text x="145" y="344" text-anchor="middle">73%</text></g>
-                <g class="project-parity-score" data-score-key="mitosis-dynamic-control" data-score-value="58"><text x="430" y="300" text-anchor="middle">Dynamic control</text><text x="430" y="344" text-anchor="middle">58%</text></g>
-                <g class="project-parity-score" data-score-key="mitosis-operations" data-score-value="70"><text x="715" y="300" text-anchor="middle">Operations</text><text x="715" y="344" text-anchor="middle">70%</text></g>
-                <g class="project-parity-score project-parity-overall" data-score-key="mitosis-overall" data-score-value="70"><text x="1000" y="300" text-anchor="middle">Overall behavior</text><text x="1000" y="344" text-anchor="middle">70% ±5</text></g>
+                <a href="#/observe/callbacks" tabindex="0" focusable="true" aria-label="Inspect latency and callback timing"><g class="project-diagram-node project-capability-present project-diagram-linked"><rect x="590" y="145" width="250" height="82" rx="8"></rect><text x="715" y="179" text-anchor="middle">Pinned latency control</text><text class="project-diagram-status" x="715" y="204" text-anchor="middle">PRESENT</text></g></a>
+                <a href="#/debugging/scheduler" tabindex="0" focusable="true" aria-label="Open debugging and diagnostics"><g class="project-diagram-node project-capability-present project-diagram-linked"><rect x="875" y="145" width="250" height="82" rx="8"></rect><text x="1000" y="179" text-anchor="middle">Metrics &amp; inspection</text><text class="project-diagram-status" x="1000" y="204" text-anchor="middle">PRESENT · scale gaps</text></g></a>
+                <g class="project-parity-score" data-score-key="mitosis-static-data-plane" data-score-value="88"><text x="145" y="300" text-anchor="middle">Static data plane</text><text x="145" y="344" text-anchor="middle">88%</text></g>
+                <g class="project-parity-score" data-score-key="mitosis-dynamic-control" data-score-value="82"><text x="430" y="300" text-anchor="middle">Dynamic control</text><text x="430" y="344" text-anchor="middle">82%</text></g>
+                <g class="project-parity-score" data-score-key="mitosis-operations" data-score-value="82"><text x="715" y="300" text-anchor="middle">Operations</text><text x="715" y="344" text-anchor="middle">82%</text></g>
+                <g class="project-parity-score project-parity-overall" data-score-key="mitosis-overall" data-score-value="85"><text x="1000" y="300" text-anchor="middle">Overall behavior</text><text x="1000" y="344" text-anchor="middle">85% ±5</text></g>
               </svg>
             </div>
             <table class="project-diagram-equivalent project-capability-table" data-diagram-equivalent="mitosis-capability-coverage" data-sort-key="roadmap:mitosis-capabilities">
-              <caption>Parity summary: static data plane 73%; dynamic control 58%; operations 70%; overall behavior 70% ±5.</caption>
+              <caption>Parity summary: static data plane 88%; dynamic control 82%; operations 82%; overall behavior 85% ±5.</caption>
               <thead><tr><th scope="col" data-sort-column="0" data-sort-type="text">Area</th><th scope="col" data-sort-column="1" data-sort-type="text">Status</th><th scope="col" data-sort-column="2" data-sort-type="text">Where to inspect</th></tr></thead>
               <tbody>
-                <tr><th scope="row">Lifecycle, identity, and cpusets</th><td>Partial</td><td><a href="#/inspect/cells">Cells &amp; tasks</a></td></tr>
-                <tr><th scope="row">Demand controller</th><td>Missing</td><td><a href="#/overview">Current counters</a></td></tr>
+                <tr><th scope="row">Lifecycle and polling identity</th><td>Partial</td><td><a href="#/inspect/cells">Cells &amp; tasks</a></td></tr>
+                <tr><th scope="row">Cpuset allocation and demand control</th><td>Present</td><td><a href="#/overview">Demand and allocation</a></td></tr>
                 <tr><th scope="row">Cell, LLC, and affinity queues</th><td>Present</td><td><a href="#/inspect/queue-topology">Queue topology</a></td></tr>
-                <tr><th scope="row">Borrowing and pinned latency</th><td>Partial</td><td><a href="#/observe/callbacks">Callback performance</a></td></tr>
-                <tr><th scope="row">Metrics and inspection</th><td>Present, with managed-control gaps</td><td><a href="#/debugging/scheduler">Debugging</a></td></tr>
+                <tr><th scope="row">Cross-cell borrowing and pinned latency</th><td>Partial evidence</td><td><a href="#/observe/callbacks">Callback performance</a></td></tr>
+                <tr><th scope="row">Metrics and inspection</th><td>Present, with scale gaps</td><td><a href="#/debugging/scheduler">Debugging</a></td></tr>
               </tbody>
             </table>
           </section>
@@ -1039,33 +1035,33 @@
             <header class="project-section-heading">
               <div>
                 <span class="project-eyebrow">Dependency order</span>
-                <h3 id="implementationPathTitle">Mitosis implementation path</h3>
+                <h3 id="implementationPathTitle">Production validation path</h3>
               </div>
-              <p>The allocator can be built early, but live ownership must wait for coherent publication and drain.</p>
+              <p>Managed control milestones are implemented; launch readiness now depends on failure contracts and operational evidence.</p>
             </header>
             <div class="project-diagram-scroll">
               <svg class="project-diagram project-path-diagram" data-diagram-key="mitosis-implementation-path" role="group" aria-labelledby="mitosisPathTitle mitosisPathDesc" viewBox="0 0 1500 230">
-                <title id="mitosisPathTitle">Ordered path to Mitosis parity</title>
-                <desc id="mitosisPathDesc">Correctness gates precede cgroup identity, a stable resource envelope, pure cpuset allocation, queue drain and live publication, demand rebalance, and operational hardening.</desc>
+                <title id="mitosisPathTitle">Ordered path to production validation</title>
+                <desc id="mitosisPathDesc">Observer isolation precedes a cross-cell backlog contract, a hotplug contract, identity churn hardening, scale and soak, canary rollback, and a restricted production decision.</desc>
                 <defs><marker id="pathArrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M 0 0 L 10 5 L 0 10 z"></path></marker></defs>
                 <path class="project-diagram-edge" marker-end="url(#pathArrow)" d="M190 105 H225"></path><path class="project-diagram-edge" marker-end="url(#pathArrow)" d="M400 105 H435"></path><path class="project-diagram-edge" marker-end="url(#pathArrow)" d="M610 105 H645"></path><path class="project-diagram-edge" marker-end="url(#pathArrow)" d="M820 105 H855"></path><path class="project-diagram-edge" marker-end="url(#pathArrow)" d="M1030 105 H1065"></path><path class="project-diagram-edge" marker-end="url(#pathArrow)" d="M1240 105 H1275"></path>
-                <a href="#/configure" data-milestone-key="correctness-gates" tabindex="0" focusable="true" aria-label="Review correctness gates"><g class="project-diagram-node project-path-node project-diagram-linked"><rect x="15" y="60" width="175" height="90" rx="8"></rect><text x="102" y="91" text-anchor="middle">0 · Correctness</text><text class="project-diagram-node-detail" x="102" y="114" text-anchor="middle">Shares · progress</text><text class="project-diagram-node-detail" x="102" y="133" text-anchor="middle">hotplug · observers</text></g></a>
-                <a href="#/inspect/cells" data-milestone-key="dynamic-cgroup-identity" tabindex="0" focusable="true" aria-label="Inspect dynamic cgroup identity"><g class="project-diagram-node project-path-node project-diagram-linked"><rect x="225" y="60" width="175" height="90" rx="8"></rect><text x="312" y="91" text-anchor="middle">1 · Identity</text><text class="project-diagram-node-detail" x="312" y="114" text-anchor="middle">Direct children</text><text class="project-diagram-node-detail" x="312" y="133" text-anchor="middle">stable epochs</text></g></a>
-                <a href="#/inspect/queue-topology" data-milestone-key="fixed-resource-envelope" tabindex="0" focusable="true" aria-label="Inspect stable resource envelope"><g class="project-diagram-node project-path-node project-diagram-linked"><rect x="435" y="60" width="175" height="90" rx="8"></rect><text x="522" y="91" text-anchor="middle">2 · Envelope</text><text class="project-diagram-node-detail" x="522" y="114" text-anchor="middle">Fixed DSQ pool</text><text class="project-diagram-node-detail" x="522" y="133" text-anchor="middle">complete banks</text></g></a>
-                <a href="#/inspect/cells" data-milestone-key="cpuset-cell0-allocation" tabindex="0" focusable="true" aria-label="Inspect cpuset allocation"><g class="project-diagram-node project-path-node project-diagram-linked"><rect x="645" y="60" width="175" height="90" rx="8"></rect><text x="732" y="91" text-anchor="middle">3 · Allocation</text><text class="project-diagram-node-detail" x="732" y="114" text-anchor="middle">Cpuset · cell 0</text><text class="project-diagram-node-detail" x="732" y="133" text-anchor="middle">pure plan only</text></g></a>
-                <a href="#/inspect/queue-topology" data-milestone-key="drain-live-publication" tabindex="0" focusable="true" aria-label="Inspect queue drain and publication"><g class="project-diagram-node project-path-node project-diagram-linked"><rect x="855" y="60" width="175" height="90" rx="8"></rect><text x="942" y="91" text-anchor="middle">4 · Drain</text><text class="project-diagram-node-detail" x="942" y="114" text-anchor="middle">Quiesce queues</text><text class="project-diagram-node-detail" x="942" y="133" text-anchor="middle">publish owners</text></g></a>
-                <a href="#/overview" data-milestone-key="demand-rebalance" tabindex="0" focusable="true" aria-label="Inspect demand and rebalance state"><g class="project-diagram-node project-path-node project-diagram-linked"><rect x="1065" y="60" width="175" height="90" rx="8"></rect><text x="1152" y="91" text-anchor="middle">5 · Demand</text><text class="project-diagram-node-detail" x="1152" y="114" text-anchor="middle">EWMA · cooldown</text><text class="project-diagram-node-detail" x="1152" y="133" text-anchor="middle">rebalance</text></g></a>
-                <a href="#/debugging/scheduler" data-milestone-key="hardening" tabindex="0" focusable="true" aria-label="Inspect operational hardening"><g class="project-diagram-node project-path-node project-diagram-linked"><rect x="1275" y="60" width="195" height="90" rx="8"></rect><text x="1372" y="91" text-anchor="middle">6 · Hardening</text><text class="project-diagram-node-detail" x="1372" y="114" text-anchor="middle">Diagnostics · churn</text><text class="project-diagram-node-detail" x="1372" y="133" text-anchor="middle">scale · latency</text></g></a>
+                <a href="#/debugging/scheduler" data-milestone-key="correctness-gates" tabindex="0" focusable="true" aria-label="Inspect observer isolation"><g class="project-diagram-node project-path-node project-diagram-linked"><rect x="15" y="60" width="175" height="90" rx="8"></rect><text x="102" y="91" text-anchor="middle">0 · Observers</text><text class="project-diagram-node-detail" x="102" y="114" text-anchor="middle">Degrade safely</text><text class="project-diagram-node-detail" x="102" y="133" text-anchor="middle">stay attached</text></g></a>
+                <a href="#/inspect/queue-topology" data-milestone-key="cross-cell-backlog" tabindex="0" focusable="true" aria-label="Inspect the cross-cell backlog contract"><g class="project-diagram-node project-path-node project-diagram-linked"><rect x="225" y="60" width="175" height="90" rx="8"></rect><text x="312" y="91" text-anchor="middle">1 · Backlog</text><text class="project-diagram-node-detail" x="312" y="114" text-anchor="middle">Guarantee service</text><text class="project-diagram-node-detail" x="312" y="133" text-anchor="middle">or reject safely</text></g></a>
+                <a href="#/debugging/scheduler" data-milestone-key="hotplug-contract" tabindex="0" focusable="true" aria-label="Inspect the CPU hotplug contract"><g class="project-diagram-node project-path-node project-diagram-linked"><rect x="435" y="60" width="175" height="90" rx="8"></rect><text x="522" y="91" text-anchor="middle">2 · Hotplug</text><text class="project-diagram-node-detail" x="522" y="114" text-anchor="middle">Transact change</text><text class="project-diagram-node-detail" x="522" y="133" text-anchor="middle">or detach</text></g></a>
+                <a href="#/inspect/cells" data-milestone-key="identity-hardening" tabindex="0" focusable="true" aria-label="Inspect managed identity hardening"><g class="project-diagram-node project-path-node project-diagram-linked"><rect x="645" y="60" width="175" height="90" rx="8"></rect><text x="732" y="91" text-anchor="middle">3 · Identity</text><text class="project-diagram-node-detail" x="732" y="114" text-anchor="middle">Fork · move</text><text class="project-diagram-node-detail" x="732" y="133" text-anchor="middle">reuse churn</text></g></a>
+                <a href="#/overview" data-milestone-key="scale-soak" tabindex="0" focusable="true" aria-label="Inspect scale and soak evidence"><g class="project-diagram-node project-path-node project-diagram-linked"><rect x="855" y="60" width="175" height="90" rx="8"></rect><text x="942" y="91" text-anchor="middle">4 · Scale</text><text class="project-diagram-node-detail" x="942" y="114" text-anchor="middle">Target host</text><text class="project-diagram-node-detail" x="942" y="133" text-anchor="middle">sustained soak</text></g></a>
+                <a href="#/validate/testing" data-milestone-key="canary-rollback" tabindex="0" focusable="true" aria-label="Review canary and rollback validation"><g class="project-diagram-node project-path-node project-diagram-linked"><rect x="1065" y="60" width="175" height="90" rx="8"></rect><text x="1152" y="91" text-anchor="middle">5 · Canary</text><text class="project-diagram-node-detail" x="1152" y="114" text-anchor="middle">Restart · detach</text><text class="project-diagram-node-detail" x="1152" y="133" text-anchor="middle">rollback</text></g></a>
+                <a href="#/project/operations" data-milestone-key="hardening" tabindex="0" focusable="true" aria-label="Review the restricted production decision"><g class="project-diagram-node project-path-node project-diagram-linked"><rect x="1275" y="60" width="195" height="90" rx="8"></rect><text x="1372" y="91" text-anchor="middle">6 · Decision</text><text class="project-diagram-node-detail" x="1372" y="114" text-anchor="middle">Restricted scope</text><text class="project-diagram-node-detail" x="1372" y="133" text-anchor="middle">explicit evidence</text></g></a>
               </svg>
             </div>
             <ol class="project-diagram-equivalent project-path-list" data-diagram-equivalent="mitosis-implementation-path">
-              <li data-milestone-key="correctness-gates"><a href="#/configure">Correctness and semantics</a></li>
-              <li data-milestone-key="dynamic-cgroup-identity"><a href="#/inspect/cells">Cgroup-native identity</a></li>
-              <li data-milestone-key="fixed-resource-envelope"><a href="#/inspect/queue-topology">Stable dynamic resource envelope</a></li>
-              <li data-milestone-key="cpuset-cell0-allocation"><a href="#/inspect/cells">Pure cpuset and cell-0 allocation</a></li>
-              <li data-milestone-key="drain-live-publication"><a href="#/inspect/queue-topology">Queue drain, then live ownership publication</a></li>
-              <li data-milestone-key="demand-rebalance"><a href="#/overview">Demand EWMA and controlled rebalance</a></li>
-              <li data-milestone-key="hardening"><a href="#/debugging/scheduler">Data-plane and operational hardening</a></li>
+              <li data-milestone-key="correctness-gates"><a href="#/debugging/scheduler">Observer isolation</a></li>
+              <li data-milestone-key="cross-cell-backlog"><a href="#/inspect/queue-topology">Cross-cell backlog contract</a></li>
+              <li data-milestone-key="hotplug-contract"><a href="#/debugging/scheduler">CPU hotplug contract</a></li>
+              <li data-milestone-key="identity-hardening"><a href="#/inspect/cells">Identity churn hardening</a></li>
+              <li data-milestone-key="scale-soak"><a href="#/overview">Scale and soak</a></li>
+              <li data-milestone-key="canary-rollback"><a href="#/validate/testing">Canary and rollback exercise</a></li>
+              <li data-milestone-key="hardening"><a href="#/project/operations">Restricted production decision</a></li>
             </ol>
           </section>
         </div>
