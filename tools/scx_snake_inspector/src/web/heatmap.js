@@ -146,6 +146,30 @@ function buildGroupedUsage(topology, entries, orderMode, identityForCpu) {
   return { groups, spans };
 }
 
+function physicalCoreIdentity(cpu) {
+  return cpu.core == null
+    ? null
+    : {
+      key: `${cpu.node}:${cpu.package}:${cpu.llc}:${cpu.core}`,
+      node: cpu.node,
+      package: cpu.package,
+      llc: cpu.llc,
+      core: cpu.core,
+      cpus: [],
+    };
+}
+
+function physicalCoreTiles(groups) {
+  let start = 0;
+  const tiles = groups.map((group, groupIndex) => {
+    const end = start + group.cpuCount;
+    const tile = { start, end, groupIndex };
+    start = end;
+    return tile;
+  });
+  return { tiles, slotCount: start };
+}
+
 export function buildLlcUsage(topology, entries, orderMode) {
   return buildGroupedUsage(topology, entries, orderMode, (cpu) => ({
     key: `${cpu.node}:${cpu.package}:${cpu.llc}`,
@@ -156,17 +180,84 @@ export function buildLlcUsage(topology, entries, orderMode) {
 }
 
 export function buildCoreUsage(topology, entries, orderMode) {
-  return buildGroupedUsage(topology, entries, orderMode, (cpu) => (
-    cpu.core == null
-      ? null
-      : {
-        key: `${cpu.node}:${cpu.package}:${cpu.core}`,
-        node: cpu.node,
-        package: cpu.package,
-        core: cpu.core,
-        cpus: [],
-      }
-  ));
+  const usage = buildGroupedUsage(topology, entries, orderMode, physicalCoreIdentity);
+  return { ...usage, ...physicalCoreTiles(usage.groups) };
+}
+
+function nonNegative(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? Math.max(0, number) : 0;
+}
+
+export function buildHostTaxUsage(topology, entries, orderMode, { ready = false } = {}) {
+  const order = [...(orderMode === "numeric"
+    ? topology.numeric_order
+    : topology.topology_order)];
+  const cpuInfo = new Map(topology.cpus.map((cpu) => [cpu.cpu, cpu]));
+  const rows = new Map((entries || []).map((entry) => [Number(entry.cpu), entry]));
+  const groups = [];
+  const groupIndexes = new Map();
+
+  for (const cpuId of order) {
+    const identity = physicalCoreIdentity(cpuInfo.get(cpuId) || {});
+    if (!identity) continue;
+    let groupIndex = groupIndexes.get(identity.key);
+    if (groupIndex === undefined) {
+      groupIndex = groups.length;
+      groupIndexes.set(identity.key, groupIndex);
+      groups.push({
+        ...identity,
+        cpuCount: 0,
+        sampledCpuCount: 0,
+        totalNs: 0,
+        taxNs: 0,
+        otherTaskNs: 0,
+        hardirqNs: 0,
+        softirqNs: 0,
+        stealNs: 0,
+        unclassifiedNs: 0,
+        utilizationPct: null,
+      });
+    }
+    const group = groups[groupIndex];
+    group.cpuCount += 1;
+    group.cpus.push(cpuId);
+
+    const row = ready ? rows.get(cpuId) : null;
+    if (!row || nonNegative(row.total_ns) <= 0) continue;
+    const totalNs = nonNegative(row.total_ns);
+    const taskNs = nonNegative(row.task_ns);
+    const snakeNs = Math.min(taskNs, nonNegative(row.snake_ns));
+    const otherTaskNs = row.other_task_ns == null
+      ? Math.max(0, taskNs - snakeNs)
+      : nonNegative(row.other_task_ns);
+    const hardirqNs = nonNegative(row.hardirq_ns);
+    const softirqNs = nonNegative(row.softirq_ns);
+    const idleNs = nonNegative(row.idle_ns);
+    const iowaitNs = nonNegative(row.iowait_ns);
+    const stealNs = nonNegative(row.steal_ns);
+    const unclassifiedNs = Math.max(
+      0,
+      totalNs - taskNs - hardirqNs - softirqNs - idleNs - iowaitNs - stealNs,
+    );
+    const taxNs = otherTaskNs + hardirqNs + softirqNs + stealNs + unclassifiedNs;
+
+    group.sampledCpuCount += 1;
+    group.totalNs += totalNs;
+    group.taxNs += taxNs;
+    group.otherTaskNs += otherTaskNs;
+    group.hardirqNs += hardirqNs;
+    group.softirqNs += softirqNs;
+    group.stealNs += stealNs;
+    group.unclassifiedNs += unclassifiedNs;
+  }
+
+  for (const group of groups) {
+    group.utilizationPct = group.sampledCpuCount > 0 && group.totalNs > 0
+      ? group.taxNs * 100 / group.totalNs
+      : null;
+  }
+  return { order, groups, ready, ...physicalCoreTiles(groups) };
 }
 
 export function axisLabelIndices(count, maxLabels = 24) {
@@ -189,8 +280,10 @@ export function heatmapLayout(cpuCount, viewportWidth, zoom) {
   const availableWidth = Math.max(320, Number(viewportWidth) || 800);
   const fitCell = (availableWidth - 104) / count;
   const cellSize = Math.max(2, Math.min(9, fitCell)) * (Number(zoom) || 1);
+  const hostTaxHeight = Math.max(16, Math.min(24, cellSize * 2.5));
+  const hostTaxTop = 20;
   const usageHeight = Math.max(13, Math.min(26, cellSize * 2.5));
-  const usageTop = 20;
+  const usageTop = hostTaxTop + hostTaxHeight + 4;
   const coreHeight = Math.max(16, Math.min(24, cellSize * 2.5));
   const coreTop = usageTop + usageHeight + 4;
   const llcHeight = Math.max(16, Math.min(24, cellSize * 2.5));
@@ -204,6 +297,8 @@ export function heatmapLayout(cpuCount, viewportWidth, zoom) {
     coreHeight,
     coreTop,
     height,
+    hostTaxHeight,
+    hostTaxTop,
     llcHeight,
     llcTop,
     margins,

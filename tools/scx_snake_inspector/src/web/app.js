@@ -7,6 +7,7 @@ import {
   axisLabelIndices,
   buildCoreUsage,
   buildCpuUsage,
+  buildHostTaxUsage,
   buildLlcUsage,
   buildMatrix,
   contrastTextColor,
@@ -201,6 +202,7 @@ const elements = {
   schedulerUptimeStatus: document.querySelector("#schedulerUptimeStatus"),
   schedulerUptime: document.querySelector("#schedulerUptime"),
   migrationRate: document.querySelector("#migrationRate"),
+  matrixSubtitle: document.querySelector("#matrixSubtitle"),
   migrationPairInspection: document.querySelector("#migrationPairInspection"),
   notice: document.querySelector("#notice"),
   debuggingCommand: document.querySelector("#debuggingCommand"),
@@ -1491,6 +1493,9 @@ function renderSnapshot() {
   if (snapshot.cpu_usage_error) {
     notices.push(snapshot.cpu_usage_error);
   }
+  if (snapshot.host_cpu_usage_error) {
+    notices.push(snapshot.host_cpu_usage_error);
+  }
   if (notices.length > 0) {
     showNotice(notices.join(" | "));
   } else {
@@ -1547,6 +1552,18 @@ function renderHeatmap() {
     state.snapshot?.cpu_usage || [],
     state.orderMode,
   );
+  const cpuUsageObservedMs = Number(state.snapshot?.cpu_usage_observed_ms) || 0;
+  const hostUsageObservedMs = Number(state.snapshot?.host_cpu_usage_observed_ms) || 0;
+  const hostTaxReady = !state.snapshot?.cpu_usage_error
+    && !state.snapshot?.host_cpu_usage_error
+    && cpuUsageObservedMs > 0
+    && cpuUsageObservedMs === hostUsageObservedMs;
+  const hostTaxUsage = buildHostTaxUsage(
+    state.topology,
+    state.snapshot?.host_cpu_usage || [],
+    state.orderMode,
+    { ready: hostTaxReady },
+  );
   const llcUsage = buildLlcUsage(
     state.topology,
     state.snapshot?.cpu_usage || [],
@@ -1559,6 +1576,8 @@ function renderHeatmap() {
     coreHeight,
     coreTop,
     height,
+    hostTaxHeight,
+    hostTaxTop,
     llcHeight,
     llcTop,
     margins,
@@ -1572,6 +1591,14 @@ function renderHeatmap() {
 
   elements.legendLow.textContent = numberFormat.format(matrix.minPositive);
   elements.legendHigh.textContent = numberFormat.format(matrix.max);
+  const physicalCoreSummary = state.orderMode === "numeric"
+    ? `${numberFormat.format(coreUsage.groups.length)} physical cores in compact core-ID order`
+    : `${numberFormat.format(coreUsage.groups.length)} physical cores`;
+  elements.matrixSubtitle.textContent = [
+    `${numberFormat.format(cpuCount)} logical CPUs`,
+    physicalCoreSummary,
+    `${numberFormat.format(llcUsage.groups.length)} LLCs`,
+  ].join(" · ");
   elements.legendLow.parentElement.setAttribute(
     "aria-label",
     `${state.scale === "log" ? "Logarithmic" : "Linear"} heat intensity from ${numberFormat.format(matrix.minPositive)} to ${numberFormat.format(matrix.max)} migrations`,
@@ -1608,8 +1635,17 @@ function renderHeatmap() {
   drawBoundaries(context, matrix, margins, matrixSize, cellSize, palette);
   drawPinnedMigrationPair(context, matrix, margins, cellSize, palette);
   drawAxes(context, matrix.order, margins, matrixSize, cellSize, palette);
+  drawHostTaxUsage(
+    context,
+    hostTaxUsage,
+    margins,
+    matrixSize,
+    hostTaxTop,
+    hostTaxHeight,
+    palette,
+  );
   drawCpuUsage(context, usage, margins, matrixSize, cellSize, usageTop, usageHeight, palette);
-  drawCoreUsage(context, coreUsage, margins, cellSize, coreTop, coreHeight, palette);
+  drawCoreUsage(context, coreUsage, margins, matrixSize, coreTop, coreHeight, palette);
   drawLlcUsage(context, llcUsage, margins, cellSize, llcTop, llcHeight, palette);
   drawLlcAnnotations(context, matrix.order, margins, cellSize, palette);
   state.geometry = {
@@ -1617,6 +1653,9 @@ function renderHeatmap() {
     coreHeight,
     coreTop,
     coreUsage,
+    hostTaxHeight,
+    hostTaxTop,
+    hostTaxUsage,
     llcHeight,
     llcTop,
     llcUsage,
@@ -1629,7 +1668,7 @@ function renderHeatmap() {
   };
   elements.canvas.setAttribute(
     "aria-label",
-    `CPU migration heatmap with ${numberFormat.format(matrix.total)} transitions, LLC annotations, logical CPU utilization across ${cpuCount} CPUs, capacity-normalized utilization across ${coreUsage.groups.length} whole cores, and capacity-normalized utilization across ${llcUsage.groups.length} LLCs`,
+    `CPU migration heatmap with ${numberFormat.format(matrix.total)} transitions, LLC annotations, host tax and capacity-normalized utilization across ${physicalCoreSummary}, logical CPU utilization across ${cpuCount} CPUs, and capacity-normalized utilization across ${llcUsage.groups.length} LLCs`,
   );
 }
 
@@ -1772,11 +1811,60 @@ function drawCpuUsage(context, usage, margins, matrixSize, cellSize, top, height
   }
 }
 
-function drawCoreUsage(context, coreUsage, margins, cellSize, top, height, palette) {
-  for (const span of coreUsage.spans) {
-    const group = coreUsage.groups[span.groupIndex];
-    const left = margins.left + span.start * cellSize;
-    const width = (span.end - span.start) * cellSize;
+function physicalCoreTileBox(usage, tile, margins, matrixSize) {
+  const slotCount = Math.max(1, usage.slotCount);
+  const left = margins.left + tile.start * matrixSize / slotCount;
+  const right = margins.left + tile.end * matrixSize / slotCount;
+  return { left, width: right - left };
+}
+
+function physicalCoreGroupAtOffset(usage, offset, matrixSize) {
+  if (offset < 0 || offset >= matrixSize || usage.slotCount <= 0) return null;
+  const slot = offset * usage.slotCount / matrixSize;
+  const tile = usage.tiles.find((candidate) => slot >= candidate.start && slot < candidate.end);
+  return tile ? usage.groups[tile.groupIndex] : null;
+}
+
+function drawHostTaxUsage(context, usage, margins, matrixSize, top, height, palette) {
+  context.fillStyle = palette.matrix;
+  context.fillRect(margins.left, top, matrixSize, height);
+  for (const tile of usage.tiles) {
+    const group = usage.groups[tile.groupIndex];
+    const { left, width } = physicalCoreTileBox(usage, tile, margins, matrixSize);
+    const sampled = group.utilizationPct !== null;
+    const background = sampled
+      ? infernoColor(normalizeUtilization(group.utilizationPct, state.scale))
+      : palette.matrix;
+    context.fillStyle = background;
+    context.fillRect(left, top, Math.ceil(width), height);
+    context.strokeStyle = palette.boundary;
+    context.lineWidth = 1;
+    context.strokeRect(left, top, Math.ceil(width), height);
+
+    if (!sampled) continue;
+    context.font = "600 9px ui-sans-serif, system-ui, sans-serif";
+    context.textAlign = "center";
+    context.textBaseline = "middle";
+    context.fillStyle = contrastTextColor(background, palette.darkText, palette.lightText);
+    const labels = [
+      `Core ${group.core} · ${group.utilizationPct.toFixed(1)}%`,
+      `${group.core} · ${group.utilizationPct.toFixed(0)}%`,
+    ];
+    const label = labels.find((candidate) => context.measureText(candidate).width <= width - 4);
+    if (label) context.fillText(label, left + width / 2, top + height / 2);
+  }
+
+  context.fillStyle = palette.label;
+  context.font = "600 10px ui-sans-serif, system-ui, sans-serif";
+  context.textAlign = "right";
+  context.textBaseline = "middle";
+  context.fillText("Host tax", margins.left - 7, top + height / 2);
+}
+
+function drawCoreUsage(context, coreUsage, margins, matrixSize, top, height, palette) {
+  for (const tile of coreUsage.tiles) {
+    const group = coreUsage.groups[tile.groupIndex];
+    const { left, width } = physicalCoreTileBox(coreUsage, tile, margins, matrixSize);
     const intensity = normalizeUtilization(group.utilizationPct, state.scale);
     const background = infernoColor(intensity);
     context.fillStyle = background;
@@ -1935,6 +2023,36 @@ function showTooltip(event) {
   const row = Math.floor(y / geometry.cellSize);
   const size = geometry.matrix.order.length;
   if (
+    x >= 0 && x < geometry.matrixSize &&
+    canvasY >= geometry.hostTaxTop &&
+    canvasY < geometry.hostTaxTop + geometry.hostTaxHeight
+  ) {
+    const group = physicalCoreGroupAtOffset(
+      geometry.hostTaxUsage,
+      x,
+      geometry.matrixSize,
+    );
+    if (group) {
+      elements.tooltip.textContent = group.utilizationPct === null
+        ? [
+          `Core ${group.core} host tax`,
+          `CPUs ${compactCpuList(group.cpus)}`,
+          "Host CPU accounting is unavailable for this core.",
+        ].join("\n")
+        : [
+          `Core ${group.core} host tax`,
+          `CPUs ${compactCpuList(group.cpus)}`,
+          `Outside Snake: ${group.utilizationPct.toFixed(1)}% of sampled core capacity`,
+          `Other tasks ${formatRuntime(group.otherTaskNs)}`,
+          `Hard IRQ ${formatRuntime(group.hardirqNs)} · SoftIRQ ${formatRuntime(group.softirqNs)}`,
+          `Steal ${formatRuntime(group.stealNs)} · residual ${formatRuntime(group.unclassifiedNs)}`,
+          `${numberFormat.format(group.sampledCpuCount)} / ${numberFormat.format(group.cpuCount)} logical CPUs sampled`,
+        ].join("\n");
+      positionTooltip(event);
+      return;
+    }
+  }
+  if (
     column >= 0 && column < size &&
     canvasY >= geometry.usageTop &&
     canvasY < geometry.usageTop + geometry.usageHeight
@@ -1953,14 +2071,15 @@ function showTooltip(event) {
     return;
   }
   if (
-    column >= 0 && column < size &&
+    x >= 0 && x < geometry.matrixSize &&
     canvasY >= geometry.coreTop &&
     canvasY < geometry.coreTop + geometry.coreHeight
   ) {
-    const span = geometry.coreUsage.spans.find((candidate) => (
-      column >= candidate.start && column < candidate.end
-    ));
-    const group = span && geometry.coreUsage.groups[span.groupIndex];
+    const group = physicalCoreGroupAtOffset(
+      geometry.coreUsage,
+      x,
+      geometry.matrixSize,
+    );
     if (group) {
       elements.tooltip.textContent = [
         `Core ${group.core}`,

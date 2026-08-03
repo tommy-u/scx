@@ -192,9 +192,10 @@ test("buildCoreUsage combines sparse SMT siblings into whole-core capacity", () 
   const grouped = heatmapModule.buildCoreUsage(sparseSiblings, entries, "topology");
   assert.deepEqual(grouped.groups, [
     {
-      key: "0:0:0",
+      key: "0:0:0:0",
       node: 0,
       package: 0,
+      llc: 0,
       core: 0,
       cpus: [0, 158],
       cpuCount: 2,
@@ -202,9 +203,10 @@ test("buildCoreUsage combines sparse SMT siblings into whole-core capacity", () 
       utilizationPct: 50,
     },
     {
-      key: "0:0:1",
+      key: "0:0:0:1",
       node: 0,
       package: 0,
+      llc: 0,
       core: 1,
       cpus: [1, 159],
       cpuCount: 2,
@@ -224,6 +226,110 @@ test("buildCoreUsage combines sparse SMT siblings into whole-core capacity", () 
     { start: 2, end: 3, groupIndex: 0 },
     { start: 3, end: 4, groupIndex: 1 },
   ]);
+  assert.deepEqual(grouped.tiles, [
+    { start: 0, end: 2, groupIndex: 0 },
+    { start: 2, end: 4, groupIndex: 1 },
+  ]);
+  assert.deepEqual(numeric.tiles, grouped.tiles);
+});
+
+test("buildCoreUsage keeps repeated core IDs separate across LLCs", () => {
+  const repeatedIds = {
+    cpus: [
+      { cpu: 0, node: 0, package: 0, llc: 0, core: 0 },
+      { cpu: 1, node: 0, package: 0, llc: 1, core: 0 },
+    ],
+    numeric_order: [0, 1],
+    topology_order: [0, 1],
+  };
+  const result = heatmapModule.buildCoreUsage(repeatedIds, [
+    { cpu: 0, runtime_ns: 10, utilization_pct: 10 },
+    { cpu: 1, runtime_ns: 90, utilization_pct: 90 },
+  ], "topology");
+
+  assert.equal(result.groups.length, 2);
+  assert.deepEqual(result.groups.map((group) => group.cpus), [[0], [1]]);
+});
+
+test("buildHostTaxUsage aggregates work outside Snake across SMT siblings", () => {
+  assert.equal(typeof heatmapModule.buildHostTaxUsage, "function");
+  if (typeof heatmapModule.buildHostTaxUsage !== "function") return;
+  const sparseSiblings = {
+    cpus: [
+      { cpu: 0, node: 0, package: 0, llc: 0, core: 0 },
+      { cpu: 1, node: 0, package: 0, llc: 0, core: 1 },
+      { cpu: 158, node: 0, package: 0, llc: 0, core: 0 },
+      { cpu: 159, node: 0, package: 0, llc: 0, core: 1 },
+    ],
+    numeric_order: [0, 1, 158, 159],
+    topology_order: [0, 158, 1, 159],
+  };
+  const result = heatmapModule.buildHostTaxUsage(sparseSiblings, [
+    {
+      cpu: 0,
+      total_ns: 110,
+      task_ns: 30,
+      snake_ns: 20,
+      other_task_ns: 10,
+      hardirq_ns: 5,
+      softirq_ns: 5,
+      idle_ns: 60,
+      iowait_ns: 0,
+      steal_ns: 0,
+    },
+    {
+      cpu: 1,
+      total_ns: 0,
+      task_ns: 0,
+      snake_ns: 0,
+      other_task_ns: 0,
+      hardirq_ns: 0,
+      softirq_ns: 0,
+      idle_ns: 0,
+      iowait_ns: 0,
+      steal_ns: 0,
+    },
+    {
+      cpu: 158,
+      total_ns: 100,
+      task_ns: 40,
+      snake_ns: 20,
+      other_task_ns: 20,
+      hardirq_ns: 10,
+      softirq_ns: 0,
+      idle_ns: 45,
+      iowait_ns: 0,
+      steal_ns: 5,
+    },
+  ], "numeric", { ready: true });
+
+  assert.equal(result.groups.length, 2);
+  assert.deepEqual(result.groups[0].cpus, [0, 158]);
+  assert.equal(result.groups[0].cpuCount, 2);
+  assert.equal(result.groups[0].sampledCpuCount, 2);
+  assert.equal(result.groups[0].otherTaskNs, 30);
+  assert.equal(result.groups[0].hardirqNs, 15);
+  assert.equal(result.groups[0].softirqNs, 5);
+  assert.equal(result.groups[0].stealNs, 5);
+  assert.equal(result.groups[0].unclassifiedNs, 10);
+  assert.equal(result.groups[0].taxNs, 65);
+  assert.equal(result.groups[0].totalNs, 210);
+  assert.ok(Math.abs(result.groups[0].utilizationPct - (65 * 100 / 210)) < 1e-12);
+  assert.equal(result.groups[1].sampledCpuCount, 0);
+  assert.equal(result.groups[1].utilizationPct, null);
+  assert.deepEqual(result.tiles, [
+    { start: 0, end: 2, groupIndex: 0 },
+    { start: 2, end: 4, groupIndex: 1 },
+  ]);
+
+  const synchronizing = heatmapModule.buildHostTaxUsage(
+    sparseSiblings,
+    [{ cpu: 0, total_ns: 100, task_ns: 100, snake_ns: 0, other_task_ns: 100 }],
+    "numeric",
+    { ready: false },
+  );
+  assert.equal(synchronizing.groups[0].sampledCpuCount, 0);
+  assert.equal(synchronizing.groups[0].utilizationPct, null);
 });
 
 test("normalizeUtilization uses an absolute zero-to-one-hundred scale", () => {
@@ -369,6 +475,7 @@ test("heatmap layout places utilization above the migration matrix", () => {
   assert.equal(typeof heatmapModule.heatmapLayout, "function");
   const layout = heatmapModule.heatmapLayout(316, 1440, 1);
 
+  assert.ok(layout.hostTaxTop + layout.hostTaxHeight <= layout.usageTop);
   assert.ok(layout.usageTop + layout.usageHeight <= layout.coreTop);
   assert.ok(layout.coreTop + layout.coreHeight <= layout.llcTop);
   assert.ok(layout.llcTop + layout.llcHeight < layout.margins.top);
@@ -379,10 +486,12 @@ test("heatmap layout places utilization above the migration matrix", () => {
 test("Activity labels logical CPU, whole-core, and LLC utilization rows", () => {
   const script = readFileSync(new URL("../../src/web/app.js", import.meta.url), "utf8");
 
+  assert.match(script, /fillText\("Host tax"/);
   assert.match(script, /fillText\("CPU util"/);
   assert.match(script, /fillText\("Core util"/);
   assert.match(script, /buildCoreUsage/);
   assert.match(script, /whole-core capacity/);
+  assert.match(script, /physical cores/);
 });
 
 test("the Activity viewport delegates vertical scrolling to the document", () => {
