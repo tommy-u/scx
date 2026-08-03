@@ -25,6 +25,7 @@ import {
   appendCellRebalanceSample,
   callbackSampleRateOptions,
   captureKeyedRenderState,
+  cellAccountingEwmaModel,
   cellLayoutDiagramModel,
   cellPlacementAtlasModel,
   cellQueueFacts,
@@ -4782,6 +4783,10 @@ function renderCells() {
       samples: state.cellRebalanceSamples,
       lifecycle: lifecycleModel,
     });
+    utilization.accountingEwma = cellAccountingEwmaModel({
+      utilization,
+      samples: appendCellRebalanceSample(state.cellRebalanceSamples, sample),
+    });
     renderCellUtilization(utilization);
     return;
   }
@@ -5151,8 +5156,8 @@ function renderCellServiceLlc(cell, llc) {
   const renderKey = llc.topologyKey ?? llc.llcId ?? "unknown";
   const cpuCoverage = `${formatCount(llc.cpus.length)} active / ${formatCount(llc.topologyCpuCount)} CPUs`;
   return `
-    <details class="cell-service-llc" data-render-key="util-cell:${cell.id}:llc:${renderKey}">
-      <summary data-render-key="util-cell:${cell.id}:llc:${renderKey}:summary">
+    <details class="cell-service-llc" data-render-key="util-cell:${cell.id}:${cell.slotEpoch}:llc:${renderKey}">
+      <summary data-render-key="util-cell:${cell.id}:${cell.slotEpoch}:llc:${renderKey}:summary">
         <span class="utilization-identity"><strong>${escapeHtml(label)}</strong><small>${escapeHtml(cpuCoverage)}</small></span>
         ${renderServiceMeter(llc.capacityPct)}
         <span class="utilization-value"><strong>${formatUtilizationCores(llc.serviceCores)} CPUs</strong><small>${formatPercentage(llc.capacityPct)} full LLC · ${formatPercentage(llc.borrowedRuntimeNs * 100 / Math.max(1, llc.runtimeNs))} borrowed</small></span>
@@ -5168,8 +5173,8 @@ function renderCellOwnedLlc(cell, llc) {
   const renderKey = llc.topologyKey ?? llc.llcId ?? "unknown";
   const coverage = `${formatCount(llc.cpuCount)} / ${formatCount(llc.topologyCpuCount)} owned CPUs sampled`;
   return `
-    <details class="host-capacity-llc cell-owned-capacity" data-render-key="util-owned:${cell.id}:llc:${renderKey}">
-      <summary data-render-key="util-owned:${cell.id}:llc:${renderKey}:summary">
+    <details class="host-capacity-llc cell-owned-capacity" data-render-key="util-owned:${cell.id}:${cell.slotEpoch}:llc:${renderKey}">
+      <summary data-render-key="util-owned:${cell.id}:${cell.slotEpoch}:llc:${renderKey}:summary">
         <span class="utilization-identity"><strong>${escapeHtml(label)}</strong><small>${escapeHtml(coverage)}</small></span>
         ${renderCapacityStack(llc)}
         <span class="utilization-value"><strong>${formatUtilizationPercentage(capacityBusyPct(llc))} busy</strong><small>${formatUtilizationPercentage(capacityIrqPct(llc))} IRQ</small></span>
@@ -5180,17 +5185,98 @@ function renderCellOwnedLlc(cell, llc) {
     </details>`;
 }
 
-function renderCellService(cell) {
-  const ownedBusy = capacityBusyPct(cell.owned.total);
-  const ownedStatus = ownedBusy === null
-    ? "owned pressure unavailable"
-    : `${formatUtilizationPercentage(ownedBusy)} owned busy`;
+const CELL_ACCOUNTING_PARTS = [
+  ["home", "home", "Home work"],
+  ["foreignFlexible", "foreign-flexible", "Foreign flexible"],
+  ["foreignPinned", "foreign-pinned", "Foreign pinned"],
+  ["foreignCombined", "foreign-combined", "Foreign scheduled"],
+  ["otherTask", "other-task", "Other tasks"],
+  ["hardirq", "hardirq", "Hard IRQ"],
+  ["softirq", "softirq", "SoftIRQ"],
+  ["idleWait", "idle", "Idle / wait"],
+  ["steal", "steal", "Steal"],
+  ["residual", "residual", "Residual"],
+];
+
+function cellAccountingParts(accounting) {
+  return CELL_ACCOUNTING_PARTS
+    .map(([field, kind, label]) => ({
+      field,
+      kind,
+      label,
+      value: Math.max(0, Number(accounting?.parts?.[field]) || 0),
+    }))
+    .filter((part) => part.value > 0);
+}
+
+function renderCellAccountingStack(accounting, scaleMaxCores) {
+  const total = Number.isFinite(accounting?.totalCores)
+    ? Math.max(0, accounting.totalCores)
+    : null;
+  const accounted = Number.isFinite(accounting?.accountedCores)
+    ? Math.max(0, accounting.accountedCores)
+    : null;
+  const scale = Math.max(1, Number(scaleMaxCores) || 1);
+  const extent = accounted === null ? 0 : Math.min(100, accounted * 100 / scale);
+  const capacityPosition = total === null ? null : Math.min(100, total * 100 / scale);
+  const parts = cellAccountingParts(accounting);
+  const description = parts
+    .map((part) => `${part.label} ${formatUtilizationCores(part.value)} cores`)
+    .join(", ");
   return `
-    <article class="cell-service-row" data-render-key="util-cell:${cell.id}">
-      <header>
-        <span><strong>${escapeHtml(cell.label)}</strong><small>Cell ${formatCount(cell.id)}</small></span>
-        <span class="cell-service-total"><strong>${formatUtilizationCores(cell.serviceCores)} average CPUs</strong><small>${escapeHtml(formatRuntime(cell.runtimeNs))} service · ${escapeHtml(ownedStatus)}</small></span>
-      </header>
+    <span class="cell-accounting-track" role="img"
+      aria-label="${escapeHtml(accounted === null ? "Owned-capacity accounting unavailable" : `${formatUtilizationCores(accounted)} accounted cores of ${formatUtilizationCores(total)} owned cores. ${description}`)}">
+      <span class="cell-accounting-stack" style="--extent:${extent.toFixed(3)}%" role="img"
+        aria-label="${escapeHtml(description || "No accounted capacity")}">
+        ${parts.map((part) => {
+          const share = accounted > 0 ? Math.min(100, part.value * 100 / accounted) : 0;
+          return `<i class="${part.kind}" style="--share:${share.toFixed(3)}%" title="${escapeHtml(`${part.label}: ${formatUtilizationCores(part.value)} average cores`)}" aria-hidden="true"></i>`;
+        }).join("")}
+      </span>
+      ${capacityPosition === null ? "" : `<b class="cell-capacity-limit" style="--position:${capacityPosition.toFixed(3)}%" title="Owned capacity: ${escapeHtml(formatUtilizationCores(total))} cores" aria-hidden="true"></b>`}
+    </span>`;
+}
+
+function renderCellRuntimeLane(accounting, scaleMaxCores) {
+  const scale = Math.max(1, Number(scaleMaxCores) || 1);
+  const runtime = Number.isFinite(accounting?.runtimeCores)
+    ? Math.max(0, accounting.runtimeCores)
+    : null;
+  const current = accounting?.currentRuntimeCores;
+  const extent = runtime === null ? 0 : Math.min(100, runtime * 100 / scale);
+  const controller = accounting?.controllerRuntimeCores;
+  const controllerPosition = controller == null
+    ? null
+    : Math.min(100, Math.max(0, controller * 100 / scale));
+  const secondary = [
+    current == null ? null : `${formatUtilizationCores(current)} current`,
+    controller == null ? null : `${formatUtilizationCores(controller)} controller`,
+  ].filter(Boolean).join(" · ") || "current unavailable";
+  return `
+    <div class="cell-accounting-lane runtime">
+      <span class="cell-accounting-lane-label"><strong>Cell runtime</strong><small>EWMA across all execution CPUs</small></span>
+      <span class="cell-accounting-track" role="img" aria-label="${escapeHtml(runtime === null ? "Runtime EWMA unavailable" : `Runtime EWMA ${formatUtilizationCores(runtime)} average cores`)}">
+        <i class="cell-runtime-ewma" style="--extent:${extent.toFixed(3)}%" aria-hidden="true"></i>
+        ${controllerPosition === null ? "" : `<b class="cell-controller-ewma" style="--position:${controllerPosition.toFixed(3)}%" title="Snake controller EWMA: ${escapeHtml(formatUtilizationCores(controller))} cores" aria-hidden="true"></b>`}
+      </span>
+      <span class="cell-accounting-value"><strong>${formatUtilizationCores(runtime)}${runtime === null ? "" : " cores"}</strong><small>${escapeHtml(secondary)}</small></span>
+    </div>`;
+}
+
+function renderCellCapacityLane(accounting, scaleMaxCores) {
+  const total = accounting?.totalCores;
+  return `
+    <div class="cell-accounting-lane capacity">
+      <span class="cell-accounting-lane-label"><strong>Owned capacity</strong><small>EWMA, reconciled to CPU wall time</small></span>
+      ${renderCellAccountingStack(accounting, scaleMaxCores)}
+      <span class="cell-accounting-value"><strong>${formatUtilizationCores(total)}${total == null ? "" : " cores"}</strong><small>${formatCount(accounting?.primaryCpuCount || 0)} currently owned</small></span>
+    </div>`;
+}
+
+function renderCellAccountingDetails(cell) {
+  return `
+    <details class="cell-accounting-details" data-render-key="util-cell:${cell.id}:${cell.slotEpoch}:details">
+      <summary>LLC and CPU detail</summary>
       <div class="cell-utilization-columns">
         <section aria-label="Service by execution LLC">
           <h4>Service by execution LLC</h4>
@@ -5209,6 +5295,42 @@ function renderCellService(cell) {
           </div>
         </section>
       </div>
+    </details>`;
+}
+
+function renderCellAccountingRow(cell, accounting, scaleMaxCores) {
+  const pinned = accounting?.parts?.foreignPinned;
+  const hardirq = accounting?.parts?.hardirq;
+  const softirq = accounting?.parts?.softirq;
+  const irq = hardirq == null && softirq == null
+    ? null
+    : (hardirq || 0) + (softirq || 0);
+  const status = !accounting?.complete
+    ? "Collecting one clean, aligned accounting sample."
+    : !accounting.foreignAffinitySupported
+      ? "Foreign pinned work is included in foreign scheduled work by this Snake version."
+      : accounting.overageNs > 0
+        ? `Accounting overage ${formatRuntime(accounting.overageNs)}.`
+        : null;
+  return `
+    <article class="cell-accounting-row${accounting?.complete ? "" : " incomplete"}"
+      data-render-key="util-cell:${escapeHtml(accounting?.identityKey || `${cell.id}:${cell.slotEpoch}`)}">
+      <header>
+        <span><strong>${escapeHtml(cell.label)}</strong><small>Cell ${formatCount(cell.id)}${cell.slotEpoch > 0 ? ` · epoch ${formatCount(cell.slotEpoch)}` : ""}</small></span>
+        <span><strong>${formatCount(cell.taskCount)} tasks</strong><small>${formatCount(cell.owned.cpuCount)} primary CPUs</small></span>
+      </header>
+      ${status ? `<p class="cell-accounting-status">${escapeHtml(status)}</p>` : ""}
+      <div class="cell-accounting-lanes">
+        ${renderCellRuntimeLane(accounting, scaleMaxCores)}
+        ${renderCellCapacityLane(accounting, scaleMaxCores)}
+      </div>
+      <dl class="cell-accounting-facts">
+        <div><dt>Foreign pinned</dt><dd>${pinned == null ? "—" : `${formatUtilizationCores(pinned)} cores`}</dd></div>
+        <div><dt>IRQ / SoftIRQ</dt><dd>${formatUtilizationCores(irq)}${irq == null ? "" : " cores"}</dd></div>
+        <div><dt>Other tasks</dt><dd>${formatUtilizationCores(accounting?.parts?.otherTask)}${accounting?.parts?.otherTask == null ? "" : " cores"}</dd></div>
+        <div><dt>Residual</dt><dd>${formatUtilizationCores(accounting?.parts?.residual)}${accounting?.parts?.residual == null ? "" : " cores"}</dd></div>
+      </dl>
+      ${renderCellAccountingDetails(cell)}
     </article>`;
 }
 
@@ -5559,7 +5681,7 @@ function renderCellUtilization(model, force = false) {
     delete elements.cellUtilizationNotice.dataset.message;
   }
   elements.cellServiceWindow.textContent = model.observedMs > 0
-    ? `${formatDuration(model.observedMs)} observed`
+    ? `${formatDuration(model.observedMs)} observed · EWMA α ${model.accountingEwma?.alpha?.toFixed(2) || "0.30"}`
     : "Waiting for samples";
   if (elements.capacityTaskLegend.textContent !== model.host.taskCapacityLabel) {
     elements.capacityTaskLegend.textContent = model.host.taskCapacityLabel;
@@ -5585,7 +5707,16 @@ function renderCellUtilization(model, force = false) {
   replaceKeyedHtml(
     elements.cellUtilizationGrid,
     model.cellStatus === "ready"
-      ? model.cells.map(renderCellService).join("")
+      ? model.cells.map((cell) => {
+        const identityKey = `${cell.id}:${cell.slotEpoch}`;
+        const accounting = model.accountingEwma?.cells
+          ?.find((candidate) => candidate.identityKey === identityKey);
+        return renderCellAccountingRow(
+          cell,
+          accounting,
+          model.accountingEwma?.scaleMaxCores || 1,
+        );
+      }).join("")
       : `<p class="empty-state">${escapeHtml(model.cellStatusLabel)}</p>`,
   );
   replaceKeyedHtml(
@@ -5915,6 +6046,8 @@ function renderCellDetail(cell, queueFacts, statsModel) {
         <dl class="cell-facts">
           <div><dt>Service cores</dt><dd>${formatCellMetric(stats?.serviceCores, "cores")}</dd></div>
           <div><dt>Service share</dt><dd>${formatCellMetric(stats?.serviceSharePct, "percentage")}</dd></div>
+          <div><dt>Current utilization</dt><dd>${formatCellMetric(stats?.utilizationPct, "percentage")}</dd></div>
+          <div><dt>Controller EWMA</dt><dd>${formatCellMetric(stats?.ewmaUtilizationPct, "percentage")}</dd></div>
         </dl>
       </div>
       <div class="cell-stat-group">
@@ -5929,6 +6062,7 @@ function renderCellDetail(cell, queueFacts, statsModel) {
         <dl class="cell-facts">
           <div><dt>Borrowed share</dt><dd>${formatCellMetric(stats?.borrowedPct, "percentage")}</dd></div>
           <div><dt>Lent runtime</dt><dd>${formatCellMetric(stats?.raw.lent_runtime_ns, "duration")}</dd></div>
+          <div><dt>Foreign pinned</dt><dd>${formatCellMetric(stats?.raw.foreign_affinity_runtime_ns, "duration")}</dd></div>
         </dl>
       </div>
       <div class="cell-stat-group wide">
@@ -5958,6 +6092,7 @@ function renderRawCellStats(stats, cellId) {
     ["primary_runtime_ns", "Primary runtime", "duration"],
     ["borrowed_runtime_ns", "Borrowed runtime", "duration"],
     ["lent_runtime_ns", "Lent runtime", "duration"],
+    ["foreign_affinity_runtime_ns", "Foreign affinity runtime", "duration"],
     ["normal_enqueues", "Normal enqueues", "number"],
     ["affinity_enqueues", "Affinity enqueues", "number"],
     ["normal_dispatches", "Normal dispatches", "number"],

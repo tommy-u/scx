@@ -11,6 +11,7 @@ import * as inspectionState from "../../src/web/inspection.js";
 import {
   appendCellRebalanceSample,
   callbackSampleRateOptions,
+  cellAccountingEwmaModel,
   cellLayoutDiagramModel,
   cellPlacementAtlasModel,
   cellRebalanceAnalysisModel,
@@ -2201,6 +2202,179 @@ test("cell utilization conserves service through LLC and CPU rollups", () => {
   assert.equal(cellUtilizationSignature(model), cellUtilizationSignature({ ...model }));
 });
 
+test("cell accounting reconciles owned capacity and smooths absolute runtime cores", () => {
+  const fixture = {
+    snapshot: {
+      window_ms: 1_000,
+      cell_stats: {
+        status: "ready",
+        source_topology_generation: 12,
+        observed_ms: 1_000,
+        cells: [{
+          id: 1,
+          slot_epoch: 4,
+          primary_cpu_count: 2,
+          utilization_pct: 50,
+          ewma_utilization_pct: 60,
+          runtime_ns: 500_000_000,
+          runtime_ns_by_cpu: { 0: 300_000_000, 1: 200_000_000 },
+          primary_runtime_ns: 500_000_000,
+          borrowed_runtime_ns: 0,
+          lent_runtime_ns: 200_000_000,
+          foreign_affinity_runtime_ns: 80_000_000,
+        }],
+      },
+      cpu_usage_observed_ms: 1_000,
+      host_cpu_usage_observed_ms: 1_000,
+      host_cpu_usage: [
+        {
+          cpu: 0,
+          total_ns: 1_000_000_000,
+          task_ns: 400_000_000,
+          snake_ns: 350_000_000,
+          cell_ns: 250_000_000,
+          other_task_ns: 50_000_000,
+          hardirq_ns: 50_000_000,
+          softirq_ns: 25_000_000,
+          idle_ns: 425_000_000,
+          iowait_ns: 100_000_000,
+          steal_ns: 0,
+          unattributed_snake_ns: 100_000_000,
+          cell_overage_ns: 0,
+          source_overage_ns: 0,
+        },
+        {
+          cpu: 1,
+          total_ns: 1_000_000_000,
+          task_ns: 400_000_000,
+          snake_ns: 350_000_000,
+          cell_ns: 250_000_000,
+          other_task_ns: 50_000_000,
+          hardirq_ns: 50_000_000,
+          softirq_ns: 25_000_000,
+          idle_ns: 525_000_000,
+          iowait_ns: 0,
+          steal_ns: 0,
+          unattributed_snake_ns: 100_000_000,
+          cell_overage_ns: 0,
+          source_overage_ns: 0,
+        },
+      ],
+    },
+    inspection: {
+      cells: [{ id: 1, slot_epoch: 4, name: "latency.slice", task_count: 9 }],
+      queue_topology: {
+        cells: [{ external_id: 1, slot_epoch: 4, primary_cpus: [0, 1] }],
+      },
+      topology_lifecycle: { current_generation: 12 },
+    },
+    topology: {
+      topology_order: [0, 1],
+      cpus: [
+        { cpu: 0, node: 0, package: 0, llc: 0, core: 0 },
+        { cpu: 1, node: 0, package: 0, llc: 0, core: 0 },
+      ],
+    },
+  };
+  const model = cellUtilizationModel(fixture);
+
+  const accounting = model.cells[0].accounting;
+  assert.equal(accounting.complete, true);
+  assert.equal(accounting.foreignAffinitySupported, true);
+  assert.equal(accounting.homeNs, 500_000_000);
+  assert.equal(accounting.foreignFlexibleNs, 120_000_000);
+  assert.equal(accounting.foreignPinnedNs, 80_000_000);
+  assert.equal(accounting.otherTaskNs, 100_000_000);
+  assert.equal(accounting.hardirqNs, 100_000_000);
+  assert.equal(accounting.softirqNs, 50_000_000);
+  assert.equal(accounting.idleWaitNs, 1_050_000_000);
+  assert.equal(accounting.residualNs, 0);
+  assert.equal(accounting.accountedNs, accounting.totalNs);
+
+  const skewedFixture = JSON.parse(JSON.stringify(fixture));
+  skewedFixture.snapshot.host_cpu_usage[0].snake_ns -= 10_000_000;
+  const skewed = cellUtilizationModel(skewedFixture).cells[0].accounting;
+  assert.equal(skewed.overageNs, 10_000_000);
+  assert.equal(skewed.complete, true);
+
+  const skewedModel = cellUtilizationModel(skewedFixture);
+  const skewedSample = cellRebalanceSample({
+    utilization: skewedModel,
+    context: { scheduler_attach_seq: 2, policy_generation: 7 },
+    topologyGeneration: 12,
+    sampledAtMs: 1_000,
+  });
+  const skewedEwma = cellAccountingEwmaModel({
+    utilization: skewedModel,
+    samples: [skewedSample],
+    alpha: 1,
+  });
+  assert.equal(skewedEwma.cells[0].accountedCores, 2.01);
+  assert.equal(skewedEwma.scaleMaxCores, 2.01);
+
+  const mixedGeneration = cellRebalanceSample({
+    utilization: model,
+    context: { scheduler_attach_seq: 2, policy_generation: 7 },
+    topologyGeneration: 12,
+    topologyChangedAtMs: 500,
+    sampledAtMs: 1_000,
+  });
+  assert.equal(mixedGeneration.cells[0].accounting.complete, false);
+
+  const first = cellRebalanceSample({
+    utilization: model,
+    context: { scheduler_attach_seq: 2, policy_generation: 7 },
+    topologyGeneration: 12,
+    sampledAtMs: 1_000,
+  });
+  const second = JSON.parse(JSON.stringify(first));
+  second.sampledAtMs = 2_000;
+  second.cells[0].demandCores = 1.5;
+  second.cells[0].accounting.homeNs = 1_000_000_000;
+  second.cells[0].accounting.foreignPinnedNs = 160_000_000;
+  second.cells[0].accounting.idleWaitNs = 470_000_000;
+  const ewma = cellAccountingEwmaModel({
+    utilization: model,
+    samples: [first, second],
+    alpha: 0.5,
+  });
+
+  assert.equal(ewma.cells[0].identityKey, "1:4");
+  assert.equal(ewma.cells[0].runtimeCores, 1.0);
+  assert.equal(ewma.cells[0].parts.home, 0.75);
+  assert.equal(ewma.cells[0].parts.foreignPinned, 0.12);
+  assert.equal(ewma.cells[0].controllerRuntimeCores, 1.2);
+  assert.equal(ewma.scaleMaxCores, 2);
+
+  const gatedCurrent = JSON.parse(JSON.stringify(mixedGeneration));
+  gatedCurrent.sampledAtMs = 3_000;
+  const gatedEwma = cellAccountingEwmaModel({
+    utilization: model,
+    samples: [first, gatedCurrent],
+    alpha: 0.5,
+  });
+  assert.equal(gatedEwma.cells[0].runtimeCores, 0.5);
+  assert.equal(gatedEwma.cells[0].complete, false);
+
+  const reused = JSON.parse(JSON.stringify(second));
+  reused.sampledAtMs = 3_000;
+  reused.cells[0].identityKey = "1:5";
+  reused.cells[0].slotEpoch = 5;
+  reused.cells[0].demandCores = 0.25;
+  reused.cells[0].accounting.homeNs = 250_000_000;
+  const reusedModel = cellAccountingEwmaModel({
+    utilization: {
+      ...model,
+      cells: [{ ...model.cells[0], slotEpoch: 5 }],
+    },
+    samples: [first, second, reused],
+    alpha: 0.5,
+  });
+  assert.equal(reusedModel.cells[0].identityKey, "1:5");
+  assert.equal(reusedModel.cells[0].runtimeCores, 0.25);
+  assert.equal(reusedModel.cells[0].parts.home, 0.25);
+});
+
 test("cell utilization keeps host pressure visible when cell CPU lanes are unsupported", () => {
   const model = cellUtilizationModel({
     snapshot: {
@@ -3832,6 +4006,8 @@ test("Cells page renders a live cell and DSQ layout diagram", () => {
   assert.match(page, /id="cellChangesTab"[^>]*role="tab"/);
   assert.match(page, /id="cellLayoutPanel"[^>]*role="tabpanel"/);
   assert.match(page, /id="cellUtilizationPanel"[^>]*role="tabpanel"/);
+  assert.match(page, /<h3 id="cellServiceTitle">Cell resource accounting<\/h3>/);
+  assert.match(page, /id="cellAccountingLegend"/);
   assert.equal(
     (page.match(/<section class="cell-utilization-section/g) || []).length,
     3,
@@ -3852,6 +4028,8 @@ test("Cells page renders a live cell and DSQ layout diagram", () => {
   assert.match(script, /cellPlacementAtlasModel/);
   assert.match(script, /renderCellPlacementAtlas/);
   assert.match(script, /cellUtilizationModel/);
+  assert.match(script, /cellAccountingEwmaModel/);
+  assert.match(script, /renderCellAccountingRow/);
   assert.match(script, /renderCellUtilization/);
   assert.match(script, /Managed rebalances/);
   assert.match(script, /Last managed rebalance/);
@@ -3883,6 +4061,8 @@ test("Cells page renders a live cell and DSQ layout diagram", () => {
   assert.match(stylesheet, /\.cell-placement-atlas/);
   assert.match(stylesheet, /\.cell-placement-core/);
   assert.match(stylesheet, /\.cell-utilization-grid/);
+  assert.match(stylesheet, /\.cell-accounting-lane/);
+  assert.match(stylesheet, /\.cell-accounting-stack/);
   assert.match(stylesheet, /\.capacity-stack/);
   assert.match(stylesheet, /\.rebalance-trend-svg\s*\{[^}]*height:\s*58px/s);
   assert.match(stylesheet, /\.rebalance-cell-grid/);
@@ -3964,11 +4144,15 @@ const readyCellStatsFixture = {
     {
       id: 0,
       index: 0,
+      slot_epoch: 3,
       primary_cpu_count: 1,
+      utilization_pct: 75,
+      ewma_utilization_pct: 62.5,
       runtime_ns: 44_250_000_000,
       primary_runtime_ns: 29_500_000_000,
       borrowed_runtime_ns: 14_750_000_000,
       lent_runtime_ns: 7_375_000_000,
+      foreign_affinity_runtime_ns: 1_475_000_000,
       normal_enqueues: 900,
       affinity_enqueues: 100,
       normal_dispatches: 720,
@@ -4081,7 +4265,11 @@ test("cell statistics preserve cell zero, nullable ratios, and all raw counters"
   assert.equal(model.zeroActivity, false);
   assert.equal(model.cells[0].id, 0);
   assert.equal(model.cells[0].index, 0);
+  assert.equal(model.cells[0].slotEpoch, 3);
   assert.equal(model.cells[0].primaryCpuCount, 1);
+  assert.equal(model.cells[0].utilizationPct, 75);
+  assert.equal(model.cells[0].ewmaUtilizationPct, 62.5);
+  assert.equal(model.cells[0].raw.foreign_affinity_runtime_ns, 1_475_000_000);
   assert.equal(model.cells[0].raw.clock_transitions, 16);
   assert.equal(model.cells[0].serviceCores, 1.5);
   assert.equal(model.cells[0].normalEnqueueRate, 30.5085);
@@ -4118,6 +4306,7 @@ test("cell statistics distinguish explicit availability and zero-activity states
       primary_runtime_ns: 0,
       borrowed_runtime_ns: 0,
       lent_runtime_ns: 0,
+      foreign_affinity_runtime_ns: 0,
       normal_enqueues: 0,
       affinity_enqueues: 0,
       normal_dispatches: 0,
@@ -4127,6 +4316,28 @@ test("cell statistics distinguish explicit availability and zero-activity states
   });
   assert.equal(zero.status, "ready");
   assert.equal(zero.zeroActivity, true);
+
+  const legacy = inspectionState.cellStatsModel({
+    ...readyCellStatsFixture,
+    observed_ms: 30_000,
+    cells: readyCellStatsFixture.cells.map((cell) => {
+      const { foreign_affinity_runtime_ns: _unsupported, ...olderCell } = cell;
+      return {
+        ...olderCell,
+        runtime_ns: 0,
+        primary_runtime_ns: 0,
+        borrowed_runtime_ns: 0,
+        lent_runtime_ns: 0,
+        normal_enqueues: 0,
+        affinity_enqueues: 0,
+        normal_dispatches: 0,
+        affinity_dispatches: 0,
+        clock_transitions: 0,
+      };
+    }),
+  });
+  assert.equal(legacy.cells[0].raw.foreign_affinity_runtime_ns, null);
+  assert.equal(legacy.zeroActivity, true);
 });
 
 test("cell statistic formatting never turns an undefined ratio into zero", () => {

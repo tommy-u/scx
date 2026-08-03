@@ -500,12 +500,17 @@ const CELL_COUNTER_FIELDS = [
   "primary_runtime_ns",
   "borrowed_runtime_ns",
   "lent_runtime_ns",
+  "foreign_affinity_runtime_ns",
   "normal_enqueues",
   "affinity_enqueues",
   "normal_dispatches",
   "affinity_dispatches",
   "clock_transitions",
 ];
+
+const OPTIONAL_CELL_COUNTER_FIELDS = new Set([
+  "foreign_affinity_runtime_ns",
+]);
 const cellMetricNumberFormat = new Intl.NumberFormat("en-US", {
   maximumFractionDigits: 1,
 });
@@ -563,7 +568,15 @@ export function schedulerUptimeLabel(
 
 function normalizedCell(cell, observedMs) {
   const raw = Object.fromEntries(
-    CELL_COUNTER_FIELDS.map((field) => [field, Math.max(0, finiteValue(cell?.[field]) ?? 0)]),
+    CELL_COUNTER_FIELDS.map((field) => {
+      const value = finiteValue(cell?.[field]);
+      return [
+        field,
+        value === null && OPTIONAL_CELL_COUNTER_FIELDS.has(field)
+          ? null
+          : Math.max(0, value ?? 0),
+      ];
+    }),
   );
   const observedSeconds = Number(observedMs) > 0 ? Number(observedMs) / 1_000 : null;
   const primaryCpuCount = finiteValue(cell?.primary_cpu_count);
@@ -576,8 +589,11 @@ function normalizedCell(cell, observedMs) {
   return {
     id: finiteValue(cell?.id, cell?.cell_id, cell?.external_id),
     index: finiteValue(cell?.index, cell?.cell_index),
+    slotEpoch: finiteValue(cell?.slot_epoch),
     primaryCpuCount,
     raw,
+    utilizationPct: finiteValue(cell?.utilization_pct),
+    ewmaUtilizationPct: finiteValue(cell?.ewma_utilization_pct),
     serviceCores: finiteValue(cell?.service_cores),
     serviceSharePct: finiteValue(cell?.service_share_pct),
     primaryPct: finiteValue(cell?.primary_pct, cell?.primary_runtime_pct),
@@ -640,7 +656,9 @@ export function cellStatsModel(payload, { policyGeneration = null } = {}) {
     .sort((left, right) => left.id - right.id);
   const zeroActivity = status === "ready"
     && cells.length > 0
-    && cells.every((cell) => CELL_COUNTER_FIELDS.every((field) => cell.raw[field] === 0));
+    && cells.every((cell) => CELL_COUNTER_FIELDS.every((field) => (
+      cell.raw[field] === null || cell.raw[field] === 0
+    )));
   return {
     status,
     statusLabel: CELL_STATUS_LABELS[status],
@@ -2221,14 +2239,86 @@ function utilizationLlcSort(topology, left, right) {
     || (left.llcId ?? Number.MAX_SAFE_INTEGER) - (right.llcId ?? Number.MAX_SAFE_INTEGER);
 }
 
+function cellOwnedAccounting(cell, owned, snakeOverlayReady) {
+  const total = owned?.total || {};
+  const totalNs = Math.max(0, finiteValue(total.totalNs) ?? 0);
+  const homeNs = Math.max(0, finiteValue(cell?.primary_runtime_ns) ?? 0);
+  const foreignNs = Math.max(0, finiteValue(cell?.lent_runtime_ns) ?? 0);
+  const rawForeignPinnedNs = finiteValue(cell?.foreign_affinity_runtime_ns);
+  const foreignAffinitySupported = rawForeignPinnedNs !== null;
+  const foreignPinnedNs = foreignAffinitySupported
+    ? Math.min(foreignNs, Math.max(0, rawForeignPinnedNs))
+    : null;
+  const foreignFlexibleNs = foreignAffinitySupported
+    ? Math.max(0, foreignNs - foreignPinnedNs)
+    : null;
+  const foreignCombinedNs = foreignAffinitySupported ? 0 : foreignNs;
+  const otherTaskNs = Math.max(0, finiteValue(total.otherTaskCapacityNs) ?? 0);
+  const hardirqNs = Math.max(0, finiteValue(total.hardirqNs) ?? 0);
+  const softirqNs = Math.max(0, finiteValue(total.softirqNs) ?? 0);
+  const idleWaitNs = Math.max(0, finiteValue(total.idleWaitNs) ?? 0);
+  const stealNs = Math.max(0, finiteValue(total.stealNs) ?? 0);
+  const snakeCapacityNs = Math.max(0, finiteValue(total.snakeCapacityNs) ?? 0);
+  const attributedSnakeNs = homeNs + foreignNs;
+  const unattributedSnakeNs = Math.max(0, snakeCapacityNs - attributedSnakeNs);
+  const unclassifiedNs = Math.max(0, finiteValue(total.unclassifiedNs) ?? 0);
+  const residualNs = unattributedSnakeNs + unclassifiedNs;
+  const accountedNs = homeNs
+    + (foreignFlexibleNs ?? 0)
+    + (foreignPinnedNs ?? 0)
+    + foreignCombinedNs
+    + otherTaskNs
+    + hardirqNs
+    + softirqNs
+    + idleWaitNs
+    + stealNs
+    + residualNs;
+  const classificationOverageNs = foreignAffinitySupported
+    ? Math.max(0, rawForeignPinnedNs - foreignNs)
+    : 0;
+  const overageNs = Math.max(
+    classificationOverageNs,
+    attributedSnakeNs - snakeCapacityNs,
+    accountedNs - totalNs,
+    0,
+  );
+  const toleranceNs = Math.max(
+    Math.max(1, finiteValue(owned?.cpuCount) ?? 0) * 20_000_000,
+    totalNs * 0.002,
+  );
+  const complete = snakeOverlayReady
+    && totalNs > 0
+    && finiteValue(owned?.cpuCount) > 0
+    && finiteValue(owned?.sampledCpuCount) === finiteValue(owned?.cpuCount)
+    && (owned?.missingCpus || []).length === 0
+    && overageNs <= toleranceNs;
+  return {
+    complete,
+    foreignAffinitySupported,
+    totalNs,
+    accountedNs,
+    overageNs,
+    homeNs,
+    foreignFlexibleNs,
+    foreignPinnedNs,
+    foreignCombinedNs,
+    otherTaskNs,
+    hardirqNs,
+    softirqNs,
+    idleWaitNs,
+    stealNs,
+    residualNs,
+  };
+}
+
 function cellUtilizationRows(snapshot, inspection, topology, observedMs, host) {
   const cells = snapshot?.cell_stats?.cells || [];
   if (cells.some((cell) => cell?.runtime_ns_by_cpu == null)) {
     return [];
   }
-  const labels = new Map((inspection?.cells || []).map((cell) => [
+  const inspectedCells = new Map((inspection?.cells || []).map((cell) => [
     Number(cell.id),
-    cell.name || cell.display_name || cell.managed_name || `Cell ${cell.id}`,
+    cell,
   ]));
   const observedNs = observedMs * 1_000_000;
   return cells.map((cell) => {
@@ -2289,24 +2379,42 @@ function cellUtilizationRows(snapshot, inspection, topology, observedMs, host) {
     const runtimeNs = llcs.reduce((total, llc) => total + llc.runtimeNs, 0);
     const reportedRuntimeNs = Math.max(0, finiteValue(cell?.runtime_ns) ?? 0);
     const ownedCpus = host.cpus.filter((cpu) => ownedCpuSet.has(cpu.cpu));
+    const owned = {
+      cpuCount: ownedCpuIds.length,
+      sampledCpuCount: ownedCpus.length,
+      missingCpus: ownedCpuIds.filter((cpu) => !host.cpus.some((sample) => sample.cpu === cpu)),
+      cpus: ownedCpus,
+      llcs: hostLlcRows(ownedCpus, topology, ownedCpuIds),
+      total: sumHostRows(ownedCpus),
+    };
+    const inspectedCell = inspectedCells.get(id);
+    const slotEpoch = Math.max(
+      0,
+      finiteValue(cell?.slot_epoch, topologyCell?.slot_epoch, inspectedCell?.slot_epoch) ?? 0,
+    );
+    const controllerUtilizationPct = finiteValue(cell?.utilization_pct);
+    const controllerEwmaUtilizationPct = finiteValue(cell?.ewma_utilization_pct);
     return {
       id,
-      label: labels.get(id) || `Cell ${id}`,
-      slotEpoch: Math.max(0, finiteValue(topologyCell?.slot_epoch) ?? 0),
+      label: inspectedCell?.name
+        || inspectedCell?.display_name
+        || inspectedCell?.managed_name
+        || `Cell ${id}`,
+      taskCount: Math.max(0, finiteValue(inspectedCell?.task_count) ?? 0),
+      slotEpoch,
       eligibleCpuIds,
       runtimeNs,
       reportedRuntimeNs,
       reconciliationNs: reportedRuntimeNs - runtimeNs,
       serviceCores: observedNs > 0 ? runtimeNs / observedNs : null,
+      controllerUtilizationPct,
+      controllerEwmaUtilizationPct,
+      controllerRuntimeCores: controllerEwmaUtilizationPct === null
+        ? null
+        : controllerEwmaUtilizationPct * ownedCpuIds.length / 100,
       llcs,
-      owned: {
-        cpuCount: ownedCpuIds.length,
-        sampledCpuCount: ownedCpus.length,
-        missingCpus: ownedCpuIds.filter((cpu) => !host.cpus.some((sample) => sample.cpu === cpu)),
-        cpus: ownedCpus,
-        llcs: hostLlcRows(ownedCpus, topology, ownedCpuIds),
-        total: sumHostRows(ownedCpus),
-      },
+      owned,
+      accounting: cellOwnedAccounting(cell, owned, host.snakeOverlayReady),
     };
   }).filter((cell) => Number.isSafeInteger(cell.id) && cell.id >= 0)
     .sort((left, right) => left.id - right.id);
@@ -2757,6 +2865,13 @@ export function cellRebalanceSample({
       cpuCount,
       sampledCpuCount,
       missingCpus,
+      accounting: cell?.accounting ? {
+        ...cell.accounting,
+        complete: cell.accounting.complete === true
+          && samplesAvailable
+          && topologyWindowReady,
+      } : null,
+      controllerRuntimeCores: finiteValue(cell?.controllerRuntimeCores),
       ...metric,
       ready,
       llcs,
@@ -2773,6 +2888,113 @@ export function cellRebalanceSample({
     available,
     statusMessage: unavailableMessage,
     cells,
+  };
+}
+
+const CELL_ACCOUNTING_EWMA_FIELDS = [
+  ["homeNs", "home"],
+  ["foreignFlexibleNs", "foreignFlexible"],
+  ["foreignPinnedNs", "foreignPinned"],
+  ["foreignCombinedNs", "foreignCombined"],
+  ["otherTaskNs", "otherTask"],
+  ["hardirqNs", "hardirq"],
+  ["softirqNs", "softirq"],
+  ["idleWaitNs", "idleWait"],
+  ["stealNs", "steal"],
+  ["residualNs", "residual"],
+];
+
+function cellAccountingEwma(previous, current, alpha) {
+  return previous == null ? current : previous + alpha * (current - previous);
+}
+
+export function cellAccountingEwmaModel({
+  utilization,
+  samples = [],
+  alpha = 0.3,
+} = {}) {
+  const smoothing = Math.max(0.001, Math.min(1, finiteValue(alpha) ?? 0.3));
+  const states = new Map();
+  const orderedSamples = (Array.isArray(samples) ? samples : [])
+    .filter((sample) => finiteValue(sample?.sampledAtMs) !== null)
+    .sort((left, right) => left.sampledAtMs - right.sampledAtMs);
+  const latestSample = orderedSamples[orderedSamples.length - 1];
+  const latestCells = new Map((latestSample?.cells || []).map((cell) => [
+    String(cell?.identityKey || ""),
+    cell,
+  ]));
+  for (const sample of orderedSamples) {
+    const observedNs = Math.max(0, finiteValue(sample?.observedMs) ?? 0) * 1_000_000;
+    if (observedNs <= 0) {
+      continue;
+    }
+    for (const cell of sample?.cells || []) {
+      const identityKey = String(cell?.identityKey || "");
+      if (!identityKey || cell?.accounting?.complete !== true) {
+        continue;
+      }
+      const previous = states.get(identityKey);
+      const parts = {};
+      for (const [source, target] of CELL_ACCOUNTING_EWMA_FIELDS) {
+        const runtimeNs = finiteValue(cell.accounting?.[source]);
+        const cores = runtimeNs === null ? 0 : Math.max(0, runtimeNs) / observedNs;
+        parts[target] = cellAccountingEwma(previous?.parts?.[target], cores, smoothing);
+      }
+      const totalCores = Math.max(0, finiteValue(cell.accounting?.totalNs) ?? 0) / observedNs;
+      const accountedCores = Object.values(parts).reduce((total, value) => total + value, 0);
+      const runtimeCores = Math.max(0, finiteValue(cell?.demandCores) ?? 0);
+      states.set(identityKey, {
+        identityKey,
+        id: finiteValue(cell?.id),
+        slotEpoch: Math.max(0, finiteValue(cell?.slotEpoch) ?? 0),
+        runtimeCores: cellAccountingEwma(previous?.runtimeCores, runtimeCores, smoothing),
+        totalCores: cellAccountingEwma(previous?.totalCores, totalCores, smoothing),
+        accountedCores,
+        parts,
+        sampleCount: (previous?.sampleCount || 0) + 1,
+        foreignAffinitySupported: cell.accounting?.foreignAffinitySupported === true,
+      });
+    }
+  }
+  const currentCells = (utilization?.cells || []).map((cell) => {
+    const identityKey = `${cell.id}:${Math.max(0, finiteValue(cell?.slotEpoch) ?? 0)}`;
+    const state = states.get(identityKey);
+    const latestCell = latestCells.get(identityKey);
+    return {
+      ...(state || {
+        identityKey,
+        id: finiteValue(cell?.id),
+        slotEpoch: Math.max(0, finiteValue(cell?.slotEpoch) ?? 0),
+        runtimeCores: null,
+        totalCores: null,
+        accountedCores: null,
+        parts: {},
+        sampleCount: 0,
+        foreignAffinitySupported: cell?.accounting?.foreignAffinitySupported === true,
+      }),
+      label: cell?.label || `Cell ${cell?.id}`,
+      taskCount: Math.max(0, finiteValue(cell?.taskCount) ?? 0),
+      primaryCpuCount: Math.max(0, finiteValue(cell?.owned?.cpuCount) ?? 0),
+      currentRuntimeCores: finiteValue(cell?.serviceCores),
+      controllerRuntimeCores: finiteValue(cell?.controllerRuntimeCores),
+      complete: latestCell?.accounting?.complete === true && state != null,
+      overageNs: Math.max(0, finiteValue(cell?.accounting?.overageNs) ?? 0),
+    };
+  });
+  const scaleMaxCores = Math.max(
+    1,
+    ...currentCells.flatMap((cell) => [
+      cell.primaryCpuCount,
+      cell.totalCores ?? 0,
+      cell.accountedCores ?? 0,
+      cell.runtimeCores ?? 0,
+      cell.controllerRuntimeCores ?? 0,
+    ]),
+  );
+  return {
+    alpha: smoothing,
+    cells: currentCells,
+    scaleMaxCores,
   };
 }
 
