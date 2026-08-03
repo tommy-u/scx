@@ -65,6 +65,7 @@ use stats::{
 use task_cells::{ThreadCellAssignment, ThreadCellResponse};
 
 const SCHEDULER_NAME: &str = "scx_snake";
+const MITOSIS_SIM_POLICY: &str = include_str!("../examples/mitosis-sim.toml");
 const SLOT_QUIESCENCE_TIMEOUT: Duration = Duration::from_secs(5);
 const SLOT_QUIESCENCE_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const TIMING_DRAIN_BATCH: usize = 4096;
@@ -94,8 +95,9 @@ enum StatsFormat {
 #[command(name = SCHEDULER_NAME, version)]
 struct Opts {
     /// Queue discipline used after idle-CPU placement misses; VTIME and EEVDF are experimental.
-    #[arg(long, value_enum, default_value_t)]
-    fairness: FairnessMode,
+    /// Defaults to FIFO for --policy; mitosis-sim defaults to VTIME.
+    #[arg(long, value_enum)]
+    fairness: Option<FairnessMode>,
 
     /// Sample one in every N callback executions for timing; zero disables timing.
     #[arg(
@@ -108,8 +110,16 @@ struct Opts {
     callback_timing_sample_rate: u32,
 
     /// TOML policy to compile and install before attaching the scheduler.
-    #[arg(long, value_name = "PATH")]
+    #[arg(long, value_name = "PATH", conflicts_with = "profile")]
     policy: Option<PathBuf>,
+
+    /// Built-in policy profile to compile and install before attaching the scheduler.
+    #[arg(
+        long,
+        value_enum,
+        conflicts_with_all = ["policy", "update_policy"]
+    )]
+    profile: Option<BuiltinProfile>,
 
     /// Atomically replace the policy of the running scheduler.
     #[arg(
@@ -184,9 +194,57 @@ enum RunMode {
     Update(PathBuf),
     SetThreadCell(ThreadCellAssignment),
     ClearThreadCell(i32),
-    Dump(PathBuf),
-    Validate(PathBuf),
-    Launch(PathBuf),
+    Dump(PolicySelection),
+    Validate(PolicySelection),
+    Launch(PolicySelection),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum BuiltinProfile {
+    #[value(name = "mitosis-sim")]
+    MitosisSim,
+}
+
+impl BuiltinProfile {
+    fn source(self) -> &'static str {
+        match self {
+            Self::MitosisSim => MITOSIS_SIM_POLICY,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::MitosisSim => "builtin:mitosis-sim",
+        }
+    }
+
+    fn default_fairness(self) -> FairnessMode {
+        match self {
+            Self::MitosisSim => FairnessMode::Vtime,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum PolicySelection {
+    File(PathBuf),
+    Builtin(BuiltinProfile),
+}
+
+impl PolicySelection {
+    fn label(&self) -> String {
+        match self {
+            Self::File(path) => path.display().to_string(),
+            Self::Builtin(profile) => profile.label().to_owned(),
+        }
+    }
+
+    fn default_fairness(&self) -> FairnessMode {
+        match self {
+            Self::File(_) => FairnessMode::Fifo,
+            Self::Builtin(profile) => profile.default_fairness(),
+        }
+    }
 }
 
 fn parse_positive_seconds(value: &str) -> std::result::Result<f64, String> {
@@ -225,7 +283,7 @@ fn resolve_mode(opts: &Opts) -> Result<RunMode> {
     if special_modes > 1 {
         bail!("control, monitoring, update, and dump modes are mutually exclusive");
     }
-    if opts.fairness != FairnessMode::Fifo && special_modes != 0 {
+    if opts.fairness.is_some() && special_modes != 0 {
         bail!("--fairness is only valid when launching the scheduler");
     }
 
@@ -245,9 +303,15 @@ fn resolve_mode(opts: &Opts) -> Result<RunMode> {
         return Ok(RunMode::ClearThreadCell(tid));
     }
 
-    let policy = opts.policy.clone().ok_or_else(|| {
-        anyhow!("--policy PATH is required when launching, dumping, or validating a policy")
-    })?;
+    let policy = opts
+        .profile
+        .map(PolicySelection::Builtin)
+        .or_else(|| opts.policy.clone().map(PolicySelection::File))
+        .ok_or_else(|| {
+            anyhow!(
+                "--policy PATH or --profile mitosis-sim is required when launching, dumping, or validating a policy"
+            )
+        })?;
     if opts.dump_compiled_policy {
         Ok(RunMode::Dump(policy))
     } else if opts.validate_policy {
@@ -257,13 +321,21 @@ fn resolve_mode(opts: &Opts) -> Result<RunMode> {
     }
 }
 
-fn load_policy(path: &PathBuf) -> Result<(String, CompiledPolicy)> {
-    let source =
-        fs::read_to_string(path).with_context(|| format!("reading policy {}", path.display()))?;
-    let mut compiled = policy::compile_policy(&source)
-        .with_context(|| format!("compiling policy {}", path.display()))?;
+fn effective_fairness(opts: &Opts, policy: &PolicySelection) -> FairnessMode {
+    opts.fairness.unwrap_or_else(|| policy.default_fairness())
+}
+
+fn load_policy(selection: &PolicySelection) -> Result<(String, CompiledPolicy)> {
+    let label = selection.label();
+    let source = match selection {
+        PolicySelection::File(path) => fs::read_to_string(path)
+            .with_context(|| format!("reading policy {}", path.display()))?,
+        PolicySelection::Builtin(profile) => profile.source().to_owned(),
+    };
+    let mut compiled =
+        policy::compile_policy(&source).with_context(|| format!("compiling policy {label}"))?;
     managed_cells::resolve_managed_cells(&mut compiled)
-        .with_context(|| format!("resolving managed cells for policy {}", path.display()))?;
+        .with_context(|| format!("resolving managed cells for policy {label}"))?;
     Ok((source, compiled))
 }
 
@@ -2207,6 +2279,7 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
 
     fn init(
         opts: &Opts,
+        fairness: FairnessMode,
         runtime: &'policy mut RuntimePolicy,
         mask_tables: &[ResolvedMaskTable],
         queue_topology: Option<&queue_topology::QueueTopology>,
@@ -2261,7 +2334,7 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
             .rodata_data
             .as_mut()
             .context("BPF read-only data is unavailable")?;
-        rodata.fairness_mode = opts.fairness as u32;
+        rodata.fairness_mode = fairness as u32;
         rodata.queue_mode = queue_mode_for_topology(queue_topology);
         rodata.expanded_mitosis_select = u32::from(expanded_mitosis);
         let bpf_slice_parameters = BpfSliceParameters::default();
@@ -2340,7 +2413,7 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
             "attached {SCHEDULER_NAME} policy generation {} with {} rungs ({:?} fairness)",
             runtime.generation,
             runtime.compiled.rungs.len(),
-            opts.fairness,
+            fairness,
         );
         let inspector = Inspector::new(
             SlotPolicy::new(
@@ -2351,7 +2424,7 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
                 mask_tables.to_vec(),
                 unix_time_ms(),
             ),
-            opts.fairness,
+            fairness,
             queue_topology.cloned(),
         )
         .with_callback_timing_sample_rate(opts.callback_timing_sample_rate);
@@ -2392,7 +2465,7 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
             stats_server,
             inspector,
             runtime,
-            fairness: opts.fairness,
+            fairness,
             queue_topology: queue_topology.cloned(),
             membership,
             managed_reconcile_interval,
@@ -4110,8 +4183,8 @@ fn main() -> Result<()> {
             println!("{}", control::clear_running_thread_cell(tid)?);
             return Ok(());
         }
-        RunMode::Dump(path) => {
-            let (_, policy) = load_policy(&path)?;
+        RunMode::Dump(selection) => {
+            let (_, policy) = load_policy(&selection)?;
             let mask_tables = resolve_mask_tables(&policy)?;
             print!("{}{}", policy.dump(), dump_mask_tables(&mask_tables));
             if let Some(topology) = resolve_host_queue_topology(&policy)? {
@@ -4119,22 +4192,29 @@ fn main() -> Result<()> {
             }
             return Ok(());
         }
-        RunMode::Validate(path) => {
-            let report = policy_validation::validate_policy_file(&path);
+        RunMode::Validate(selection) => {
+            let report = match selection {
+                PolicySelection::File(path) => policy_validation::validate_policy_file(&path),
+                PolicySelection::Builtin(profile) => {
+                    policy_validation::validate_policy_source(profile.source())
+                }
+            };
             println!("{}", serde_json::to_string_pretty(&report)?);
             if !report.is_valid() {
                 std::process::exit(2);
             }
             return Ok(());
         }
-        RunMode::Launch(path) => {
-            let (source, policy) = load_policy(&path)?;
+        RunMode::Launch(selection) => {
+            let fairness = effective_fairness(&opts, &selection);
+            let (source, policy) = load_policy(&selection)?;
             let mut runtime = RuntimePolicy::new(source, policy);
             init_logging(opts.verbose)?;
             info!(
-                "{} {}",
+                "{} {} loaded policy {}",
                 SCHEDULER_NAME,
-                build_id::full_version(env!("CARGO_PKG_VERSION"))
+                build_id::full_version(env!("CARGO_PKG_VERSION")),
+                selection.label(),
             );
 
             let shutdown = shutdown_flag()?;
@@ -4155,13 +4235,14 @@ fn main() -> Result<()> {
             let mut open_object = MaybeUninit::uninit();
             loop {
                 let queue_topology = resolve_host_queue_topology(&runtime.compiled)?;
-                if queue_topology.is_some() && opts.fairness != FairnessMode::Vtime {
+                if queue_topology.is_some() && fairness != FairnessMode::Vtime {
                     bail!("[queues] policies require --fairness vtime");
                 }
                 let mask_tables = resolve_mask_tables(&runtime.compiled)?;
                 let exit_info = {
                     let mut scheduler = Scheduler::init(
                         &opts,
+                        fairness,
                         &mut runtime,
                         &mask_tables,
                         queue_topology.as_ref(),
@@ -8888,14 +8969,14 @@ scope = "task_cell_borrowable"
         assert!(resolve_mode(&launch)
             .expect_err("launch without a policy must fail")
             .to_string()
-            .contains("--policy"));
+            .contains("--policy PATH or --profile mitosis-sim"));
 
         let dump = Opts::try_parse_from(["scx_snake", "--dump-compiled-policy"])
             .expect("argument parsing itself should succeed");
         assert!(resolve_mode(&dump)
             .expect_err("dump without a policy must fail")
             .to_string()
-            .contains("--policy"));
+            .contains("--policy PATH or --profile mitosis-sim"));
 
         let monitor = Opts::try_parse_from(["scx_snake", "--monitor", "1"])
             .expect("monitor arguments should parse");
@@ -8914,8 +8995,112 @@ scope = "task_cell_borrowable"
         .expect("dump arguments should parse");
         assert!(matches!(
             resolve_mode(&with_policy),
-            Ok(RunMode::Dump(path)) if path == PathBuf::from("/tmp/snake.toml")
+            Ok(RunMode::Dump(PolicySelection::File(path)))
+                if path == PathBuf::from("/tmp/snake.toml")
         ));
+    }
+
+    #[test]
+    fn built_in_mitosis_profile_selects_vtime_for_launch() {
+        let opts = Opts::try_parse_from(["scx_snake", "--profile", "mitosis-sim"])
+            .expect("built-in profile should parse");
+        let mode = resolve_mode(&opts).expect("built-in profile should launch");
+        let RunMode::Launch(selection) = mode else {
+            panic!("profile should select launch mode");
+        };
+
+        assert_eq!(
+            selection,
+            PolicySelection::Builtin(BuiltinProfile::MitosisSim)
+        );
+        assert_eq!(effective_fairness(&opts, &selection), FairnessMode::Vtime);
+    }
+
+    #[test]
+    fn custom_policy_keeps_fifo_as_its_implicit_fairness() {
+        let opts = Opts::try_parse_from(["scx_snake", "--policy", "/tmp/snake.toml"])
+            .expect("custom policy should parse");
+        let mode = resolve_mode(&opts).expect("custom policy should launch");
+        let RunMode::Launch(selection) = mode else {
+            panic!("policy should select launch mode");
+        };
+
+        assert_eq!(effective_fairness(&opts, &selection), FairnessMode::Fifo);
+    }
+
+    #[test]
+    fn explicit_fairness_overrides_the_built_in_profile_default() {
+        let opts = Opts::try_parse_from([
+            "scx_snake",
+            "--profile",
+            "mitosis-sim",
+            "--fairness",
+            "fifo",
+        ])
+        .expect("explicit fairness should parse");
+        let mode = resolve_mode(&opts).expect("built-in profile should launch");
+        let RunMode::Launch(selection) = mode else {
+            panic!("profile should select launch mode");
+        };
+
+        assert_eq!(effective_fairness(&opts, &selection), FairnessMode::Fifo);
+    }
+
+    #[test]
+    fn built_in_profile_supports_dump_and_validation_modes() {
+        let dump = Opts::try_parse_from([
+            "scx_snake",
+            "--profile",
+            "mitosis-sim",
+            "--dump-compiled-policy",
+        ])
+        .expect("built-in dump should parse");
+        assert!(matches!(
+            resolve_mode(&dump),
+            Ok(RunMode::Dump(PolicySelection::Builtin(
+                BuiltinProfile::MitosisSim
+            )))
+        ));
+
+        let validate =
+            Opts::try_parse_from(["scx_snake", "--profile", "mitosis-sim", "--validate-policy"])
+                .expect("built-in validation should parse");
+        assert!(matches!(
+            resolve_mode(&validate),
+            Ok(RunMode::Validate(PolicySelection::Builtin(
+                BuiltinProfile::MitosisSim
+            )))
+        ));
+    }
+
+    #[test]
+    fn built_in_profile_conflicts_with_file_and_update_sources() {
+        assert!(Opts::try_parse_from([
+            "scx_snake",
+            "--profile",
+            "mitosis-sim",
+            "--policy",
+            "/tmp/snake.toml",
+        ])
+        .is_err());
+        assert!(Opts::try_parse_from([
+            "scx_snake",
+            "--profile",
+            "mitosis-sim",
+            "--update-policy",
+            "/tmp/snake.toml",
+        ])
+        .is_err());
+        assert!(Opts::try_parse_from(["scx_snake", "--profile", "unknown"]).is_err());
+    }
+
+    #[test]
+    fn embedded_mitosis_profile_compiles() {
+        let source = BuiltinProfile::MitosisSim.source();
+        let policy = policy::compile_policy(source).expect("embedded profile should compile");
+
+        assert!(policy.queues.is_some());
+        assert!(!policy.rungs.is_empty());
     }
 
     #[test]

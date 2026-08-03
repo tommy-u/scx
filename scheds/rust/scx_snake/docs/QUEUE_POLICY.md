@@ -3,9 +3,10 @@
 Queue policies replace Snake's default global VTIME storage with a fixed-pool
 custom-DSQ topology. The global `llc` layout shards one fairness
 domain by cache locality; `cell` and `cell_llc` add resource allocation to task
-cell annotations. Queue policies require `--fairness vtime` and leave FIFO as
-the scheduler default. `mitosis-sim.toml` is the Production profile; the other
-files are component and demonstration policies.
+cell annotations. Queue policies require VTIME and leave FIFO as the default for
+custom policy files. `--profile mitosis-sim` selects VTIME automatically and
+uses the Production policy embedded at build time from `mitosis-sim.toml`; the
+other files are component and demonstration policies.
 
 See [`../examples/kernel-default-sim.toml`](../examples/kernel-default-sim.toml),
 [`../examples/cell-queues.toml`](../examples/cell-queues.toml),
@@ -210,6 +211,10 @@ Use `--dump-compiled-policy` to inspect the resolved primary and borrowable
 masks before attaching:
 
 ```bash
+./target/release/scx_snake \
+  --profile mitosis-sim \
+  --dump-compiled-policy
+
 ./target/release/scx_snake \
   --policy scheds/rust/scx_snake/examples/cell-queues.toml \
   --dump-compiled-policy
