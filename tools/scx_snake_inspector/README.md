@@ -86,6 +86,15 @@ queue residence and depth capture by DSQ. Successful moves are attributed to
 both queues, so FIFO mode shows the shared source and each observed per-CPU
 local destination.
 
+The Cells view reports managed identity lag from task lifetime runtime in
+`/proc/<tid>/schedstat`. The headline wrong-cell percentage counts only tasks
+created after the previous completed reconciliation that actually transition
+from effective cell 0 to a managed nonzero cell. It shows their runtime before
+correction, timeslices, and correction-latency percentiles. Tasks that existed
+before the prior reconciliation are reported separately as a move-in upper
+bound, capped by the elapsed reconciliation window. Existing tasks observed by
+the initial reconciliation establish a baseline and are not charged.
+
 An aligned strip above the matrix shows per-CPU utilization reported by
 Snake's stats socket. The strip always covers all Snake tasks; TGID and cgroup
 selectors apply only to the migration matrix. Window, CPU order, color scale,

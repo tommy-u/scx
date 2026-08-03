@@ -4362,6 +4362,89 @@ button:focus-visible {
   border-bottom: 1px solid var(--border);
 }
 
+.managed-identity-lag {
+  min-width: 0;
+  padding: 12px clamp(12px, 3vw, 40px);
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+
+.managed-identity-lag-heading h3,
+.managed-identity-lag-heading p,
+.managed-identity-detail h4 {
+  margin: 0;
+}
+
+.managed-identity-lag-heading h3,
+.managed-identity-detail h4 {
+  font-size: 0.82rem;
+}
+
+.managed-identity-lag-heading p {
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 0.64rem;
+}
+
+.managed-identity-lag-body {
+  margin-top: 10px;
+}
+
+.managed-identity-headline,
+.managed-identity-detail dl {
+  margin: 0;
+  display: grid;
+  grid-template-columns: repeat(5, minmax(92px, 1fr));
+}
+
+.managed-identity-headline > div,
+.managed-identity-detail dl > div {
+  min-width: 0;
+  padding: 2px 12px;
+  border-left: 1px solid var(--border);
+}
+
+.managed-identity-headline > div:first-child,
+.managed-identity-detail dl > div:first-child {
+  padding-left: 0;
+  border-left: 0;
+}
+
+.managed-identity-lag dt {
+  color: var(--muted);
+  font-size: 0.56rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.managed-identity-lag dd {
+  margin: 2px 0 0;
+  font-size: 0.76rem;
+  font-weight: 720;
+}
+
+.managed-identity-headline > div:first-child dd {
+  color: var(--active);
+  font-size: 1rem;
+}
+
+.managed-identity-detail {
+  margin-top: 12px;
+  padding-top: 10px;
+  display: grid;
+  grid-template-columns: minmax(0, 1.45fr) minmax(260px, 0.75fr);
+  gap: 24px;
+  border-top: 1px solid var(--border);
+}
+
+.managed-identity-detail h4 {
+  margin-bottom: 7px;
+}
+
+.managed-identity-detail section:last-child dl {
+  grid-template-columns: repeat(3, minmax(86px, 1fr));
+}
+
 .cell-placement-heading {
   min-height: 54px;
   padding: 9px 14px;
@@ -5951,6 +6034,31 @@ button:focus-visible {
   .workload-control-band .apply-button,
   .workload-control-band .secondary-button {
     width: 100%;
+  }
+
+  .managed-identity-headline,
+  .managed-identity-detail dl,
+  .managed-identity-detail section:last-child dl {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    row-gap: 9px;
+  }
+
+  .managed-identity-headline > div,
+  .managed-identity-headline > div:first-child,
+  .managed-identity-detail dl > div,
+  .managed-identity-detail dl > div:first-child {
+    padding: 0 10px;
+    border-left: 1px solid var(--border);
+  }
+
+  .managed-identity-headline > div:nth-child(odd),
+  .managed-identity-detail dl > div:nth-child(odd) {
+    padding-left: 0;
+    border-left: 0;
+  }
+
+  .managed-identity-detail {
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .cell-placement-heading {

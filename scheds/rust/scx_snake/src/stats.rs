@@ -313,6 +313,39 @@ pub struct Metrics {
     #[stat(desc = "Unix timestamp in milliseconds of the latest managed-cell rebalance")]
     #[serde(default)]
     pub managed_last_rebalance_at_ms: u64,
+    #[stat(desc = "Managed new-task candidates corrected from effective cell zero")]
+    #[serde(default)]
+    pub managed_identity_new_task_candidates: u64,
+    #[stat(desc = "Managed new-task candidates with nonzero preassignment runtime")]
+    #[serde(default)]
+    pub managed_identity_new_task_affected: u64,
+    #[stat(desc = "Conservative new-task runtime delivered before managed cell assignment")]
+    #[serde(default)]
+    pub managed_identity_new_task_runtime_ns: u64,
+    #[stat(desc = "New-task timeslices delivered before managed cell assignment")]
+    #[serde(default)]
+    pub managed_identity_new_task_timeslices: u64,
+    #[stat(desc = "Existing-task move-in candidates corrected from effective cell zero")]
+    #[serde(default)]
+    pub managed_identity_move_in_candidates: u64,
+    #[stat(desc = "Move-in candidates with a nonzero preassignment runtime upper bound")]
+    #[serde(default)]
+    pub managed_identity_move_in_affected: u64,
+    #[stat(desc = "Upper bound on move-in runtime delivered before managed cell assignment")]
+    #[serde(default)]
+    pub managed_identity_move_in_runtime_upper_bound_ns: u64,
+    #[stat(desc = "Total new-task latency from task creation to managed cell correction")]
+    #[serde(default)]
+    pub managed_identity_correction_latency_ns_total: u64,
+    #[stat(desc = "Maximum new-task latency from creation to managed cell correction")]
+    #[serde(default)]
+    pub managed_identity_correction_latency_ns_max: u64,
+    #[stat(
+        desc = "Base-2 correction-latency buckets for managed new tasks",
+        _om_skip
+    )]
+    #[serde(default)]
+    pub managed_identity_correction_latency_buckets: Vec<u64>,
     #[stat(desc = "Active scheduler fairness discipline", _om_skip)]
     pub fairness_mode: String,
     #[stat(desc = "Number of select_cpu callback invocations")]
@@ -446,6 +479,36 @@ impl Metrics {
                 .managed_rebalance_count
                 .saturating_sub(previous.managed_rebalance_count),
             managed_last_rebalance_at_ms: self.managed_last_rebalance_at_ms,
+            managed_identity_new_task_candidates: self
+                .managed_identity_new_task_candidates
+                .saturating_sub(previous.managed_identity_new_task_candidates),
+            managed_identity_new_task_affected: self
+                .managed_identity_new_task_affected
+                .saturating_sub(previous.managed_identity_new_task_affected),
+            managed_identity_new_task_runtime_ns: self
+                .managed_identity_new_task_runtime_ns
+                .saturating_sub(previous.managed_identity_new_task_runtime_ns),
+            managed_identity_new_task_timeslices: self
+                .managed_identity_new_task_timeslices
+                .saturating_sub(previous.managed_identity_new_task_timeslices),
+            managed_identity_move_in_candidates: self
+                .managed_identity_move_in_candidates
+                .saturating_sub(previous.managed_identity_move_in_candidates),
+            managed_identity_move_in_affected: self
+                .managed_identity_move_in_affected
+                .saturating_sub(previous.managed_identity_move_in_affected),
+            managed_identity_move_in_runtime_upper_bound_ns: self
+                .managed_identity_move_in_runtime_upper_bound_ns
+                .saturating_sub(previous.managed_identity_move_in_runtime_upper_bound_ns),
+            managed_identity_correction_latency_ns_total: self
+                .managed_identity_correction_latency_ns_total
+                .saturating_sub(previous.managed_identity_correction_latency_ns_total),
+            managed_identity_correction_latency_ns_max: self
+                .managed_identity_correction_latency_ns_max,
+            managed_identity_correction_latency_buckets: delta_buckets(
+                &self.managed_identity_correction_latency_buckets,
+                &previous.managed_identity_correction_latency_buckets,
+            ),
             fairness_mode: self.fairness_mode.clone(),
             select_calls: self.select_calls.saturating_sub(previous.select_calls),
             dispatch_calls: self.dispatch_calls.saturating_sub(previous.dispatch_calls),
@@ -623,6 +686,8 @@ impl Metrics {
                 "  callbacks enqueue: {} | dispatch: {} | running: {} | stopping: {} | quiescent: {}\n",
                 "  membership runs no-cell: {} | invalid: {}\n",
                 "  managed rebalances: {} | latest at ms: {}\n",
+                "  managed identity new-task candidates/affected: {}/{} | preassignment runtime ns: {} | timeslices: {}\n",
+                "  managed identity move-in candidates/affected: {}/{} | runtime upper bound ns: {} | correction latency total/max ns: {}/{}\n",
                 "  FIFO shared enqueues/dispatches: {}/{}\n",
                 "  select latency ns total: {} | average: {} | cumulative max: {}\n",
                 "  cell rehomes: {} | deferred rehomes: {} | queue preemptions/stale runs: {}/{} | borrow yields: {}\n",
@@ -650,6 +715,15 @@ impl Metrics {
             self.membership_invalid_runs,
             self.managed_rebalance_count,
             self.managed_last_rebalance_at_ms,
+            self.managed_identity_new_task_candidates,
+            self.managed_identity_new_task_affected,
+            self.managed_identity_new_task_runtime_ns,
+            self.managed_identity_new_task_timeslices,
+            self.managed_identity_move_in_candidates,
+            self.managed_identity_move_in_affected,
+            self.managed_identity_move_in_runtime_upper_bound_ns,
+            self.managed_identity_correction_latency_ns_total,
+            self.managed_identity_correction_latency_ns_max,
             self.fifo_shared_enqueues,
             self.fifo_shared_dispatches,
             self.select_latency_ns,
@@ -757,6 +831,16 @@ impl Metrics {
             encoded
         })
     }
+}
+
+fn delta_buckets(current: &[u64], previous: &[u64]) -> Vec<u64> {
+    current
+        .iter()
+        .enumerate()
+        .map(|(index, count)| {
+            count.saturating_sub(previous.get(index).copied().unwrap_or_default())
+        })
+        .collect()
 }
 
 pub fn server_data() -> StatsServerData<SchedulerRequest, SchedulerResponse> {
@@ -1521,6 +1605,33 @@ mod tests {
         let delta = current.delta(&previous);
         assert_eq!(delta.managed_rebalance_count, 1);
         assert_eq!(delta.managed_last_rebalance_at_ms, 200);
+    }
+
+    #[test]
+    fn managed_identity_lag_uses_the_fresh_generation_window() {
+        let previous = Metrics {
+            policy_generation: 7,
+            managed_identity_new_task_candidates: 3,
+            managed_identity_new_task_runtime_ns: 40,
+            managed_identity_correction_latency_buckets: vec![0, 2, 1],
+            ..Default::default()
+        };
+        let current = Metrics {
+            policy_generation: 8,
+            managed_identity_new_task_candidates: 5,
+            managed_identity_new_task_runtime_ns: 90,
+            managed_identity_correction_latency_buckets: vec![1, 4, 1],
+            ..Default::default()
+        };
+
+        let delta = current.delta(&previous);
+
+        assert_eq!(delta.managed_identity_new_task_candidates, 5);
+        assert_eq!(delta.managed_identity_new_task_runtime_ns, 90);
+        assert_eq!(
+            delta.managed_identity_correction_latency_buckets,
+            vec![1, 4, 1]
+        );
     }
 
     #[test]

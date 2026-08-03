@@ -407,6 +407,17 @@
             <button class="secondary-button" id="clearWorkloadCell" type="button">Clear override</button>
             <p class="control-message hidden" id="workloadAssignmentNotice" role="status"></p>
           </section>
+          <section class="managed-identity-lag" id="managedIdentityLag" aria-labelledby="managedIdentityLagTitle" data-feedback-key="Cells:Managed-identity-lag">
+            <header class="managed-identity-lag-heading">
+              <div>
+                <h3 id="managedIdentityLagTitle">Managed identity lag</h3>
+                <p>Effective cell 0 before userspace assigns the managed cell</p>
+              </div>
+            </header>
+            <div class="managed-identity-lag-body" id="managedIdentityLagBody" aria-live="polite">
+              <p class="empty-state">Waiting for managed-cell metrics.</p>
+            </div>
+          </section>
           <section class="cell-placement-overview" aria-labelledby="cellPlacementTitle" data-feedback-key="Cells:CPU-placement">
             <header class="cell-placement-heading">
               <div>

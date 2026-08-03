@@ -37,7 +37,7 @@ use inspection::{InspectionView, Inspector, SlotPolicy};
 use libbpf_rs::{AsRawLibbpf as _, MapCore as _, MapFlags, OpenObject, ProgramInput};
 use log::{debug, info, warn};
 use mask_tables::{dump_mask_tables, resolve_mask_tables, ResolvedMaskTable};
-use membership::{CellDirectory, MembershipManager};
+use membership::{CellDirectory, ManagedIdentityLag, MembershipManager};
 use parameters::{
     BpfParameters, BpfSliceParameters, ManagedCellResizingParameters, SchedulerParameters,
     UserspaceParameters,
@@ -1678,6 +1678,16 @@ fn aggregate_raw_stats(
         policy_generation: generation,
         managed_rebalance_count: 0,
         managed_last_rebalance_at_ms: 0,
+        managed_identity_new_task_candidates: 0,
+        managed_identity_new_task_affected: 0,
+        managed_identity_new_task_runtime_ns: 0,
+        managed_identity_new_task_timeslices: 0,
+        managed_identity_move_in_candidates: 0,
+        managed_identity_move_in_affected: 0,
+        managed_identity_move_in_runtime_upper_bound_ns: 0,
+        managed_identity_correction_latency_ns_total: 0,
+        managed_identity_correction_latency_ns_max: 0,
+        managed_identity_correction_latency_buckets: Vec::new(),
         fairness_mode: fairness.as_str().into(),
         select_calls: value(bpf_intf::snake_stat_SNAKE_STAT_SELECT_CALLS),
         dispatch_calls: value(bpf_intf::snake_stat_SNAKE_STAT_DISPATCH_CALLS),
@@ -2165,6 +2175,7 @@ struct Scheduler<'object, 'policy> {
     next_rebalance_allowed: Option<Instant>,
     managed_rebalance_count: u64,
     managed_last_rebalance_at_ms: u64,
+    managed_identity_lag: ManagedIdentityLag,
     callback_timing_sample_rate: u32,
     bpf_slice_parameters: BpfSliceParameters,
     fine_timing_state: fine_timing::FineTimingState,
@@ -2392,6 +2403,7 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
             next_rebalance_allowed,
             managed_rebalance_count: 0,
             managed_last_rebalance_at_ms: 0,
+            managed_identity_lag: ManagedIdentityLag::default(),
             callback_timing_sample_rate: opts.callback_timing_sample_rate,
             bpf_slice_parameters,
             fine_timing_state: fine_timing::FineTimingState::default(),
@@ -2433,6 +2445,23 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
         }
         metrics.managed_rebalance_count = self.managed_rebalance_count;
         metrics.managed_last_rebalance_at_ms = self.managed_last_rebalance_at_ms;
+        metrics.managed_identity_new_task_candidates =
+            self.managed_identity_lag.new_task_candidates;
+        metrics.managed_identity_new_task_affected = self.managed_identity_lag.new_task_affected;
+        metrics.managed_identity_new_task_runtime_ns =
+            self.managed_identity_lag.new_task_runtime_ns;
+        metrics.managed_identity_new_task_timeslices =
+            self.managed_identity_lag.new_task_timeslices;
+        metrics.managed_identity_move_in_candidates = self.managed_identity_lag.move_in_candidates;
+        metrics.managed_identity_move_in_affected = self.managed_identity_lag.move_in_affected;
+        metrics.managed_identity_move_in_runtime_upper_bound_ns =
+            self.managed_identity_lag.move_in_runtime_upper_bound_ns;
+        metrics.managed_identity_correction_latency_ns_total =
+            self.managed_identity_lag.correction_latency_ns_total;
+        metrics.managed_identity_correction_latency_ns_max =
+            self.managed_identity_lag.correction_latency_ns_max;
+        metrics.managed_identity_correction_latency_buckets =
+            self.managed_identity_lag.correction_latency_buckets.clone();
         metrics.callback_timing = aggregate_raw_callback_timing(&read_raw_callback_timing(
             &self.skel,
             self.runtime.active_slot,
@@ -2539,6 +2568,7 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
             frozen_metrics,
             activated_at_ms,
         );
+        self.managed_identity_lag = ManagedIdentityLag::default();
         info!(
             "activated policy generation {} ({})",
             response.generation, response.summary
@@ -2814,6 +2844,7 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
         ));
         self.managed_rebalance_count = 0;
         self.managed_last_rebalance_at_ms = 0;
+        self.managed_identity_lag = ManagedIdentityLag::default();
         if let Err(error) = self.rebase_managed_demand() {
             warn!("managed-cell demand rebase after stats reset failed: {error:#}");
         }
@@ -3574,6 +3605,7 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
         transition.complete_stage("quiescence", quiescence_started.elapsed());
         set_queue_draining(&mut self.skel, false)?;
         self.queue_topology = Some(topology.clone());
+        self.managed_identity_lag = ManagedIdentityLag::default();
         if let Err(error) = self.rebase_managed_demand() {
             warn!("managed-cell demand rebase after topology change failed: {error:#}");
         }
@@ -3825,6 +3857,7 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
         transition.complete_stage("quiescence", quiescence_started.elapsed());
         set_queue_draining(&mut self.skel, false)?;
         self.queue_topology = Some(topology.clone());
+        self.managed_identity_lag = ManagedIdentityLag::default();
         if let Err(error) = self.rebase_managed_demand() {
             warn!("managed-cell demand rebase after resize failed: {error:#}");
         }
@@ -3956,10 +3989,15 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
             self.reconcile_managed_cells_if_due()?;
             if let Some(manager) = &mut self.membership {
                 match manager.reconcile_if_due(&self.skel.maps.task_cells) {
-                    Ok(Some(report)) if report.updated != 0 || report.transient != 0 => debug!(
-                        "membership reconciliation discovered {}, updated {}, transient {}",
-                        report.discovered, report.updated, report.transient
-                    ),
+                    Ok(Some(report)) => {
+                        self.managed_identity_lag.merge(&report.identity_lag);
+                        if report.updated != 0 || report.transient != 0 {
+                            debug!(
+                                "membership reconciliation discovered {}, updated {}, transient {}",
+                                report.discovered, report.updated, report.transient
+                            );
+                        }
+                    }
                     Ok(_) => {}
                     Err(error) => {
                         if manager.identity_errors_are_fatal() && !live_managed_cells {

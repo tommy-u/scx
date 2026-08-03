@@ -91,10 +91,168 @@ impl KnownTask {
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ReconcileTimestamp {
+    boottime_ns: u64,
+}
+
+impl ReconcileTimestamp {
+    fn now() -> Result<Self> {
+        let mut timestamp = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        // SAFETY: timestamp points to writable storage for one timespec.
+        if unsafe { libc::clock_gettime(libc::CLOCK_BOOTTIME, &mut timestamp) } != 0 {
+            return Err(std::io::Error::last_os_error()).context("reading CLOCK_BOOTTIME");
+        }
+        Ok(Self {
+            boottime_ns: (timestamp.tv_sec as u64)
+                .saturating_mul(1_000_000_000)
+                .saturating_add(timestamp.tv_nsec as u64),
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct TaskSchedstat {
+    runtime_ns: u64,
+    timeslices: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PreassignmentKind {
+    NewTask,
+    MoveIn,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PreassignmentObservation {
+    kind: PreassignmentKind,
+    runtime_ns: u64,
+    timeslices: u64,
+    correction_latency_ns: u64,
+}
+
+pub const MANAGED_IDENTITY_LATENCY_BUCKETS: usize = 64;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ManagedIdentityLag {
+    pub new_task_candidates: u64,
+    pub new_task_affected: u64,
+    pub new_task_runtime_ns: u64,
+    pub new_task_timeslices: u64,
+    pub move_in_candidates: u64,
+    pub move_in_affected: u64,
+    pub move_in_runtime_upper_bound_ns: u64,
+    pub correction_latency_ns_total: u64,
+    pub correction_latency_ns_max: u64,
+    pub correction_latency_buckets: Vec<u64>,
+}
+
+impl Default for ManagedIdentityLag {
+    fn default() -> Self {
+        Self {
+            new_task_candidates: 0,
+            new_task_affected: 0,
+            new_task_runtime_ns: 0,
+            new_task_timeslices: 0,
+            move_in_candidates: 0,
+            move_in_affected: 0,
+            move_in_runtime_upper_bound_ns: 0,
+            correction_latency_ns_total: 0,
+            correction_latency_ns_max: 0,
+            correction_latency_buckets: vec![0; MANAGED_IDENTITY_LATENCY_BUCKETS],
+        }
+    }
+}
+
+impl ManagedIdentityLag {
+    pub fn merge(&mut self, other: &Self) {
+        self.new_task_candidates = self
+            .new_task_candidates
+            .saturating_add(other.new_task_candidates);
+        self.new_task_affected = self
+            .new_task_affected
+            .saturating_add(other.new_task_affected);
+        self.new_task_runtime_ns = self
+            .new_task_runtime_ns
+            .saturating_add(other.new_task_runtime_ns);
+        self.new_task_timeslices = self
+            .new_task_timeslices
+            .saturating_add(other.new_task_timeslices);
+        self.move_in_candidates = self
+            .move_in_candidates
+            .saturating_add(other.move_in_candidates);
+        self.move_in_affected = self.move_in_affected.saturating_add(other.move_in_affected);
+        self.move_in_runtime_upper_bound_ns = self
+            .move_in_runtime_upper_bound_ns
+            .saturating_add(other.move_in_runtime_upper_bound_ns);
+        self.correction_latency_ns_total = self
+            .correction_latency_ns_total
+            .saturating_add(other.correction_latency_ns_total);
+        self.correction_latency_ns_max = self
+            .correction_latency_ns_max
+            .max(other.correction_latency_ns_max);
+        for (bucket, count) in self
+            .correction_latency_buckets
+            .iter_mut()
+            .zip(&other.correction_latency_buckets)
+        {
+            *bucket = bucket.saturating_add(*count);
+        }
+    }
+
+    fn record(&mut self, observation: PreassignmentObservation) {
+        match observation.kind {
+            PreassignmentKind::NewTask => {
+                self.new_task_candidates = self.new_task_candidates.saturating_add(1);
+                self.new_task_affected = self
+                    .new_task_affected
+                    .saturating_add(u64::from(observation.runtime_ns > 0));
+                self.new_task_runtime_ns = self
+                    .new_task_runtime_ns
+                    .saturating_add(observation.runtime_ns);
+                self.new_task_timeslices = self
+                    .new_task_timeslices
+                    .saturating_add(observation.timeslices);
+                self.correction_latency_ns_total = self
+                    .correction_latency_ns_total
+                    .saturating_add(observation.correction_latency_ns);
+                self.correction_latency_ns_max = self
+                    .correction_latency_ns_max
+                    .max(observation.correction_latency_ns);
+                let bucket = log2_bucket(observation.correction_latency_ns);
+                self.correction_latency_buckets[bucket] =
+                    self.correction_latency_buckets[bucket].saturating_add(1);
+            }
+            PreassignmentKind::MoveIn => {
+                self.move_in_candidates = self.move_in_candidates.saturating_add(1);
+                self.move_in_affected = self
+                    .move_in_affected
+                    .saturating_add(u64::from(observation.runtime_ns > 0));
+                self.move_in_runtime_upper_bound_ns = self
+                    .move_in_runtime_upper_bound_ns
+                    .saturating_add(observation.runtime_ns);
+            }
+        }
+    }
+}
+
+fn log2_bucket(value: u64) -> usize {
+    if value > 1 {
+        (u64::BITS - 1 - value.leading_zeros()) as usize
+    } else {
+        0
+    }
+    .min(MANAGED_IDENTITY_LATENCY_BUCKETS - 1)
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ReconcileReport {
     pub discovered: usize,
     pub updated: usize,
     pub transient: usize,
+    pub identity_lag: ManagedIdentityLag,
 }
 
 pub struct MembershipManager {
@@ -105,6 +263,8 @@ pub struct MembershipManager {
     known: HashMap<i32, KnownTask>,
     pidfds: HashMap<i32, OwnedFd>,
     proc_root: PathBuf,
+    clock_ticks_per_second: u64,
+    previous_reconcile_at: Option<ReconcileTimestamp>,
 }
 
 impl MembershipManager {
@@ -123,6 +283,8 @@ impl MembershipManager {
             known: HashMap::new(),
             pidfds: HashMap::new(),
             proc_root: PathBuf::from("/proc"),
+            clock_ticks_per_second: clock_ticks_per_second()?,
+            previous_reconcile_at: None,
         };
         manager.replace_directory(CellDirectory::from_policy(policy, slot_epochs));
         Ok(manager)
@@ -140,6 +302,7 @@ impl MembershipManager {
     pub(crate) fn replace_directory(&mut self, directory: CellDirectory) {
         self.directory = directory;
         self.next_reconcile = Instant::now();
+        self.previous_reconcile_at = None;
     }
 
     pub fn reconcile_if_due(&mut self, map: &impl MapCore) -> Result<Option<ReconcileReport>> {
@@ -150,6 +313,7 @@ impl MembershipManager {
     }
 
     pub fn reconcile(&mut self, map: &impl MapCore) -> Result<ReconcileReport> {
+        let observed_at = ReconcileTimestamp::now()?;
         self.next_reconcile = Instant::now() + self.interval;
         self.prune_exited_tasks()?;
         let desired =
@@ -181,9 +345,36 @@ impl MembershipManager {
                 .get(&tid)
                 .expect("reconciliation update must have a desired task");
             let cell = task.membership.cell_ref();
+            let schedstat = if cell.cell_id != 0 && self.previous_reconcile_at.is_some() {
+                match read_task_schedstat(&self.proc_root, tid) {
+                    Ok(schedstat) => schedstat,
+                    Err(error) => {
+                        warn!("could not sample preassignment runtime for TID {tid}: {error:#}");
+                        None
+                    }
+                }
+            } else {
+                None
+            };
             match task_cells::set_managed_task_cell(map, tid, cell) {
-                Ok(pidfd) => {
-                    self.pidfds.insert(tid, pidfd);
+                Ok(update) => {
+                    if update.previous_effective_cell_id == 0
+                        && update.effective_cell_id == cell.cell_id
+                        && cell.cell_id != 0
+                    {
+                        if let Some(schedstat) = schedstat {
+                            if let Some(observation) = classify_preassignment(
+                                task.start_time,
+                                self.previous_reconcile_at,
+                                observed_at,
+                                schedstat,
+                                self.clock_ticks_per_second,
+                            ) {
+                                report.identity_lag.record(observation);
+                            }
+                        }
+                    }
+                    self.pidfds.insert(tid, update.pidfd);
                     applied.insert(tid, *task);
                     report.updated += 1;
                 }
@@ -202,6 +393,7 @@ impl MembershipManager {
         }
 
         self.known = applied;
+        self.previous_reconcile_at = Some(observed_at);
         Ok(report)
     }
 
@@ -396,6 +588,84 @@ fn read_task_start_time(proc_root: &Path, tid: i32) -> Result<Option<u64>> {
         Err(error) => return Err(error).with_context(|| format!("reading stat for TID {tid}")),
     };
     parse_task_start_time(&stat).map(Some)
+}
+
+fn clock_ticks_per_second() -> Result<u64> {
+    // SAFETY: sysconf has no pointer arguments and does not retain state.
+    let ticks = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+    if ticks <= 0 {
+        bail!("could not determine clock ticks per second");
+    }
+    Ok(ticks as u64)
+}
+
+fn read_task_schedstat(proc_root: &Path, tid: i32) -> Result<Option<TaskSchedstat>> {
+    let schedstat = match fs::read_to_string(proc_root.join(tid.to_string()).join("schedstat")) {
+        Ok(schedstat) => schedstat,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error).with_context(|| format!("reading schedstat for TID {tid}"))
+        }
+    };
+    parse_task_schedstat(&schedstat).map(Some)
+}
+
+fn parse_task_schedstat(schedstat: &str) -> Result<TaskSchedstat> {
+    let mut fields = schedstat.split_whitespace();
+    let runtime_ns = fields
+        .next()
+        .context("task schedstat has no runtime field")?
+        .parse()
+        .context("task schedstat has an invalid runtime field")?;
+    fields
+        .next()
+        .context("task schedstat has no runqueue-delay field")?;
+    let timeslices = fields
+        .next()
+        .context("task schedstat has no timeslice field")?
+        .parse()
+        .context("task schedstat has an invalid timeslice field")?;
+    Ok(TaskSchedstat {
+        runtime_ns,
+        timeslices,
+    })
+}
+
+fn classify_preassignment(
+    task_start_ticks: u64,
+    previous_reconcile_at: Option<ReconcileTimestamp>,
+    observed_at: ReconcileTimestamp,
+    schedstat: TaskSchedstat,
+    ticks_per_second: u64,
+) -> Option<PreassignmentObservation> {
+    let previous_reconcile_at = previous_reconcile_at?;
+    if ticks_per_second == 0 {
+        return None;
+    }
+    let start_ns = ((task_start_ticks as u128).saturating_mul(1_000_000_000)
+        / ticks_per_second as u128)
+        .min(u64::MAX as u128) as u64;
+    let is_new_task = start_ns > previous_reconcile_at.boottime_ns;
+    let correction_latency_ns = observed_at.boottime_ns.saturating_sub(start_ns);
+    let runtime_ns = if is_new_task {
+        schedstat.runtime_ns
+    } else {
+        schedstat.runtime_ns.min(
+            observed_at
+                .boottime_ns
+                .saturating_sub(previous_reconcile_at.boottime_ns),
+        )
+    };
+    Some(PreassignmentObservation {
+        kind: if is_new_task {
+            PreassignmentKind::NewTask
+        } else {
+            PreassignmentKind::MoveIn
+        },
+        runtime_ns,
+        timeslices: schedstat.timeslices,
+        correction_latency_ns,
+    })
 }
 
 fn parse_task_start_time(stat: &str) -> Result<u64> {
@@ -643,6 +913,8 @@ mod tests {
             known: HashMap::new(),
             pidfds: HashMap::new(),
             proc_root: PathBuf::from("/unused-proc"),
+            clock_ticks_per_second: 100,
+            previous_reconcile_at: Some(ReconcileTimestamp { boottime_ns: 1 }),
         };
         let replacement = CellDirectory::new(BTreeMap::from([(
             "batch".into(),
@@ -656,6 +928,7 @@ mod tests {
 
         assert_eq!(manager.directory, replacement);
         assert_eq!(manager.time_until_reconcile(), Duration::ZERO);
+        assert_eq!(manager.previous_reconcile_at, None);
     }
 
     #[test]
@@ -684,6 +957,83 @@ mod tests {
         assert_eq!(
             parse_task_start_time(&task_stat(42, 123456)).unwrap(),
             123456
+        );
+    }
+
+    #[test]
+    fn parses_runtime_and_timeslices_from_schedstat() {
+        assert_eq!(
+            parse_task_schedstat("123456789 42000 17\n").unwrap(),
+            TaskSchedstat {
+                runtime_ns: 123456789,
+                timeslices: 17,
+            }
+        );
+    }
+
+    #[test]
+    fn new_task_preassignment_uses_exact_lifetime_runtime() {
+        let observation = classify_preassignment(
+            110,
+            Some(ReconcileTimestamp {
+                boottime_ns: 1_000_000_000,
+            }),
+            ReconcileTimestamp {
+                boottime_ns: 1_500_000_000,
+            },
+            TaskSchedstat {
+                runtime_ns: 123_000_000,
+                timeslices: 17,
+            },
+            100,
+        )
+        .unwrap();
+
+        assert_eq!(observation.kind, PreassignmentKind::NewTask);
+        assert_eq!(observation.runtime_ns, 123_000_000);
+        assert_eq!(observation.timeslices, 17);
+        assert_eq!(observation.correction_latency_ns, 400_000_000);
+    }
+
+    #[test]
+    fn move_in_preassignment_is_capped_by_the_reconciliation_window() {
+        let observation = classify_preassignment(
+            50,
+            Some(ReconcileTimestamp {
+                boottime_ns: 1_000_000_000,
+            }),
+            ReconcileTimestamp {
+                boottime_ns: 1_200_000_000,
+            },
+            TaskSchedstat {
+                runtime_ns: 900_000_000,
+                timeslices: 99,
+            },
+            100,
+        )
+        .unwrap();
+
+        assert_eq!(observation.kind, PreassignmentKind::MoveIn);
+        assert_eq!(observation.runtime_ns, 200_000_000);
+        assert_eq!(observation.timeslices, 99);
+    }
+
+    #[test]
+    fn initial_reconciliation_only_establishes_a_baseline() {
+        assert_eq!(
+            classify_preassignment(
+                50,
+                None,
+                ReconcileTimestamp {
+                    boottime_ns: 1_200_000_000,
+                },
+                TaskSchedstat {
+                    runtime_ns: 900_000_000,
+                    timeslices: 99,
+                },
+                100,
+            ),
+            None
         );
     }
 }

@@ -2483,6 +2483,90 @@ export function cellWorkspaceTabModel(activeTab = "layout") {
   }));
 }
 
+function log2BucketPercentile(buckets, percentile) {
+  const counts = Array.isArray(buckets) ? buckets : [];
+  const samples = counts.reduce(
+    (total, count) => total + Math.max(0, Number(count) || 0),
+    0,
+  );
+  if (samples === 0) {
+    return null;
+  }
+  const rank = Math.ceil(samples * percentile);
+  let cumulative = 0;
+  for (let bucket = 0; bucket < counts.length; bucket += 1) {
+    cumulative += Math.max(0, Number(counts[bucket]) || 0);
+    if (cumulative >= rank) {
+      return bucket >= 52 ? Number.MAX_SAFE_INTEGER : (2 ** (bucket + 1)) - 1;
+    }
+  }
+  return null;
+}
+
+export function managedIdentityLagModel(inspection) {
+  const activeSlot = (inspection?.slots || []).find((slot) => (
+    slot.state === "active" || slot.slot === inspection?.active_slot
+  )) || null;
+  const metrics = activeSlot?.metrics || null;
+  const available = Boolean(
+    metrics
+    && Object.prototype.hasOwnProperty.call(
+      metrics,
+      "managed_identity_new_task_candidates",
+    )
+  );
+  if (!available) {
+    return {
+      available: false,
+      headlineRuntimePct: null,
+      newTasks: null,
+      moveIns: null,
+      correctionLatency: null,
+    };
+  }
+  const count = (name) => Math.max(0, Number(metrics[name]) || 0);
+  const newTaskRuntimeNs = count("managed_identity_new_task_runtime_ns");
+  const managedRuntimeNs = Object.entries(metrics.cells || {}).reduce(
+    (total, [cellId, cell]) => (
+      Number(cell?.id ?? cellId) === 0
+        ? total
+        : total + Math.max(0, Number(cell?.runtime_ns) || 0)
+    ),
+    0,
+  );
+  const headlineDenominatorNs = managedRuntimeNs + newTaskRuntimeNs;
+  const candidates = count("managed_identity_new_task_candidates");
+  const latencyBuckets = metrics.managed_identity_correction_latency_buckets;
+  return {
+    available: true,
+    headlineRuntimePct: headlineDenominatorNs > 0
+      ? newTaskRuntimeNs * 100 / headlineDenominatorNs
+      : 0,
+    newTasks: {
+      candidates,
+      affected: count("managed_identity_new_task_affected"),
+      runtimeNs: newTaskRuntimeNs,
+      timeslices: count("managed_identity_new_task_timeslices"),
+    },
+    moveIns: {
+      candidates: count("managed_identity_move_in_candidates"),
+      affected: count("managed_identity_move_in_affected"),
+      runtimeUpperBoundNs: count("managed_identity_move_in_runtime_upper_bound_ns"),
+    },
+    correctionLatency: {
+      meanNs: candidates > 0
+        ? Math.floor(count("managed_identity_correction_latency_ns_total") / candidates)
+        : null,
+      p50Ns: log2BucketPercentile(latencyBuckets, 0.50),
+      p95Ns: log2BucketPercentile(latencyBuckets, 0.95),
+      p99Ns: log2BucketPercentile(latencyBuckets, 0.99),
+      maxNs: candidates > 0
+        ? count("managed_identity_correction_latency_ns_max")
+        : null,
+    },
+  };
+}
+
 export function nextCellWorkspaceTab(activeTab, key) {
   const tabs = CELL_WORKSPACE_TABS.map((tab) => tab.id);
   const current = Math.max(0, tabs.indexOf(activeTab));
