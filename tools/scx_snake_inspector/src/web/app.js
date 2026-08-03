@@ -5306,7 +5306,9 @@ function renderCellAccountingRow(cell, accounting, scaleMaxCores) {
     ? null
     : (hardirq || 0) + (softirq || 0);
   const status = !accounting?.complete
-    ? "Collecting one clean, aligned accounting sample."
+    ? accounting?.reconciliationSupported === false
+      ? `Current sample exceeds owned capacity after neutral-time reconciliation (${formatUtilizationCores(accounting.currentUnreconciledOverageCores || 0)} cores). Measured work was not altered.`
+      : "Collecting one clean, aligned accounting sample."
     : !accounting.foreignAffinitySupported
       ? "Foreign pinned work is included in foreign scheduled work by this Snake version."
       : accounting.overageNs > 0
@@ -5329,6 +5331,7 @@ function renderCellAccountingRow(cell, accounting, scaleMaxCores) {
         <div><dt>IRQ / SoftIRQ</dt><dd>${formatUtilizationCores(irq)}${irq == null ? "" : " cores"}</dd></div>
         <div><dt>Other tasks</dt><dd>${formatUtilizationCores(accounting?.parts?.otherTask)}${accounting?.parts?.otherTask == null ? "" : " cores"}</dd></div>
         <div><dt>Residual</dt><dd>${formatUtilizationCores(accounting?.parts?.residual)}${accounting?.parts?.residual == null ? "" : " cores"}</dd></div>
+        <div><dt title="Signed correction applied only to residual, idle/wait, or steal so the stack equals owned CPU time.">Window adjustment</dt><dd>${accounting?.adjustmentCores == null ? "—" : `${accounting.adjustmentCores > 0 ? "+" : ""}${formatUtilizationCores(accounting.adjustmentCores)} cores`}</dd></div>
       </dl>
       ${renderCellAccountingDetails(cell)}
     </article>`;

@@ -2297,6 +2297,12 @@ test("cell accounting reconciles owned capacity and smooths absolute runtime cor
   assert.equal(skewed.overageNs, 10_000_000);
   assert.equal(skewed.complete, true);
 
+  const excessiveSkewFixture = JSON.parse(JSON.stringify(fixture));
+  excessiveSkewFixture.snapshot.host_cpu_usage[0].snake_ns -= 100_000_000;
+  const excessiveSkew = cellUtilizationModel(excessiveSkewFixture).cells[0].accounting;
+  assert.equal(excessiveSkew.overageNs, 100_000_000);
+  assert.equal(excessiveSkew.complete, false);
+
   const skewedModel = cellUtilizationModel(skewedFixture);
   const skewedSample = cellRebalanceSample({
     utilization: skewedModel,
@@ -2309,8 +2315,13 @@ test("cell accounting reconciles owned capacity and smooths absolute runtime cor
     samples: [skewedSample],
     alpha: 1,
   });
-  assert.equal(skewedEwma.cells[0].accountedCores, 2.01);
-  assert.equal(skewedEwma.scaleMaxCores, 2.01);
+  assert.equal(skewedEwma.cells[0].unreconciledCores, 2.01);
+  assert.equal(skewedEwma.cells[0].accountedCores, 2);
+  assert.equal(skewedEwma.cells[0].totalCores, 2);
+  assert.equal(skewedEwma.cells[0].parts.residual, 0);
+  assert.equal(skewedEwma.cells[0].parts.idleWait, 1.05);
+  assert.ok(Math.abs(skewedEwma.cells[0].adjustmentCores + 0.01) < 1e-12);
+  assert.equal(skewedEwma.scaleMaxCores, 2);
 
   const mixedGeneration = cellRebalanceSample({
     utilization: model,
@@ -2345,6 +2356,64 @@ test("cell accounting reconciles owned capacity and smooths absolute runtime cor
   assert.equal(ewma.cells[0].parts.foreignPinned, 0.12);
   assert.equal(ewma.cells[0].controllerRuntimeCores, 1.2);
   assert.equal(ewma.scaleMaxCores, 2);
+
+  const underfilled = JSON.parse(JSON.stringify(first));
+  underfilled.sampledAtMs = 2_500;
+  underfilled.cells[0].accounting.idleWaitNs -= 100_000_000;
+  const underfilledEwma = cellAccountingEwmaModel({
+    utilization: model,
+    samples: [underfilled],
+    alpha: 1,
+  });
+  assert.equal(underfilledEwma.cells[0].unreconciledCores, 1.9);
+  assert.ok(Math.abs(underfilledEwma.cells[0].parts.residual - 0.1) < 1e-12);
+  assert.equal(underfilledEwma.cells[0].accountedCores, 2);
+  assert.ok(Math.abs(underfilledEwma.cells[0].adjustmentCores - 0.1) < 1e-12);
+
+  const saturated = JSON.parse(JSON.stringify(first));
+  saturated.sampledAtMs = 2_750;
+  for (const field of [
+    "foreignFlexibleNs",
+    "foreignPinnedNs",
+    "foreignCombinedNs",
+    "otherTaskNs",
+    "hardirqNs",
+    "softirqNs",
+    "idleWaitNs",
+    "stealNs",
+    "residualNs",
+  ]) {
+    saturated.cells[0].accounting[field] = 0;
+  }
+  saturated.cells[0].accounting.homeNs = 2_100_000_000;
+  saturated.cells[0].accounting.idleWaitNs = 50_000_000;
+  const saturatedEwma = cellAccountingEwmaModel({
+    utilization: model,
+    samples: [saturated],
+    alpha: 1,
+  });
+  assert.equal(saturatedEwma.cells[0].complete, false);
+  assert.equal(saturatedEwma.cells[0].reconciliationSupported, false);
+  assert.equal(saturatedEwma.cells[0].runtimeCores, null);
+  assert.ok(Math.abs(saturatedEwma.cells[0].currentAdjustmentCores + 0.15) < 1e-12);
+  assert.ok(Math.abs(
+    saturatedEwma.cells[0].currentUnreconciledOverageCores - 0.1,
+  ) < 1e-12);
+
+  const resized = JSON.parse(JSON.stringify(first));
+  resized.sampledAtMs = 3_000;
+  resized.cells[0].cpuCount = 3;
+  const resizedEwma = cellAccountingEwmaModel({
+    utilization: model,
+    samples: [first, resized],
+    alpha: 0.5,
+  });
+  const resizedCell = resizedEwma.cells[0];
+  const resizedParts = Object.values(resizedCell.parts)
+    .reduce((total, value) => total + value, 0);
+  assert.equal(resizedCell.totalCores, 2.5);
+  assert.ok(Math.abs(resizedParts - resizedCell.totalCores) < 1e-12);
+  assert.ok(Math.abs(resizedCell.adjustmentCores - 0.5) < 1e-12);
 
   const gatedCurrent = JSON.parse(JSON.stringify(mixedGeneration));
   gatedCurrent.sampledAtMs = 3_000;

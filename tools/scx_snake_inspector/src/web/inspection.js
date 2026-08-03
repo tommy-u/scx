@@ -2283,8 +2283,8 @@ function cellOwnedAccounting(cell, owned, snakeOverlayReady) {
     0,
   );
   const toleranceNs = Math.max(
-    Math.max(1, finiteValue(owned?.cpuCount) ?? 0) * 20_000_000,
-    totalNs * 0.002,
+    Math.max(1, finiteValue(owned?.cpuCount) ?? 0) * 30_000_000,
+    totalNs * 0.003,
   );
   const complete = snakeOverlayReady
     && totalNs > 0
@@ -2908,6 +2908,42 @@ function cellAccountingEwma(previous, current, alpha) {
   return previous == null ? current : previous + alpha * (current - previous);
 }
 
+function reconcileCellAccountingParts(parts, capacityCores) {
+  const rawParts = { ...parts };
+  const reconciled = { ...parts };
+  const unreconciledCores = Object.values(reconciled)
+    .reduce((total, value) => total + value, 0);
+  const adjustmentCores = Math.max(0, capacityCores) - unreconciledCores;
+  let difference = adjustmentCores;
+  if (difference >= 0) {
+    reconciled.residual = (reconciled.residual || 0) + difference;
+  } else {
+    let overage = -difference;
+    for (const field of ["residual", "idleWait", "steal"]) {
+      const reduction = Math.min(overage, reconciled[field] || 0);
+      const remaining = Math.max(0, (reconciled[field] || 0) - reduction);
+      reconciled[field] = remaining < 1e-9 ? 0 : remaining;
+      overage = Math.max(0, overage - reduction);
+    }
+    if (overage > 1e-9) {
+      return {
+        complete: false,
+        parts: rawParts,
+        unreconciledCores,
+        adjustmentCores,
+        unreconciledOverageCores: overage,
+      };
+    }
+  }
+  return {
+    complete: true,
+    parts: reconciled,
+    unreconciledCores,
+    adjustmentCores,
+    unreconciledOverageCores: 0,
+  };
+}
+
 export function cellAccountingEwmaModel({
   utilization,
   samples = [],
@@ -2923,6 +2959,7 @@ export function cellAccountingEwmaModel({
     String(cell?.identityKey || ""),
     cell,
   ]));
+  const latestReconciliations = new Map();
   for (const sample of orderedSamples) {
     const observedNs = Math.max(0, finiteValue(sample?.observedMs) ?? 0) * 1_000_000;
     if (observedNs <= 0) {
@@ -2934,22 +2971,47 @@ export function cellAccountingEwmaModel({
         continue;
       }
       const previous = states.get(identityKey);
-      const parts = {};
+      const sampleParts = {};
       for (const [source, target] of CELL_ACCOUNTING_EWMA_FIELDS) {
         const runtimeNs = finiteValue(cell.accounting?.[source]);
         const cores = runtimeNs === null ? 0 : Math.max(0, runtimeNs) / observedNs;
-        parts[target] = cellAccountingEwma(previous?.parts?.[target], cores, smoothing);
+        sampleParts[target] = cores;
       }
-      const totalCores = Math.max(0, finiteValue(cell.accounting?.totalNs) ?? 0) / observedNs;
-      const accountedCores = Object.values(parts).reduce((total, value) => total + value, 0);
+      const capacityCores = Math.max(0, finiteValue(cell?.cpuCount) ?? 0);
+      const reconciled = reconcileCellAccountingParts(sampleParts, capacityCores);
+      if (sample === latestSample) {
+        latestReconciliations.set(identityKey, reconciled);
+      }
+      if (!reconciled.complete) {
+        continue;
+      }
+      const parts = Object.fromEntries(Object.entries(reconciled.parts).map(([field, cores]) => [
+        field,
+        cellAccountingEwma(previous?.parts?.[field], cores, smoothing),
+      ]));
+      const totalCores = cellAccountingEwma(
+        previous?.totalCores,
+        capacityCores,
+        smoothing,
+      );
       const runtimeCores = Math.max(0, finiteValue(cell?.demandCores) ?? 0);
       states.set(identityKey, {
         identityKey,
         id: finiteValue(cell?.id),
         slotEpoch: Math.max(0, finiteValue(cell?.slotEpoch) ?? 0),
         runtimeCores: cellAccountingEwma(previous?.runtimeCores, runtimeCores, smoothing),
-        totalCores: cellAccountingEwma(previous?.totalCores, totalCores, smoothing),
-        accountedCores,
+        totalCores,
+        accountedCores: totalCores,
+        unreconciledCores: cellAccountingEwma(
+          previous?.unreconciledCores,
+          reconciled.unreconciledCores,
+          smoothing,
+        ),
+        adjustmentCores: cellAccountingEwma(
+          previous?.adjustmentCores,
+          reconciled.adjustmentCores,
+          smoothing,
+        ),
         parts,
         sampleCount: (previous?.sampleCount || 0) + 1,
         foreignAffinitySupported: cell.accounting?.foreignAffinitySupported === true,
@@ -2960,6 +3022,7 @@ export function cellAccountingEwmaModel({
     const identityKey = `${cell.id}:${Math.max(0, finiteValue(cell?.slotEpoch) ?? 0)}`;
     const state = states.get(identityKey);
     const latestCell = latestCells.get(identityKey);
+    const latestReconciliation = latestReconciliations.get(identityKey);
     return {
       ...(state || {
         identityKey,
@@ -2968,6 +3031,8 @@ export function cellAccountingEwmaModel({
         runtimeCores: null,
         totalCores: null,
         accountedCores: null,
+        unreconciledCores: null,
+        adjustmentCores: null,
         parts: {},
         sampleCount: 0,
         foreignAffinitySupported: cell?.accounting?.foreignAffinitySupported === true,
@@ -2977,7 +3042,14 @@ export function cellAccountingEwmaModel({
       primaryCpuCount: Math.max(0, finiteValue(cell?.owned?.cpuCount) ?? 0),
       currentRuntimeCores: finiteValue(cell?.serviceCores),
       controllerRuntimeCores: finiteValue(cell?.controllerRuntimeCores),
-      complete: latestCell?.accounting?.complete === true && state != null,
+      complete: latestCell?.accounting?.complete === true
+        && latestReconciliation?.complete === true
+        && state != null,
+      reconciliationSupported: latestReconciliation?.complete !== false,
+      currentAdjustmentCores: finiteValue(latestReconciliation?.adjustmentCores),
+      currentUnreconciledOverageCores: finiteValue(
+        latestReconciliation?.unreconciledOverageCores,
+      ),
       overageNs: Math.max(0, finiteValue(cell?.accounting?.overageNs) ?? 0),
     };
   });
