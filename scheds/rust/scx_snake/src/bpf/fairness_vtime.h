@@ -6,6 +6,15 @@
 #include "queue_timing.h"
 #include "queue.h"
 
+extern u64 vtime_slice_ns;
+
+static __always_inline u64 fairness_vtime_base_slice(void)
+{
+	u64 slice = READ_ONCE(vtime_slice_ns);
+
+	return slice ? slice : SNAKE_VTIME_SLICE_NS;
+}
+
 struct snake_vtime_domain {
 	struct bpf_spin_lock lock;
 	u32		     pad;
@@ -33,14 +42,14 @@ static __always_inline u64 fairness_vtime_slice(u32 weight)
 		weight = SNAKE_BASE_WEIGHT;
 	if (weight > SNAKE_BASE_WEIGHT)
 		weight = SNAKE_BASE_WEIGHT;
-	slice = (SNAKE_VTIME_SLICE_NS / SNAKE_BASE_WEIGHT) * weight;
+	slice = (fairness_vtime_base_slice() / SNAKE_BASE_WEIGHT) * weight;
 	return slice < SNAKE_VTIME_MIN_SLICE_NS ? SNAKE_VTIME_MIN_SLICE_NS :
 						  slice;
 }
 
 static __always_inline u64 fairness_vtime_run_start(u64 vruntime, u64 frontier)
 {
-	u64 minimum = frontier - SNAKE_VTIME_SLICE_NS;
+	u64 minimum = frontier - fairness_vtime_base_slice();
 
 	return time_before(vruntime, minimum) ? minimum : vruntime;
 }
@@ -140,7 +149,7 @@ fairness_vtime_prepare_runnable(struct snake_ladder_ctx *ctx,
 	bpf_spin_lock(&domain->lock);
 	vtime_now = domain->vtime_now;
 	bpf_spin_unlock(&domain->lock);
-	minimum = vtime_now - SNAKE_VTIME_SLICE_NS;
+	minimum = vtime_now - fairness_vtime_base_slice();
 	if (time_before(runtime->vruntime, minimum)) {
 		runtime->vruntime = minimum;
 		stat_inc(ctx, SNAKE_STAT_VTIME_CREDIT_CLAMPS);

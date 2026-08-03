@@ -48,19 +48,20 @@ for placement experiments and compatibility comparisons.
 
 VTIME uses one global custom DSQ for unrestricted tasks and one custom DSQ per
 CPU for affinity-restricted tasks. Every queue is ordered by task virtual
-runtime and shares the same global clock. VTIME scales its physical slice down
-for weights below the baseline of 100, with a 1 ms floor for scheduler-tick
-granularity, and caps it at 5 ms for larger weights:
+runtime and shares the same global clock. Let `S` be the configurable VTIME base
+slice, which defaults to 5 ms and must be at least 1 ms. VTIME scales its
+physical slice down for weights below the baseline of 100, with a 1 ms floor
+for scheduler-tick granularity, and caps it at `S` for larger weights:
 
 ```text
-physical_slice_ns = max(1 ms, 5 ms * min(task.weight, 100) / 100)
+physical_slice_ns = max(1 ms, S * min(task.weight, 100) / 100)
 ```
 
-Thus weights 1 through 20 receive 1 ms, weight 50 receives 2.5 ms, and weight
-100 or higher receives 5 ms. A weight below 20 advances farther in virtual time
-per turn and is therefore chosen less frequently; over a complete virtual
-period, physical service remains proportional to task weight. Weights above
-100 advance less per 5 ms turn and are chosen more frequently.
+With the default, weights 1 through 20 receive 1 ms, weight 50 receives 2.5 ms,
+and weight 100 or higher receives 5 ms. A weight below 20 advances farther in
+virtual time per turn and is therefore chosen less frequently; over a complete
+virtual period, physical service remains proportional to task weight. Weights
+above 100 advance less per capped turn and are chosen more frequently.
 
 Snake derives virtual service from both measured runtime and the consumed
 sched_ext slice. Initial dispatch establishes a service budget. Each
@@ -85,6 +86,23 @@ run. A weight change while the task waits does not reinterpret an already
 assigned slice under the new weight; the next enqueue or direct assignment
 adopts the new value.
 
+### Optional pinned-waiter slice shrinking
+
+Snake records each task's runtime with an EWMA using alpha 1/8. When an
+affinity-restricted task waits behind the current task on its selected CPU,
+Snake derives a smaller limit from the waiter's EWMA:
+
+```text
+limit = clamp(waiter.avg_runtime * multiplier, min_slice, max_slice)
+runner.slice = min(runner.slice, limit)
+```
+
+The feature is disabled by default. Its minimum, maximum, and multiplier are
+live BPF parameters exposed by the Inspector. Lowering a current slice also
+removes the same amount from that run's service budget, so VTIME never charges
+the runner for service it was prevented from receiving. Counters distinguish
+minimum-clamped, proportional, and maximum-clamped shrink decisions.
+
 The global frontier follows the latest virtual runtime observed when a task
 starts running:
 
@@ -96,7 +114,7 @@ Before a runnable task is dispatched or enqueued, Snake limits accumulated
 sleeper or queue-wait credit to one virtual slice:
 
 ```text
-task.vruntime = max(task.vruntime, vtime_now - 5 ms)
+task.vruntime = max(task.vruntime, vtime_now - S)
 ```
 
 The clamp is repeated when the task starts running because a shared frontier can

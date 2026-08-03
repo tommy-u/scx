@@ -426,8 +426,8 @@ not need per-stage visibility.
 
 This profile models Mitosis cell discovery, CPU ownership, placement, direct
 dispatch, borrowing, demand rebalancing with orphan draining, same-cell
-sibling-LLC stealing, and one VTIME domain per cell. Slice shrinking remains
-outside the profile.
+sibling-LLC stealing, one VTIME domain per cell, and optional pinned-waiter
+slice shrinking.
 
 ## Live updates
 
@@ -436,6 +436,14 @@ An explicit live policy update must resolve to the exact same layout, cells,
 weights, primary allocation, borrowable masks, normal queues, and CPU queues.
 For `llc`, CPU-to-local routes and normal consumer masks must also match. Restart
 Snake to change any of them through policy replacement.
+
+VTIME slice parameters are independent of the policy bank. The Inspector
+updates the base slice, shrinking enable bit, minimum, maximum, and runtime
+multiplier as one validated control request. BPF temporarily disables shrinking
+while publishing the other values, then publishes the requested enable state.
+Existing queued tasks retain their assigned slice; subsequent dispatches use
+the new base. A current runner can be shortened immediately when an affinity
+waiter is observed.
 
 Managed-cell reconciliation may rebind that fixed pool. Structural changes
 first divert new enqueues to CPU-local DSQs and wait for custom queues to empty,

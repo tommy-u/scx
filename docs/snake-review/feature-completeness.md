@@ -60,6 +60,7 @@ Category estimate: **92%**.
 | Queue-mode per-cell/LLC VTIME | 82% | Medium | Experimental; no hierarchical group fairness |
 | Weight, slice, and replenishment accounting | 78% | Medium | EEVDF validation remains incorrect |
 | Sleeper-credit and lag clamps | 88% | Medium | Wraparound/concurrency assumptions lack long soak evidence |
+| Pinned-waiter slice shrinking | 80% | Medium | Implemented and observable; pinned-latency and fairness evidence remains limited |
 
 EEVDF's failure is explicit: the pinned nice-level demo produces approximately
 equal service rather than weighted shares
@@ -112,7 +113,7 @@ general resource elasticity**.
 Atomic slot publication is implemented in
 [runtime_policy.rs](../../scheds/rust/scx_snake/src/runtime_policy.rs#L112-L167) and
 [main.h](../../scheds/rust/scx_snake/src/bpf/main.h#L170-L212). Current
-`intf.h` and `POLICY_LOWERING.md` now agree on ABI 30, nine generic placement
+`intf.h` and `POLICY_LOWERING.md` now agree on ABI 31, nine generic placement
 rungs, the exact sixteen-rung expanded Mitosis ladder, and eight
 enqueue/dispatch rungs. The versioned `--validate-policy` JSON record exposes
 both placement limits to automation without loading BPF.
@@ -179,6 +180,7 @@ production web application.
 | Queue timing | 82% | High | Sampled capture and duplicated transport parsing |
 | Policy introspection | 85% | High | Scheduler-specific schema |
 | Policy catalog/live activation | 88% | Medium | Compatibility remains scheduler-specific |
+| Live scheduler parameter controls | 88% | Medium | VTIME slice and shrinking are live; topology and fairness still require restart |
 | Scheduler lifecycle | 92% | Medium | External attachment association is heuristic |
 | Cells and workload assignment | 78% | Medium | Snapshot-only bulk target and serial per-TID RPCs |
 | Overview, debugging, host context | 82% | Medium | Recent code, environment-specific dependencies |

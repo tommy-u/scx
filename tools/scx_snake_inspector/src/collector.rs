@@ -341,6 +341,20 @@ pub struct UserspaceParameters {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SliceShrinkingParameters {
+    pub enabled: bool,
+    pub min_us: u64,
+    pub max_us: u64,
+    pub multiplier: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct BpfSliceParameters {
+    pub vtime_slice_us: u64,
+    pub slice_shrinking: SliceShrinkingParameters,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct StatsResetResponse {
     pub generation: u64,
     pub active_slot: u32,
@@ -376,6 +390,10 @@ pub enum CollectorCommand {
     SetUserspaceParameters {
         parameters: UserspaceParameters,
         response: std::sync::mpsc::SyncSender<std::result::Result<UserspaceParameters, String>>,
+    },
+    SetBpfSliceParameters {
+        parameters: BpfSliceParameters,
+        response: std::sync::mpsc::SyncSender<std::result::Result<BpfSliceParameters, String>>,
     },
     SetWorkloadCell {
         target: WorkloadTarget,
@@ -435,6 +453,14 @@ impl PartialEq for CollectorCommand {
             (
                 Self::SetQueueTiming { enabled: left, .. },
                 Self::SetQueueTiming { enabled: right, .. },
+            ) => left == right,
+            (
+                Self::SetBpfSliceParameters {
+                    parameters: left, ..
+                },
+                Self::SetBpfSliceParameters {
+                    parameters: right, ..
+                },
             ) => left == right,
             (Self::ResetStats { .. }, Self::ResetStats { .. }) => true,
             (Self::Shutdown, Self::Shutdown) => true,
@@ -630,12 +656,20 @@ pub fn run_collector(
                 parameters,
                 response,
             }) => {
-                let result = set_userspace_parameters(
-                    &mut stats_client,
-                    &options.stats_path,
-                    &parameters,
-                )
-                .map_err(|error| format!("{error:#}"));
+                let result =
+                    set_userspace_parameters(&mut stats_client, &options.stats_path, &parameters)
+                        .map_err(|error| format!("{error:#}"));
+                let _ = response.send(result);
+                next_inspection_at = Instant::now();
+                continue;
+            }
+            Ok(CollectorCommand::SetBpfSliceParameters {
+                parameters,
+                response,
+            }) => {
+                let result =
+                    set_bpf_slice_parameters(&mut stats_client, &options.stats_path, &parameters)
+                        .map_err(|error| format!("{error:#}"));
                 let _ = response.send(result);
                 next_inspection_at = Instant::now();
                 continue;
@@ -994,6 +1028,51 @@ fn set_userspace_parameters(
                 ),
             ],
         )
+}
+
+pub fn bpf_slice_parameters_args(parameters: &BpfSliceParameters) -> Vec<(String, String)> {
+    vec![
+        ("target".into(), "bpf_slice_parameters_set".into()),
+        (
+            "vtime_slice_us".into(),
+            parameters.vtime_slice_us.to_string(),
+        ),
+        (
+            "slice_shrinking_enabled".into(),
+            parameters.slice_shrinking.enabled.to_string(),
+        ),
+        (
+            "slice_shrink_min_us".into(),
+            parameters.slice_shrinking.min_us.to_string(),
+        ),
+        (
+            "slice_shrink_max_us".into(),
+            parameters.slice_shrinking.max_us.to_string(),
+        ),
+        (
+            "slice_shrink_multiplier".into(),
+            parameters.slice_shrinking.multiplier.to_string(),
+        ),
+    ]
+}
+
+fn set_bpf_slice_parameters(
+    client: &mut Option<StatsClient>,
+    stats_path: &Path,
+    parameters: &BpfSliceParameters,
+) -> Result<BpfSliceParameters> {
+    if client.is_none() {
+        *client = Some(
+            StatsClient::new()
+                .set_path(stats_path)
+                .connect(Some(STATS_TIMEOUT_MS))
+                .with_context(|| format!("connecting to {}", stats_path.display()))?,
+        );
+    }
+    client
+        .as_mut()
+        .context("Snake stats client is unavailable")?
+        .request("stats", bpf_slice_parameters_args(parameters))
 }
 
 fn reset_scheduler_stats(

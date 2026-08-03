@@ -547,6 +547,9 @@ test("VTIME debug model summarizes the active generation without inventing thres
         vtime_clock_cas_exhaustions: 0,
         vtime_accounting_errors: 2,
         vtime_equal_head_ties: 5,
+        slice_shrink_min: 11,
+        slice_shrink_proportional: 12,
+        slice_shrink_max: 13,
         vtime_direct_runtime_ns: 20,
         vtime_queued_runtime_ns: 80,
         select_calls: 120,
@@ -600,6 +603,9 @@ test("VTIME debug model summarizes the active generation without inventing thres
   assert.ok(model.counters.relevant.some((counter) => counter.key === "vtime_credit_clamps"));
   assert.ok(model.counters.relevant.some((counter) => counter.key === "vtime_clock_cas_retries"));
   assert.ok(model.counters.relevant.some((counter) => counter.key === "vtime_clock_cas_exhaustions"));
+  assert.ok(model.counters.relevant.some((counter) => counter.key === "slice_shrink_min"));
+  assert.ok(model.counters.relevant.some((counter) => counter.key === "slice_shrink_proportional"));
+  assert.ok(model.counters.relevant.some((counter) => counter.key === "slice_shrink_max"));
   assert.ok(model.counters.inactive.some((counter) => counter.key === "fifo_shared_enqueues"));
   assert.ok(model.counters.inactive.some((counter) => counter.key === "eevdf_lag_clamps"));
   assert.ok(!model.counters.inactive.some((counter) => counter.key.startsWith("vtime_")));

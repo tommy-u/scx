@@ -586,6 +586,26 @@
                       <span>Queue timing</span>
                       <input id="parameterQueueTiming" type="checkbox" role="switch">
                     </label>
+                    <label>
+                      <span>VTIME slice</span>
+                      <span class="parameter-input"><input id="parameterVtimeSliceUs" type="number" min="1000" step="500"><em>µs</em></span>
+                    </label>
+                    <label class="parameter-toggle-row">
+                      <span>Slice shrinking</span>
+                      <input id="parameterSliceShrinking" type="checkbox" role="switch">
+                    </label>
+                    <label>
+                      <span>Shrink minimum</span>
+                      <span class="parameter-input"><input id="parameterSliceShrinkMinUs" type="number" min="1" step="100"><em>µs</em></span>
+                    </label>
+                    <label>
+                      <span>Shrink maximum</span>
+                      <span class="parameter-input"><input id="parameterSliceShrinkMaxUs" type="number" min="1" step="100"><em>µs</em></span>
+                    </label>
+                    <label>
+                      <span>Runtime multiplier</span>
+                      <span class="parameter-input"><input id="parameterSliceShrinkMultiplier" type="number" min="1" step="1"><em>×</em></span>
+                    </label>
                   </div>
                   <dl class="scheduler-parameter-facts">
                     <div><dt>Fairness</dt><dd id="parameterFairness">—</dd></div>

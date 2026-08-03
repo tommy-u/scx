@@ -13,7 +13,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::control::{SchedulerRequest, SchedulerResponse};
 use crate::fine_timing::FineTimingCallback;
-use crate::parameters::{ManagedCellResizingParameters, UserspaceParameters};
+use crate::parameters::{
+    BpfSliceParameters, ManagedCellResizingParameters, SliceShrinkingParameters,
+    UserspaceParameters,
+};
 use crate::task_cells::ThreadCellAssignment;
 
 #[stat_doc]
@@ -356,6 +359,12 @@ pub struct Metrics {
     pub queue_stale_rehome_runs: u64,
     #[stat(desc = "Directly borrowed slices forced back through enqueue")]
     pub queue_borrow_yields: u64,
+    #[stat(desc = "Running slices shrunk to the configured minimum")]
+    pub slice_shrink_min: u64,
+    #[stat(desc = "Running slices shrunk proportionally to waiter runtime")]
+    pub slice_shrink_proportional: u64,
+    #[stat(desc = "Running slices shrunk to the configured maximum")]
+    pub slice_shrink_max: u64,
     #[stat(desc = "Tasks inserted into the VTIME ordered queue")]
     pub vtime_enqueues: u64,
     #[stat(desc = "Tasks dispatched from the VTIME ordered queue")]
@@ -482,6 +491,15 @@ impl Metrics {
             queue_borrow_yields: self
                 .queue_borrow_yields
                 .saturating_sub(previous.queue_borrow_yields),
+            slice_shrink_min: self
+                .slice_shrink_min
+                .saturating_sub(previous.slice_shrink_min),
+            slice_shrink_proportional: self
+                .slice_shrink_proportional
+                .saturating_sub(previous.slice_shrink_proportional),
+            slice_shrink_max: self
+                .slice_shrink_max
+                .saturating_sub(previous.slice_shrink_max),
             vtime_enqueues: self.vtime_enqueues.saturating_sub(previous.vtime_enqueues),
             vtime_dispatches: self
                 .vtime_dispatches
@@ -608,6 +626,7 @@ impl Metrics {
                 "  FIFO shared enqueues/dispatches: {}/{}\n",
                 "  select latency ns total: {} | average: {} | cumulative max: {}\n",
                 "  cell rehomes: {} | deferred rehomes: {} | queue preemptions/stale runs: {}/{} | borrow yields: {}\n",
+                "  slice shrinking min/proportional/max: {}/{}/{}\n",
                 "  VTIME enqueues: {} (per-CPU: {}) | dispatches: {} (per-CPU: {}) | strict sync queues: {}\n",
                 "  VTIME direct/queued runtime ns: {}/{} | credit clamps: {} | clock CAS retries/exhaustions: {}/{} | accounting errors: {} | equal-head ties: {}\n",
                 "  EEVDF eligible/future enqueues: {}/{} | promotions: {} | forced advances: {} | dispatches: {}\n",
@@ -641,6 +660,9 @@ impl Metrics {
             self.queue_rehome_preemptions,
             self.queue_stale_rehome_runs,
             self.queue_borrow_yields,
+            self.slice_shrink_min,
+            self.slice_shrink_proportional,
+            self.slice_shrink_max,
             self.vtime_enqueues,
             self.vtime_cpu_enqueues,
             self.vtime_dispatches,
@@ -953,6 +975,53 @@ pub fn server_data() -> StatsServerData<SchedulerRequest, SchedulerResponse> {
             Ok(read)
         });
 
+    let set_bpf_slice_parameters: Box<dyn StatsOpener<SchedulerRequest, SchedulerResponse>> =
+        Box::new(move |_| {
+            let read: Box<dyn StatsReader<SchedulerRequest, SchedulerResponse>> =
+                Box::new(move |args, (req_ch, res_ch)| {
+                    let parameters = BpfSliceParameters {
+                        vtime_slice_us: parse_arg::<u64>(
+                            args,
+                            "vtime_slice_us",
+                            "bpf_slice_parameters_set",
+                        )?,
+                        slice_shrinking: SliceShrinkingParameters {
+                            enabled: parse_arg::<bool>(
+                                args,
+                                "slice_shrinking_enabled",
+                                "bpf_slice_parameters_set",
+                            )?,
+                            min_us: parse_arg::<u64>(
+                                args,
+                                "slice_shrink_min_us",
+                                "bpf_slice_parameters_set",
+                            )?,
+                            max_us: parse_arg::<u64>(
+                                args,
+                                "slice_shrink_max_us",
+                                "bpf_slice_parameters_set",
+                            )?,
+                            multiplier: parse_arg::<u32>(
+                                args,
+                                "slice_shrink_multiplier",
+                                "bpf_slice_parameters_set",
+                            )?,
+                        },
+                    };
+                    req_ch.send(SchedulerRequest::SetBpfSliceParameters(parameters))?;
+                    match res_ch.recv()? {
+                        SchedulerResponse::BpfSliceParameters(Ok(response)) => {
+                            Ok(serde_json::to_value(response)?)
+                        }
+                        SchedulerResponse::BpfSliceParameters(Err(error)) => bail!(error),
+                        response => bail!(
+                            "unexpected response to BPF slice parameter request: {response:?}"
+                        ),
+                    }
+                });
+            Ok(read)
+        });
+
     let reset_stats: Box<dyn StatsOpener<SchedulerRequest, SchedulerResponse>> =
         Box::new(move |_| {
             let read: Box<dyn StatsReader<SchedulerRequest, SchedulerResponse>> =
@@ -1032,6 +1101,13 @@ pub fn server_data() -> StatsServerData<SchedulerRequest, SchedulerResponse> {
             "userspace_parameters_set",
             StatsOps {
                 open: set_userspace_parameters,
+                close: None,
+            },
+        )
+        .add_ops(
+            "bpf_slice_parameters_set",
+            StatsOps {
+                open: set_bpf_slice_parameters,
                 close: None,
             },
         )
@@ -1183,6 +1259,9 @@ mod tests {
             queue_rehome_preemptions: 8,
             queue_stale_rehome_runs: 6,
             queue_borrow_yields: 4,
+            slice_shrink_min: 3,
+            slice_shrink_proportional: 2,
+            slice_shrink_max: 1,
             vtime_cpu_enqueues: 20,
             vtime_cpu_dispatches: 19,
             vtime_clock_cas_retries: 18,
@@ -1206,6 +1285,9 @@ mod tests {
             queue_rehome_preemptions: 1,
             queue_stale_rehome_runs: 0,
             queue_borrow_yields: 0,
+            slice_shrink_min: 0,
+            slice_shrink_proportional: 0,
+            slice_shrink_max: 0,
             vtime_cpu_enqueues: 2,
             vtime_cpu_dispatches: 1,
             vtime_clock_cas_retries: 1,
@@ -1225,6 +1307,9 @@ mod tests {
         assert_eq!(delta.fifo_shared_enqueues, 0);
         assert_eq!(delta.fifo_shared_dispatches, 0);
         assert_eq!(delta.running, 0);
+        assert_eq!(delta.slice_shrink_min, 0);
+        assert_eq!(delta.slice_shrink_proportional, 0);
+        assert_eq!(delta.slice_shrink_max, 0);
         assert_eq!(delta.stopping, 0);
         assert_eq!(delta.quiescent, 0);
         assert_eq!(delta.select_latency_ns, 0);

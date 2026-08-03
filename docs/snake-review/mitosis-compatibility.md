@@ -74,7 +74,7 @@ Snake should not copy that property.
 | Cell intersect previous LLC placement | Missing | `previous_llc` and `task_cell` are separate sources. |
 | Same-cell sibling-shard recovery | Present | Earliest remote shard head is scanned. |
 | Orphaned shard drain after owner move | Partial | Managed transitions drain the fixed DSQ pool; no demand controller initiates owner moves. |
-| Pinned-waiter slice shrinking | Missing | Snake's slice is shorter, but no waiter-aware mechanism exists. |
+| Pinned-waiter slice shrinking | Present | Optional waiter-runtime EWMA limits the current slice; all thresholds are live Inspector controls. |
 | Task rehome across clocks | Present | One stale run is preserved, then bounded-lag translation converges. |
 | Detailed metrics/inspection | Present or stronger | Managed allocation and rebalance fields are missing. |
 | Exit and task dumps | Partial | Exit buffer exists; `.dump` and `.dump_task` callbacks do not. |

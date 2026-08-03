@@ -174,6 +174,13 @@ test("scheduler parameter panel keeps userspace and BPF values in separate group
       fairness: "vtime",
       queue_layout: "cell_llc",
       direct_dispatch: false,
+      vtime_slice_us: 20_000,
+      slice_shrinking: {
+        enabled: true,
+        min_us: 500,
+        max_us: 4_000,
+        multiplier: 2,
+      },
     },
   }, {
     sample_ms: "750",
@@ -225,6 +232,13 @@ test("scheduler parameter panel keeps userspace and BPF values in separate group
     fairness: "vtime",
     queue_layout: "cell_llc",
     direct_dispatch: false,
+    vtime_slice_us: 20_000,
+    slice_shrinking: {
+      enabled: true,
+      min_us: 500,
+      max_us: 4_000,
+      multiplier: 2,
+    },
   });
   assert.deepEqual(
     model.bpf.fields.map(({ key, effectiveValue, editable, applyKind }) => ({
@@ -259,7 +273,126 @@ test("scheduler parameter panel keeps userspace and BPF values in separate group
         editable: false,
         applyKind: null,
       },
+      {
+        key: "vtime_slice_us",
+        effectiveValue: 20_000,
+        editable: true,
+        applyKind: "bpf-slice",
+      },
+      {
+        key: "slice_shrinking.enabled",
+        effectiveValue: true,
+        editable: true,
+        applyKind: "bpf-slice",
+      },
+      {
+        key: "slice_shrinking.min_us",
+        effectiveValue: 500,
+        editable: true,
+        applyKind: "bpf-slice",
+      },
+      {
+        key: "slice_shrinking.max_us",
+        effectiveValue: 4_000,
+        editable: true,
+        applyKind: "bpf-slice",
+      },
+      {
+        key: "slice_shrinking.multiplier",
+        effectiveValue: 2,
+        editable: true,
+        applyKind: "bpf-slice",
+      },
     ],
+  );
+});
+
+test("BPF slice parameter helper builds a nested numeric API request", () => {
+  assert.equal(typeof inspectionState.bpfSliceParameterRequest, "function");
+  if (typeof inspectionState.bpfSliceParameterRequest !== "function") {
+    return;
+  }
+
+  assert.deepEqual(inspectionState.bpfSliceParameterRequest({
+    vtime_slice_us: "20000",
+    slice_shrinking: {
+      enabled: true,
+      min_us: "500",
+      max_us: "4000",
+      multiplier: "2",
+    },
+  }), {
+    vtime_slice_us: 20_000,
+    slice_shrinking: {
+      enabled: true,
+      min_us: 500,
+      max_us: 4_000,
+      multiplier: 2,
+    },
+  });
+});
+
+test("BPF slice parameter helper validates positive values and ordered limits", () => {
+  assert.equal(typeof inspectionState.bpfSliceParameterRequest, "function");
+  if (typeof inspectionState.bpfSliceParameterRequest !== "function") {
+    return;
+  }
+
+  const draft = {
+    vtime_slice_us: 20_000,
+    slice_shrinking: {
+      enabled: false,
+      min_us: 500,
+      max_us: 4_000,
+      multiplier: 2,
+    },
+  };
+  assert.throws(
+    () => inspectionState.bpfSliceParameterRequest({ ...draft, vtime_slice_us: 0 }),
+    /vtime_slice_us must be at least 1000/,
+  );
+  assert.throws(
+    () => inspectionState.bpfSliceParameterRequest({
+      ...draft,
+      vtime_slice_us: 999,
+      slice_shrinking: { ...draft.slice_shrinking, max_us: 900 },
+    }),
+    /vtime_slice_us must be at least 1000/,
+  );
+  assert.throws(
+    () => inspectionState.bpfSliceParameterRequest({
+      ...draft,
+      slice_shrinking: { ...draft.slice_shrinking, min_us: -1 },
+    }),
+    /slice_shrinking\.min_us must be greater than 0/,
+  );
+  assert.throws(
+    () => inspectionState.bpfSliceParameterRequest({
+      ...draft,
+      slice_shrinking: { ...draft.slice_shrinking, multiplier: 0 },
+    }),
+    /slice_shrinking\.multiplier must be greater than 0/,
+  );
+  assert.throws(
+    () => inspectionState.bpfSliceParameterRequest({
+      ...draft,
+      slice_shrinking: { ...draft.slice_shrinking, min_us: 4_001 },
+    }),
+    /slice_shrinking\.min_us must be less than slice_shrinking\.max_us/,
+  );
+  assert.throws(
+    () => inspectionState.bpfSliceParameterRequest({
+      ...draft,
+      slice_shrinking: { ...draft.slice_shrinking, min_us: 4_000 },
+    }),
+    /slice_shrinking\.min_us must be less than slice_shrinking\.max_us/,
+  );
+  assert.throws(
+    () => inspectionState.bpfSliceParameterRequest({
+      ...draft,
+      vtime_slice_us: 3_999,
+    }),
+    /slice_shrinking\.max_us must be less than or equal to vtime_slice_us/,
   );
 });
 
@@ -338,7 +471,7 @@ test("scheduler parameter groups report availability independently", () => {
   assert.equal(unavailable.userspace.available, false);
   assert.equal(unavailable.bpf.available, false);
   assert.equal(unavailable.userspace.fields.length, 5);
-  assert.equal(unavailable.bpf.fields.length, 5);
+  assert.equal(unavailable.bpf.fields.length, 10);
 });
 
 test("Configure exposes separate userspace and BPF parameter controls", () => {
@@ -355,9 +488,18 @@ test("Configure exposes separate userspace and BPF parameter controls", () => {
   assert.match(page, /id="bpfParametersTitle">BPF runtime/);
   assert.match(page, /id="managedReconcileMs"/);
   assert.match(page, /id="parameterCallbackSampleRate"/);
+  assert.match(page, /id="parameterVtimeSliceUs"/);
+  assert.match(page, /id="parameterSliceShrinking"/);
+  assert.match(page, /id="parameterSliceShrinkMinUs"/);
+  assert.match(page, /id="parameterSliceShrinkMaxUs"/);
+  assert.match(page, /id="parameterSliceShrinkMultiplier"/);
   assert.match(script, /fetch\("\/api\/scheduler\/parameters\/userspace"/);
   assert.match(script, /postParameterUpdate\("\/api\/callback-timing"/);
   assert.match(script, /postParameterUpdate\("\/api\/queue-timing"/);
+  assert.match(
+    script,
+    /postParameterUpdate\(\s*"\/api\/scheduler\/parameters\/bpf-slice"/s,
+  );
 });
 
 test("table sort values handle natural text, formatted numbers, units, and missing data", () => {

@@ -21,9 +21,9 @@ use serde::{Deserialize, Serialize};
 use tokio_stream::wrappers::WatchStream;
 
 use crate::collector::{
-    CallbackTimingRateResponse, CollectorCommand, FineTimingCallback, FineTimingControlResponse,
-    ManagedCellResizingParameters, QueueTimingControlResponse, StatsResetResponse,
-    UserspaceParameters,
+    BpfSliceParameters, CallbackTimingRateResponse, CollectorCommand, FineTimingCallback,
+    FineTimingControlResponse, ManagedCellResizingParameters, QueueTimingControlResponse,
+    StatsResetResponse, UserspaceParameters,
 };
 use crate::dashboard::{Dashboard, RuntimeContextView};
 use crate::host_context::{ChartMetric, HostContextService};
@@ -153,6 +153,10 @@ pub fn router(context: ApiContext) -> Router {
         .route(
             "/api/scheduler/parameters/userspace",
             post(set_userspace_parameters),
+        )
+        .route(
+            "/api/scheduler/parameters/bpf-slice",
+            post(set_bpf_slice_parameters),
         )
         .route("/api/testing/campaigns", get(testing_campaigns))
         .route("/api/testing/matrix", get(testing_matrix))
@@ -645,6 +649,29 @@ async fn set_userspace_parameters(
             .await
             .map_err(|_| ApiError::unavailable("userspace parameter worker failed"))?
             .map_err(|_| ApiError::unavailable("userspace parameter update timed out"))?
+            .map_err(ApiError::bad_request)?;
+    Ok(Json(response))
+}
+
+async fn set_bpf_slice_parameters(
+    State(context): State<ApiContext>,
+    headers: HeaderMap,
+    Json(parameters): Json<BpfSliceParameters>,
+) -> Result<Json<BpfSliceParameters>, ApiError> {
+    require_session_token(&headers, &context.token)?;
+    let (response_tx, response_rx) = std::sync::mpsc::sync_channel(1);
+    context
+        .commands
+        .send(CollectorCommand::SetBpfSliceParameters {
+            parameters,
+            response: response_tx,
+        })
+        .map_err(|_| ApiError::unavailable("collector is not running"))?;
+    let response =
+        tokio::task::spawn_blocking(move || response_rx.recv_timeout(Duration::from_secs(5)))
+            .await
+            .map_err(|_| ApiError::unavailable("BPF slice parameter worker failed"))?
+            .map_err(|_| ApiError::unavailable("BPF slice parameter update timed out"))?
             .map_err(ApiError::bad_request)?;
     Ok(Json(response))
 }

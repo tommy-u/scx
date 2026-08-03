@@ -39,7 +39,8 @@ use log::{debug, info, warn};
 use mask_tables::{dump_mask_tables, resolve_mask_tables, ResolvedMaskTable};
 use membership::{CellDirectory, MembershipManager};
 use parameters::{
-    BpfParameters, ManagedCellResizingParameters, SchedulerParameters, UserspaceParameters,
+    BpfParameters, BpfSliceParameters, ManagedCellResizingParameters, SchedulerParameters,
+    UserspaceParameters,
 };
 use policy::{
     CompiledPolicy, CompiledRung, InputSource, Opcode, QueueDispatchAction, QueueDispatchOperation,
@@ -1700,6 +1701,9 @@ fn aggregate_raw_stats(
         queue_rehome_preemptions: value(bpf_intf::snake_stat_SNAKE_STAT_QUEUE_REHOME_PREEMPTIONS),
         queue_stale_rehome_runs: value(bpf_intf::snake_stat_SNAKE_STAT_QUEUE_STALE_REHOME_RUNS),
         queue_borrow_yields: value(bpf_intf::snake_stat_SNAKE_STAT_QUEUE_BORROW_YIELDS),
+        slice_shrink_min: value(bpf_intf::snake_stat_SNAKE_STAT_SLICE_SHRINK_MIN),
+        slice_shrink_proportional: value(bpf_intf::snake_stat_SNAKE_STAT_SLICE_SHRINK_PROPORTIONAL),
+        slice_shrink_max: value(bpf_intf::snake_stat_SNAKE_STAT_SLICE_SHRINK_MAX),
         vtime_enqueues: value(bpf_intf::snake_stat_SNAKE_STAT_VTIME_ENQUEUES),
         vtime_dispatches: value(bpf_intf::snake_stat_SNAKE_STAT_VTIME_DISPATCHES),
         vtime_cpu_enqueues: value(bpf_intf::snake_stat_SNAKE_STAT_VTIME_CPU_ENQUEUES),
@@ -2162,6 +2166,7 @@ struct Scheduler<'object, 'policy> {
     managed_rebalance_count: u64,
     managed_last_rebalance_at_ms: u64,
     callback_timing_sample_rate: u32,
+    bpf_slice_parameters: BpfSliceParameters,
     fine_timing_state: fine_timing::FineTimingState,
     queue_timing_state: queue_timing::QueueTimingState,
     queue_timing_counters: queue_timing::QueueTimingCounters,
@@ -2248,11 +2253,24 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
         rodata.fairness_mode = opts.fairness as u32;
         rodata.queue_mode = queue_mode_for_topology(queue_topology);
         rodata.expanded_mitosis_select = u32::from(expanded_mitosis);
-        skel.maps
+        let bpf_slice_parameters = BpfSliceParameters::default();
+        let bss = skel
+            .maps
             .bss_data
             .as_mut()
-            .context("BPF bss data is unavailable")?
-            .callback_timing_sample_rate = opts.callback_timing_sample_rate;
+            .context("BPF bss data is unavailable")?;
+        bss.callback_timing_sample_rate = opts.callback_timing_sample_rate;
+        bss.vtime_slice_ns = bpf_slice_parameters
+            .vtime_slice_ns()
+            .map_err(anyhow::Error::msg)?;
+        bss.slice_shrink_min_ns = bpf_slice_parameters
+            .slice_shrink_min_ns()
+            .map_err(anyhow::Error::msg)?;
+        bss.slice_shrink_max_ns = bpf_slice_parameters
+            .slice_shrink_max_ns()
+            .map_err(anyhow::Error::msg)?;
+        bss.slice_shrink_multiplier = bpf_slice_parameters.slice_shrinking.multiplier;
+        bss.slice_shrinking_enabled = u32::from(bpf_slice_parameters.slice_shrinking.enabled);
         if queue_topology.is_some() {
             skel.struct_ops.snake_ops_mut().flags |= *scx_utils::compat::SCX_OPS_ENQ_LAST;
         }
@@ -2375,6 +2393,7 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
             managed_rebalance_count: 0,
             managed_last_rebalance_at_ms: 0,
             callback_timing_sample_rate: opts.callback_timing_sample_rate,
+            bpf_slice_parameters,
             fine_timing_state: fine_timing::FineTimingState::default(),
             queue_timing_state: queue_timing::QueueTimingState::default(),
             queue_timing_counters: queue_timing::QueueTimingCounters::default(),
@@ -3134,8 +3153,41 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
                 fairness: self.fairness.as_str().into(),
                 queue_layout: queues.map(|queues| queues.layout.as_str().into()),
                 direct_dispatch: queues.map(|queues| queues.direct_dispatch),
+                vtime_slice_us: self.bpf_slice_parameters.vtime_slice_us,
+                slice_shrinking: self.bpf_slice_parameters.slice_shrinking.clone(),
             },
         }
+    }
+
+    fn set_bpf_slice_parameters(
+        &mut self,
+        parameters: BpfSliceParameters,
+    ) -> Result<BpfSliceParameters> {
+        let parameters = parameters.validate().map_err(anyhow::Error::msg)?;
+        let vtime_slice_ns = parameters.vtime_slice_ns().map_err(anyhow::Error::msg)?;
+        let min_ns = parameters
+            .slice_shrink_min_ns()
+            .map_err(anyhow::Error::msg)?;
+        let max_ns = parameters
+            .slice_shrink_max_ns()
+            .map_err(anyhow::Error::msg)?;
+        let bss = self
+            .skel
+            .maps
+            .bss_data
+            .as_mut()
+            .context("BPF bss data is unavailable")?;
+
+        bss.slice_shrinking_enabled = 0;
+        std::sync::atomic::fence(Ordering::Release);
+        bss.vtime_slice_ns = vtime_slice_ns;
+        bss.slice_shrink_min_ns = min_ns;
+        bss.slice_shrink_max_ns = max_ns;
+        bss.slice_shrink_multiplier = parameters.slice_shrinking.multiplier;
+        std::sync::atomic::fence(Ordering::Release);
+        bss.slice_shrinking_enabled = u32::from(parameters.slice_shrinking.enabled);
+        self.bpf_slice_parameters = parameters;
+        Ok(self.bpf_slice_parameters.clone())
     }
 
     fn set_userspace_parameters(
@@ -3884,6 +3936,12 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
                         .set_userspace_parameters(parameters)
                         .map_err(|error| format!("{error:#}"));
                     response_channel.send(SchedulerResponse::UserspaceParameters(response))?;
+                }
+                Ok(SchedulerRequest::SetBpfSliceParameters(parameters)) => {
+                    let response = self
+                        .set_bpf_slice_parameters(parameters)
+                        .map_err(|error| format!("{error:#}"));
+                    response_channel.send(SchedulerResponse::BpfSliceParameters(response))?;
                 }
                 Ok(SchedulerRequest::ResetStats) => {
                     let response = self.reset_stats().map_err(|error| format!("{error:#}"));
@@ -4947,6 +5005,7 @@ scope = "task_cell"
             "struct bpf_cpumask __kptr *queue_cpumask",
             "u64 started_exec_runtime",
             "u64 service_budget",
+            "u64 avg_runtime_ns",
             "u64 vruntime",
             "u64 affinity_vruntime",
             "u64 topology_generation",
@@ -5010,53 +5069,54 @@ scope = "task_cell"
         assert_eq!(declarations, EXPECTED_DECLARATIONS);
 
         type TaskRuntime = bpf_skel::types::snake_task_runtime;
-        assert_eq!(size_of::<TaskRuntime>(), 184);
+        assert_eq!(size_of::<TaskRuntime>(), 192);
         assert_eq!(std::mem::align_of::<TaskRuntime>(), 8);
         assert_eq!(offset_of!(TaskRuntime, queue_cpumask), 0);
         assert_eq!(offset_of!(TaskRuntime, started_exec_runtime), 8);
         assert_eq!(offset_of!(TaskRuntime, service_budget), 16);
-        assert_eq!(offset_of!(TaskRuntime, vruntime), 24);
-        assert_eq!(offset_of!(TaskRuntime, affinity_vruntime), 32);
-        assert_eq!(offset_of!(TaskRuntime, topology_generation), 40);
-        assert_eq!(offset_of!(TaskRuntime, affinity_topology_generation), 48);
-        assert_eq!(offset_of!(TaskRuntime, deadline), 56);
-        assert_eq!(offset_of!(TaskRuntime, request_remaining_ns), 64);
-        assert_eq!(offset_of!(TaskRuntime, queue_timing_session_id), 72);
-        assert_eq!(offset_of!(TaskRuntime, queue_timing_dsq_id), 80);
-        assert_eq!(offset_of!(TaskRuntime, queue_timing_enqueued_at_ns), 88);
-        assert_eq!(offset_of!(TaskRuntime, sleep_lag), 96);
-        assert_eq!(offset_of!(TaskRuntime, active_weight), 104);
-        assert_eq!(offset_of!(TaskRuntime, pending_weight), 108);
-        assert_eq!(offset_of!(TaskRuntime, cell_index), 112);
-        assert_eq!(offset_of!(TaskRuntime, cell_external_id), 116);
-        assert_eq!(offset_of!(TaskRuntime, cell_epoch), 120);
-        assert_eq!(offset_of!(TaskRuntime, affinity_cell_index), 124);
-        assert_eq!(offset_of!(TaskRuntime, affinity_cell_external_id), 128);
-        assert_eq!(offset_of!(TaskRuntime, affinity_cell_epoch), 132);
-        assert_eq!(offset_of!(TaskRuntime, run_cell_index), 136);
-        assert_eq!(offset_of!(TaskRuntime, run_owner_cell_index), 140);
-        assert_eq!(offset_of!(TaskRuntime, selected_cpu), 144);
-        assert_eq!(offset_of!(TaskRuntime, direct_cell_index), 148);
-        assert_eq!(offset_of!(TaskRuntime, queue_timing_cell_index), 152);
+        assert_eq!(offset_of!(TaskRuntime, avg_runtime_ns), 24);
+        assert_eq!(offset_of!(TaskRuntime, vruntime), 32);
+        assert_eq!(offset_of!(TaskRuntime, affinity_vruntime), 40);
+        assert_eq!(offset_of!(TaskRuntime, topology_generation), 48);
+        assert_eq!(offset_of!(TaskRuntime, affinity_topology_generation), 56);
+        assert_eq!(offset_of!(TaskRuntime, deadline), 64);
+        assert_eq!(offset_of!(TaskRuntime, request_remaining_ns), 72);
+        assert_eq!(offset_of!(TaskRuntime, queue_timing_session_id), 80);
+        assert_eq!(offset_of!(TaskRuntime, queue_timing_dsq_id), 88);
+        assert_eq!(offset_of!(TaskRuntime, queue_timing_enqueued_at_ns), 96);
+        assert_eq!(offset_of!(TaskRuntime, sleep_lag), 104);
+        assert_eq!(offset_of!(TaskRuntime, active_weight), 112);
+        assert_eq!(offset_of!(TaskRuntime, pending_weight), 116);
+        assert_eq!(offset_of!(TaskRuntime, cell_index), 120);
+        assert_eq!(offset_of!(TaskRuntime, cell_external_id), 124);
+        assert_eq!(offset_of!(TaskRuntime, cell_epoch), 128);
+        assert_eq!(offset_of!(TaskRuntime, affinity_cell_index), 132);
+        assert_eq!(offset_of!(TaskRuntime, affinity_cell_external_id), 136);
+        assert_eq!(offset_of!(TaskRuntime, affinity_cell_epoch), 140);
+        assert_eq!(offset_of!(TaskRuntime, run_cell_index), 144);
+        assert_eq!(offset_of!(TaskRuntime, run_owner_cell_index), 148);
+        assert_eq!(offset_of!(TaskRuntime, selected_cpu), 152);
+        assert_eq!(offset_of!(TaskRuntime, direct_cell_index), 156);
+        assert_eq!(offset_of!(TaskRuntime, queue_timing_cell_index), 160);
         assert_eq!(
             offset_of!(TaskRuntime, queue_timing_depth_after_insert),
-            156
+            164
         );
-        assert_eq!(offset_of!(TaskRuntime, queue_timing_queue_class), 160);
-        assert_eq!(offset_of!(TaskRuntime, queued_dsq_index), 164);
-        assert_eq!(offset_of!(TaskRuntime, runtime_valid), 168);
-        assert_eq!(offset_of!(TaskRuntime, initialized), 169);
-        assert_eq!(offset_of!(TaskRuntime, runnable_accounted), 170);
-        assert_eq!(offset_of!(TaskRuntime, has_sleep_lag), 171);
-        assert_eq!(offset_of!(TaskRuntime, run_direct), 172);
-        assert_eq!(offset_of!(TaskRuntime, cell_initialized), 173);
-        assert_eq!(offset_of!(TaskRuntime, affinity_initialized), 174);
-        assert_eq!(offset_of!(TaskRuntime, selected_cpu_valid), 175);
-        assert_eq!(offset_of!(TaskRuntime, queue_class), 176);
-        assert_eq!(offset_of!(TaskRuntime, run_queue_class), 177);
-        assert_eq!(offset_of!(TaskRuntime, direct_cell_valid), 178);
-        assert_eq!(offset_of!(TaskRuntime, queued_dsq_class), 179);
-        assert_eq!(offset_of!(TaskRuntime, queued_dsq_accounted), 180);
+        assert_eq!(offset_of!(TaskRuntime, queue_timing_queue_class), 168);
+        assert_eq!(offset_of!(TaskRuntime, queued_dsq_index), 172);
+        assert_eq!(offset_of!(TaskRuntime, runtime_valid), 176);
+        assert_eq!(offset_of!(TaskRuntime, initialized), 177);
+        assert_eq!(offset_of!(TaskRuntime, runnable_accounted), 178);
+        assert_eq!(offset_of!(TaskRuntime, has_sleep_lag), 179);
+        assert_eq!(offset_of!(TaskRuntime, run_direct), 180);
+        assert_eq!(offset_of!(TaskRuntime, cell_initialized), 181);
+        assert_eq!(offset_of!(TaskRuntime, affinity_initialized), 182);
+        assert_eq!(offset_of!(TaskRuntime, selected_cpu_valid), 183);
+        assert_eq!(offset_of!(TaskRuntime, queue_class), 184);
+        assert_eq!(offset_of!(TaskRuntime, run_queue_class), 185);
+        assert_eq!(offset_of!(TaskRuntime, direct_cell_valid), 186);
+        assert_eq!(offset_of!(TaskRuntime, queued_dsq_class), 187);
+        assert_eq!(offset_of!(TaskRuntime, queued_dsq_accounted), 188);
     }
 
     #[test]
@@ -5103,6 +5163,37 @@ scope = "task_cell"
             assert!(!source.contains("BPF_MAP_TYPE_TASK_STORAGE"));
             assert!(!source.contains("BPF_LOCAL_STORAGE_GET_F_CREATE"));
         }
+    }
+
+    #[test]
+    fn vtime_slice_and_shrinking_are_runtime_configured() {
+        let bpf_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bpf");
+        let main = fs::read_to_string(bpf_dir.join("main.bpf.c")).unwrap();
+        let vtime = fs::read_to_string(bpf_dir.join("fairness_vtime.h")).unwrap();
+        let shrinking = fs::read_to_string(bpf_dir.join("slice_shrinking.h")).unwrap();
+
+        assert!(main.contains("u64"));
+        assert!(main.contains("vtime_slice_ns"));
+        assert!(main.contains("slice_shrinking_enabled"));
+        assert!(vtime.contains("READ_ONCE(vtime_slice_ns)"));
+        assert!(!vtime.contains("(SNAKE_VTIME_SLICE_NS / SNAKE_BASE_WEIGHT)"));
+        assert!(shrinking.contains("slice_shrink_limit("));
+        assert!(shrinking.contains("avg_runtime_ns"));
+        assert!(shrinking.contains("SNAKE_STAT_SLICE_SHRINK_MIN"));
+        assert!(shrinking.contains("SNAKE_STAT_SLICE_SHRINK_PROPORTIONAL"));
+        assert!(shrinking.contains("SNAKE_STAT_SLICE_SHRINK_MAX"));
+        assert!(shrinking.contains("runtime->service_budget -= removed"));
+    }
+
+    #[test]
+    fn slice_shrinking_observes_affinity_waiters_on_enqueue_and_running() {
+        let bpf_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bpf");
+        let enqueue = fs::read_to_string(bpf_dir.join("queue_enqueue.h")).unwrap();
+        let vtime = fs::read_to_string(bpf_dir.join("queue_vtime.h")).unwrap();
+
+        assert!(enqueue.contains("slice_shrink_on_enqueue("));
+        assert!(vtime.contains("slice_shrink_on_running("));
+        assert!(vtime.contains("slice_runtime_update(runtime, delta)"));
     }
 
     #[test]
@@ -7573,14 +7664,14 @@ scope = "task_allowed"
         let policy = policy::compile_policy(policy_source()).expect("policy should compile");
         let encoded = encode_ladder(&policy, 42).expect("ladder should encode");
 
-        assert_eq!(bpf_intf::SNAKE_ABI_VERSION, 30);
+        assert_eq!(bpf_intf::SNAKE_ABI_VERSION, 31);
         assert_eq!(bpf_intf::SNAKE_MAX_RUNGS, 16);
-        assert_eq!(bpf_intf::snake_stat_SNAKE_STAT_VTIME_CLOCK_CAS_RETRIES, 212);
+        assert_eq!(bpf_intf::snake_stat_SNAKE_STAT_VTIME_CLOCK_CAS_RETRIES, 215);
         assert_eq!(
             bpf_intf::snake_stat_SNAKE_STAT_VTIME_CLOCK_CAS_EXHAUSTIONS,
-            213
+            216
         );
-        assert_eq!(bpf_intf::snake_stat_SNAKE_NR_STATS, 214);
+        assert_eq!(bpf_intf::snake_stat_SNAKE_NR_STATS, 217);
         assert_eq!(size_of::<bpf_intf::snake_callback_timing>(), 520);
         assert_eq!(offset_of!(bpf_intf::snake_callback_timing, total_ns), 0);
         assert_eq!(offset_of!(bpf_intf::snake_callback_timing, buckets), 8);
@@ -7859,7 +7950,7 @@ scope = "task_cell"
         .unwrap();
         let encoded = encode_ladder(&policy, 9).unwrap();
 
-        assert_eq!(bpf_intf::SNAKE_ABI_VERSION, 30);
+        assert_eq!(bpf_intf::SNAKE_ABI_VERSION, 31);
         assert_eq!(encoded.nr_enqueue_rungs, 3);
         assert_eq!(encoded.enqueue_rungs[0].opcode, 5);
         assert_eq!(encoded.enqueue_rungs[0].input, 4);
@@ -7913,7 +8004,7 @@ scope = "task_cell"
         .unwrap();
         let encoded = encode_ladder(&policy, 10).unwrap();
 
-        assert_eq!(bpf_intf::SNAKE_ABI_VERSION, 30);
+        assert_eq!(bpf_intf::SNAKE_ABI_VERSION, 31);
         assert_eq!(encoded.nr_dispatch_rungs, 5);
         assert_eq!(
             encoded
@@ -8608,7 +8699,7 @@ scope = "task_cell"
         let cpu_pick = include_str!("bpf/cpu_pick.h");
         let ladder = include_str!("bpf/ladder.h");
 
-        assert!(intf.contains("#define SNAKE_ABI_VERSION 30"));
+        assert!(intf.contains("#define SNAKE_ABI_VERSION 31"));
         assert!(intf.contains("SNAKE_OP_PICK_IDLE_PREFER_PREVIOUS = 8"));
         assert!(intf.contains("SNAKE_INPUT_TASK_ALLOWED_RESTRICTED = 5"));
         assert!(intf.contains("SNAKE_QUEUE_MASK_LOCAL_LLC"));

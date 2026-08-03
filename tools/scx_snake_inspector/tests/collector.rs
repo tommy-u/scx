@@ -7,9 +7,9 @@ use std::path::PathBuf;
 use std::sync::mpsc;
 
 use scx_snake_inspector::collector::{
-    decode_counter_entry, decode_inspection_stats, decode_top_stats, find_symbol_address,
-    parse_host_cpu_times, CollectorCommand, CollectorConfig, ManagedCellResizingParameters,
-    UserspaceParameters,
+    bpf_slice_parameters_args, decode_counter_entry, decode_inspection_stats, decode_top_stats,
+    find_symbol_address, parse_host_cpu_times, BpfSliceParameters, CollectorCommand,
+    CollectorConfig, ManagedCellResizingParameters, SliceShrinkingParameters, UserspaceParameters,
 };
 use scx_snake_inspector::model::CpuPair;
 use scx_snake_inspector::scope::TaskScope;
@@ -51,6 +51,70 @@ fn userspace_parameter_command_forwards_values_and_returns_effective_response() 
 
     response.send(Ok(effective.clone())).unwrap();
     assert_eq!(response_rx.recv().unwrap().unwrap(), effective);
+}
+
+#[test]
+fn bpf_slice_parameter_command_forwards_values_and_returns_effective_response() {
+    let requested = BpfSliceParameters {
+        vtime_slice_us: 20_000,
+        slice_shrinking: SliceShrinkingParameters {
+            enabled: true,
+            min_us: 500,
+            max_us: 4_000,
+            multiplier: 2,
+        },
+    };
+    let effective = BpfSliceParameters {
+        vtime_slice_us: 18_000,
+        slice_shrinking: SliceShrinkingParameters {
+            enabled: true,
+            min_us: 600,
+            max_us: 3_600,
+            multiplier: 3,
+        },
+    };
+    let (response_tx, response_rx) = mpsc::sync_channel(1);
+    let command = CollectorCommand::SetBpfSliceParameters {
+        parameters: requested.clone(),
+        response: response_tx,
+    };
+
+    let CollectorCommand::SetBpfSliceParameters {
+        parameters,
+        response,
+    } = command
+    else {
+        panic!("expected BPF slice parameter command");
+    };
+    assert_eq!(parameters, requested);
+
+    response.send(Ok(effective.clone())).unwrap();
+    assert_eq!(response_rx.recv().unwrap().unwrap(), effective);
+}
+
+#[test]
+fn bpf_slice_parameter_stats_request_is_atomic() {
+    let args = bpf_slice_parameters_args(&BpfSliceParameters {
+        vtime_slice_us: 20_000,
+        slice_shrinking: SliceShrinkingParameters {
+            enabled: true,
+            min_us: 500,
+            max_us: 4_000,
+            multiplier: 2,
+        },
+    });
+
+    assert_eq!(
+        args,
+        vec![
+            ("target".into(), "bpf_slice_parameters_set".into()),
+            ("vtime_slice_us".into(), "20000".into()),
+            ("slice_shrinking_enabled".into(), "true".into()),
+            ("slice_shrink_min_us".into(), "500".into()),
+            ("slice_shrink_max_us".into(), "4000".into()),
+            ("slice_shrink_multiplier".into(), "2".into()),
+        ]
+    );
 }
 
 #[test]
