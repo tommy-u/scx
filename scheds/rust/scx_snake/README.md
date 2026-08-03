@@ -194,11 +194,11 @@ constrain task execution. See
 managed-cell profile. It combines dynamic child-cgroup cells, cell/LLC queues,
 Mitosis-style preferred idle selection, cell-aware direct dispatch, borrowing,
 expanded `min_vtime` dispatch, same-cell sibling-LLC stealing, orphan draining,
-EWMA demand rebalancing, and optional pinned-waiter slice shrinking. The
-Inspector can update the VTIME base slice and shrinking thresholds without
+EWMA demand rebalancing, and pinned-waiter slice shrinking. The built-in profile
+starts shrinking enabled with a 500 us minimum, 4000 us maximum, and multiplier
+2. The Inspector can update the VTIME base slice and shrinking thresholds without
 restarting Snake. Shrinking shortens a running task's remaining VTIME slice when
-an affinity-constrained waiter targets its CPU; it is disabled by default while
-latency and context-switch tradeoffs are measured.
+an affinity-constrained waiter targets its CPU.
 
 Its preferred idle selection is expanded into 16 observable placement rungs.
 LLC-local, primary, borrowable, and restricted-affinity scopes each run
@@ -287,8 +287,9 @@ than a missing core Mitosis placement feature:
   topology at attachment; do not online or offline CPUs while Snake is attached.
 - Live parameter changes are process-local. On restart, managed reconciliation
   and EWMA settings reload from the selected TOML policy. The VTIME base slice
-  returns to 5000 us and slice shrinking returns to disabled with 500 us minimum,
-  4000 us maximum, and multiplier 2. Put intended managed-cell values in the
+  returns to 5000 us. The built-in `mitosis-sim` profile restores slice shrinking
+  enabled with a 500 us minimum, 4000 us maximum, and multiplier 2; custom policy
+  files restore shrinking disabled. Put intended managed-cell values in the
   policy and reapply any non-default BPF slice settings after every restart.
 
 Broader rollout still requires hotplug rejection or support, observer-failure
@@ -365,6 +366,15 @@ binary at build time from
 [`examples/mitosis-sim.toml`](examples/mitosis-sim.toml), so the TOML file does
 not need to be distributed with the executable. The checked-in TOML remains the
 single source of truth; changing it requires rebuilding Snake.
+
+Snake reserves a 1 MiB sched_ext exit-dump buffer by default. Use
+`--exit-dump-len BYTES` (or the Inspector launch control) to change the limit;
+`--exit-dump-len 0` selects the kernel default. On a scheduler diagnostic or
+failure, the dump records the active/staging policy and topology generations,
+transition state, slice parameters, cell masks and clocks, actual versus
+tracked queue depths, CPU routes, and per-task cell, queue, fairness, and
+affinity state. Empty inactive normal queues are omitted so the allowance is
+spent on actionable state.
 
 To launch a custom policy file instead:
 

@@ -60,7 +60,7 @@ automatic direct-child cells                 IMPLEMENTED (userspace polling)
 | Pinned-waiter slice shrinking | Present | Base slice, enable bit, min/max, and multiplier are live controls. |
 | Task rehome across clocks | Present | Identity/epoch checks and bounded-lag translation converge after unavoidable old-route races. |
 | Managed metrics and inspection | Present | Allocation, EWMA, ownership, rebalance, queue recovery, and transition state are visible. |
-| Exit and task dumps | Partial | Exit reporting exists; Mitosis-style `.dump`/`.dump_task` callbacks are not complete. |
+| Exit and task dumps | Present | Global dumps include publication, topology, cells, clocks, queue accounting, and CPU routes; task dumps include annotation, routing, fairness, and affinity state. |
 | Queued-wakeup optimization | Missing | Not needed for initial simulation parity; evaluate only with evidence. |
 
 Implementation evidence is concentrated in
@@ -194,12 +194,13 @@ owned by a different cell.
 
 ### Slice shrinking
 
-VTIME can optionally shorten the current runner when an affinity waiter is
-observed. The runtime base slice and shrinking enable/min/max/multiplier values are
-validated and published through the control socket and Inspector. Existing queued
-tasks retain their assigned slice; later dispatches use the new base. This feature
-is implemented but still needs pinned-latency, context-switch, and fairness evidence
-before default enablement.
+VTIME can shorten the current runner when an affinity waiter is observed. The
+built-in `mitosis-sim` profile enables shrinking by default; custom policy files
+retain the disabled default. The runtime base slice and shrinking
+enable/min/max/multiplier values are validated and published through the control
+socket and Inspector. Existing queued tasks retain their assigned slice; later
+dispatches use the new base. Pinned-latency, context-switch, and fairness evidence
+remains a rollout gate.
 
 ## Inspector parity
 
