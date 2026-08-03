@@ -90,8 +90,8 @@ Mitosis's demand accounting scans dense CPU-by-cell capacity. Snake should itera
 active cells and sample only counters required by the controller.
 
 Pinned-waiter slice shrinking addresses Mitosis's long slice exposure. Snake's
-VTIME slices are already bounded to 1–5 ms. Measure pinned wake-to-run p95/p99 before
-adding the extra state and context switches.
+VTIME base slice and waiter-aware shrink limits are now live parameters. Measure
+pinned wake-to-run p95/p99 and context-switch cost before enabling it by default.
 
 ## Layered: allocator structure and capacity signals
 

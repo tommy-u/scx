@@ -190,6 +190,82 @@ async fn userspace_parameter_updates_round_trip_effective_values() {
     responder.join().unwrap();
 }
 
+#[tokio::test]
+async fn bpf_slice_parameter_updates_require_the_session_token() {
+    let (tx, _rx) = mpsc::channel();
+    let cgroup_root = tempfile::tempdir().unwrap();
+    let context = ApiContext::new(dashboard(), tx, "secret", cgroup_root.path().to_path_buf());
+
+    let response = router(context)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/scheduler/parameters/bpf-slice")
+                .header("host", "127.0.0.1")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"vtime_slice_us":20000,"slice_shrinking":{"enabled":true,"min_us":500,"max_us":4000,"multiplier":2}}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn bpf_slice_parameter_updates_round_trip_effective_values() {
+    let (tx, rx) = mpsc::channel();
+    let cgroup_root = tempfile::tempdir().unwrap();
+    let context = ApiContext::new(dashboard(), tx, "secret", cgroup_root.path().to_path_buf());
+    let responder = std::thread::spawn(move || {
+        let CollectorCommand::SetBpfSliceParameters {
+            parameters,
+            response,
+        } = rx.recv_timeout(Duration::from_secs(2)).unwrap()
+        else {
+            panic!("expected BPF slice parameter command");
+        };
+        assert_eq!(parameters.vtime_slice_us, 20_000);
+        assert!(parameters.slice_shrinking.enabled);
+        assert_eq!(parameters.slice_shrinking.min_us, 500);
+        assert_eq!(parameters.slice_shrinking.max_us, 4_000);
+        assert_eq!(parameters.slice_shrinking.multiplier, 2);
+
+        let mut effective = parameters;
+        effective.vtime_slice_us = 19_000;
+        effective.slice_shrinking.max_us = 3_500;
+        response.send(Ok(effective)).unwrap();
+    });
+
+    let response = router(context)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/scheduler/parameters/bpf-slice")
+                .header("host", "127.0.0.1")
+                .header("content-type", "application/json")
+                .header(CSRF_HEADER, "secret")
+                .body(Body::from(
+                    r#"{"vtime_slice_us":20000,"slice_shrinking":{"enabled":true,"min_us":500,"max_us":4000,"multiplier":2}}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(body["vtime_slice_us"], 19_000);
+    assert_eq!(body["slice_shrinking"]["enabled"], true);
+    assert_eq!(body["slice_shrinking"]["min_us"], 500);
+    assert_eq!(body["slice_shrinking"]["max_us"], 3_500);
+    assert_eq!(body["slice_shrinking"]["multiplier"], 2);
+    responder.join().unwrap();
+}
+
 fn fine_timing_snapshot() -> Value {
     let mut snapshot = callback_timing_snapshot(7, 0, 0);
     snapshot["fairness"] = json!({"mode_name": "fifo"});

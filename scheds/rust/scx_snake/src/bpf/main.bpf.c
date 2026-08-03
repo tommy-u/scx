@@ -26,6 +26,11 @@ u64				   select_fine_timing_session_id;
 u64				   dispatch_fine_timing_session_id;
 u64				   queue_timing_session_id;
 struct snake_queue_timing_counters queue_timing_counters;
+u64				   vtime_slice_ns;
+u64				   slice_shrink_min_ns;
+u64				   slice_shrink_max_ns;
+u32				   slice_shrink_multiplier;
+u32				   slice_shrinking_enabled;
 const volatile u32		       expanded_mitosis_select = 0;
 
 static __always_inline int

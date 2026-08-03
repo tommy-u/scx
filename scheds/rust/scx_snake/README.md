@@ -188,7 +188,9 @@ constrain task execution. See
 managed-cell profile. It combines dynamic child-cgroup cells, cell/LLC queues,
 Mitosis-style preferred idle selection, cell-aware direct dispatch, borrowing,
 expanded `min_vtime` dispatch, same-cell sibling-LLC stealing, orphan draining,
-and EWMA demand rebalancing. Slice shrinking remains outside this profile.
+EWMA demand rebalancing, and optional pinned-waiter slice shrinking. The
+Inspector can update the VTIME base slice and shrinking thresholds without
+restarting Snake.
 
 Its preferred idle selection is expanded into 16 observable placement rungs.
 LLC-local, primary, borrowable, and restricted-affinity scopes each run

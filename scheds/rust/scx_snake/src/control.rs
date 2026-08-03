@@ -8,7 +8,7 @@ use scx_stats::StatsClient;
 
 use crate::fine_timing::{FineTimingCallback, FineTimingControlResponse};
 use crate::inspection::InspectionView;
-use crate::parameters::UserspaceParameters;
+use crate::parameters::{BpfSliceParameters, UserspaceParameters};
 use crate::queue_timing::QueueTimingControlResponse;
 use crate::runtime_policy::{PolicyUpdateResponse, PolicyValidationResponse};
 use crate::stats::Metrics;
@@ -58,6 +58,7 @@ pub enum SchedulerRequest {
         sample_rate: u32,
     },
     SetUserspaceParameters(UserspaceParameters),
+    SetBpfSliceParameters(BpfSliceParameters),
     ResetStats,
 }
 
@@ -73,6 +74,7 @@ pub enum SchedulerResponse {
     QueueTiming(std::result::Result<QueueTimingControlResponse, String>),
     CallbackTimingSampleRate(std::result::Result<CallbackTimingRateResponse, String>),
     UserspaceParameters(std::result::Result<UserspaceParameters, String>),
+    BpfSliceParameters(std::result::Result<BpfSliceParameters, String>),
     StatsReset(std::result::Result<StatsResetResponse, String>),
 }
 
@@ -670,6 +672,60 @@ scope = "task_allowed"
             .expect("client should connect");
         let response = request_userspace_parameters(&mut client, &parameters)
             .expect("userspace parameters should be acknowledged");
+
+        assert_eq!(response, parameters);
+        worker.join().expect("worker should finish");
+        drop(server);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn bpf_slice_parameter_update_round_trips_effective_values() {
+        let path = socket_path("bpf-slice-parameters");
+        let server = StatsServer::new(stats::server_data())
+            .set_path(&path)
+            .launch()
+            .expect("test server should launch");
+        let (responses, requests) = server.channels();
+        let parameters = crate::parameters::BpfSliceParameters {
+            vtime_slice_us: 20_000,
+            slice_shrinking: crate::parameters::SliceShrinkingParameters {
+                enabled: true,
+                min_us: 500,
+                max_us: 4_000,
+                multiplier: 2,
+            },
+        };
+        let expected = parameters.clone();
+        let worker = thread::spawn(move || {
+            let SchedulerRequest::SetBpfSliceParameters(request) =
+                requests.recv().expect("request should arrive")
+            else {
+                panic!("expected a BPF slice parameter request");
+            };
+            assert_eq!(request, expected);
+            responses
+                .send(SchedulerResponse::BpfSliceParameters(Ok(request)))
+                .expect("response should send");
+        });
+
+        let mut client = StatsClient::new()
+            .set_path(&path)
+            .connect(Some(1_000))
+            .expect("client should connect");
+        let response: crate::parameters::BpfSliceParameters = client
+            .request(
+                "stats",
+                vec![
+                    ("target".into(), "bpf_slice_parameters_set".into()),
+                    ("vtime_slice_us".into(), "20000".into()),
+                    ("slice_shrinking_enabled".into(), "true".into()),
+                    ("slice_shrink_min_us".into(), "500".into()),
+                    ("slice_shrink_max_us".into(), "4000".into()),
+                    ("slice_shrink_multiplier".into(), "2".into()),
+                ],
+            )
+            .expect("BPF slice parameters should be acknowledged");
 
         assert_eq!(response, parameters);
         worker.join().expect("worker should finish");

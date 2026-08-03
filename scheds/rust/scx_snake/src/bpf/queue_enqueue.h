@@ -293,6 +293,7 @@ static __always_inline int queue_fairness_enqueue_affinity(
 	stat_inc(ctx, SNAKE_STAT_VTIME_CPU_ENQUEUES);
 	cell_stat_inc(ctx, runtime->cell_index,
 		      SNAKE_CELL_STAT_AFFINITY_ENQUEUES);
+	slice_shrink_on_enqueue(ctx, target_cpu, runtime);
 	scx_bpf_kick_cpu(target_cpu, SCX_KICK_IDLE);
 out:
 	fine_timing_finish(fine, SNAKE_FINE_TIMING_ENQUEUE_AFFINITY_PATH,

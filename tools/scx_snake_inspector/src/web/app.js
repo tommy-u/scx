@@ -23,6 +23,7 @@ import {
 } from "/assets/heatmap.js";
 import {
   appendCellRebalanceSample,
+  bpfSliceParameterRequest,
   callbackSampleRateOptions,
   captureKeyedRenderState,
   cellAccountingEwmaModel,
@@ -273,6 +274,11 @@ const elements = {
   userspaceParametersNotice: document.querySelector("#userspaceParametersNotice"),
   parameterCallbackSampleRate: document.querySelector("#parameterCallbackSampleRate"),
   parameterQueueTiming: document.querySelector("#parameterQueueTiming"),
+  parameterVtimeSliceUs: document.querySelector("#parameterVtimeSliceUs"),
+  parameterSliceShrinking: document.querySelector("#parameterSliceShrinking"),
+  parameterSliceShrinkMinUs: document.querySelector("#parameterSliceShrinkMinUs"),
+  parameterSliceShrinkMaxUs: document.querySelector("#parameterSliceShrinkMaxUs"),
+  parameterSliceShrinkMultiplier: document.querySelector("#parameterSliceShrinkMultiplier"),
   parameterFairness: document.querySelector("#parameterFairness"),
   parameterQueueLayout: document.querySelector("#parameterQueueLayout"),
   parameterDirectDispatch: document.querySelector("#parameterDirectDispatch"),
@@ -828,14 +834,16 @@ function bindControls() {
       renderSchedulerParameters();
     });
   }
-  elements.parameterCallbackSampleRate.addEventListener("change", () => {
-    state.bpfParametersDirty = true;
-    renderSchedulerParameters();
-  });
-  elements.parameterQueueTiming.addEventListener("change", () => {
-    state.bpfParametersDirty = true;
-    renderSchedulerParameters();
-  });
+  for (const control of bpfParameterControls()) {
+    control.addEventListener("input", () => {
+      state.bpfParametersDirty = true;
+      renderSchedulerParameters();
+    });
+    control.addEventListener("change", () => {
+      state.bpfParametersDirty = true;
+      renderSchedulerParameters();
+    });
+  }
   elements.applyUserspaceParameters.addEventListener("click", setUserspaceParameters);
   elements.applyBpfParameters.addEventListener("click", setBpfParameters);
   elements.startScheduler.addEventListener("click", startScheduler);
@@ -3193,6 +3201,30 @@ function userspaceParameterDraft() {
   };
 }
 
+function bpfParameterControls() {
+  return [
+    elements.parameterCallbackSampleRate,
+    elements.parameterQueueTiming,
+    elements.parameterVtimeSliceUs,
+    elements.parameterSliceShrinking,
+    elements.parameterSliceShrinkMinUs,
+    elements.parameterSliceShrinkMaxUs,
+    elements.parameterSliceShrinkMultiplier,
+  ];
+}
+
+function bpfSliceParameterDraft() {
+  return {
+    vtime_slice_us: elements.parameterVtimeSliceUs.value,
+    slice_shrinking: {
+      enabled: elements.parameterSliceShrinking.checked,
+      min_us: elements.parameterSliceShrinkMinUs.value,
+      max_us: elements.parameterSliceShrinkMaxUs.value,
+      multiplier: elements.parameterSliceShrinkMultiplier.value,
+    },
+  };
+}
+
 function hydrateUserspaceParameterControls(values) {
   const controls = {
     managed_reconcile_ms: elements.managedReconcileMs,
@@ -3232,14 +3264,54 @@ function renderSchedulerParameters() {
       model.bpf.values.callback_timing_sample_rate ?? 0,
     );
     elements.parameterQueueTiming.checked = Boolean(model.bpf.values.queue_timing_enabled);
+    elements.parameterVtimeSliceUs.value = model.bpf.values.vtime_slice_us == null
+      ? ""
+      : String(model.bpf.values.vtime_slice_us);
+    elements.parameterSliceShrinking.checked = Boolean(
+      model.bpf.values.slice_shrinking?.enabled,
+    );
+    elements.parameterSliceShrinkMinUs.value = model.bpf.values.slice_shrinking?.min_us == null
+      ? ""
+      : String(model.bpf.values.slice_shrinking.min_us);
+    elements.parameterSliceShrinkMaxUs.value = model.bpf.values.slice_shrinking?.max_us == null
+      ? ""
+      : String(model.bpf.values.slice_shrinking.max_us);
+    elements.parameterSliceShrinkMultiplier.value =
+      model.bpf.values.slice_shrinking?.multiplier == null
+        ? ""
+        : String(model.bpf.values.slice_shrinking.multiplier);
   }
   const bpfLocked = !schedulerActive || !model.bpf.editable || state.bpfParametersPending;
+  const sliceAvailable = model.bpf.values.vtime_slice_us != null
+    && model.bpf.values.slice_shrinking != null;
+  const sliceDraft = sliceAvailable ? bpfSliceParameterDraft() : null;
+  let sliceChanged = false;
+  if (sliceAvailable) {
+    const current = model.bpf.values.slice_shrinking;
+    sliceChanged = Number(sliceDraft.vtime_slice_us) !== Number(model.bpf.values.vtime_slice_us)
+      || sliceDraft.slice_shrinking.enabled !== Boolean(current.enabled)
+      || Number(sliceDraft.slice_shrinking.min_us) !== Number(current.min_us)
+      || Number(sliceDraft.slice_shrinking.max_us) !== Number(current.max_us)
+      || Number(sliceDraft.slice_shrinking.multiplier) !== Number(current.multiplier);
+  }
   const bpfChanged = Number(elements.parameterCallbackSampleRate.value)
       !== Number(model.bpf.values.callback_timing_sample_rate)
     || elements.parameterQueueTiming.checked
-      !== Boolean(model.bpf.values.queue_timing_enabled);
+      !== Boolean(model.bpf.values.queue_timing_enabled)
+    || sliceChanged;
   elements.parameterCallbackSampleRate.disabled = bpfLocked;
   elements.parameterQueueTiming.disabled = bpfLocked;
+  for (const control of [
+    elements.parameterVtimeSliceUs,
+    elements.parameterSliceShrinking,
+    elements.parameterSliceShrinkMinUs,
+    elements.parameterSliceShrinkMaxUs,
+    elements.parameterSliceShrinkMultiplier,
+  ]) {
+    control.disabled = bpfLocked
+      || !sliceAvailable
+      || model.bpf.values.fairness !== "vtime";
+  }
   elements.applyBpfParameters.disabled = bpfLocked
     || !state.bpfParametersDirty
     || !bpfChanged;
@@ -3302,6 +3374,17 @@ async function setBpfParameters() {
   const effective = state.inspection?.parameters?.bpf;
   const sampleRate = Number(elements.parameterCallbackSampleRate.value);
   const queueTimingEnabled = elements.parameterQueueTiming.checked;
+  const sliceAvailable = effective?.vtime_slice_us != null
+    && effective?.slice_shrinking != null;
+  let sliceRequest = null;
+  if (sliceAvailable) {
+    try {
+      sliceRequest = bpfSliceParameterRequest(bpfSliceParameterDraft());
+    } catch (error) {
+      showElementNotice(elements.bpfParametersNotice, error.message);
+      return;
+    }
+  }
   if (queueTimingEnabled && sampleRate === 0) {
     showElementNotice(
       elements.bpfParametersNotice,
@@ -3322,6 +3405,20 @@ async function setBpfParameters() {
       || (callbackChangeStoppedQueue && queueTimingEnabled)
     ) {
       await postParameterUpdate("/api/queue-timing", { enabled: queueTimingEnabled });
+    }
+    if (sliceRequest) {
+      const current = effective.slice_shrinking;
+      const changed = sliceRequest.vtime_slice_us !== Number(effective.vtime_slice_us)
+        || sliceRequest.slice_shrinking.enabled !== Boolean(current.enabled)
+        || sliceRequest.slice_shrinking.min_us !== Number(current.min_us)
+        || sliceRequest.slice_shrinking.max_us !== Number(current.max_us)
+        || sliceRequest.slice_shrinking.multiplier !== Number(current.multiplier);
+      if (changed) {
+        await postParameterUpdate(
+          "/api/scheduler/parameters/bpf-slice",
+          sliceRequest,
+        );
+      }
     }
     state.bpfParametersDirty = false;
     showElementNotice(elements.bpfParametersNotice, "BPF runtime parameters applied.", "success");

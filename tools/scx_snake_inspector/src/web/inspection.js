@@ -270,6 +270,47 @@ const BPF_PARAMETER_FIELDS = [
     inputKind: "output",
     applyKind: null,
   },
+  {
+    key: "vtime_slice_us",
+    label: "Base VTIME slice",
+    inputKind: "number",
+    applyKind: "bpf-slice",
+    unit: "us",
+    min: 1_000,
+    step: 1,
+  },
+  {
+    key: "slice_shrinking.enabled",
+    label: "Slice shrinking",
+    inputKind: "checkbox",
+    applyKind: "bpf-slice",
+  },
+  {
+    key: "slice_shrinking.min_us",
+    label: "Minimum shrunken slice",
+    inputKind: "number",
+    applyKind: "bpf-slice",
+    unit: "us",
+    min: 1,
+    step: 1,
+  },
+  {
+    key: "slice_shrinking.max_us",
+    label: "Maximum shrunken slice",
+    inputKind: "number",
+    applyKind: "bpf-slice",
+    unit: "us",
+    min: 1,
+    step: 1,
+  },
+  {
+    key: "slice_shrinking.multiplier",
+    label: "Runtime multiplier",
+    inputKind: "number",
+    applyKind: "bpf-slice",
+    min: 1,
+    step: 1,
+  },
 ];
 
 function flattenUserspaceParameters(parameters) {
@@ -299,6 +340,36 @@ function numericParameter(value, key) {
   return number;
 }
 
+function positiveNumericParameter(value, key) {
+  const number = numericParameter(value, key);
+  if (number <= 0) {
+    throw new RangeError(`${key} must be greater than 0`);
+  }
+  return number;
+}
+
+function bpfParameterValue(parameters, key) {
+  const [group, nestedKey] = key.split(".");
+  return nestedKey == null
+    ? parameters?.[group] ?? null
+    : parameters?.[group]?.[nestedKey] ?? null;
+}
+
+function bpfParameterValues(parameters) {
+  const values = Object.fromEntries(BPF_PARAMETER_FIELDS
+    .filter(({ key }) => !key.includes("."))
+    .map(({ key }) => [key, bpfParameterValue(parameters, key)]));
+  values.slice_shrinking = parameters?.slice_shrinking == null
+    ? null
+    : {
+      enabled: bpfParameterValue(parameters, "slice_shrinking.enabled"),
+      min_us: bpfParameterValue(parameters, "slice_shrinking.min_us"),
+      max_us: bpfParameterValue(parameters, "slice_shrinking.max_us"),
+      multiplier: bpfParameterValue(parameters, "slice_shrinking.multiplier"),
+    };
+  return values;
+}
+
 export function userspaceParameterRequest(draft) {
   const values = flattenUserspaceParameters(draft);
   if (!values) {
@@ -308,6 +379,59 @@ export function userspaceParameterRequest(draft) {
     key,
     numericParameter(values[key], key),
   ]));
+}
+
+export function bpfSliceParameterRequest(draft) {
+  if (!draft || typeof draft !== "object") {
+    throw new TypeError("BPF slice parameters are required");
+  }
+  const sliceShrinking = draft.slice_shrinking;
+  if (!sliceShrinking || typeof sliceShrinking !== "object") {
+    throw new TypeError("slice_shrinking parameters are required");
+  }
+  if (typeof sliceShrinking.enabled !== "boolean") {
+    throw new TypeError("slice_shrinking.enabled must be a boolean");
+  }
+
+  const vtimeSliceUs = numericParameter(
+    draft.vtime_slice_us,
+    "vtime_slice_us",
+  );
+  if (vtimeSliceUs < 1_000) {
+    throw new RangeError("vtime_slice_us must be at least 1000");
+  }
+  const minUs = positiveNumericParameter(
+    sliceShrinking.min_us,
+    "slice_shrinking.min_us",
+  );
+  const maxUs = positiveNumericParameter(
+    sliceShrinking.max_us,
+    "slice_shrinking.max_us",
+  );
+  const multiplier = positiveNumericParameter(
+    sliceShrinking.multiplier,
+    "slice_shrinking.multiplier",
+  );
+  if (minUs >= maxUs) {
+    throw new RangeError(
+      "slice_shrinking.min_us must be less than slice_shrinking.max_us",
+    );
+  }
+  if (maxUs > vtimeSliceUs) {
+    throw new RangeError(
+      "slice_shrinking.max_us must be less than or equal to vtime_slice_us",
+    );
+  }
+
+  return {
+    vtime_slice_us: vtimeSliceUs,
+    slice_shrinking: {
+      enabled: sliceShrinking.enabled,
+      min_us: minUs,
+      max_us: maxUs,
+      multiplier,
+    },
+  };
 }
 
 export function userspaceParametersDirty(effective, draft) {
@@ -335,10 +459,7 @@ export function schedulerParameterPanelModel(parameters, userspaceDraft = null) 
   const userspaceAvailable = userspaceValues !== null;
   const bpfAvailable = parameters?.bpf != null
     && typeof parameters.bpf === "object";
-  const bpfValues = Object.fromEntries(BPF_PARAMETER_FIELDS.map(({ key }) => [
-    key,
-    bpfAvailable ? parameters.bpf[key] ?? null : null,
-  ]));
+  const bpfValues = bpfParameterValues(bpfAvailable ? parameters.bpf : null);
 
   const userspaceFields = USERSPACE_PARAMETER_FIELDS.map((field) => {
     const effectiveValue = userspaceValues?.[field.key] ?? null;
@@ -355,14 +476,17 @@ export function schedulerParameterPanelModel(parameters, userspaceDraft = null) 
           !== numericParameter(draftValue, field.key),
     };
   });
-  const bpfFields = BPF_PARAMETER_FIELDS.map((field) => ({
-    ...field,
-    available: bpfAvailable && bpfValues[field.key] !== null,
-    editable: bpfAvailable && field.applyKind !== null,
-    effectiveValue: bpfValues[field.key],
-    draftValue: bpfValues[field.key],
-    dirty: false,
-  }));
+  const bpfFields = BPF_PARAMETER_FIELDS.map((field) => {
+    const value = bpfParameterValue(bpfValues, field.key);
+    return {
+      ...field,
+      available: bpfAvailable && value !== null,
+      editable: bpfAvailable && field.applyKind !== null,
+      effectiveValue: value,
+      draftValue: value,
+      dirty: false,
+    };
+  });
 
   return {
     available: userspaceAvailable || bpfAvailable,
@@ -4751,6 +4875,9 @@ const POLICY_COUNTER_CATALOG = [
   ["vtime_direct_runtime_ns", "Direct runtime (ns)", "vtime"],
   ["vtime_queued_runtime_ns", "Queued runtime (ns)", "vtime"],
   ["vtime_credit_clamps", "Credit clamps", "vtime"],
+  ["slice_shrink_min", "Slice shrinks to minimum", "vtime_queue"],
+  ["slice_shrink_proportional", "Proportional slice shrinks", "vtime_queue"],
+  ["slice_shrink_max", "Slice shrinks capped at maximum", "vtime_queue"],
   ["vtime_clock_cas_retries", "Cell clock CAS retries", "vtime_queue"],
   ["vtime_clock_cas_exhaustions", "Cell clock CAS exhaustions", "vtime_queue"],
   ["vtime_accounting_errors", "VTIME accounting errors", "vtime"],

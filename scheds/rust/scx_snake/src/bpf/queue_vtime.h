@@ -4,6 +4,7 @@
 
 #include "queue.h"
 #include "fairness.h"
+#include "slice_shrinking.h"
 
 #define SNAKE_VTIME_CAS_RETRIES 16
 
@@ -135,14 +136,15 @@ out:
 }
 
 static __always_inline u64 queue_translate_vruntime(u64 vruntime, u64 old_now,
-						    u64 new_now)
+						     u64 new_now)
 {
 	s64 lag = (s64)(vruntime - old_now);
+	u64 limit = fairness_vtime_base_slice();
 
-	if (lag > (s64)SNAKE_VTIME_SLICE_NS)
-		lag = SNAKE_VTIME_SLICE_NS;
-	else if (lag < -(s64)SNAKE_VTIME_SLICE_NS)
-		lag = -(s64)SNAKE_VTIME_SLICE_NS;
+	if (lag > (s64)limit)
+		lag = limit;
+	else if (lag < -(s64)limit)
+		lag = -(s64)limit;
 	return new_now + lag;
 }
 
@@ -578,6 +580,7 @@ static __always_inline int queue_fairness_running(
 	runtime->started_exec_runtime = p->se.sum_exec_runtime;
 	runtime->service_budget	      = p->scx.slice;
 	runtime->runtime_valid	      = 1;
+	slice_shrink_on_running(ctx, p);
 	cell_stat_inc(ctx, runtime->run_cell_index,
 		      runtime->run_queue_class == SNAKE_QUEUE_CLASS_AFFINITY ?
 			      SNAKE_CELL_STAT_AFFINITY_DISPATCHES :
@@ -605,6 +608,7 @@ static __always_inline int queue_fairness_stopping(struct snake_ladder_ctx *ctx,
 		return -ERANGE;
 	}
 	delta	= current - runtime->started_exec_runtime;
+	slice_runtime_update(runtime, delta);
 	weight	= runtime->active_weight ?: fairness_task_weight(p);
 	service = fairness_vtime_service(delta, runtime->service_budget,
 					 p->scx.slice);

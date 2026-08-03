@@ -9,6 +9,7 @@ struct snake_task_runtime {
 	struct bpf_cpumask __kptr *queue_cpumask;
 	u64			   started_exec_runtime;
 	u64			   service_budget;
+	u64			   avg_runtime_ns;
 	u64			   vruntime;
 	u64			   affinity_vruntime;
 	u64			   topology_generation;
