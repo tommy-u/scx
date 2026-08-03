@@ -578,6 +578,6 @@ explicitly drains one shared DSQ but has no topology-aware enqueue or stealing
 policy. Global VTIME and EEVDF remain global-clock experiments. VTIME with
 `layout = "llc"` shards storage by LLC without creating cells or new fairness
 domains; its remote rung returns one candidate from a bounded rotating scan.
-Cell layouts support at most 31 declared cells plus synthetic cell 0 and do not
+Cell layouts support at most 255 declared cells plus synthetic cell 0 and do not
 steal queued work across cells. No queue layout can change its DSQ topology
 live. The ABI remains experimental.

@@ -10,7 +10,7 @@ pub const MAX_RUNGS: usize = 16;
 pub const MAX_GENERIC_RUNGS: usize = 9;
 pub const MAX_MASK_TABLES: usize = 4;
 pub const MAX_CELL_IDS: u32 = 1024;
-pub const MAX_QUEUE_CELLS: usize = 32;
+pub const MAX_QUEUE_CELLS: usize = 256;
 pub const MAX_QUEUE_RUNGS: usize = 8;
 pub const RUNG_FLAG_INTERSECT_TASK_ALLOWED: u32 = 1;
 pub const RUNG_FLAG_PICK_IDLE_CORE: u32 = 1 << 1;
@@ -3218,15 +3218,17 @@ scope = "task_cell"
     }
 
     #[test]
-    fn queue_policy_rejects_more_than_31_declared_cells() {
+    fn queue_policy_accepts_255_declared_cells_and_rejects_256() {
         let mut source = String::from("[queues]\nlayout = \"cell\"\n");
-        for id in 1..=32 {
-            source.push_str(&format!("[[cell]]\nid = {id}\ncpus = \"{}\"\n", id - 1));
+        for id in 1..=255 {
+            source.push_str(&format!("[[cell]]\nid = {id}\ncpus = \"0\"\n"));
         }
         source.push_str("[[rung]]\noperation = \"pick_idle\"\nscope = \"task_cell\"\n");
+        compile_policy(&source).expect("255 declared cells plus cell 0 should compile");
 
+        source.push_str("[[cell]]\nid = 256\ncpus = \"0\"\n");
         let error = error_for(&source);
-        assert!(error.contains("at most 31 declared cells"), "{error}");
+        assert!(error.contains("at most 255 declared cells"), "{error}");
     }
 
     #[test]
@@ -4239,11 +4241,11 @@ scope = "task_allowed"
             ),
             (
                 "parent = \"/workloads\"\nmax_children = 0",
-                "max_children must be between 1 and 31",
+                "max_children must be between 1 and 255",
             ),
             (
-                "parent = \"/workloads\"\nmax_children = 32",
-                "max_children must be between 1 and 31",
+                "parent = \"/workloads\"\nmax_children = 256",
+                "max_children must be between 1 and 255",
             ),
             (
                 "parent = \"/workloads\"\nreconcile_ms = 49",

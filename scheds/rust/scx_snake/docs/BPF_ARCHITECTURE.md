@@ -88,11 +88,12 @@ ABI version 21 introduced queue rungs using the mechanical
 `{ opcode, input, flags, reserved, data }` record and adds global queue mode,
 normal consumer masks, per-CPU remote cursors, and queue-rung counters. From
 that version onward, the coordinated surfaces are listed below. The current
-ABI is version 31: placement records have sixteen entries while enqueue and
+ABI is version 32: placement records have sixteen entries while enqueue and
 dispatch ladders retain eight entries. Generic placement uses at most nine;
 the full sixteen-entry form is the exact expanded Mitosis template. Version 31
-adds per-task runtime EWMA state and slice-shrinking counters for live VTIME
-slice control.
+added per-task runtime EWMA state and slice-shrinking counters. Version 32
+expands the queue-cell pool to 256 and the stable cell/LLC normal-DSQ pool to
+8,192 entries.
 
 - map names, map types, or map key/value records;
 - sched_ext program and struct-ops names;

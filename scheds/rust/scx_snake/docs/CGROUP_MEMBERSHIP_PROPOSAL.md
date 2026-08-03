@@ -95,7 +95,7 @@ listing them individually:
 [managed_cells]
 parent = "/workload.slice/workload-tw.slice"
 exclude_children = ["systemd-workaround.service"]
-max_children = 31
+max_children = 255
 reconcile_ms = 1000
 cell0_min_cpus = 0
 

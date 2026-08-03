@@ -7704,7 +7704,7 @@ scope = "task_allowed"
         let policy = policy::compile_policy(policy_source()).expect("policy should compile");
         let encoded = encode_ladder(&policy, 42).expect("ladder should encode");
 
-        assert_eq!(bpf_intf::SNAKE_ABI_VERSION, 31);
+        assert_eq!(bpf_intf::SNAKE_ABI_VERSION, 32);
         assert_eq!(bpf_intf::SNAKE_MAX_RUNGS, 16);
         assert_eq!(bpf_intf::snake_stat_SNAKE_STAT_VTIME_CLOCK_CAS_RETRIES, 215);
         assert_eq!(
@@ -7990,7 +7990,7 @@ scope = "task_cell"
         .unwrap();
         let encoded = encode_ladder(&policy, 9).unwrap();
 
-        assert_eq!(bpf_intf::SNAKE_ABI_VERSION, 31);
+        assert_eq!(bpf_intf::SNAKE_ABI_VERSION, 32);
         assert_eq!(encoded.nr_enqueue_rungs, 3);
         assert_eq!(encoded.enqueue_rungs[0].opcode, 5);
         assert_eq!(encoded.enqueue_rungs[0].input, 4);
@@ -8044,7 +8044,7 @@ scope = "task_cell"
         .unwrap();
         let encoded = encode_ladder(&policy, 10).unwrap();
 
-        assert_eq!(bpf_intf::SNAKE_ABI_VERSION, 31);
+        assert_eq!(bpf_intf::SNAKE_ABI_VERSION, 32);
         assert_eq!(encoded.nr_dispatch_rungs, 5);
         assert_eq!(
             encoded
@@ -8739,7 +8739,9 @@ scope = "task_cell"
         let cpu_pick = include_str!("bpf/cpu_pick.h");
         let ladder = include_str!("bpf/ladder.h");
 
-        assert!(intf.contains("#define SNAKE_ABI_VERSION 31"));
+        assert!(intf.contains("#define SNAKE_ABI_VERSION 32"));
+        assert!(intf.contains("#define SNAKE_MAX_QUEUE_CELLS 256"));
+        assert!(intf.contains("#define SNAKE_MAX_NORMAL_QUEUES 8192"));
         assert!(intf.contains("SNAKE_OP_PICK_IDLE_PREFER_PREVIOUS = 8"));
         assert!(intf.contains("SNAKE_INPUT_TASK_ALLOWED_RESTRICTED = 5"));
         assert!(intf.contains("SNAKE_QUEUE_MASK_LOCAL_LLC"));

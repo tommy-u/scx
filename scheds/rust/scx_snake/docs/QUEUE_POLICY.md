@@ -108,7 +108,7 @@ Static `[[cell]]` declarations use the original weighted allocator:
 
 - Cell ID 0 is reserved for a synthetic cell containing unannotated tasks.
   It claims every online CPU and uses `cell0_cpu_weight`.
-- A policy may declare at most 31 cells with IDs 1 through 1023, for 32 queue
+- A policy may declare at most 255 cells with IDs 1 through 1023, for 256 queue
   cells including cell 0.
 - Every cell weight must be positive. Every cell must receive at least one
   primary CPU, so the host needs at least as many online CPUs as queue cells.
@@ -222,8 +222,8 @@ Snake creates all queue-policy DSQs when the scheduler attaches.
 | Layout | Normal VTIME DSQs | Clock |
 | --- | --- | --- |
 | `llc` | One per discovered LLC | One global clock shared by every queue |
-| `cell` | A fixed pool of 32; one active descriptor per cell | One per cell |
-| `cell_llc` | A fixed pool of 32 times the discovered LLC count; one active descriptor per active cell/LLC pair | One per cell, shared by all of that cell's LLC shards |
+| `cell` | A fixed pool of 256; one active descriptor per cell | One per cell |
+| `cell_llc` | A fixed pool of 256 times the discovered LLC count; one active descriptor per active cell/LLC pair | One per cell, shared by all of that cell's LLC shards |
 
 Every layout also creates exactly one affinity-safe DSQ per online CPU. In
 `llc`, all normal and CPU queues use the global clock. In cell layouts, each

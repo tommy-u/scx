@@ -96,17 +96,17 @@ confirmed. Add a deterministic injected-failure retry test.
 
 ### Inspector polling amplification is large-host material
 
-At 1,024 CPUs and 32 cells, one full metrics request reads approximately:
+At 1,024 CPUs and 256 cells, one full metrics request reads approximately:
 
 ```text
 74 global stats × 1024 CPUs × 8 bytes
-+ 32 cells × 9 stats × 1024 CPUs × 8 bytes
++ 256 cells × 10 stats × 1024 CPUs × 8 bytes
 + 7 callbacks × 1024 CPUs × 520 bytes
-= 6,692,864 bytes
+= 25,305,088 bytes
 ```
 
-Four top-stat requests plus one inspection request per second are roughly 32 MiB/s
-of raw map data and 1,845 per-CPU map lookup calls per second, before task inspection,
+Four top-stat requests plus one inspection request per second are roughly 121 MiB/s
+of raw map data and 13,205 per-CPU map lookup calls per second, before task inspection,
 allocation, JSON, and rendering. The migration collector additionally walks its
 map every 250 ms, and the browser performs dense `N²` work.
 
@@ -313,7 +313,7 @@ mechanism tests do not close:
 | Axis | Values |
 | --- | --- |
 | CPUs | 8, 64, 128, 256, 512, 1,024 |
-| Cells | 1, 8, 32; higher only after scale limit changes |
+| Cells | 1, 8, 32, 256 |
 | LLCs | 1, 4, 8, 16 and a high-fanout host if available |
 | Runnable tasks | 1×, 4×, and 32× CPU count; plus 100k sleeping/managed tasks |
 | Affinity | unrestricted, one CPU, one LLC, fragmented masks |

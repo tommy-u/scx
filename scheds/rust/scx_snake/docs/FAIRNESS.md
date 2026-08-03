@@ -433,7 +433,7 @@ sudo scheds/rust/scx_snake/tests/vtime_cell_borrowing.sh \
 
 Inside an isolated guest, the combined gauntlet runs the FIFO fallback, the
 targeted EEVDF mixed-affinity and fork/yield regressions, and all applicable
-VTIME queue tests. It adds max-cell coverage at 32 CPUs and the low-weight
+VTIME queue tests. It adds max-cell coverage at 256 CPUs and the low-weight
 watchdog campaign at 128 CPUs:
 
 ```bash
@@ -449,7 +449,7 @@ Additional VM-only contracts cover the remaining queue boundaries:
 | `vtime_llc_queues.sh` | Global-clock LLC queues exercise local, CPU, and bounded remote-candidate paths with consistent rung counters. |
 | `eevdf_stall_workload.sh` | Bounded mixed-affinity and fork/yield cohorts retain progress across a 60-second watchdog window. |
 | `vtime_queue_ladders.sh` | Callback ladders activate, live reorder, switch to `min_vtime`, and dispatch both queue classes. |
-| `vtime_max_cells.sh` | 31 declared cells plus cell 0 run under `cell` and `cell_llc`. |
+| `vtime_max_cells.sh` | 255 declared cells plus cell 0 run under `cell` and `cell_llc`. |
 | `vtime_single_runner_rehome.sh` | A sole running task is re-enqueued and cannot retain an obsolete cell indefinitely. |
 | `vtime_queued_rehome.sh` | An old normal-DSQ run is preserved once, then translated on re-enqueue. |
 | `vtime_cell_borrowing.sh` | Direct borrowers yield after one slice before any owner-cell comparison. |

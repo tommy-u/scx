@@ -8,7 +8,7 @@ typedef unsigned int	   u32;
 typedef unsigned long long u64;
 #endif
 
-#define SNAKE_ABI_VERSION 31
+#define SNAKE_ABI_VERSION 32
 #define SNAKE_MAX_RUNGS 16
 #define SNAKE_MAX_GENERIC_RUNGS 9
 #define SNAKE_MAX_QUEUE_RUNGS 8
@@ -17,9 +17,9 @@ typedef unsigned long long u64;
 #define SNAKE_MAX_CPUS 1024
 #define SNAKE_MASK_BYTES (SNAKE_MAX_CPUS / 8)
 #define SNAKE_MAX_MASK_TABLES 4
-#define SNAKE_MAX_QUEUE_CELLS 32
+#define SNAKE_MAX_QUEUE_CELLS 256
 #define SNAKE_MAX_CELL_LLCS 32
-#define SNAKE_MAX_NORMAL_QUEUES SNAKE_MAX_CPUS
+#define SNAKE_MAX_NORMAL_QUEUES 8192
 #define SNAKE_QUEUE_MODE_NONE 0U
 #define SNAKE_QUEUE_MODE_GLOBAL 1U
 #define SNAKE_QUEUE_MODE_CELL 2U
