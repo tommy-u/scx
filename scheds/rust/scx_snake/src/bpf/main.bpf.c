@@ -8,6 +8,7 @@
 #include "queue_ladder.h"
 #include "ladder.h"
 #include "scheduler_mode.h"
+#include "dump.h"
 
 char _license[] SEC("license") = "GPL";
 
@@ -892,4 +893,5 @@ SCX_OPS_DEFINE(
 	.running = (void *)snake_running, .stopping = (void *)snake_stopping,
 	.quiescent  = (void *)snake_quiescent,
 	.set_weight = (void *)snake_set_weight, .init = (void *)snake_init,
+	.dump = (void *)snake_dump, .dump_task = (void *)snake_dump_task,
 	.exit = (void *)snake_exit, .timeout_ms = 5000, .name = "snake");

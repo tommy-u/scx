@@ -49,7 +49,7 @@ data flow, [`QUEUE_POLICY.md`](QUEUE_POLICY.md) for queue semantics, and
 | Queue dispatch | `queue_dispatch.h` | legacy cyclic sources, bounded global peek/consume arbitration, and replenishment. |
 | Queue fairness state | `queue_vtime.h`, `queue_fairness.h` | global or cell clocks, task transitions, rehome state, and queue callback composition. |
 | Scheduler mode | `scheduler_mode.h` | the only switch between placement-only fairness and queue-topology callbacks. |
-| Telemetry | `stats.h`, `timing.h`, `queue_timing.h` | counters, sampled callback/rung/DSQ timing, and queue residence captures. |
+| Telemetry | `stats.h`, `timing.h`, `queue_timing.h`, `dump.h` | counters, sampled callback/rung/DSQ timing, queue residence captures, and sched_ext global/task dumps. |
 
 The facade headers are deliberately narrow. Callback code selects a scheduler
 mode through `scheduler_mode.h`; scheduler mode selects a fairness policy
@@ -106,6 +106,21 @@ expands the queue-cell pool to 256 and the stable cell/LLC normal-DSQ pool to
 Moving a definition between owning headers is internal. Changing any item
 above requires coordinated userspace encoding, BPF validation, inspection,
 and compatibility tests.
+
+## Diagnostic dumps
+
+The `snake_dump` struct-op callback starts with the sched_ext dump header and
+then emits policy publication and topology-transition state. Queue mode adds
+cell identities, CPU masks, VTIME clocks, drain state, active normal queues,
+and every CPU's owner and normal/affinity route. Both kernel DSQ depth and
+Snake's tracked depth are printed so a dump can expose accounting divergence.
+Placement-only modes instead report their global fairness DSQ depths.
+
+The `snake_dump_task` callback reports the task annotation and managed-cell
+identity, adopted cell and epoch, topology generation, queued route, VTIME and
+service accounting, selected CPU state, and allowed CPU mask. The exit dump
+allowance defaults to 1 MiB and is configurable with `--exit-dump-len`; zero
+retains the kernel default.
 
 ## Mitosis extraction seams
 

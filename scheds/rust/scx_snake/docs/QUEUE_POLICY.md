@@ -431,8 +431,8 @@ not need per-stage visibility.
 
 This profile models Mitosis cell discovery, CPU ownership, placement, direct
 dispatch, borrowing, demand rebalancing with orphan draining, same-cell
-sibling-LLC stealing, one VTIME domain per cell, and optional pinned-waiter
-slice shrinking.
+sibling-LLC stealing, one VTIME domain per cell, and pinned-waiter slice
+shrinking enabled by default for the built-in profile.
 
 ## Live updates
 

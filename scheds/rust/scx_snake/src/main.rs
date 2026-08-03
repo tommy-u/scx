@@ -66,6 +66,7 @@ use task_cells::{ThreadCellAssignment, ThreadCellResponse};
 
 const SCHEDULER_NAME: &str = "scx_snake";
 const MITOSIS_SIM_POLICY: &str = include_str!("../examples/mitosis-sim.toml");
+const DEFAULT_EXIT_DUMP_LEN: u32 = 1_048_576;
 const SLOT_QUIESCENCE_TIMEOUT: Duration = Duration::from_secs(5);
 const SLOT_QUIESCENCE_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const TIMING_DRAIN_BATCH: usize = 4096;
@@ -175,8 +176,8 @@ struct Opts {
     #[arg(long)]
     help_stats: bool,
 
-    /// Exit debug dump buffer length. Zero selects the kernel default.
-    #[arg(long, default_value_t = 0)]
+    /// Exit debug dump buffer length in bytes. Zero selects the kernel default.
+    #[arg(long, default_value_t = DEFAULT_EXIT_DUMP_LEN)]
     exit_dump_len: u32,
 
     /// Enable verbose userspace and libbpf logging.
@@ -323,6 +324,14 @@ fn resolve_mode(opts: &Opts) -> Result<RunMode> {
 
 fn effective_fairness(opts: &Opts, policy: &PolicySelection) -> FairnessMode {
     opts.fairness.unwrap_or_else(|| policy.default_fairness())
+}
+
+fn initial_bpf_slice_parameters(policy: &PolicySelection) -> BpfSliceParameters {
+    let mut parameters = BpfSliceParameters::default();
+    if matches!(policy, PolicySelection::Builtin(BuiltinProfile::MitosisSim)) {
+        parameters.slice_shrinking.enabled = true;
+    }
+    parameters
 }
 
 fn load_policy(selection: &PolicySelection) -> Result<(String, CompiledPolicy)> {
@@ -2280,6 +2289,7 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
     fn init(
         opts: &Opts,
         fairness: FairnessMode,
+        bpf_slice_parameters: BpfSliceParameters,
         runtime: &'policy mut RuntimePolicy,
         mask_tables: &[ResolvedMaskTable],
         queue_topology: Option<&queue_topology::QueueTopology>,
@@ -2337,7 +2347,6 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
         rodata.fairness_mode = fairness as u32;
         rodata.queue_mode = queue_mode_for_topology(queue_topology);
         rodata.expanded_mitosis_select = u32::from(expanded_mitosis);
-        let bpf_slice_parameters = BpfSliceParameters::default();
         let bss = skel
             .maps
             .bss_data
@@ -4207,6 +4216,7 @@ fn main() -> Result<()> {
         }
         RunMode::Launch(selection) => {
             let fairness = effective_fairness(&opts, &selection);
+            let bpf_slice_parameters = initial_bpf_slice_parameters(&selection);
             let (source, policy) = load_policy(&selection)?;
             let mut runtime = RuntimePolicy::new(source, policy);
             init_logging(opts.verbose)?;
@@ -4243,6 +4253,7 @@ fn main() -> Result<()> {
                     let mut scheduler = Scheduler::init(
                         &opts,
                         fairness,
+                        bpf_slice_parameters.clone(),
                         &mut runtime,
                         &mask_tables,
                         queue_topology.as_ref(),
@@ -4593,6 +4604,8 @@ scope = "task_allowed"
             "scx_lib_init_probe",
             "snake_dequeue",
             "snake_dispatch",
+            "snake_dump",
+            "snake_dump_task",
             "snake_enqueue",
             "snake_enqueue_expanded",
             "snake_enqueue_no_direct",
@@ -4670,6 +4683,8 @@ scope = "task_allowed"
                 ".quiescent=(void*)snake_quiescent,",
                 ".set_weight=(void*)snake_set_weight,",
                 ".init=(void*)snake_init,",
+                ".dump=(void*)snake_dump,",
+                ".dump_task=(void*)snake_dump_task,",
                 ".exit=(void*)snake_exit,",
                 ".timeout_ms=5000,",
                 ".name=\"snake\""
@@ -5315,6 +5330,36 @@ scope = "task_cell"
         assert!(enqueue.contains("slice_shrink_on_enqueue("));
         assert!(vtime.contains("slice_shrink_on_running("));
         assert!(vtime.contains("slice_runtime_update(runtime, delta)"));
+    }
+
+    #[test]
+    fn sched_ext_dump_callbacks_capture_snake_runtime_state() {
+        let bpf_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bpf");
+        let main = fs::read_to_string(bpf_dir.join("main.bpf.c")).unwrap();
+
+        assert!(main.contains("#include \"dump.h\""));
+        let dump = fs::read_to_string(bpf_dir.join("dump.h")).unwrap();
+        for needle in [
+            "BPF_STRUCT_OPS(snake_dump,",
+            "BPF_STRUCT_OPS(snake_dump_task,",
+            "scx_bpf_dump_header()",
+            "topology_generation",
+            "llcs_to_drain",
+            "tracked_nr_queued",
+            "affinity_tracked_nr_queued",
+            "cell_external_id",
+            "service_budget",
+            "avg_runtime_ns",
+            "READ_ONCE(cpuq->valid)",
+        ] {
+            assert!(
+                dump.contains(needle),
+                "dump implementation is missing {needle}"
+            );
+        }
+        assert!(main.contains(".dump = (void *)snake_dump"));
+        assert!(main.contains(".dump_task = (void *)snake_dump_task"));
+        assert!(!dump.contains("cpu >= header->nr_cpus"));
     }
 
     #[test]
@@ -9014,6 +9059,38 @@ scope = "task_cell_borrowable"
             PolicySelection::Builtin(BuiltinProfile::MitosisSim)
         );
         assert_eq!(effective_fairness(&opts, &selection), FairnessMode::Vtime);
+    }
+
+    #[test]
+    fn built_in_mitosis_profile_enables_slice_shrinking() {
+        let parameters =
+            initial_bpf_slice_parameters(&PolicySelection::Builtin(BuiltinProfile::MitosisSim));
+
+        assert!(parameters.slice_shrinking.enabled);
+        assert_eq!(parameters.slice_shrinking.min_us, 500);
+        assert_eq!(parameters.slice_shrinking.max_us, 4_000);
+        assert_eq!(parameters.slice_shrinking.multiplier, 2);
+
+        let custom =
+            initial_bpf_slice_parameters(&PolicySelection::File(PathBuf::from("/tmp/snake.toml")));
+        assert!(!custom.slice_shrinking.enabled);
+    }
+
+    #[test]
+    fn exit_dump_defaults_to_one_mib_and_remains_configurable() {
+        let default = Opts::try_parse_from(["scx_snake", "--profile", "mitosis-sim"])
+            .expect("built-in profile should parse");
+        assert_eq!(default.exit_dump_len, 1_048_576);
+
+        let configured = Opts::try_parse_from([
+            "scx_snake",
+            "--profile",
+            "mitosis-sim",
+            "--exit-dump-len",
+            "65536",
+        ])
+        .expect("custom dump length should parse");
+        assert_eq!(configured.exit_dump_len, 65_536);
     }
 
     #[test]

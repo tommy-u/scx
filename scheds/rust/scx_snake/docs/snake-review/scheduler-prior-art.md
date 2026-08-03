@@ -35,7 +35,7 @@ userspace discovers resources and computes a complete plan
 | P1 | Mitosis cpuset change signal | Avoids constant file polling | Kernel hook compatibility | Add with polling fallback |
 | P1 | Mitosis lifecycle test scenarios | Exercises real isolation and churn | VM harness work | Core cases ported; add scale, soak, faults, and rollback |
 | P2 | Mitosis capability-gated lockless peek | Potential dispatch reduction with fallback | Kernel feature and benchmark | Borrow only if measured |
-| Done | Mitosis pinned-waiter slice shrinking | Reduces wait behind long affinity slices | Runtime EWMA and context-switch cost | Implemented as an optional live control; benchmark before default |
+| Done | Mitosis pinned-waiter slice shrinking | Reduces wait behind long affinity slices | Runtime EWMA and context-switch cost | Enabled by `mitosis-sim`; benchmark before broader rollout |
 | Done | Layered quantity/order separation | Allocator chooses counts; topology chooses concrete CPUs | Planner boundaries | Adapted in the managed allocator |
 | Done | Layered pure allocator/property tests | Deterministic resource planning | Low | Adopted |
 | P2 | Layered IRQ/stolen-time compensation | More accurate demand on capacity-reduced CPUs | Per-CPU capacity accounting | Inspector exposes host tax; controller integration remains |

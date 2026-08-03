@@ -97,8 +97,10 @@ limit = clamp(waiter.avg_runtime * multiplier, min_slice, max_slice)
 runner.slice = min(runner.slice, limit)
 ```
 
-The feature is disabled by default. Its minimum, maximum, and multiplier are
-live BPF parameters exposed by the Inspector. Lowering a current slice also
+The feature is disabled by default for custom policies. The built-in
+`mitosis-sim` profile enables it with a 500 us minimum, 4000 us maximum, and
+multiplier 2. These values and the enable bit are live BPF parameters exposed by
+the Inspector. Lowering a current slice also
 removes the same amount from that run's service budget, so VTIME never charges
 the runner for service it was prevented from receiving. Counters distinguish
 minimum-clamped, proportional, and maximum-clamped shrink decisions.

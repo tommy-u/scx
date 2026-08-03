@@ -33,6 +33,11 @@ static __always_inline bool dsq_vtime_head(dsq_id_t dsq, u64 *vtime)
 	return dsq_peek_vtime(dsq, vtime) != NULL;
 }
 
+static __always_inline u64 dsq_task_vtime(const struct task_struct *p)
+{
+	return READ_ONCE(p->scx.dsq_vtime);
+}
+
 static __always_inline s32 dsq_create(dsq_id_t dsq, s32 node)
 {
 	return scx_bpf_create_dsq(dsq.raw, node);
