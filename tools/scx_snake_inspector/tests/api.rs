@@ -118,6 +118,78 @@ fn callback_timing_snapshot(
     })
 }
 
+#[tokio::test]
+async fn userspace_parameter_updates_require_the_session_token() {
+    let (tx, _rx) = mpsc::channel();
+    let cgroup_root = tempfile::tempdir().unwrap();
+    let context = ApiContext::new(dashboard(), tx, "secret", cgroup_root.path().to_path_buf());
+
+    let response = router(context)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/scheduler/parameters/userspace")
+                .header("host", "127.0.0.1")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"managed_reconcile_ms":1000,"sample_ms":1000,"threshold_pct":20.0,"cooldown_ms":5000,"ewma_alpha":0.3}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn userspace_parameter_updates_round_trip_effective_values() {
+    let (tx, rx) = mpsc::channel();
+    let cgroup_root = tempfile::tempdir().unwrap();
+    let context = ApiContext::new(dashboard(), tx, "secret", cgroup_root.path().to_path_buf());
+    let responder = std::thread::spawn(move || {
+        let CollectorCommand::SetUserspaceParameters {
+            parameters,
+            response,
+        } = rx.recv_timeout(Duration::from_secs(2)).unwrap()
+        else {
+            panic!("expected userspace parameter command");
+        };
+        assert_eq!(parameters.managed_reconcile_ms, 750);
+        assert_eq!(parameters.resizing.sample_ms, 500);
+        assert_eq!(parameters.resizing.threshold_pct, 12.5);
+        assert_eq!(parameters.resizing.cooldown_ms, 2_500);
+        assert_eq!(parameters.resizing.ewma_alpha, 0.45);
+        response.send(Ok(parameters)).unwrap();
+    });
+
+    let response = router(context)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/scheduler/parameters/userspace")
+                .header("host", "127.0.0.1")
+                .header("content-type", "application/json")
+                .header(CSRF_HEADER, "secret")
+                .body(Body::from(
+                    r#"{"managed_reconcile_ms":750,"sample_ms":500,"threshold_pct":12.5,"cooldown_ms":2500,"ewma_alpha":0.45}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value =
+        serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(body["managed_reconcile_ms"], 750);
+    assert_eq!(body["resizing"]["sample_ms"], 500);
+    assert_eq!(body["resizing"]["threshold_pct"], 12.5);
+    assert_eq!(body["resizing"]["cooldown_ms"], 2_500);
+    assert_eq!(body["resizing"]["ewma_alpha"], 0.45);
+    responder.join().unwrap();
+}
+
 fn fine_timing_snapshot() -> Value {
     let mut snapshot = callback_timing_snapshot(7, 0, 0);
     snapshot["fairness"] = json!({"mode_name": "fifo"});

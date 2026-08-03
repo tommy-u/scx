@@ -4,13 +4,54 @@
 // GNU General Public License version 2.
 
 use std::path::PathBuf;
+use std::sync::mpsc;
 
 use scx_snake_inspector::collector::{
     decode_counter_entry, decode_inspection_stats, decode_top_stats, find_symbol_address,
-    parse_host_cpu_times, CollectorConfig,
+    parse_host_cpu_times, CollectorCommand, CollectorConfig, ManagedCellResizingParameters,
+    UserspaceParameters,
 };
 use scx_snake_inspector::model::CpuPair;
 use scx_snake_inspector::scope::TaskScope;
+
+#[test]
+fn userspace_parameter_command_forwards_values_and_returns_effective_response() {
+    let requested = UserspaceParameters {
+        managed_reconcile_ms: 750,
+        resizing: ManagedCellResizingParameters {
+            sample_ms: 500,
+            threshold_pct: 12.5,
+            cooldown_ms: 2_500,
+            ewma_alpha: 0.45,
+        },
+    };
+    let effective = UserspaceParameters {
+        managed_reconcile_ms: 800,
+        resizing: ManagedCellResizingParameters {
+            sample_ms: 600,
+            threshold_pct: 15.0,
+            cooldown_ms: 3_000,
+            ewma_alpha: 0.5,
+        },
+    };
+    let (response_tx, response_rx) = mpsc::sync_channel(1);
+    let command = CollectorCommand::SetUserspaceParameters {
+        parameters: requested.clone(),
+        response: response_tx,
+    };
+
+    let CollectorCommand::SetUserspaceParameters {
+        parameters,
+        response,
+    } = command
+    else {
+        panic!("expected userspace parameter command");
+    };
+    assert_eq!(parameters, requested);
+
+    response.send(Ok(effective.clone())).unwrap();
+    assert_eq!(response_rx.recv().unwrap().unwrap(), effective);
+}
 
 #[test]
 fn collector_config_matches_the_bpf_abi() {

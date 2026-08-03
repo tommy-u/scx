@@ -152,6 +152,214 @@ test("inspection routes default to overview and preserve legacy view aliases", (
   assert.equal(routeFromHash("#/unknown"), "overview");
 });
 
+test("scheduler parameter panel keeps userspace and BPF values in separate groups", () => {
+  assert.equal(typeof inspectionState.schedulerParameterPanelModel, "function");
+  if (typeof inspectionState.schedulerParameterPanelModel !== "function") {
+    return;
+  }
+
+  const model = inspectionState.schedulerParameterPanelModel({
+    userspace: {
+      managed_reconcile_ms: 1_000,
+      resizing: {
+        sample_ms: 500,
+        threshold_pct: 20,
+        cooldown_ms: 5_000,
+        ewma_alpha: 0.3,
+      },
+    },
+    bpf: {
+      callback_timing_sample_rate: 64,
+      queue_timing_enabled: true,
+      fairness: "vtime",
+      queue_layout: "cell_llc",
+      direct_dispatch: false,
+    },
+  }, {
+    sample_ms: "750",
+    threshold_pct: "20.0",
+  });
+
+  assert.equal(model.available, true);
+  assert.equal(model.userspace.available, true);
+  assert.equal(model.userspace.editable, true);
+  assert.deepEqual(model.userspace.values, {
+    managed_reconcile_ms: 1_000,
+    sample_ms: 500,
+    threshold_pct: 20,
+    cooldown_ms: 5_000,
+    ewma_alpha: 0.3,
+  });
+  assert.equal(model.userspace.dirty, true);
+  assert.deepEqual(
+    model.userspace.fields.map(({ key, effectiveValue, draftValue, dirty }) => ({
+      key,
+      effectiveValue,
+      draftValue,
+      dirty,
+    })),
+    [
+      {
+        key: "managed_reconcile_ms",
+        effectiveValue: 1_000,
+        draftValue: 1_000,
+        dirty: false,
+      },
+      { key: "sample_ms", effectiveValue: 500, draftValue: "750", dirty: true },
+      {
+        key: "threshold_pct",
+        effectiveValue: 20,
+        draftValue: "20.0",
+        dirty: false,
+      },
+      { key: "cooldown_ms", effectiveValue: 5_000, draftValue: 5_000, dirty: false },
+      { key: "ewma_alpha", effectiveValue: 0.3, draftValue: 0.3, dirty: false },
+    ],
+  );
+
+  assert.equal(model.bpf.available, true);
+  assert.equal(model.bpf.editable, true);
+  assert.deepEqual(model.bpf.values, {
+    callback_timing_sample_rate: 64,
+    queue_timing_enabled: true,
+    fairness: "vtime",
+    queue_layout: "cell_llc",
+    direct_dispatch: false,
+  });
+  assert.deepEqual(
+    model.bpf.fields.map(({ key, effectiveValue, editable, applyKind }) => ({
+      key,
+      effectiveValue,
+      editable,
+      applyKind,
+    })),
+    [
+      {
+        key: "callback_timing_sample_rate",
+        effectiveValue: 64,
+        editable: true,
+        applyKind: "callback-timing",
+      },
+      {
+        key: "queue_timing_enabled",
+        effectiveValue: true,
+        editable: true,
+        applyKind: "queue-timing",
+      },
+      { key: "fairness", effectiveValue: "vtime", editable: false, applyKind: null },
+      {
+        key: "queue_layout",
+        effectiveValue: "cell_llc",
+        editable: false,
+        applyKind: null,
+      },
+      {
+        key: "direct_dispatch",
+        effectiveValue: false,
+        editable: false,
+        applyKind: null,
+      },
+    ],
+  );
+});
+
+test("userspace parameter helpers build the flat API request and compare numeric drafts", () => {
+  assert.equal(typeof inspectionState.userspaceParameterRequest, "function");
+  assert.equal(typeof inspectionState.userspaceParametersDirty, "function");
+  if (
+    typeof inspectionState.userspaceParameterRequest !== "function"
+    || typeof inspectionState.userspaceParametersDirty !== "function"
+  ) {
+    return;
+  }
+
+  const effective = {
+    managed_reconcile_ms: 1_000,
+    resizing: {
+      sample_ms: 500,
+      threshold_pct: 20,
+      cooldown_ms: 5_000,
+      ewma_alpha: 0.3,
+    },
+  };
+  const unchangedDraft = {
+    managed_reconcile_ms: "1000",
+    sample_ms: "500",
+    threshold_pct: "20.0",
+    cooldown_ms: "5000",
+    ewma_alpha: "0.30",
+  };
+
+  assert.deepEqual(inspectionState.userspaceParameterRequest(unchangedDraft), {
+    managed_reconcile_ms: 1_000,
+    sample_ms: 500,
+    threshold_pct: 20,
+    cooldown_ms: 5_000,
+    ewma_alpha: 0.3,
+  });
+  assert.equal(
+    inspectionState.userspaceParametersDirty(effective, unchangedDraft),
+    false,
+  );
+  assert.equal(
+    inspectionState.userspaceParametersDirty(effective, {
+      ...unchangedDraft,
+      cooldown_ms: "6000",
+    }),
+    true,
+  );
+});
+
+test("scheduler parameter groups report availability independently", () => {
+  assert.equal(typeof inspectionState.schedulerParameterPanelModel, "function");
+  if (typeof inspectionState.schedulerParameterPanelModel !== "function") {
+    return;
+  }
+
+  const userspaceUnavailable = inspectionState.schedulerParameterPanelModel({
+    userspace: null,
+    bpf: {
+      callback_timing_sample_rate: 0,
+      queue_timing_enabled: false,
+      fairness: "fifo",
+      queue_layout: null,
+      direct_dispatch: null,
+    },
+  });
+  assert.equal(userspaceUnavailable.available, true);
+  assert.equal(userspaceUnavailable.userspace.available, false);
+  assert.equal(userspaceUnavailable.userspace.editable, false);
+  assert.equal(userspaceUnavailable.userspace.dirty, false);
+  assert.equal(userspaceUnavailable.bpf.available, true);
+  assert.equal(userspaceUnavailable.bpf.fields[4].effectiveValue, null);
+
+  const unavailable = inspectionState.schedulerParameterPanelModel(null);
+  assert.equal(unavailable.available, false);
+  assert.equal(unavailable.userspace.available, false);
+  assert.equal(unavailable.bpf.available, false);
+  assert.equal(unavailable.userspace.fields.length, 5);
+  assert.equal(unavailable.bpf.fields.length, 5);
+});
+
+test("Configure exposes separate userspace and BPF parameter controls", () => {
+  const page = readFileSync(
+    new URL("../../src/web/index.html", import.meta.url),
+    "utf8",
+  );
+  const script = readFileSync(
+    new URL("../../src/web/app.js", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(page, /id="userspaceParametersTitle">Userspace controller/);
+  assert.match(page, /id="bpfParametersTitle">BPF runtime/);
+  assert.match(page, /id="managedReconcileMs"/);
+  assert.match(page, /id="parameterCallbackSampleRate"/);
+  assert.match(script, /fetch\("\/api\/scheduler\/parameters\/userspace"/);
+  assert.match(script, /postParameterUpdate\("\/api\/callback-timing"/);
+  assert.match(script, /postParameterUpdate\("\/api\/queue-timing"/);
+});
+
 test("table sort values handle natural text, formatted numbers, units, and missing data", () => {
   assert.equal(typeof inspectionState.tableSortValue, "function");
   assert.equal(typeof inspectionState.compareTableSortValues, "function");

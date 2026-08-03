@@ -77,6 +77,7 @@ import {
   schedulerCurrentLaunch,
   schedulerDebugModel,
   schedulerLifecycleRequest,
+  schedulerParameterPanelModel,
   schedulerUptimeLabel,
   statsResetDisabled,
   stableSortTableRows,
@@ -92,6 +93,7 @@ import {
   topologyAnchorScrollDelta,
   topologyLifecycleModel,
   topologyLifecycleSignature,
+  userspaceParameterRequest,
   vtimeDebugModel,
   workloadAssignmentRequest,
 } from "/assets/inspection.js";
@@ -261,6 +263,21 @@ const elements = {
   schedulerExitDumpEnabled: document.querySelector("#schedulerExitDumpEnabled"),
   schedulerExitDumpLen: document.querySelector("#schedulerExitDumpLen"),
   schedulerVerbose: document.querySelector("#schedulerVerbose"),
+  schedulerParametersStatus: document.querySelector("#schedulerParametersStatus"),
+  managedReconcileMs: document.querySelector("#managedReconcileMs"),
+  managedSampleMs: document.querySelector("#managedSampleMs"),
+  managedThresholdPct: document.querySelector("#managedThresholdPct"),
+  managedCooldownMs: document.querySelector("#managedCooldownMs"),
+  managedEwmaAlpha: document.querySelector("#managedEwmaAlpha"),
+  applyUserspaceParameters: document.querySelector("#applyUserspaceParameters"),
+  userspaceParametersNotice: document.querySelector("#userspaceParametersNotice"),
+  parameterCallbackSampleRate: document.querySelector("#parameterCallbackSampleRate"),
+  parameterQueueTiming: document.querySelector("#parameterQueueTiming"),
+  parameterFairness: document.querySelector("#parameterFairness"),
+  parameterQueueLayout: document.querySelector("#parameterQueueLayout"),
+  parameterDirectDispatch: document.querySelector("#parameterDirectDispatch"),
+  applyBpfParameters: document.querySelector("#applyBpfParameters"),
+  bpfParametersNotice: document.querySelector("#bpfParametersNotice"),
   statsResetNotice: document.querySelector("#statsResetNotice"),
   startScheduler: document.querySelector("#startScheduler"),
   stopScheduler: document.querySelector("#stopScheduler"),
@@ -379,6 +396,10 @@ const state = {
   schedulerControlLoading: false,
   schedulerControlPending: false,
   schedulerFormInitialized: false,
+  userspaceParametersDirty: false,
+  userspaceParametersPending: false,
+  bpfParametersDirty: false,
+  bpfParametersPending: false,
   selectedPolicyFairness: null,
   selectedLifecycleFairness: null,
   selectedLifecyclePolicyId: null,
@@ -537,11 +558,16 @@ function configureCallbackRangeSelector() {
 }
 
 function configureCallbackSampleRateSelector() {
-  for (const optionModel of callbackSampleRateOptions()) {
-    const option = document.createElement("option");
-    option.value = String(optionModel.value);
-    option.textContent = optionModel.label;
-    elements.callbackSampleRateControl.append(option);
+  for (const select of [
+    elements.callbackSampleRateControl,
+    elements.parameterCallbackSampleRate,
+  ]) {
+    for (const optionModel of callbackSampleRateOptions()) {
+      const option = document.createElement("option");
+      option.value = String(optionModel.value);
+      option.textContent = optionModel.label;
+      select.append(option);
+    }
   }
 }
 
@@ -796,6 +822,22 @@ function bindControls() {
     });
   }
   elements.schedulerExitDumpLen.addEventListener("input", renderSchedulerCommandPreview);
+  for (const control of userspaceParameterControls()) {
+    control.addEventListener("input", () => {
+      state.userspaceParametersDirty = true;
+      renderSchedulerParameters();
+    });
+  }
+  elements.parameterCallbackSampleRate.addEventListener("change", () => {
+    state.bpfParametersDirty = true;
+    renderSchedulerParameters();
+  });
+  elements.parameterQueueTiming.addEventListener("change", () => {
+    state.bpfParametersDirty = true;
+    renderSchedulerParameters();
+  });
+  elements.applyUserspaceParameters.addEventListener("click", setUserspaceParameters);
+  elements.applyBpfParameters.addEventListener("click", setBpfParameters);
   elements.startScheduler.addEventListener("click", startScheduler);
   elements.restartScheduler.addEventListener("click", restartScheduler);
   elements.stopScheduler.addEventListener("click", stopScheduler);
@@ -2725,6 +2767,9 @@ async function loadInspection() {
   }
   renderRuntimeContext();
   renderInspectionViews();
+  if (state.route === "configure") {
+    renderSchedulerParameters();
+  }
 }
 
 async function loadPolicyCatalog() {
@@ -3125,6 +3170,189 @@ function renderSchedulerControl() {
 
   elements.schedulerCurrentCommand.textContent = schedulerCurrentCommand(control);
   renderSchedulerCommandPreview();
+  renderSchedulerParameters();
+}
+
+function userspaceParameterControls() {
+  return [
+    elements.managedReconcileMs,
+    elements.managedSampleMs,
+    elements.managedThresholdPct,
+    elements.managedCooldownMs,
+    elements.managedEwmaAlpha,
+  ];
+}
+
+function userspaceParameterDraft() {
+  return {
+    managed_reconcile_ms: elements.managedReconcileMs.value,
+    sample_ms: elements.managedSampleMs.value,
+    threshold_pct: elements.managedThresholdPct.value,
+    cooldown_ms: elements.managedCooldownMs.value,
+    ewma_alpha: elements.managedEwmaAlpha.value,
+  };
+}
+
+function hydrateUserspaceParameterControls(values) {
+  const controls = {
+    managed_reconcile_ms: elements.managedReconcileMs,
+    sample_ms: elements.managedSampleMs,
+    threshold_pct: elements.managedThresholdPct,
+    cooldown_ms: elements.managedCooldownMs,
+    ewma_alpha: elements.managedEwmaAlpha,
+  };
+  for (const [key, control] of Object.entries(controls)) {
+    control.value = values?.[key] == null ? "" : String(values[key]);
+  }
+}
+
+function renderSchedulerParameters() {
+  const draft = state.userspaceParametersDirty ? userspaceParameterDraft() : null;
+  const model = schedulerParameterPanelModel(state.inspection?.parameters, draft);
+  const schedulerActive = Boolean(state.schedulerControl?.active);
+  elements.schedulerParametersStatus.textContent = model.available
+    ? "Live values"
+    : schedulerActive ? "Synchronizing" : "Snake stopped";
+
+  if (!state.userspaceParametersDirty) {
+    hydrateUserspaceParameterControls(model.userspace.values);
+  }
+  for (const control of userspaceParameterControls()) {
+    control.disabled = !schedulerActive
+      || !model.userspace.editable
+      || state.userspaceParametersPending;
+  }
+  elements.applyUserspaceParameters.disabled = !schedulerActive
+    || !model.userspace.editable
+    || !model.userspace.dirty
+    || state.userspaceParametersPending;
+
+  if (!state.bpfParametersDirty) {
+    elements.parameterCallbackSampleRate.value = String(
+      model.bpf.values.callback_timing_sample_rate ?? 0,
+    );
+    elements.parameterQueueTiming.checked = Boolean(model.bpf.values.queue_timing_enabled);
+  }
+  const bpfLocked = !schedulerActive || !model.bpf.editable || state.bpfParametersPending;
+  const bpfChanged = Number(elements.parameterCallbackSampleRate.value)
+      !== Number(model.bpf.values.callback_timing_sample_rate)
+    || elements.parameterQueueTiming.checked
+      !== Boolean(model.bpf.values.queue_timing_enabled);
+  elements.parameterCallbackSampleRate.disabled = bpfLocked;
+  elements.parameterQueueTiming.disabled = bpfLocked;
+  elements.applyBpfParameters.disabled = bpfLocked
+    || !state.bpfParametersDirty
+    || !bpfChanged;
+  elements.parameterFairness.textContent = parameterFact(model.bpf.values.fairness);
+  elements.parameterQueueLayout.textContent = parameterFact(model.bpf.values.queue_layout);
+  elements.parameterDirectDispatch.textContent = model.bpf.values.direct_dispatch == null
+    ? "—"
+    : model.bpf.values.direct_dispatch ? "Enabled" : "Disabled";
+}
+
+function parameterFact(value) {
+  if (value == null || value === "") {
+    return "—";
+  }
+  return String(value).replaceAll("_", " ").toUpperCase();
+}
+
+async function setUserspaceParameters() {
+  if (state.userspaceParametersPending) {
+    return;
+  }
+  let request;
+  try {
+    request = userspaceParameterRequest(userspaceParameterDraft());
+  } catch (error) {
+    showElementNotice(elements.userspaceParametersNotice, error.message);
+    return;
+  }
+  state.userspaceParametersPending = true;
+  renderSchedulerParameters();
+  showElementNotice(elements.userspaceParametersNotice, "Applying userspace parameters…", "info");
+  try {
+    const response = await fetch("/api/scheduler/parameters/userspace", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-snake-token": token,
+      },
+      body: JSON.stringify(request),
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(payload.error || `Userspace parameter update failed (${response.status})`);
+    }
+    state.userspaceParametersDirty = false;
+    showElementNotice(elements.userspaceParametersNotice, "Userspace parameters applied.", "success");
+    await loadInspection();
+  } catch (error) {
+    showElementNotice(elements.userspaceParametersNotice, error.message);
+  } finally {
+    state.userspaceParametersPending = false;
+    renderSchedulerParameters();
+  }
+}
+
+async function setBpfParameters() {
+  if (state.bpfParametersPending) {
+    return;
+  }
+  const effective = state.inspection?.parameters?.bpf;
+  const sampleRate = Number(elements.parameterCallbackSampleRate.value);
+  const queueTimingEnabled = elements.parameterQueueTiming.checked;
+  if (queueTimingEnabled && sampleRate === 0) {
+    showElementNotice(
+      elements.bpfParametersNotice,
+      "Queue timing requires callback sampling to be enabled.",
+    );
+    return;
+  }
+  state.bpfParametersPending = true;
+  renderSchedulerParameters();
+  showElementNotice(elements.bpfParametersNotice, "Applying BPF runtime parameters…", "info");
+  try {
+    if (sampleRate !== Number(effective?.callback_timing_sample_rate)) {
+      await postParameterUpdate("/api/callback-timing", { sample_rate: sampleRate });
+    }
+    const callbackChangeStoppedQueue = sampleRate !== Number(effective?.callback_timing_sample_rate);
+    if (
+      queueTimingEnabled !== Boolean(effective?.queue_timing_enabled)
+      || (callbackChangeStoppedQueue && queueTimingEnabled)
+    ) {
+      await postParameterUpdate("/api/queue-timing", { enabled: queueTimingEnabled });
+    }
+    state.bpfParametersDirty = false;
+    showElementNotice(elements.bpfParametersNotice, "BPF runtime parameters applied.", "success");
+    await Promise.all([
+      loadInspection(),
+      loadCallbackTiming(),
+      loadFineTiming(),
+      loadQueueTiming(),
+    ]);
+  } catch (error) {
+    showElementNotice(elements.bpfParametersNotice, error.message);
+  } finally {
+    state.bpfParametersPending = false;
+    renderSchedulerParameters();
+  }
+}
+
+async function postParameterUpdate(path, payload) {
+  const response = await fetch(path, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-snake-token": token,
+    },
+    body: JSON.stringify(payload),
+  });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(body.error || `Parameter update failed (${response.status})`);
+  }
+  return body;
 }
 
 function renderStatsResetControl() {

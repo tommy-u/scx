@@ -22,7 +22,8 @@ use tokio_stream::wrappers::WatchStream;
 
 use crate::collector::{
     CallbackTimingRateResponse, CollectorCommand, FineTimingCallback, FineTimingControlResponse,
-    QueueTimingControlResponse, StatsResetResponse,
+    ManagedCellResizingParameters, QueueTimingControlResponse, StatsResetResponse,
+    UserspaceParameters,
 };
 use crate::dashboard::{Dashboard, RuntimeContextView};
 use crate::host_context::{ChartMetric, HostContextService};
@@ -149,6 +150,10 @@ pub fn router(context: ApiContext) -> Router {
         .route("/api/scheduler/start", post(start_scheduler))
         .route("/api/scheduler/restart", post(restart_scheduler))
         .route("/api/scheduler/stop", post(stop_scheduler))
+        .route(
+            "/api/scheduler/parameters/userspace",
+            post(set_userspace_parameters),
+        )
         .route("/api/testing/campaigns", get(testing_campaigns))
         .route("/api/testing/matrix", get(testing_matrix))
         .route("/api/testing/run", post(start_testing))
@@ -599,6 +604,47 @@ async fn set_queue_timing(
             .await
             .map_err(|_| ApiError::unavailable("queue timing worker failed"))?
             .map_err(|_| ApiError::unavailable("queue timing update timed out"))?
+            .map_err(ApiError::bad_request)?;
+    Ok(Json(response))
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct UserspaceParametersRequest {
+    managed_reconcile_ms: u64,
+    sample_ms: u64,
+    threshold_pct: f64,
+    cooldown_ms: u64,
+    ewma_alpha: f64,
+}
+
+async fn set_userspace_parameters(
+    State(context): State<ApiContext>,
+    headers: HeaderMap,
+    Json(request): Json<UserspaceParametersRequest>,
+) -> Result<Json<UserspaceParameters>, ApiError> {
+    require_session_token(&headers, &context.token)?;
+    let parameters = UserspaceParameters {
+        managed_reconcile_ms: request.managed_reconcile_ms,
+        resizing: ManagedCellResizingParameters {
+            sample_ms: request.sample_ms,
+            threshold_pct: request.threshold_pct,
+            cooldown_ms: request.cooldown_ms,
+            ewma_alpha: request.ewma_alpha,
+        },
+    };
+    let (response_tx, response_rx) = std::sync::mpsc::sync_channel(1);
+    context
+        .commands
+        .send(CollectorCommand::SetUserspaceParameters {
+            parameters,
+            response: response_tx,
+        })
+        .map_err(|_| ApiError::unavailable("collector is not running"))?;
+    let response =
+        tokio::task::spawn_blocking(move || response_rx.recv_timeout(Duration::from_secs(5)))
+            .await
+            .map_err(|_| ApiError::unavailable("userspace parameter worker failed"))?
+            .map_err(|_| ApiError::unavailable("userspace parameter update timed out"))?
             .map_err(ApiError::bad_request)?;
     Ok(Json(response))
 }

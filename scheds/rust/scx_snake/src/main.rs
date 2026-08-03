@@ -10,6 +10,7 @@ mod inspection;
 mod managed_cells;
 mod mask_tables;
 mod membership;
+mod parameters;
 mod policy;
 mod policy_validation;
 mod queue_timing;
@@ -37,6 +38,9 @@ use libbpf_rs::{AsRawLibbpf as _, MapCore as _, MapFlags, OpenObject, ProgramInp
 use log::{debug, info, warn};
 use mask_tables::{dump_mask_tables, resolve_mask_tables, ResolvedMaskTable};
 use membership::{CellDirectory, MembershipManager};
+use parameters::{
+    BpfParameters, ManagedCellResizingParameters, SchedulerParameters, UserspaceParameters,
+};
 use policy::{
     CompiledPolicy, CompiledRung, InputSource, Opcode, QueueDispatchAction, QueueDispatchOperation,
     QueueDispatchSource, QueueEnqueueAction, QueueEnqueueTarget,
@@ -3092,6 +3096,7 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
         let mut snapshot = self.inspector.snapshot(self.metrics()?, task_mappings);
         snapshot.fine_timing = self.fine_timing_inspection()?;
         snapshot.queue_timing = Some(self.queue_timing_inspection()?);
+        snapshot.parameters = Some(self.scheduler_parameters());
         Ok(snapshot)
     }
 
@@ -3103,6 +3108,94 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
     fn time_until_demand_sample(&self) -> Option<Duration> {
         self.next_demand_sample
             .map(|next| next.saturating_duration_since(Instant::now()))
+    }
+
+    fn userspace_parameters(&self) -> Option<UserspaceParameters> {
+        let managed = self.runtime.compiled.managed_cells.as_ref()?;
+        let resizing = managed.resizing.as_ref()?;
+        Some(UserspaceParameters {
+            managed_reconcile_ms: managed.reconcile_ms,
+            resizing: ManagedCellResizingParameters {
+                sample_ms: resizing.sample_ms,
+                threshold_pct: resizing.threshold_pct(),
+                cooldown_ms: resizing.cooldown_ms,
+                ewma_alpha: resizing.ewma_alpha(),
+            },
+        })
+    }
+
+    fn scheduler_parameters(&self) -> SchedulerParameters {
+        let queues = self.runtime.compiled.queues.as_ref();
+        SchedulerParameters {
+            userspace: self.userspace_parameters(),
+            bpf: BpfParameters {
+                callback_timing_sample_rate: self.callback_timing_sample_rate,
+                queue_timing_enabled: self.queue_timing_state.is_enabled(),
+                fairness: self.fairness.as_str().into(),
+                queue_layout: queues.map(|queues| queues.layout.as_str().into()),
+                direct_dispatch: queues.map(|queues| queues.direct_dispatch),
+            },
+        }
+    }
+
+    fn set_userspace_parameters(
+        &mut self,
+        parameters: UserspaceParameters,
+    ) -> Result<UserspaceParameters> {
+        let parameters = parameters.validate().map_err(anyhow::Error::msg)?;
+        let threshold_milli_pct = parameters
+            .threshold_milli_pct()
+            .map_err(anyhow::Error::msg)?;
+        let ewma_alpha_milli = parameters.ewma_alpha_milli().map_err(anyhow::Error::msg)?;
+        if self
+            .runtime
+            .compiled
+            .managed_cells
+            .as_ref()
+            .and_then(|managed| managed.resizing.as_ref())
+            .is_none()
+        {
+            bail!("the active policy does not enable managed-cell resizing");
+        }
+        if self.demand_tracker.is_none() {
+            bail!("managed-cell demand tracking is unavailable");
+        }
+
+        self.rebase_managed_demand()?;
+        self.demand_tracker
+            .as_mut()
+            .context("managed-cell demand tracking is unavailable")?
+            .set_ewma_alpha(f64::from(ewma_alpha_milli) / 1_000.0)
+            .map_err(anyhow::Error::msg)?;
+
+        let managed = self
+            .runtime
+            .compiled
+            .managed_cells
+            .as_mut()
+            .context("managed-cell policy disappeared")?;
+        let resizing = managed
+            .resizing
+            .as_mut()
+            .context("managed-cell resizing policy disappeared")?;
+        managed.reconcile_ms = parameters.managed_reconcile_ms;
+        resizing.sample_ms = parameters.resizing.sample_ms;
+        resizing.threshold_milli_pct = threshold_milli_pct;
+        resizing.cooldown_ms = parameters.resizing.cooldown_ms;
+        resizing.ewma_alpha_milli = ewma_alpha_milli;
+
+        let now = Instant::now();
+        let reconcile = Duration::from_millis(parameters.managed_reconcile_ms);
+        let sample = Duration::from_millis(parameters.resizing.sample_ms);
+        let cooldown = Duration::from_millis(parameters.resizing.cooldown_ms);
+        self.managed_reconcile_interval = Some(reconcile);
+        self.next_managed_reconcile = Some(now + reconcile);
+        self.demand_sample_interval = Some(sample);
+        self.next_demand_sample = Some(now + sample);
+        self.next_rebalance_allowed = Some(now + cooldown);
+
+        self.userspace_parameters()
+            .context("managed-cell parameters disappeared after update")
     }
 
     fn rebase_managed_demand(&mut self) -> Result<()> {
@@ -3785,6 +3878,12 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
                         .set_callback_timing_sample_rate(sample_rate)
                         .map_err(|error| format!("{error:#}"));
                     response_channel.send(SchedulerResponse::CallbackTimingSampleRate(response))?;
+                }
+                Ok(SchedulerRequest::SetUserspaceParameters(parameters)) => {
+                    let response = self
+                        .set_userspace_parameters(parameters)
+                        .map_err(|error| format!("{error:#}"));
+                    response_channel.send(SchedulerResponse::UserspaceParameters(response))?;
                 }
                 Ok(SchedulerRequest::ResetStats) => {
                     let response = self.reset_stats().map_err(|error| format!("{error:#}"));

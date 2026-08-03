@@ -195,6 +195,199 @@ export function parseInspectorRoute(hash) {
   };
 }
 
+const USERSPACE_PARAMETER_FIELDS = [
+  {
+    key: "managed_reconcile_ms",
+    label: "Cgroup reconcile interval",
+    inputKind: "number",
+    unit: "ms",
+    min: 50,
+    step: 50,
+  },
+  {
+    key: "sample_ms",
+    label: "Demand sample interval",
+    inputKind: "number",
+    unit: "ms",
+    min: 1,
+    step: 1,
+  },
+  {
+    key: "threshold_pct",
+    label: "Resize threshold",
+    inputKind: "number",
+    unit: "%",
+    min: 0,
+    step: 0.1,
+  },
+  {
+    key: "cooldown_ms",
+    label: "Minimum resize interval",
+    inputKind: "number",
+    unit: "ms",
+    min: 1,
+    step: 1,
+  },
+  {
+    key: "ewma_alpha",
+    label: "Demand smoothing alpha",
+    inputKind: "number",
+    unit: null,
+    min: 0.001,
+    max: 1,
+    step: 0.01,
+  },
+];
+
+const BPF_PARAMETER_FIELDS = [
+  {
+    key: "callback_timing_sample_rate",
+    label: "Callback timing sample rate",
+    inputKind: "select",
+    applyKind: "callback-timing",
+  },
+  {
+    key: "queue_timing_enabled",
+    label: "Queue timing capture",
+    inputKind: "checkbox",
+    applyKind: "queue-timing",
+  },
+  {
+    key: "fairness",
+    label: "Fairness mode",
+    inputKind: "output",
+    applyKind: null,
+  },
+  {
+    key: "queue_layout",
+    label: "Queue layout",
+    inputKind: "output",
+    applyKind: null,
+  },
+  {
+    key: "direct_dispatch",
+    label: "Direct dispatch",
+    inputKind: "output",
+    applyKind: null,
+  },
+];
+
+function flattenUserspaceParameters(parameters) {
+  if (!parameters || typeof parameters !== "object") {
+    return null;
+  }
+  const values = {
+    managed_reconcile_ms: parameters.managed_reconcile_ms,
+    sample_ms: parameters.sample_ms ?? parameters.resizing?.sample_ms,
+    threshold_pct: parameters.threshold_pct ?? parameters.resizing?.threshold_pct,
+    cooldown_ms: parameters.cooldown_ms ?? parameters.resizing?.cooldown_ms,
+    ewma_alpha: parameters.ewma_alpha ?? parameters.resizing?.ewma_alpha,
+  };
+  return Object.fromEntries(
+    Object.entries(values).filter(([, value]) => value !== undefined),
+  );
+}
+
+function numericParameter(value, key) {
+  if (value === "" || value == null) {
+    throw new TypeError(`${key} is required`);
+  }
+  const number = Number(value);
+  if (!Number.isFinite(number)) {
+    throw new TypeError(`${key} must be a finite number`);
+  }
+  return number;
+}
+
+export function userspaceParameterRequest(draft) {
+  const values = flattenUserspaceParameters(draft);
+  if (!values) {
+    throw new TypeError("userspace parameters are required");
+  }
+  return Object.fromEntries(USERSPACE_PARAMETER_FIELDS.map(({ key }) => [
+    key,
+    numericParameter(values[key], key),
+  ]));
+}
+
+export function userspaceParametersDirty(effective, draft) {
+  const current = flattenUserspaceParameters(effective);
+  if (!current) {
+    return false;
+  }
+  const proposed = {
+    ...current,
+    ...(flattenUserspaceParameters(draft) || {}),
+  };
+  const currentRequest = userspaceParameterRequest(current);
+  const proposedRequest = userspaceParameterRequest(proposed);
+  return USERSPACE_PARAMETER_FIELDS.some(
+    ({ key }) => currentRequest[key] !== proposedRequest[key],
+  );
+}
+
+export function schedulerParameterPanelModel(parameters, userspaceDraft = null) {
+  const userspaceValues = flattenUserspaceParameters(parameters?.userspace);
+  const draftValues = flattenUserspaceParameters(userspaceDraft);
+  const proposedValues = userspaceValues
+    ? { ...userspaceValues, ...(draftValues || {}) }
+    : null;
+  const userspaceAvailable = userspaceValues !== null;
+  const bpfAvailable = parameters?.bpf != null
+    && typeof parameters.bpf === "object";
+  const bpfValues = Object.fromEntries(BPF_PARAMETER_FIELDS.map(({ key }) => [
+    key,
+    bpfAvailable ? parameters.bpf[key] ?? null : null,
+  ]));
+
+  const userspaceFields = USERSPACE_PARAMETER_FIELDS.map((field) => {
+    const effectiveValue = userspaceValues?.[field.key] ?? null;
+    const draftValue = proposedValues?.[field.key] ?? null;
+    return {
+      ...field,
+      applyKind: "userspace",
+      available: userspaceAvailable,
+      editable: userspaceAvailable,
+      effectiveValue,
+      draftValue,
+      dirty: userspaceAvailable
+        && numericParameter(effectiveValue, field.key)
+          !== numericParameter(draftValue, field.key),
+    };
+  });
+  const bpfFields = BPF_PARAMETER_FIELDS.map((field) => ({
+    ...field,
+    available: bpfAvailable && bpfValues[field.key] !== null,
+    editable: bpfAvailable && field.applyKind !== null,
+    effectiveValue: bpfValues[field.key],
+    draftValue: bpfValues[field.key],
+    dirty: false,
+  }));
+
+  return {
+    available: userspaceAvailable || bpfAvailable,
+    userspace: {
+      id: "userspace",
+      label: "Userspace",
+      available: userspaceAvailable,
+      editable: userspaceAvailable,
+      values: userspaceValues,
+      fields: userspaceFields,
+      dirty: userspaceAvailable
+        && userspaceFields.some((field) => field.dirty),
+    },
+    bpf: {
+      id: "bpf",
+      label: "BPF",
+      available: bpfAvailable,
+      editable: bpfFields.some((field) => field.editable),
+      values: bpfValues,
+      fields: bpfFields,
+      dirty: false,
+    },
+  };
+}
+
 const TESTING_WORKLOAD_LABELS = {
   cpu_saturation: "CPU saturation",
   waker_wakee: "Waker / wakee",

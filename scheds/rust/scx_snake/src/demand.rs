@@ -132,6 +132,14 @@ impl DemandTracker {
         })
     }
 
+    pub fn set_ewma_alpha(&mut self, ewma_alpha: f64) -> Result<(), DemandError> {
+        if !ewma_alpha.is_finite() || ewma_alpha <= 0.0 || ewma_alpha > 1.0 {
+            return Err(DemandError::InvalidEwmaAlpha);
+        }
+        self.ewma_alpha = ewma_alpha;
+        Ok(())
+    }
+
     /// Applies a complete snapshot transactionally.
     ///
     /// A first observation, counter-bank change, or counter decrease establishes
@@ -369,6 +377,37 @@ mod tests {
             lent_ns,
             primary_cpus,
         }
+    }
+
+    #[test]
+    fn retuning_ewma_alpha_preserves_the_active_baseline() {
+        let started = Instant::now();
+        let cell = identity(7, 2);
+        let mut tracker = DemandTracker::new(0.5).unwrap();
+
+        tracker
+            .step(snapshot((1, 0), started, [(cell, sample(0, 1))]))
+            .unwrap();
+        tracker
+            .step(snapshot(
+                (1, 0),
+                started + std::time::Duration::from_secs(1),
+                [(cell, sample(500_000_000, 1))],
+            ))
+            .unwrap();
+        assert_eq!(tracker.gauge(cell).unwrap().ewma_pct, Some(50.0));
+
+        tracker.set_ewma_alpha(1.0).unwrap();
+        tracker
+            .step(snapshot(
+                (1, 0),
+                started + std::time::Duration::from_secs(2),
+                [(cell, sample(1_500_000_000, 1))],
+            ))
+            .unwrap();
+
+        assert_eq!(tracker.counter_bank(), Some((1, 0)));
+        assert_eq!(tracker.gauge(cell).unwrap().ewma_pct, Some(100.0));
     }
 
     fn snapshot(

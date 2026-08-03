@@ -8,6 +8,7 @@ use scx_stats::StatsClient;
 
 use crate::fine_timing::{FineTimingCallback, FineTimingControlResponse};
 use crate::inspection::InspectionView;
+use crate::parameters::UserspaceParameters;
 use crate::queue_timing::QueueTimingControlResponse;
 use crate::runtime_policy::{PolicyUpdateResponse, PolicyValidationResponse};
 use crate::stats::Metrics;
@@ -56,6 +57,7 @@ pub enum SchedulerRequest {
     SetCallbackTimingSampleRate {
         sample_rate: u32,
     },
+    SetUserspaceParameters(UserspaceParameters),
     ResetStats,
 }
 
@@ -70,7 +72,41 @@ pub enum SchedulerResponse {
     FineTiming(std::result::Result<FineTimingControlResponse, String>),
     QueueTiming(std::result::Result<QueueTimingControlResponse, String>),
     CallbackTimingSampleRate(std::result::Result<CallbackTimingRateResponse, String>),
+    UserspaceParameters(std::result::Result<UserspaceParameters, String>),
     StatsReset(std::result::Result<StatsResetResponse, String>),
+}
+
+#[cfg(test)]
+pub fn request_userspace_parameters(
+    client: &mut StatsClient,
+    parameters: &UserspaceParameters,
+) -> Result<UserspaceParameters> {
+    client.request(
+        "stats",
+        vec![
+            ("target".into(), "userspace_parameters_set".into()),
+            (
+                "managed_reconcile_ms".into(),
+                parameters.managed_reconcile_ms.to_string(),
+            ),
+            (
+                "sample_ms".into(),
+                parameters.resizing.sample_ms.to_string(),
+            ),
+            (
+                "threshold_pct".into(),
+                parameters.resizing.threshold_pct.to_string(),
+            ),
+            (
+                "cooldown_ms".into(),
+                parameters.resizing.cooldown_ms.to_string(),
+            ),
+            (
+                "ewma_alpha".into(),
+                parameters.resizing.ewma_alpha.to_string(),
+            ),
+        ],
+    )
 }
 
 #[cfg(test)]
@@ -515,6 +551,7 @@ scope = "task_allowed"
                         callback_timing_sample_rate: 64,
                         fine_timing: crate::inspection::FineTimingInspectionView::default(),
                         queue_timing: None,
+                        parameters: None,
                         fairness: crate::inspection::FairnessInspectionView {
                             mode_name: "fifo".into(),
                             clock_model: "no virtual-time clock".into(),
@@ -592,6 +629,49 @@ scope = "task_allowed"
 
         assert_eq!(response["rung_count"], 1);
         assert_eq!(response["cell_count"], 0);
+        worker.join().expect("worker should finish");
+        drop(server);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn userspace_parameter_update_round_trips_effective_values() {
+        let path = socket_path("userspace-parameters");
+        let server = StatsServer::new(stats::server_data())
+            .set_path(&path)
+            .launch()
+            .expect("test server should launch");
+        let (responses, requests) = server.channels();
+        let parameters = UserspaceParameters {
+            managed_reconcile_ms: 750,
+            resizing: crate::parameters::ManagedCellResizingParameters {
+                sample_ms: 500,
+                threshold_pct: 12.5,
+                cooldown_ms: 2_500,
+                ewma_alpha: 0.45,
+            },
+        };
+        let expected = parameters.clone();
+        let worker = thread::spawn(move || {
+            let SchedulerRequest::SetUserspaceParameters(request) =
+                requests.recv().expect("request should arrive")
+            else {
+                panic!("expected a userspace parameter request");
+            };
+            assert_eq!(request, expected);
+            responses
+                .send(SchedulerResponse::UserspaceParameters(Ok(request)))
+                .expect("response should send");
+        });
+
+        let mut client = StatsClient::new()
+            .set_path(&path)
+            .connect(Some(1_000))
+            .expect("client should connect");
+        let response = request_userspace_parameters(&mut client, &parameters)
+            .expect("userspace parameters should be acknowledged");
+
+        assert_eq!(response, parameters);
         worker.join().expect("worker should finish");
         drop(server);
         let _ = fs::remove_file(path);

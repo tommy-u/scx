@@ -326,6 +326,20 @@ pub struct QueueTimingControlResponse {
     pub session_id: Option<u64>,
 }
 
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct ManagedCellResizingParameters {
+    pub sample_ms: u64,
+    pub threshold_pct: f64,
+    pub cooldown_ms: u64,
+    pub ewma_alpha: f64,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct UserspaceParameters {
+    pub managed_reconcile_ms: u64,
+    pub resizing: ManagedCellResizingParameters,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct StatsResetResponse {
     pub generation: u64,
@@ -358,6 +372,10 @@ pub enum CollectorCommand {
         enabled: bool,
         response:
             std::sync::mpsc::SyncSender<std::result::Result<QueueTimingControlResponse, String>>,
+    },
+    SetUserspaceParameters {
+        parameters: UserspaceParameters,
+        response: std::sync::mpsc::SyncSender<std::result::Result<UserspaceParameters, String>>,
     },
     SetWorkloadCell {
         target: WorkloadTarget,
@@ -604,6 +622,20 @@ pub fn run_collector(
             Ok(CollectorCommand::SetQueueTiming { enabled, response }) => {
                 let result = set_queue_timing(&mut stats_client, &options.stats_path, enabled)
                     .map_err(|error| format!("{error:#}"));
+                let _ = response.send(result);
+                next_inspection_at = Instant::now();
+                continue;
+            }
+            Ok(CollectorCommand::SetUserspaceParameters {
+                parameters,
+                response,
+            }) => {
+                let result = set_userspace_parameters(
+                    &mut stats_client,
+                    &options.stats_path,
+                    &parameters,
+                )
+                .map_err(|error| format!("{error:#}"));
                 let _ = response.send(result);
                 next_inspection_at = Instant::now();
                 continue;
@@ -916,6 +948,50 @@ fn set_queue_timing(
             vec![
                 ("target".into(), "queue_timing_set".into()),
                 ("enabled".into(), enabled.to_string()),
+            ],
+        )
+}
+
+fn set_userspace_parameters(
+    client: &mut Option<StatsClient>,
+    stats_path: &Path,
+    parameters: &UserspaceParameters,
+) -> Result<UserspaceParameters> {
+    if client.is_none() {
+        *client = Some(
+            StatsClient::new()
+                .set_path(stats_path)
+                .connect(Some(STATS_TIMEOUT_MS))
+                .with_context(|| format!("connecting to {}", stats_path.display()))?,
+        );
+    }
+    client
+        .as_mut()
+        .context("Snake stats client is unavailable")?
+        .request(
+            "stats",
+            vec![
+                ("target".into(), "userspace_parameters_set".into()),
+                (
+                    "managed_reconcile_ms".into(),
+                    parameters.managed_reconcile_ms.to_string(),
+                ),
+                (
+                    "sample_ms".into(),
+                    parameters.resizing.sample_ms.to_string(),
+                ),
+                (
+                    "threshold_pct".into(),
+                    parameters.resizing.threshold_pct.to_string(),
+                ),
+                (
+                    "cooldown_ms".into(),
+                    parameters.resizing.cooldown_ms.to_string(),
+                ),
+                (
+                    "ewma_alpha".into(),
+                    parameters.resizing.ewma_alpha.to_string(),
+                ),
             ],
         )
 }

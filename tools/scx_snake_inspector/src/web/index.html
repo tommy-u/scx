@@ -533,6 +533,73 @@
             </section>
             <p class="notice hidden" id="schedulerControlNotice" role="status"></p>
 
+            <section class="scheduler-parameters-section" aria-labelledby="schedulerParametersTitle">
+              <header class="section-heading scheduler-parameters-heading">
+                <h3 id="schedulerParametersTitle">Live parameters</h3>
+                <span id="schedulerParametersStatus">Waiting for Snake</span>
+              </header>
+              <div class="scheduler-parameter-groups">
+                <section class="scheduler-parameter-group" aria-labelledby="userspaceParametersTitle">
+                  <header>
+                    <h4 id="userspaceParametersTitle">Userspace controller</h4>
+                    <span>Cell manager</span>
+                  </header>
+                  <div class="scheduler-parameter-fields">
+                    <label>
+                      <span>Reconcile interval</span>
+                      <span class="parameter-input"><input id="managedReconcileMs" type="number" min="50" step="50"><em>ms</em></span>
+                    </label>
+                    <label>
+                      <span>Demand sample</span>
+                      <span class="parameter-input"><input id="managedSampleMs" type="number" min="1" step="50"><em>ms</em></span>
+                    </label>
+                    <label>
+                      <span>Resize threshold</span>
+                      <span class="parameter-input"><input id="managedThresholdPct" type="number" min="0" step="0.5"><em>%</em></span>
+                    </label>
+                    <label>
+                      <span>Resize cooldown</span>
+                      <span class="parameter-input"><input id="managedCooldownMs" type="number" min="1" step="100"><em>ms</em></span>
+                    </label>
+                    <label>
+                      <span>EWMA alpha</span>
+                      <span class="parameter-input"><input id="managedEwmaAlpha" type="number" min="0.001" max="1" step="0.01"><em>0–1</em></span>
+                    </label>
+                  </div>
+                  <div class="scheduler-parameter-actions">
+                    <p class="notice hidden" id="userspaceParametersNotice" role="status"></p>
+                    <button class="apply-button" id="applyUserspaceParameters" type="button">Apply userspace</button>
+                  </div>
+                </section>
+
+                <section class="scheduler-parameter-group" aria-labelledby="bpfParametersTitle">
+                  <header>
+                    <h4 id="bpfParametersTitle">BPF runtime</h4>
+                    <span>Scheduler maps</span>
+                  </header>
+                  <div class="scheduler-parameter-fields">
+                    <label>
+                      <span>Callback sampling</span>
+                      <select id="parameterCallbackSampleRate"></select>
+                    </label>
+                    <label class="parameter-toggle-row">
+                      <span>Queue timing</span>
+                      <input id="parameterQueueTiming" type="checkbox" role="switch">
+                    </label>
+                  </div>
+                  <dl class="scheduler-parameter-facts">
+                    <div><dt>Fairness</dt><dd id="parameterFairness">—</dd></div>
+                    <div><dt>Queue layout</dt><dd id="parameterQueueLayout">—</dd></div>
+                    <div><dt>Direct dispatch</dt><dd id="parameterDirectDispatch">—</dd></div>
+                  </dl>
+                  <div class="scheduler-parameter-actions">
+                    <p class="notice hidden" id="bpfParametersNotice" role="status"></p>
+                    <button class="apply-button" id="applyBpfParameters" type="button">Apply BPF runtime</button>
+                  </div>
+                </section>
+              </div>
+            </section>
+
             <section class="scheduler-launch-section" aria-labelledby="schedulerLaunchTitle">
           <header class="section-heading">
             <h3 id="schedulerLaunchTitle">Launch and restart configuration</h3>

@@ -5287,6 +5287,164 @@ button:focus-visible {
   border-bottom: 1px solid var(--border);
 }
 
+.scheduler-parameters-section {
+  padding: 18px clamp(16px, 2.5vw, 32px) 22px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+
+.scheduler-parameters-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.scheduler-parameters-heading > span,
+.scheduler-parameter-group > header span {
+  color: var(--muted);
+  font-size: 0.68rem;
+  font-weight: 700;
+}
+
+.scheduler-parameter-groups {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.scheduler-parameter-group {
+  min-width: 0;
+  padding: 16px;
+}
+
+.scheduler-parameter-group + .scheduler-parameter-group {
+  border-left: 1px solid var(--border);
+}
+
+.scheduler-parameter-group > header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.scheduler-parameter-group h4 {
+  margin: 0;
+  font-size: 0.78rem;
+}
+
+.scheduler-parameter-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 14px;
+}
+
+.scheduler-parameter-fields label {
+  min-width: 0;
+  display: grid;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 0.68rem;
+  font-weight: 700;
+}
+
+.scheduler-parameter-fields input[type="number"],
+.scheduler-parameter-fields select {
+  min-width: 0;
+  width: 100%;
+  height: 34px;
+  padding: 5px 9px;
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+}
+
+.parameter-input {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 7px;
+}
+
+.parameter-input em {
+  min-width: 24px;
+  font-size: 0.66rem;
+  font-style: normal;
+  text-align: right;
+}
+
+.scheduler-parameter-fields .parameter-toggle-row {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+}
+
+.parameter-toggle-row input {
+  width: 34px;
+  height: 18px;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.scheduler-parameter-facts {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin: 14px 0 0;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.scheduler-parameter-facts div {
+  min-width: 0;
+  padding: 0 10px;
+  border-left: 1px solid var(--border);
+}
+
+.scheduler-parameter-facts div:first-child {
+  padding-left: 0;
+  border-left: 0;
+}
+
+.scheduler-parameter-facts dt {
+  color: var(--muted);
+  font-size: 0.64rem;
+  font-weight: 700;
+}
+
+.scheduler-parameter-facts dd {
+  min-width: 0;
+  margin: 4px 0 0;
+  overflow: hidden;
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.scheduler-parameter-actions {
+  min-height: 38px;
+  display: flex;
+  align-items: flex-end;
+  justify-content: flex-end;
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.scheduler-parameter-actions .notice {
+  min-width: 0;
+  margin: 0 auto 0 0;
+  padding: 7px 9px;
+  font-size: 0.68rem;
+}
+
+.scheduler-parameter-actions button {
+  flex: 0 0 auto;
+}
+
 .section-heading {
   margin-bottom: 14px;
 }
@@ -7945,6 +8103,15 @@ th[aria-sort] .table-sort-indicator {
     border-bottom: 1px solid var(--border);
   }
 
+  .scheduler-parameter-groups {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .scheduler-parameter-group + .scheduler-parameter-group {
+    border-top: 1px solid var(--border);
+    border-left: 0;
+  }
+
   .roadmap-headline-grid,
   .project-card-grid,
   .roadmap-goal-grid {
@@ -7978,6 +8145,29 @@ th[aria-sort] .table-sort-indicator {
 
   .runtime-summary {
     margin-left: auto;
+  }
+}
+
+@media (max-width: 600px) {
+  .scheduler-parameter-fields,
+  .scheduler-parameter-facts {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .scheduler-parameter-facts {
+    gap: 8px;
+  }
+
+  .scheduler-parameter-facts div,
+  .scheduler-parameter-facts div:first-child {
+    padding: 8px 0 0;
+    border-top: 1px solid var(--border);
+    border-left: 0;
+  }
+
+  .scheduler-parameter-actions {
+    align-items: stretch;
+    flex-direction: column;
   }
 }
 

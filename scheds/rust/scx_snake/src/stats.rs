@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::control::{SchedulerRequest, SchedulerResponse};
 use crate::fine_timing::FineTimingCallback;
+use crate::parameters::{ManagedCellResizingParameters, UserspaceParameters};
 use crate::task_cells::ThreadCellAssignment;
 
 #[stat_doc]
@@ -905,6 +906,53 @@ pub fn server_data() -> StatsServerData<SchedulerRequest, SchedulerResponse> {
             Ok(read)
         });
 
+    let set_userspace_parameters: Box<dyn StatsOpener<SchedulerRequest, SchedulerResponse>> =
+        Box::new(move |_| {
+            let read: Box<dyn StatsReader<SchedulerRequest, SchedulerResponse>> =
+                Box::new(move |args, (req_ch, res_ch)| {
+                    let parameters = UserspaceParameters {
+                        managed_reconcile_ms: parse_arg::<u64>(
+                            args,
+                            "managed_reconcile_ms",
+                            "userspace_parameters_set",
+                        )?,
+                        resizing: ManagedCellResizingParameters {
+                            sample_ms: parse_arg::<u64>(
+                                args,
+                                "sample_ms",
+                                "userspace_parameters_set",
+                            )?,
+                            threshold_pct: parse_arg::<f64>(
+                                args,
+                                "threshold_pct",
+                                "userspace_parameters_set",
+                            )?,
+                            cooldown_ms: parse_arg::<u64>(
+                                args,
+                                "cooldown_ms",
+                                "userspace_parameters_set",
+                            )?,
+                            ewma_alpha: parse_arg::<f64>(
+                                args,
+                                "ewma_alpha",
+                                "userspace_parameters_set",
+                            )?,
+                        },
+                    };
+                    req_ch.send(SchedulerRequest::SetUserspaceParameters(parameters))?;
+                    match res_ch.recv()? {
+                        SchedulerResponse::UserspaceParameters(Ok(response)) => {
+                            Ok(serde_json::to_value(response)?)
+                        }
+                        SchedulerResponse::UserspaceParameters(Err(error)) => bail!(error),
+                        response => bail!(
+                            "unexpected response to userspace parameter request: {response:?}"
+                        ),
+                    }
+                });
+            Ok(read)
+        });
+
     let reset_stats: Box<dyn StatsOpener<SchedulerRequest, SchedulerResponse>> =
         Box::new(move |_| {
             let read: Box<dyn StatsReader<SchedulerRequest, SchedulerResponse>> =
@@ -977,6 +1025,13 @@ pub fn server_data() -> StatsServerData<SchedulerRequest, SchedulerResponse> {
             "callback_timing_sample_rate_set",
             StatsOps {
                 open: set_callback_timing_sample_rate,
+                close: None,
+            },
+        )
+        .add_ops(
+            "userspace_parameters_set",
+            StatsOps {
+                open: set_userspace_parameters,
                 close: None,
             },
         )

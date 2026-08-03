@@ -7,6 +7,7 @@ use serde::Serialize;
 
 use crate::bpf_intf;
 use crate::mask_tables::ResolvedMaskTable;
+use crate::parameters::SchedulerParameters;
 use crate::policy::{
     CompiledPolicy, CompiledRung, Fallback, InputSource, MaskTableSource, Opcode, QueueLayout,
     QueueMaskKind, QueuePolicy, RUNG_FLAG_INTERSECT_TASK_ALLOWED, RUNG_FLAG_PICK_IDLE_CORE,
@@ -242,6 +243,7 @@ pub struct InspectionView {
     pub callback_timing_sample_rate: u32,
     pub fine_timing: FineTimingInspectionView,
     pub queue_timing: Option<QueueTimingInspectionView>,
+    pub parameters: Option<SchedulerParameters>,
     pub fairness: FairnessInspectionView,
     pub queue_topology: Option<QueueTopologyInspectionView>,
     pub topology_lifecycle: TopologyLifecycleInspectionView,
@@ -528,6 +530,7 @@ impl Inspector {
             callback_timing_sample_rate: self.callback_timing_sample_rate,
             fine_timing: FineTimingInspectionView::default(),
             queue_timing: None,
+            parameters: None,
             fairness: self.fairness.clone(),
             queue_topology: self.queue_topology.clone(),
             topology_lifecycle: TopologyLifecycleInspectionView {
