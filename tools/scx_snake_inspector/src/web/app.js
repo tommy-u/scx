@@ -50,6 +50,7 @@ import {
   formatFeedbackTranscript,
   ladderPercentages,
   launchDiff,
+  managedIdentityLagModel,
   parseFeedbackEntries,
   policyCategoryGroups,
   policyInlineActionModel,
@@ -165,6 +166,7 @@ const elements = {
   cellsView: document.querySelector("#cellsView"),
   cellWorkspaceTabs: document.querySelector("#cellWorkspaceTabs"),
   cellLayoutPanel: document.querySelector("#cellLayoutPanel"),
+  managedIdentityLagBody: document.querySelector("#managedIdentityLagBody"),
   cellPlacementSummary: document.querySelector("#cellPlacementSummary"),
   cellPlacementLegend: document.querySelector("#cellPlacementLegend"),
   cellPlacementAtlas: document.querySelector("#cellPlacementAtlas"),
@@ -5235,6 +5237,7 @@ function renderCells() {
     return;
   }
   renderWorkloadCellOptions();
+  renderManagedIdentityLag(managedIdentityLagModel(state.inspection));
   const statsModel = cellStatsModel(state.snapshot?.cell_stats, {
     policyGeneration: state.inspectionContext?.policy_generation,
   });
@@ -5296,6 +5299,44 @@ function renderCells() {
   } else {
     elements.cellDetail.replaceChildren();
   }
+}
+
+function renderManagedIdentityLag(model) {
+  if (!model.available) {
+    elements.managedIdentityLagBody.innerHTML =
+      '<p class="empty-state">Managed identity metrics are unavailable.</p>';
+    return;
+  }
+  const latency = model.correctionLatency;
+  const duration = (value) => value == null ? "—" : formatRuntime(value);
+  elements.managedIdentityLagBody.innerHTML = `
+    <dl class="managed-identity-headline">
+      <div><dt>Wrong-cell runtime</dt><dd>${formatPercentage(model.headlineRuntimePct)}</dd></div>
+      <div><dt>New-task runtime</dt><dd>${formatRuntime(model.newTasks.runtimeNs)}</dd></div>
+      <div><dt>New-task candidates</dt><dd>${formatCount(model.newTasks.candidates)}</dd></div>
+      <div><dt>Affected new tasks</dt><dd>${formatCount(model.newTasks.affected)}</dd></div>
+      <div><dt>Timeslices</dt><dd>${formatCount(model.newTasks.timeslices)}</dd></div>
+    </dl>
+    <div class="managed-identity-detail">
+      <section aria-labelledby="managedIdentityCorrectionTitle">
+        <h4 id="managedIdentityCorrectionTitle">Correction latency</h4>
+        <dl>
+          <div><dt>Mean</dt><dd>${duration(latency.meanNs)}</dd></div>
+          <div><dt>p50</dt><dd>${duration(latency.p50Ns)}</dd></div>
+          <div><dt>p95</dt><dd>${duration(latency.p95Ns)}</dd></div>
+          <div><dt>p99</dt><dd>${duration(latency.p99Ns)}</dd></div>
+          <div><dt>Max</dt><dd>${duration(latency.maxNs)}</dd></div>
+        </dl>
+      </section>
+      <section aria-labelledby="managedIdentityMoveInTitle">
+        <h4 id="managedIdentityMoveInTitle">Move-in upper bound</h4>
+        <dl>
+          <div><dt>Runtime</dt><dd>${formatRuntime(model.moveIns.runtimeUpperBoundNs)}</dd></div>
+          <div><dt>Candidates</dt><dd>${formatCount(model.moveIns.candidates)}</dd></div>
+          <div><dt>Affected</dt><dd>${formatCount(model.moveIns.affected)}</dd></div>
+        </dl>
+      </section>
+    </div>`;
 }
 
 function selectCellWorkspaceTab(tabId, focus = false) {

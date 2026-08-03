@@ -29,6 +29,7 @@ import {
   fineTimingDsqModels,
   formatCallbackDuration,
   ladderPercentages,
+  managedIdentityLagModel,
   nextCellWorkspaceTab,
   nextPolicyCandidate,
   policyLibraryModels,
@@ -54,6 +55,67 @@ import {
   topologyLifecycleSignature,
   workloadAssignmentRequest,
 } from "../../src/web/inspection.js";
+
+test("managed identity lag separates conservative new tasks from move-in bounds", () => {
+  const latencyBuckets = Array(64).fill(0);
+  latencyBuckets[19] = 2;
+  latencyBuckets[20] = 4;
+  latencyBuckets[21] = 2;
+  const model = managedIdentityLagModel({
+    active_slot: 1,
+    slots: [{
+      slot: 1,
+      state: "active",
+      metrics: {
+        managed_identity_new_task_candidates: 8,
+        managed_identity_new_task_affected: 4,
+        managed_identity_new_task_runtime_ns: 20_000_000,
+        managed_identity_new_task_timeslices: 12,
+        managed_identity_move_in_candidates: 3,
+        managed_identity_move_in_affected: 2,
+        managed_identity_move_in_runtime_upper_bound_ns: 7_000_000,
+        managed_identity_correction_latency_ns_total: 12_000_000,
+        managed_identity_correction_latency_ns_max: 3_000_000,
+        managed_identity_correction_latency_buckets: latencyBuckets,
+        cells: {
+          0: { runtime_ns: 900_000_000 },
+          1: { runtime_ns: 180_000_000 },
+        },
+      },
+    }],
+  });
+
+  assert.equal(model.available, true);
+  assert.equal(model.headlineRuntimePct, 10);
+  assert.equal(model.newTasks.candidates, 8);
+  assert.equal(model.newTasks.affected, 4);
+  assert.equal(model.newTasks.runtimeNs, 20_000_000);
+  assert.equal(model.newTasks.timeslices, 12);
+  assert.equal(model.moveIns.runtimeUpperBoundNs, 7_000_000);
+  assert.deepEqual(model.correctionLatency, {
+    meanNs: 1_500_000,
+    p50Ns: 2_097_151,
+    p95Ns: 4_194_303,
+    p99Ns: 4_194_303,
+    maxNs: 3_000_000,
+  });
+});
+
+test("cells workspace renders managed identity lag telemetry", () => {
+  const markup = readFileSync(
+    new URL("../../src/web/index.html", import.meta.url),
+    "utf8",
+  );
+  const script = readFileSync(
+    new URL("../../src/web/app.js", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(markup, /id="managedIdentityLag"/);
+  assert.match(markup, /id="managedIdentityLagBody"/);
+  assert.match(script, /managedIdentityLagModel\(state\.inspection\)/);
+  assert.match(script, /function renderManagedIdentityLag/);
+});
 
 test("cell placement atlas follows physical topology for sparse SMT CPUs", () => {
   const model = cellPlacementAtlasModel({

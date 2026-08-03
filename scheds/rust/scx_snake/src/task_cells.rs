@@ -144,10 +144,25 @@ pub(crate) fn set_managed_task_cell(
     map: &impl MapCore,
     tid: i32,
     cell: CellRef,
-) -> Result<OwnedFd> {
+) -> Result<ManagedTaskCellUpdate> {
     let pidfd = open_thread(tid)?;
-    update_task_cell_with_pidfd(map, tid, &pidfd, |value| apply_managed_cell(value, cell))?;
-    Ok(pidfd)
+    let (previous_effective_cell_id, effective_cell_id) =
+        update_task_cell_with_pidfd(map, tid, &pidfd, |value| {
+            let previous_effective_cell_id = value.cell_id;
+            apply_managed_cell(value, cell);
+            (previous_effective_cell_id, value.cell_id)
+        })?;
+    Ok(ManagedTaskCellUpdate {
+        pidfd,
+        previous_effective_cell_id,
+        effective_cell_id,
+    })
+}
+
+pub(crate) struct ManagedTaskCellUpdate {
+    pub pidfd: OwnedFd,
+    pub previous_effective_cell_id: u32,
+    pub effective_cell_id: u32,
 }
 
 pub(crate) fn clear_managed_task_cell(map: &impl MapCore, tid: i32, pidfd: &OwnedFd) -> Result<()> {
