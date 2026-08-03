@@ -167,9 +167,12 @@ only when the task may run on every CPU in the cell's primary mask. In
 earliest head from another shard of the same cell. There is no cross-cell
 normal-queue stealing.
 
-The cell's `cpu_weight` controls how overlapping CPU claims are resolved into
-primary ownership. It is resource allocation, not a VTIME weight. The kernel
-task weight continues to control service order among tasks using a cell clock.
+A static cell's `cpu_weight` controls how overlapping CPU claims are resolved
+into primary ownership. Managed child cells use equal admission weights;
+exclusive constraints are honored before their target deficits divide contested
+and unclaimed CPUs. These are resource-allocation weights, not VTIME weights.
+The kernel task weight continues to control service order among tasks using a
+cell clock.
 
 ### Affinity escape queues and dual coordinates
 

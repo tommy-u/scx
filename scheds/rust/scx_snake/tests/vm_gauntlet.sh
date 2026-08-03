@@ -110,6 +110,12 @@ if (( $(nproc) >= 2 )); then
         "${repo}/scheds/rust/scx_snake/examples/basic.toml" fork_yield
 fi
 
+if (( $(nproc) >= 6 )); then
+    run_case vtime_managed_cell_resizing \
+        "${script_dir}/vtime_managed_cell_resizing.sh" "${snake_bin}" \
+        "${repo}/scheds/rust/scx_snake/examples/mitosis-sim.toml"
+fi
+
 if (( $(nproc) >= 32 )); then
     run_case vtime_max_cells \
         env SNAKE_QUEUE_LAYOUT=cell "${script_dir}/vtime_max_cells.sh" "${snake_bin}"

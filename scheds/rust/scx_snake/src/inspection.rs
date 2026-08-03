@@ -1806,6 +1806,8 @@ scope = "task_cell"
             exclude_children: Vec::new(),
             max_children: 31,
             reconcile_ms: 1_000,
+            cell0_min_cpus: 0,
+            resizing: None,
         });
         active.compiled.membership = Some(policy::MembershipPolicy {
             parent: "/workloads".into(),
@@ -1972,6 +1974,8 @@ scope = "task_cell"
             exclude_children: Vec::new(),
             max_children: 31,
             reconcile_ms: 1_000,
+            cell0_min_cpus: 0,
+            resizing: None,
         });
         let mut inspector = Inspector::new(active, FairnessMode::Fifo, None);
         for id in 1..=25 {

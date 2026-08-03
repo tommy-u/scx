@@ -4,6 +4,7 @@ mod bpf_intf;
 mod bpf_skel;
 mod cell_allocation;
 mod control;
+mod demand;
 mod fine_timing;
 mod inspection;
 mod managed_cells;
@@ -40,7 +41,9 @@ use policy::{
     CompiledPolicy, CompiledRung, InputSource, Opcode, QueueDispatchAction, QueueDispatchOperation,
     QueueDispatchSource, QueueEnqueueAction, QueueEnqueueTarget,
 };
-use queue_topology::{dump_queue_topology, resolve_host_queue_topology};
+use queue_topology::{
+    dump_queue_topology, resolve_host_queue_topology, resolve_host_queue_topology_with_demands,
+};
 use runtime_policy::RuntimePolicy;
 use scx_snake::fairness::FairnessMode;
 use scx_stats::prelude::*;
@@ -1509,6 +1512,8 @@ fn aggregate_raw_stats(
 
     Ok(Metrics {
         policy_generation: generation,
+        managed_rebalance_count: 0,
+        managed_last_rebalance_at_ms: 0,
         fairness_mode: fairness.as_str().into(),
         select_calls: value(bpf_intf::snake_stat_SNAKE_STAT_SELECT_CALLS),
         dispatch_calls: value(bpf_intf::snake_stat_SNAKE_STAT_DISPATCH_CALLS),
@@ -1667,6 +1672,12 @@ fn aggregate_raw_cell_stats(
                 CellMetrics {
                     id: cell.external_id,
                     index: cell.index,
+                    primary_cpu_count: u32::try_from(cell.primary.len())
+                        .context("cell primary CPU count does not fit u32")?,
+                    utilization_pct: 0.0,
+                    ewma_utilization_pct: 0.0,
+                    borrowed_pct: 0.0,
+                    lent_pct: 0.0,
                     runtime_ns: value(dense, bpf_intf::snake_cell_stat_SNAKE_CELL_STAT_RUNTIME_NS)?,
                     runtime_ns_by_cpu: decode_per_cpu_stat(
                         &raw[dense * nr_stats
@@ -1768,8 +1779,68 @@ fn read_raw_cell_stats(
         .collect()
 }
 
+fn read_cell_demand_snapshot(
+    skel: &BpfSkel<'_>,
+    generation: u64,
+    slot: u32,
+    topology: &queue_topology::QueueTopology,
+) -> Result<demand::Snapshot> {
+    let read = |dense: u32, stat: u32| -> Result<u64> {
+        let index = runtime_policy::cell_stat_index(slot, dense, stat)?;
+        let raw = skel
+            .maps
+            .cell_stats
+            .lookup_percpu(&index.to_ne_bytes(), MapFlags::ANY)
+            .with_context(|| format!("reading demand counter {stat} for cell index {dense}"))?
+            .ok_or_else(|| anyhow!("cell demand counter has no entry {index}"))?;
+        decode_stat(&raw, false)
+    };
+    let cells = topology
+        .cells
+        .iter()
+        .map(|cell| {
+            let identity = demand::CellIdentity {
+                id: cell.external_id,
+                slot_epoch: cell.slot_epoch,
+            };
+            let primary_ns = read(
+                cell.index,
+                bpf_intf::snake_cell_stat_SNAKE_CELL_STAT_PRIMARY_RUNTIME_NS,
+            )?;
+            let borrowed_ns = read(
+                cell.index,
+                bpf_intf::snake_cell_stat_SNAKE_CELL_STAT_BORROWED_RUNTIME_NS,
+            )?;
+            let lent_ns = read(
+                cell.index,
+                bpf_intf::snake_cell_stat_SNAKE_CELL_STAT_LENT_RUNTIME_NS,
+            )?;
+            // Runtime contains primary plus borrowed time, so read it last to
+            // keep the borrowed percentage bounded under concurrent updates.
+            let runtime_ns = read(
+                cell.index,
+                bpf_intf::snake_cell_stat_SNAKE_CELL_STAT_RUNTIME_NS,
+            )?;
+            let sample = demand::DemandSample {
+                runtime_ns,
+                primary_ns,
+                borrowed_ns,
+                lent_ns,
+                primary_cpus: cell.primary.len(),
+            };
+            Ok((identity, sample))
+        })
+        .collect::<Result<_>>()?;
+    Ok(demand::Snapshot {
+        counter_bank: (generation, slot),
+        sampled_at: Instant::now(),
+        cells,
+    })
+}
+
 struct TopologyTransitionAttempt {
     id: u64,
+    reason: String,
     from_generation: u64,
     started_at_ms: u64,
     stages: Vec<inspection::TopologyTransitionStageInspectionView>,
@@ -1778,8 +1849,13 @@ struct TopologyTransitionAttempt {
 
 impl TopologyTransitionAttempt {
     fn new(id: u64, from_generation: u64, started_at_ms: u64) -> Self {
+        Self::new_with_reason(id, from_generation, started_at_ms, "managed_cells_changed")
+    }
+
+    fn new_with_reason(id: u64, from_generation: u64, started_at_ms: u64, reason: &str) -> Self {
         Self {
             id,
+            reason: reason.into(),
             from_generation,
             started_at_ms,
             stages: Vec::new(),
@@ -1840,7 +1916,7 @@ impl TopologyTransitionAttempt {
     ) -> inspection::TopologyTransitionInspectionView {
         inspection::TopologyTransitionInspectionView {
             id: self.id,
-            reason: "managed_cells_changed".into(),
+            reason: self.reason,
             outcome,
             from_generation: self.from_generation,
             to_generation,
@@ -1883,6 +1959,12 @@ struct Scheduler<'object, 'policy> {
     membership: Option<MembershipManager>,
     managed_reconcile_interval: Option<Duration>,
     next_managed_reconcile: Option<Instant>,
+    demand_tracker: Option<demand::DemandTracker>,
+    demand_sample_interval: Option<Duration>,
+    next_demand_sample: Option<Instant>,
+    next_rebalance_allowed: Option<Instant>,
+    managed_rebalance_count: u64,
+    managed_last_rebalance_at_ms: u64,
     callback_timing_sample_rate: u32,
     fine_timing_state: fine_timing::FineTimingState,
     queue_timing_state: queue_timing::QueueTimingState,
@@ -2001,6 +2083,20 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
             .map(|managed| Duration::from_millis(managed.reconcile_ms));
         let next_managed_reconcile =
             managed_reconcile_interval.map(|interval| Instant::now() + interval);
+        let resizing = runtime
+            .compiled
+            .managed_cells
+            .as_ref()
+            .and_then(|managed| managed.resizing.as_ref());
+        let demand_tracker = resizing
+            .map(|resizing| demand::DemandTracker::new(resizing.ewma_alpha()))
+            .transpose()
+            .context("initializing managed-cell demand tracker")?;
+        let demand_sample_interval =
+            resizing.map(|resizing| Duration::from_millis(resizing.sample_ms));
+        let next_demand_sample = demand_sample_interval.map(|interval| Instant::now() + interval);
+        let next_rebalance_allowed =
+            resizing.map(|resizing| Instant::now() + Duration::from_millis(resizing.cooldown_ms));
         let struct_ops = Some(scx_ops_attach!(skel, snake_ops)?);
         let stats_server = StatsServer::new(stats::server_data()).launch()?;
         info!(
@@ -2064,6 +2160,12 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
             membership,
             managed_reconcile_interval,
             next_managed_reconcile,
+            demand_tracker,
+            demand_sample_interval,
+            next_demand_sample,
+            next_rebalance_allowed,
+            managed_rebalance_count: 0,
+            managed_last_rebalance_at_ms: 0,
             callback_timing_sample_rate: opts.callback_timing_sample_rate,
             fine_timing_state: fine_timing::FineTimingState::default(),
             queue_timing_state: queue_timing::QueueTimingState::default(),
@@ -2084,7 +2186,29 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
                 &read_raw_cell_stats(&self.skel, self.runtime.active_slot, topology.cells.len())?,
                 topology,
             )?;
+            if let Some(tracker) = self.demand_tracker.as_ref().filter(|tracker| {
+                tracker.counter_bank() == Some((self.runtime.generation, self.runtime.active_slot))
+            }) {
+                for cell in &topology.cells {
+                    let identity = demand::CellIdentity {
+                        id: cell.external_id,
+                        slot_epoch: cell.slot_epoch,
+                    };
+                    let Some(gauges) = tracker.gauge(identity) else {
+                        continue;
+                    };
+                    let Some(cell_metrics) = metrics.cells.get_mut(&cell.external_id) else {
+                        continue;
+                    };
+                    cell_metrics.utilization_pct = gauges.util_pct;
+                    cell_metrics.ewma_utilization_pct = gauges.ewma_pct.unwrap_or(0.0);
+                    cell_metrics.borrowed_pct = gauges.borrowed_pct;
+                    cell_metrics.lent_pct = gauges.lent_pct;
+                }
+            }
         }
+        metrics.managed_rebalance_count = self.managed_rebalance_count;
+        metrics.managed_last_rebalance_at_ms = self.managed_last_rebalance_at_ms;
         metrics.callback_timing = aggregate_raw_callback_timing(&read_raw_callback_timing(
             &self.skel,
             self.runtime.active_slot,
@@ -2460,6 +2584,11 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
             resolved_tables,
             reset_at_ms,
         ));
+        self.managed_rebalance_count = 0;
+        self.managed_last_rebalance_at_ms = 0;
+        if let Err(error) = self.rebase_managed_demand() {
+            warn!("managed-cell demand rebase after stats reset failed: {error:#}");
+        }
         Ok(control::StatsResetResponse {
             generation: self.runtime.generation,
             active_slot,
@@ -2766,6 +2895,109 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
             .map(|next| next.saturating_duration_since(Instant::now()))
     }
 
+    fn time_until_demand_sample(&self) -> Option<Duration> {
+        self.next_demand_sample
+            .map(|next| next.saturating_duration_since(Instant::now()))
+    }
+
+    fn rebase_managed_demand(&mut self) -> Result<()> {
+        let Some(topology) = self.queue_topology.as_ref() else {
+            return Ok(());
+        };
+        if self.demand_tracker.is_none() {
+            return Ok(());
+        }
+        let snapshot = read_cell_demand_snapshot(
+            &self.skel,
+            self.runtime.generation,
+            self.runtime.active_slot,
+            topology,
+        )?;
+        let sampled_at = snapshot.sampled_at;
+        self.demand_tracker
+            .as_mut()
+            .expect("checked above")
+            .step(snapshot)
+            .context("rebasing managed-cell demand counters")?;
+        if let Some(interval) = self.demand_sample_interval {
+            self.next_demand_sample = Some(sampled_at + interval);
+        }
+        Ok(())
+    }
+
+    fn sample_managed_demand_if_due(&mut self) -> Result<()> {
+        let Some(next) = self.next_demand_sample else {
+            return Ok(());
+        };
+        let now = Instant::now();
+        if now < next {
+            return Ok(());
+        }
+        let interval = self
+            .demand_sample_interval
+            .context("managed demand sampling has no interval")?;
+        self.next_demand_sample = Some(now + interval);
+        let topology = self
+            .queue_topology
+            .as_ref()
+            .context("managed demand sampling has no queue topology")?;
+        let snapshot = match read_cell_demand_snapshot(
+            &self.skel,
+            self.runtime.generation,
+            self.runtime.active_slot,
+            topology,
+        ) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                warn!("managed-cell demand sample unavailable; retrying: {error:#}");
+                return Ok(());
+            }
+        };
+        let tracker = self
+            .demand_tracker
+            .as_mut()
+            .context("managed demand sampling has no tracker")?;
+        if let Err(error) = tracker
+            .step(snapshot)
+            .context("updating managed-cell demand EWMA")
+        {
+            warn!("managed-cell demand sample rejected; retrying: {error:#}");
+            return Ok(());
+        }
+
+        if self
+            .next_rebalance_allowed
+            .is_some_and(|allowed| now < allowed)
+        {
+            return Ok(());
+        }
+        let resizing = self
+            .runtime
+            .compiled
+            .managed_cells
+            .as_ref()
+            .and_then(|managed| managed.resizing.as_ref())
+            .context("managed demand policy disappeared")?;
+        if !tracker
+            .spread_at_least(resizing.threshold_pct())
+            .context("checking managed-cell demand spread")?
+        {
+            return Ok(());
+        }
+        let weights = tracker.demand_weights();
+        let cooldown = Duration::from_millis(resizing.cooldown_ms);
+        let applied = self.activate_resized_managed_topology(&weights)?;
+        self.next_rebalance_allowed = Some(Instant::now() + cooldown);
+        if applied {
+            self.managed_rebalance_count = self
+                .managed_rebalance_count
+                .checked_add(1)
+                .context("managed rebalance counter overflow")?;
+            self.managed_last_rebalance_at_ms = unix_time_ms();
+        }
+        Ok(())
+    }
+
     fn reconcile_managed_cells_if_due(&mut self) -> Result<()> {
         let Some(next) = self.next_managed_reconcile else {
             return Ok(());
@@ -2799,7 +3031,10 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
                 transition_started.elapsed(),
                 Some(detail),
             ));
-            return Err(error);
+            warn!(
+                "managed-cell discovery changed while scanning; preserving the active topology and retrying: {error:#}"
+            );
+            return Ok(());
         }
         if candidate == self.runtime.compiled {
             return Ok(());
@@ -2812,37 +3047,56 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
         transition.complete_stage("discovery", discovery_started.elapsed());
 
         let resolution_started = Instant::now();
-        let topology = match resolve_host_queue_topology(&candidate)
-            .context("resolving live managed cell topology")
-        {
-            Ok(Some(topology)) => topology,
-            Ok(None) => {
-                let error = anyhow!("managed cells resolved without a queue topology");
-                let detail = format!("{error:#}");
-                transition.fail_stage("resolution", resolution_started.elapsed(), detail.clone());
-                self.inspector.record_topology_transition(transition.finish(
-                    inspection::TopologyTransitionOutcome::Rejected,
-                    None,
-                    unix_time_ms(),
-                    transition_started.elapsed(),
-                    Some(detail),
-                ));
-                return Err(error);
-            }
-            Err(error) => {
-                let detail = format!("{error:#}");
-                transition.fail_stage("resolution", resolution_started.elapsed(), detail.clone());
-                self.inspector.record_topology_transition(transition.finish(
-                    inspection::TopologyTransitionOutcome::Rejected,
-                    None,
-                    unix_time_ms(),
-                    transition_started.elapsed(),
-                    Some(detail),
-                ));
-                warn!("managed cell candidate remains unbound in cell 0: {error:#}");
-                return Ok(());
-            }
-        };
+        let projected_weights = self.demand_tracker.as_ref().map(|tracker| {
+            let identities = std::iter::once(demand::CellIdentity {
+                id: 0,
+                slot_epoch: 0,
+            })
+            .chain(candidate.cells.keys().map(|&id| demand::CellIdentity {
+                id,
+                slot_epoch: candidate.cell_slot_epochs.get(&id).copied().unwrap_or(0),
+            }));
+            tracker.projected_demand_weights(identities)
+        });
+        let topology =
+            match resolve_host_queue_topology_with_demands(&candidate, projected_weights.as_ref())
+                .context("resolving live managed cell topology")
+            {
+                Ok(Some(topology)) => topology,
+                Ok(None) => {
+                    let error = anyhow!("managed cells resolved without a queue topology");
+                    let detail = format!("{error:#}");
+                    transition.fail_stage(
+                        "resolution",
+                        resolution_started.elapsed(),
+                        detail.clone(),
+                    );
+                    self.inspector.record_topology_transition(transition.finish(
+                        inspection::TopologyTransitionOutcome::Rejected,
+                        None,
+                        unix_time_ms(),
+                        transition_started.elapsed(),
+                        Some(detail),
+                    ));
+                    return Err(error);
+                }
+                Err(error) => {
+                    let detail = format!("{error:#}");
+                    transition.fail_stage(
+                        "resolution",
+                        resolution_started.elapsed(),
+                        detail.clone(),
+                    );
+                    self.inspector.record_topology_transition(transition.finish(
+                        inspection::TopologyTransitionOutcome::Rejected,
+                        None,
+                        unix_time_ms(),
+                        transition_started.elapsed(),
+                        Some(detail),
+                    ));
+                    return Err(error);
+                }
+            };
         let tables = match resolve_mask_tables(&candidate)
             .context("resolving live managed cell mask tables")
         {
@@ -2857,8 +3111,7 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
                     transition_started.elapsed(),
                     Some(detail),
                 ));
-                warn!("managed cell candidate remains unbound in cell 0: {error:#}");
-                return Ok(());
+                return Err(error);
             }
         };
         transition.complete_stage("resolution", resolution_started.elapsed());
@@ -2928,8 +3181,7 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
                     Some(detail),
                 ));
                 set_queue_draining(&mut self.skel, false)?;
-                warn!("managed cell topology activation rejected: {error:#}");
-                return Ok(());
+                return Err(error);
             }
         };
         transition.complete_stage("publication", publication_started.elapsed());
@@ -2953,6 +3205,9 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
         transition.complete_stage("quiescence", quiescence_started.elapsed());
         set_queue_draining(&mut self.skel, false)?;
         self.queue_topology = Some(topology.clone());
+        if let Err(error) = self.rebase_managed_demand() {
+            warn!("managed-cell demand rebase after topology change failed: {error:#}");
+        }
 
         let membership_started = Instant::now();
         let Some(membership_policy) = self.runtime.compiled.membership.as_ref() else {
@@ -3031,6 +3286,166 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
         Ok(())
     }
 
+    fn activate_resized_managed_topology(&mut self, weights: &BTreeMap<u32, f64>) -> Result<bool> {
+        let transition_started = Instant::now();
+        let started_at_ms = unix_time_ms();
+        let mut transition = TopologyTransitionAttempt::new_with_reason(
+            self.inspector.next_topology_transition_id(),
+            self.runtime.generation,
+            started_at_ms,
+            "managed_cells_rebalanced",
+        );
+        let resolution_started = Instant::now();
+        let resolution = (|| {
+            let topology =
+                resolve_host_queue_topology_with_demands(&self.runtime.compiled, Some(weights))?
+                    .context("managed demand policy resolved without a queue topology")?;
+            let tables = resolve_mask_tables(&self.runtime.compiled)
+                .context("resolving managed rebalance mask tables")?;
+            Ok::<_, anyhow::Error>((topology, tables))
+        })();
+        let (topology, tables) = match resolution {
+            Ok(resolution) => resolution,
+            Err(error) => {
+                let detail = format!("{error:#}");
+                transition.fail_stage("resolution", resolution_started.elapsed(), detail.clone());
+                self.inspector.record_topology_transition(transition.finish(
+                    inspection::TopologyTransitionOutcome::Rejected,
+                    None,
+                    unix_time_ms(),
+                    transition_started.elapsed(),
+                    Some(detail),
+                ));
+                return Err(error);
+            }
+        };
+        if self.queue_topology.as_ref() == Some(&topology) {
+            return Ok(false);
+        }
+        transition.complete_stage("resolution", resolution_started.elapsed());
+        transition.cell_changes = inspection::topology_transition_changes(
+            self.queue_topology.as_ref(),
+            Some(&topology),
+            &topology_cell_names(&self.runtime.compiled),
+            &topology_cell_names(&self.runtime.compiled),
+        );
+        let previous_slot = self.runtime.active_slot;
+        let frozen_metrics = self.metrics()?;
+
+        let drain_started = Instant::now();
+        if let Err(error) = set_queue_draining(&mut self.skel, true) {
+            let detail = format!("{error:#}");
+            transition.fail_stage("drain", drain_started.elapsed(), detail.clone());
+            self.inspector.record_topology_transition(transition.finish(
+                inspection::TopologyTransitionOutcome::Rejected,
+                None,
+                unix_time_ms(),
+                transition_started.elapsed(),
+                Some(detail),
+            ));
+            return Err(error);
+        }
+        if let Err(error) = wait_for_queue_drain(&mut self.skel, SLOT_QUIESCENCE_TIMEOUT) {
+            let detail = format!("{error:#}");
+            transition.fail_stage("drain", drain_started.elapsed(), detail.clone());
+            self.inspector.record_topology_transition(transition.finish(
+                inspection::TopologyTransitionOutcome::Deferred,
+                None,
+                unix_time_ms(),
+                transition_started.elapsed(),
+                Some(detail),
+            ));
+            set_queue_draining(&mut self.skel, false)?;
+            return Ok(false);
+        }
+        transition.complete_stage("drain", drain_started.elapsed());
+
+        let publication_started = Instant::now();
+        let candidate = self.runtime.compiled.clone();
+        let source = self.runtime.source.clone();
+        let activation = {
+            let mut backend = BpfPolicyBackend {
+                skel: &mut self.skel,
+                queue_topology: Some(&topology),
+            };
+            runtime_policy::activate_compiled_policy(
+                self.runtime,
+                source,
+                candidate,
+                &tables,
+                &mut backend,
+            )
+        };
+        let response = match activation {
+            Ok(response) => response,
+            Err(error) => {
+                let detail = format!("{error:#}");
+                transition.fail_stage("publication", publication_started.elapsed(), detail.clone());
+                self.inspector.record_topology_transition(transition.finish(
+                    inspection::TopologyTransitionOutcome::Rejected,
+                    None,
+                    unix_time_ms(),
+                    transition_started.elapsed(),
+                    Some(detail),
+                ));
+                set_queue_draining(&mut self.skel, false)?;
+                return Err(error);
+            }
+        };
+        transition.complete_stage("publication", publication_started.elapsed());
+
+        let quiescence_started = Instant::now();
+        if let Err(error) =
+            wait_for_slot_quiescent(&self.skel, previous_slot, SLOT_QUIESCENCE_TIMEOUT)
+                .context("waiting for the retired managed rebalance bank")
+        {
+            let detail = format!("{error:#}");
+            transition.fail_stage("quiescence", quiescence_started.elapsed(), detail.clone());
+            self.inspector.record_topology_transition(transition.finish(
+                inspection::TopologyTransitionOutcome::Applied,
+                Some(response.generation),
+                unix_time_ms(),
+                transition_started.elapsed(),
+                Some(detail),
+            ));
+            set_queue_draining(&mut self.skel, false)?;
+            return Err(error);
+        }
+        transition.complete_stage("quiescence", quiescence_started.elapsed());
+        set_queue_draining(&mut self.skel, false)?;
+        self.queue_topology = Some(topology.clone());
+        if let Err(error) = self.rebase_managed_demand() {
+            warn!("managed-cell demand rebase after resize failed: {error:#}");
+        }
+
+        let activated_at_ms = unix_time_ms();
+        self.inspector.set_queue_topology(Some(topology));
+        self.inspector.activate(
+            SlotPolicy::new(
+                self.runtime.active_slot,
+                self.runtime.generation,
+                self.runtime.source.clone(),
+                self.runtime.compiled.clone(),
+                tables,
+                activated_at_ms,
+            ),
+            frozen_metrics,
+            activated_at_ms,
+        );
+        self.inspector.record_topology_transition(transition.finish(
+            inspection::TopologyTransitionOutcome::Applied,
+            Some(response.generation),
+            activated_at_ms,
+            transition_started.elapsed(),
+            None,
+        ));
+        info!(
+            "activated managed-cell demand rebalance generation {}",
+            response.generation
+        );
+        Ok(true)
+    }
+
     fn run(&mut self, shutdown: Arc<AtomicBool>) -> Result<UserExitInfo> {
         let (response_channel, request_channel) = self.stats_server.channels();
         let live_managed_cells = self.managed_reconcile_interval.is_some();
@@ -3043,6 +3458,9 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
                 .min(Duration::from_secs(1));
             if let Some(managed_timeout) = self.time_until_managed_reconcile() {
                 timeout = timeout.min(managed_timeout);
+            }
+            if let Some(demand_timeout) = self.time_until_demand_sample() {
+                timeout = timeout.min(demand_timeout);
             }
             let timeout = if self.queue_timing_state.is_enabled()
                 || fine_timing::FineTimingCallback::ALL
@@ -3137,6 +3555,7 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
                     }
                 }
             }
+            self.sample_managed_demand_if_due()?;
         }
 
         self.stop_all_fine_timing()?;
@@ -3814,6 +4233,52 @@ scope = "task_allowed"
                 "managed reconciliation does not record {outcome} outcomes"
             );
         }
+    }
+
+    #[test]
+    fn managed_runtime_discovery_errors_preserve_the_active_topology() {
+        let source = include_str!("main.rs");
+        let discovery_error = source
+            .split_once("if let Err(error) = managed_cells::resolve_managed_cells")
+            .and_then(|(_, body)| body.split_once("if candidate == self.runtime.compiled"))
+            .map(|(body, _)| body)
+            .expect("managed discovery error path should be bounded");
+
+        assert!(discovery_error.contains("preserving the active topology and retrying"));
+        assert!(discovery_error.contains("return Ok(())"));
+        assert!(!discovery_error.contains("return Err(error)"));
+    }
+
+    #[test]
+    fn managed_demand_rebases_reschedule_and_resize_attempts_throttle() {
+        let source = include_str!("main.rs");
+        let rebase = source
+            .split_once("fn rebase_managed_demand(")
+            .and_then(|(_, body)| body.split_once("fn sample_managed_demand_if_due("))
+            .map(|(body, _)| body)
+            .expect("managed demand rebase should be bounded");
+        let sample = source
+            .split_once("fn sample_managed_demand_if_due(")
+            .and_then(|(_, body)| body.split_once("fn reconcile_managed_cells_if_due("))
+            .map(|(body, _)| body)
+            .expect("managed demand sampling should be bounded");
+
+        let rebase_step = rebase.find(".step(snapshot)").expect("rebase should step");
+        let reschedule = rebase
+            .find("self.next_demand_sample = Some(sampled_at + interval)")
+            .expect("successful rebase should reschedule sampling");
+        assert!(rebase_step < reschedule);
+
+        let attempt = sample
+            .find("let applied = self.activate_resized_managed_topology(&weights)?")
+            .expect("sampling should attempt a weighted resize");
+        let cooldown = sample
+            .find("self.next_rebalance_allowed = Some(Instant::now() + cooldown)")
+            .expect("every completed resize attempt should arm cooldown");
+        let applied = sample
+            .find("if applied")
+            .expect("applied resizes should update event counters");
+        assert!(attempt < cooldown && cooldown < applied);
     }
 
     #[test]

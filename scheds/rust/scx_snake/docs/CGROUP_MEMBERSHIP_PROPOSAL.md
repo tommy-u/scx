@@ -97,6 +97,7 @@ parent = "/workload.slice/workload-tw.slice"
 exclude_children = ["systemd-workaround.service"]
 max_children = 31
 reconcile_ms = 1000
+cell0_min_cpus = 0
 
 [queues]
 layout = "cell_llc"
@@ -104,12 +105,25 @@ layout = "cell_llc"
 
 `parent` is an absolute cgroup path. A path already rooted beneath
 `/sys/fs/cgroup` is also accepted. Each non-excluded direct child is assigned a
-cell ID and its `cpuset.cpus.effective` mask becomes that cell's CPU claim.
-Existing children retain their IDs across reconciliations. New children take the
-lowest free ID, and slot reuse or same-name inode replacement advances the slot
-epoch. A child beyond `max_children` remains in cell 0 and is retried when a slot
-becomes free. Snake rejects a candidate whose effective mask is missing,
-invalid, or empty.
+cell ID. Snake requires a non-empty effective cpuset, inheriting the nearest
+ancestor's `cpuset.cpus.effective` when the controller is not available in the
+child. It uses a local configured `cpuset.cpus` as the allocation constraint.
+An empty or unavailable configured list means the cell is unpinned; a non-empty
+list restricts its primary and borrowable CPUs. In both cases the effective mask
+bounds the allocation domain. Existing
+children retain their IDs across reconciliations. New children
+take the lowest free ID, and slot reuse or same-name inode replacement advances
+the slot epoch. A child beyond `max_children` remains in cell 0 and is retried
+when a slot becomes free. Snake rejects invalid CPU files and a cgroup ancestry
+with no non-empty effective mask.
+
+Pinned cells receive exclusive claims first and split overlapping claims by
+target deficit. Cell 0 and unpinned children split only CPUs that no pinned cell
+claims. `cell0_min_cpus` defaults to 0; when configured, Snake takes unclaimed
+CPUs first and then holds out claimed CPUs only while every affected child keeps
+an exclusive CPU. It also protects one eligible CPU for every unpinned child.
+The reservation may stop short of the configured value rather than leaving a
+child without primary capacity.
 
 Only direct children create cells. All nested cgroups remain flat within their
 direct child's cell, and the membership walker applies the same cell reference
@@ -117,11 +131,12 @@ to their threads. A nested cgroup's narrower effective cpuset is still enforced
 through each task's kernel allowed-CPU mask; it does not create a nested cell or
 another queue domain.
 
-Managed discovery runs at `reconcile_ms`. For a changed child set or effective
-cpuset, userspace resolves a complete candidate, drains the fixed custom-DSQ
-pool, prepares policy and topology in the inactive configuration bank, and
-publishes the bank atomically. The active bank remains unchanged if preparation
-fails. Membership is updated only after old-bank readers have quiesced.
+Managed discovery runs at `reconcile_ms`. For a changed child set, effective
+cpuset, or configured constraint, userspace resolves a complete candidate,
+drains the fixed custom-DSQ pool, prepares policy and topology in the inactive
+configuration bank, and publishes the bank atomically. The active bank remains
+unchanged if preparation fails. Membership is updated only after old-bank
+readers have quiesced.
 
 Discovery records each managed child's cgroup inode. Deletion removes its cell;
 same-name replacement is a new identity even if it reuses the numeric slot.

@@ -5,7 +5,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use anyhow::{bail, Context, Result};
 use scx_utils::Topology;
 
-use crate::cell_allocation::{resolve_cell_allocation, CellAllocation};
+use crate::cell_allocation::{
+    resolve_cell_allocation_with_llcs, resolve_managed_cell_allocation, CellAllocation,
+};
 use crate::policy::{CompiledPolicy, QueueLayout};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -65,7 +67,7 @@ pub fn resolve_queue_topology(
             cpu_to_llc,
         )?));
     }
-    let allocation = resolve_cell_allocation(policy, available_cpus)?
+    let allocation = resolve_cell_allocation_with_llcs(policy, available_cpus, cpu_to_llc)?
         .expect("queue policy existence was checked above");
     Ok(Some(compile_queue_topology(
         queues.layout,
@@ -76,6 +78,13 @@ pub fn resolve_queue_topology(
 }
 
 pub fn resolve_host_queue_topology(policy: &CompiledPolicy) -> Result<Option<QueueTopology>> {
+    resolve_host_queue_topology_with_demands(policy, None)
+}
+
+pub fn resolve_host_queue_topology_with_demands(
+    policy: &CompiledPolicy,
+    demand_weights: Option<&BTreeMap<u32, f64>>,
+) -> Result<Option<QueueTopology>> {
     if policy.queues.is_none() {
         return Ok(None);
     }
@@ -95,7 +104,25 @@ pub fn resolve_host_queue_topology(policy: &CompiledPolicy) -> Result<Option<Que
             ))
         })
         .collect::<Result<BTreeMap<_, _>>>()?;
-    resolve_queue_topology(policy, &available_cpus, &cpu_to_llc)
+    let Some(demand_weights) = demand_weights else {
+        return resolve_queue_topology(policy, &available_cpus, &cpu_to_llc);
+    };
+    let queues = policy.queues.as_ref().expect("checked above");
+    if policy.managed_cells.is_none() || queues.layout == QueueLayout::Llc {
+        bail!("demand-weighted topology requires managed cell queues");
+    }
+    let allocation = resolve_managed_cell_allocation(
+        policy,
+        &available_cpus,
+        &cpu_to_llc,
+        Some(demand_weights),
+    )?;
+    Ok(Some(compile_queue_topology(
+        queues.layout,
+        allocation,
+        &cpu_to_llc,
+        &policy.cell_slot_epochs,
+    )?))
 }
 
 pub fn dump_queue_topology(topology: &QueueTopology) -> String {

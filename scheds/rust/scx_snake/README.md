@@ -173,8 +173,12 @@ stale assignment cannot enter a reused managed cell. See
 [Userspace Cgroup Cell Membership](docs/CGROUP_MEMBERSHIP_PROPOSAL.md).
 
 Alternatively, `[managed_cells]` discovers every non-excluded direct child at
-attachment and on each reconciliation interval, reads its
-`cpuset.cpus.effective`, and synthesizes both the cell and membership assignment.
+attachment and on each reconciliation interval. The nearest available non-empty
+`cpuset.cpus.effective`, inherited from an ancestor when necessary, records the
+CPUs available to the child. A non-empty configured `cpuset.cpus` is a hard cell
+constraint, while an empty or unavailable configured list creates an unpinned
+cell. Snake synthesizes both the cell and membership assignment, then distributes
+unclaimed CPUs among cell 0 and unpinned cells.
 Existing children keep stable IDs; a reused slot advances its epoch. Descendants
 remain in the direct child's cell while their own narrower cpusets continue to
 constrain task execution. See
@@ -183,7 +187,7 @@ constrain task execution. See
 [`examples/mitosis-sim.toml`](examples/mitosis-sim.toml) is the Production
 managed-cell profile. It combines dynamic child-cgroup cells, cell/LLC queues,
 Mitosis-style preferred idle selection, cell-aware direct dispatch, borrowing,
-and combined `min_vtime` dispatch. Demand rebalancing, queued-work stealing,
+combined `min_vtime` dispatch, and EWMA demand rebalancing. Queued-work stealing
 and slice shrinking are intentionally outside this profile.
 
 Its preferred idle selection is expanded into 16 observable placement rungs.
@@ -227,8 +231,11 @@ operation = "pick_idle"
 scope = "task_cell_borrowable"
 ```
 
-Userspace resolves overlapping claims and positive CPU weights into disjoint
-primary masks. It adds synthetic cell 0 for `NoCell` tasks and creates
+For static cell declarations, userspace resolves overlapping claims and positive
+CPU weights into disjoint primary masks. Managed cells instead use Mitosis
+admission: exclusive constraints are honored first, contested CPUs are divided
+by target deficit, and unclaimed CPUs go only to unpinned cells and cell 0.
+Userspace adds synthetic cell 0 for `NoCell` tasks and creates
 either one normal DSQ per cell or one per populated cell/LLC pair. All LLC
 shards of a cell share one cell clock. Exactly one affinity escape DSQ is
 created per online CPU, and each escape queue uses the clock of the cell that
@@ -482,8 +489,10 @@ accounting errors. `min_vtime` dispatch also reports exact head ties resolved by
 per-CPU alternation. Every queue ladder reports per-rung attempts, hits, misses,
 and errors; dispatch also reports selected candidates, selected atomic move
 misses, and bounded fallback results. Cell layouts additionally report each
-cell's total, primary, borrowed, and lent runtime, normal and affinity enqueues
-and execution selections, and clock transitions, plus keep-running suppressions
+cell's primary CPU count, instantaneous and EWMA utilization, borrowed/lent
+percentages, total/primary/borrowed/lent runtime, normal and affinity enqueues,
+execution selections, and clock transitions. Managed resizing reports its
+rebalance count and latest timestamp, plus keep-running suppressions
 and unavoidable old-queue runs for pending live rehomes. Direct-borrow yield counts
 confirm that foreign CPUs are reconsidered after one slice. EEVDF also reports
 its two queue insertion counts, promotions, forced advances, direct/queued

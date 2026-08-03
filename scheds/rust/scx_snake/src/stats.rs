@@ -188,13 +188,28 @@ impl CpuMetrics {
 }
 
 #[stat_doc]
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize, Stats)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, Stats)]
 #[stat(_om_prefix = "cell_", _om_label = "cell_id")]
 pub struct CellMetrics {
     #[stat(desc = "External task-cell ID", _om_skip)]
     pub id: u32,
     #[stat(desc = "Dense queue and clock index", _om_skip)]
     pub index: u32,
+    #[stat(desc = "CPUs primarily owned by this cell")]
+    #[serde(default)]
+    pub primary_cpu_count: u32,
+    #[stat(desc = "Instantaneous cell CPU utilization percentage")]
+    #[serde(default)]
+    pub utilization_pct: f64,
+    #[stat(desc = "EWMA cell CPU utilization percentage")]
+    #[serde(default)]
+    pub ewma_utilization_pct: f64,
+    #[stat(desc = "Percentage of cell runtime borrowed from other cells")]
+    #[serde(default)]
+    pub borrowed_pct: f64,
+    #[stat(desc = "Percentage of owned CPU capacity lent to other cells")]
+    #[serde(default)]
+    pub lent_pct: f64,
     #[stat(desc = "Runtime charged to tasks in this cell")]
     pub runtime_ns: u64,
     #[stat(desc = "Per-CPU runtime charged to tasks in this cell", _om_skip)]
@@ -224,6 +239,11 @@ impl CellMetrics {
         Self {
             id: self.id,
             index: self.index,
+            primary_cpu_count: self.primary_cpu_count,
+            utilization_pct: self.utilization_pct,
+            ewma_utilization_pct: self.ewma_utilization_pct,
+            borrowed_pct: self.borrowed_pct,
+            lent_pct: self.lent_pct,
             runtime_ns: self.runtime_ns.saturating_sub(previous.runtime_ns),
             runtime_ns_by_cpu: self
                 .runtime_ns_by_cpu
@@ -263,11 +283,17 @@ impl CellMetrics {
 }
 
 #[stat_doc]
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize, Stats)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, Stats)]
 #[stat(top)]
 pub struct Metrics {
     #[stat(desc = "Active userspace policy generation")]
     pub policy_generation: u64,
+    #[stat(desc = "Completed managed-cell demand rebalances")]
+    #[serde(default)]
+    pub managed_rebalance_count: u64,
+    #[stat(desc = "Unix timestamp in milliseconds of the latest managed-cell rebalance")]
+    #[serde(default)]
+    pub managed_last_rebalance_at_ms: u64,
     #[stat(desc = "Active scheduler fairness discipline", _om_skip)]
     pub fairness_mode: String,
     #[stat(desc = "Number of select_cpu callback invocations")]
@@ -382,11 +408,19 @@ pub struct Metrics {
 impl Metrics {
     pub fn delta(&self, previous: &Self) -> Self {
         if self.policy_generation != previous.policy_generation {
-            return self.clone();
+            let mut fresh = self.clone();
+            fresh.managed_rebalance_count = self
+                .managed_rebalance_count
+                .saturating_sub(previous.managed_rebalance_count);
+            return fresh;
         }
 
         Self {
             policy_generation: self.policy_generation,
+            managed_rebalance_count: self
+                .managed_rebalance_count
+                .saturating_sub(previous.managed_rebalance_count),
+            managed_last_rebalance_at_ms: self.managed_last_rebalance_at_ms,
             fairness_mode: self.fairness_mode.clone(),
             select_calls: self.select_calls.saturating_sub(previous.select_calls),
             dispatch_calls: self.dispatch_calls.saturating_sub(previous.dispatch_calls),
@@ -554,6 +588,7 @@ impl Metrics {
                 "  fallback previous CPU: {} | fallback any allowed CPU: {} | invalid/errors: {}\n",
                 "  callbacks enqueue: {} | dispatch: {} | running: {} | stopping: {} | quiescent: {}\n",
                 "  membership runs no-cell: {} | invalid: {}\n",
+                "  managed rebalances: {} | latest at ms: {}\n",
                 "  FIFO shared enqueues/dispatches: {}/{}\n",
                 "  select latency ns total: {} | average: {} | cumulative max: {}\n",
                 "  cell rehomes: {} | deferred rehomes: {} | queue preemptions/stale runs: {}/{} | borrow yields: {}\n",
@@ -578,6 +613,8 @@ impl Metrics {
             self.quiescent,
             self.membership_no_cell_runs,
             self.membership_invalid_runs,
+            self.managed_rebalance_count,
+            self.managed_last_rebalance_at_ms,
             self.fifo_shared_enqueues,
             self.fifo_shared_dispatches,
             self.select_latency_ns,
@@ -648,8 +685,13 @@ impl Metrics {
         }
         for cell in self.cells.values() {
             output.push_str(&format!(
-                "    cell {}: runtime {} | primary {} | borrowed {} | lent {} | normal/affinity enqueues {}/{} | dispatches {}/{} | clock transitions {}\n",
+                "    cell {}: primary CPUs {} | util/ewma {:.1}/{:.1}% | borrowed/lent {:.1}/{:.1}% | runtime {} | primary {} | borrowed {} | lent {} | normal/affinity enqueues {}/{} | dispatches {}/{} | clock transitions {}\n",
                 cell.id,
+                cell.primary_cpu_count,
+                cell.utilization_pct,
+                cell.ewma_utilization_pct,
+                cell.borrowed_pct,
+                cell.lent_pct,
                 cell.runtime_ns,
                 cell.primary_runtime_ns,
                 cell.borrowed_runtime_ns,
@@ -1267,6 +1309,26 @@ mod tests {
         };
 
         assert_eq!(current.delta(&previous), current);
+    }
+
+    #[test]
+    fn managed_rebalance_count_remains_an_event_counter_across_generations() {
+        let previous = Metrics {
+            policy_generation: 7,
+            managed_rebalance_count: 3,
+            managed_last_rebalance_at_ms: 100,
+            ..Default::default()
+        };
+        let current = Metrics {
+            policy_generation: 8,
+            managed_rebalance_count: 4,
+            managed_last_rebalance_at_ms: 200,
+            ..Default::default()
+        };
+
+        let delta = current.delta(&previous);
+        assert_eq!(delta.managed_rebalance_count, 1);
+        assert_eq!(delta.managed_last_rebalance_at_ms, 200);
     }
 
     #[test]

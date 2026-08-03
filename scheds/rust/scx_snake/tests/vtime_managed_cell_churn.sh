@@ -15,6 +15,7 @@ cgroup_root=/sys/fs/cgroup
 parent_name=scx-snake-managed-churn-$$
 parent=${cgroup_root}/${parent_name}
 child=${parent}/workload
+racy_child=${parent}/racy
 snake_pid=
 worker_pid=
 dmesg_lines=0
@@ -70,6 +71,7 @@ cleanup() {
     kill -INT "${snake_pid}" 2>/dev/null || true
     stop_pid "${snake_pid}" INT
     rmdir "${child}" 2>/dev/null || true
+    rmdir "${racy_child}" 2>/dev/null || true
     rmdir "${parent}" 2>/dev/null || true
     rm -rf "${tmpdir}"
     exit "${rc}"
@@ -100,12 +102,12 @@ wait_for_enabled() {
     return 1
 }
 
-wait_for_generation() {
-    local generation=$1 cells=$2 attempt
-    local pattern="activated managed cell topology generation ${generation} with ${cells} managed cells"
+wait_for_cell_count_after() {
+    local cells=$1 first_line=$2 attempt
+    local pattern="activated managed cell topology generation [0-9]+ with ${cells} managed cells"
 
     for ((attempt = 0; attempt < 300; attempt++)); do
-        grep -Fq "${pattern}" "${snake_log}" && return 0
+        tail -n +"${first_line}" "${snake_log}" | grep -Eq "${pattern}" && return 0
         scheduler_enabled || return 1
         sleep 0.05
     done
@@ -125,12 +127,13 @@ soak_switch_workload() {
 start_workload() {
     mkdir "${child}"
     printf '%s\n' "${cpuset_mems}" >"${child}/cpuset.mems"
-    printf '%s\n' "${workload_cpu}" >"${child}/cpuset.cpus"
+    # Leave cpuset.cpus empty so this managed child exercises unpinned admission.
+    [[ -z $(<"${child}/cpuset.cpus") ]] || fail "managed child cpuset.cpus is not empty"
     # shellcheck disable=SC2016 # The child expands its own PID and arguments.
     setsid bash -c '
         printf "%s\n" "$$" >"$1/cgroup.procs"
-        exec taskset -c "$2" stress-ng --switch 1 --switch-method pipe --metrics-brief
-    ' _ "${child}" "${workload_cpu}" >"${workload_log}" 2>&1 &
+        exec stress-ng --switch 1 --switch-method pipe --metrics-brief
+    ' _ "${child}" >"${workload_log}" 2>&1 &
     worker_pid=$!
 }
 
@@ -145,7 +148,6 @@ fi
 [[ -x ${snake_bin} ]] || fail "scheduler binary is not executable: ${snake_bin}"
 [[ -r ${policy_template} ]] || fail "policy template is not readable: ${policy_template}"
 command -v stress-ng >/dev/null || fail "stress-ng is required"
-command -v taskset >/dev/null || fail "taskset is required"
 command -v setsid >/dev/null || fail "setsid is required"
 [[ $(cat /sys/kernel/sched_ext/state 2>/dev/null || true) == disabled ]] ||
     fail "sched_ext must be disabled before the test"
@@ -154,7 +156,6 @@ grep -qw cpuset "${cgroup_root}/cgroup.controllers" ||
 (( $(nproc) >= 2 )) || fail "requires at least two CPUs"
 
 online_cpus=$(cat /sys/devices/system/cpu/online)
-workload_cpu=${online_cpus%%[-,]*}
 cpuset_mems=$(cat "${cgroup_root}/cpuset.mems.effective")
 [[ -n ${cpuset_mems} ]] || fail "root cpuset has no effective memory nodes"
 dmesg_lines=$(dmesg | wc -l)
@@ -165,7 +166,12 @@ mkdir "${parent}"
 printf '%s\n' "${cpuset_mems}" >"${parent}/cpuset.mems"
 printf '%s\n' "${online_cpus}" >"${parent}/cpuset.cpus"
 printf '%s\n' +cpuset >"${parent}/cgroup.subtree_control"
-sed "s|^parent = .*|parent = \"/${parent_name}\"|" "${policy_template}" >"${policy}"
+sed \
+    -e "s|^parent = .*|parent = \"/${parent_name}\"|" \
+    -e 's/^reconcile_ms = .*/reconcile_ms = 50/' \
+    -e 's/^cell0_min_cpus = .*/cell0_min_cpus = 1/' \
+    -e 's/^threshold_pct = .*/threshold_pct = 1000000.0/' \
+    "${policy_template}" >"${policy}"
 grep -Fq "parent = \"/${parent_name}\"" "${policy}" ||
     fail "managed-cell parent was not replaced in the test policy"
 
@@ -174,17 +180,32 @@ grep -Fq "parent = \"/${parent_name}\"" "${policy}" ||
 snake_pid=$!
 wait_for_enabled || fail "scheduler did not attach"
 
-start_workload
-wait_for_generation 2 1 || fail "first managed cell was not activated"
-soak_switch_workload || fail "scheduler exited during the first switch workload"
-stop_workload || fail "first managed cgroup did not become removable"
-wait_for_generation 3 0 || fail "first managed cell was not removed"
+for _ in $(seq 1 100); do
+    mkdir "${racy_child}"
+    printf '%s\n' "${cpuset_mems}" >"${racy_child}/cpuset.mems"
+    sleep 0.005
+    rmdir "${racy_child}"
+    sleep 0.005
+    scheduler_enabled || fail "scheduler exited during rapid managed-cgroup churn"
+done
+sleep 0.1
+scheduler_enabled || fail "scheduler exited after rapid managed-cgroup churn"
 
+first_line=$(( $(wc -l <"${snake_log}") + 1 ))
 start_workload
-wait_for_generation 4 1 || fail "recreated managed cell was not activated"
+wait_for_cell_count_after 1 "${first_line}" || fail "first managed cell was not activated"
+soak_switch_workload || fail "scheduler exited during the first switch workload"
+first_line=$(( $(wc -l <"${snake_log}") + 1 ))
+stop_workload || fail "first managed cgroup did not become removable"
+wait_for_cell_count_after 0 "${first_line}" || fail "first managed cell was not removed"
+
+first_line=$(( $(wc -l <"${snake_log}") + 1 ))
+start_workload
+wait_for_cell_count_after 1 "${first_line}" || fail "recreated managed cell was not activated"
 soak_switch_workload || fail "scheduler exited during the recreated switch workload"
+first_line=$(( $(wc -l <"${snake_log}") + 1 ))
 stop_workload || fail "recreated managed cgroup did not become removable"
-wait_for_generation 5 0 || fail "recreated managed cell was not removed"
+wait_for_cell_count_after 0 "${first_line}" || fail "recreated managed cell was not removed"
 scheduler_enabled || fail "scheduler exited after managed-cell churn"
 
 if grep -Eq 'invalid enq_flags|scx_bpf_error|Error: EXIT' "${snake_log}"; then
@@ -201,4 +222,4 @@ snake_pid=
 [[ $(cat /sys/kernel/sched_ext/state 2>/dev/null || true) == disabled ]] ||
     fail "scheduler did not detach cleanly"
 
-echo "PASS: managed cell create/delete/recreate survived a pipe-switch workload"
+echo "PASS: unpinned managed cell create/delete/recreate survived a pipe-switch workload"

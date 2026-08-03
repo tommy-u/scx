@@ -8,6 +8,13 @@ parent = "/workload.slice/workload-tw.slice"
 exclude_children = ["systemd-workaround.service"]
 max_children = 31
 reconcile_ms = 1000
+cell0_min_cpus = 4
+
+[managed_cells.resizing]
+sample_ms = 1000
+threshold_pct = 20.0
+cooldown_ms = 5000
+ewma_alpha = 0.3
 
 [queues]
 layout = "cell_llc"

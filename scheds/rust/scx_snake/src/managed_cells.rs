@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::io::ErrorKind;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
@@ -73,6 +74,7 @@ fn resolve_managed_cells_at(policy: &mut CompiledPolicy, cgroup_root: &Path) -> 
         .unwrap_or_default();
 
     let mut cells = BTreeMap::new();
+    let mut constraints = BTreeMap::new();
     let mut weights = BTreeMap::new();
     let mut epochs = policy.cell_slot_epochs.clone();
     let mut assignments = BTreeMap::new();
@@ -126,28 +128,7 @@ fn resolve_managed_cells_at(policy: &mut CompiledPolicy, cgroup_root: &Path) -> 
             }
         };
         used_ids.insert(cell_id);
-        let effective_path = path.join("cpuset.cpus.effective");
-        let cpulist = fs::read_to_string(&effective_path)
-            .with_context(|| format!("reading {}", effective_path.display()))?;
-        let cpulist = cpulist.trim();
-        if cpulist.is_empty() {
-            bail!("managed child {name} has an empty effective CPU set");
-        }
-        let cpus = scx_utils::read_cpulist(cpulist)
-            .with_context(|| format!("parsing {}", effective_path.display()))?
-            .into_iter()
-            .map(|cpu| {
-                u32::try_from(cpu)
-                    .with_context(|| format!("CPU {cpu} in {} does not fit u32", path.display()))
-            })
-            .collect::<Result<BTreeSet<_>>>()?;
-        debug_assert!(!cpus.is_empty());
-        if let Some(cpu) = cpus.iter().find(|&&cpu| cpu >= MAX_CELL_IDS) {
-            bail!(
-                "managed child {name} CPU {cpu} exceeds mask capacity {}",
-                MAX_CELL_IDS - 1
-            );
-        }
+        let (cpus, constraint) = read_stable_cpu_domain(&path, cgroup_root, &name)?;
         let current_inode = fs::metadata(&path)
             .with_context(|| format!("rechecking managed child {}", path.display()))?
             .ino();
@@ -155,6 +136,7 @@ fn resolve_managed_cells_at(policy: &mut CompiledPolicy, cgroup_root: &Path) -> 
             bail!("managed child {name} identity changed during discovery");
         }
         cells.insert(cell_id, cpus);
+        constraints.insert(cell_id, constraint);
         weights.insert(cell_id, 1);
         child_inodes.insert(name.clone(), inode);
         assignments.insert(name, cell_id);
@@ -165,6 +147,7 @@ fn resolve_managed_cells_at(policy: &mut CompiledPolicy, cgroup_root: &Path) -> 
         .context("managed cell parent is not valid UTF-8")?
         .to_owned();
     policy.cells = cells;
+    policy.cell_cpu_constraints = constraints;
     policy.cell_cpu_weights = weights;
     policy.cell_slot_epochs = epochs;
     policy.membership = Some(MembershipPolicy {
@@ -174,6 +157,80 @@ fn resolve_managed_cells_at(policy: &mut CompiledPolicy, cgroup_root: &Path) -> 
         child_inodes: Some(child_inodes),
     });
     Ok(())
+}
+
+fn read_optional_cpu_file(path: &Path) -> Result<Option<String>> {
+    match fs::read_to_string(path) {
+        Ok(value) => Ok(Some(value)),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error).with_context(|| format!("reading {}", path.display())),
+    }
+}
+
+fn read_effective_cpu_file(path: &Path, cgroup_root: &Path) -> Result<String> {
+    let mut current = Some(path);
+    while let Some(directory) = current {
+        let effective_path = directory.join("cpuset.cpus.effective");
+        if let Some(value) = read_optional_cpu_file(&effective_path)? {
+            return Ok(value);
+        }
+        if directory == cgroup_root {
+            break;
+        }
+        current = directory.parent();
+    }
+    bail!(
+        "managed child {} has no effective cpuset in its cgroup ancestry",
+        path.display()
+    )
+}
+
+fn parse_cpu_file(value: &str, path: &Path, name: &str) -> Result<BTreeSet<u32>> {
+    let cpus = scx_utils::read_cpulist(value)
+        .with_context(|| format!("parsing {}", path.display()))?
+        .into_iter()
+        .map(|cpu| {
+            u32::try_from(cpu)
+                .with_context(|| format!("CPU {cpu} in {} does not fit u32", path.display()))
+        })
+        .collect::<Result<BTreeSet<_>>>()?;
+    if let Some(cpu) = cpus.iter().find(|&&cpu| cpu >= MAX_CELL_IDS) {
+        bail!(
+            "managed child {name} CPU {cpu} exceeds mask capacity {}",
+            MAX_CELL_IDS - 1
+        );
+    }
+    Ok(cpus)
+}
+
+fn read_stable_cpu_domain(
+    path: &Path,
+    cgroup_root: &Path,
+    name: &str,
+) -> Result<(BTreeSet<u32>, Option<BTreeSet<u32>>)> {
+    let configured_path = path.join("cpuset.cpus");
+    let effective_path = path.join("cpuset.cpus.effective");
+    let configured_before = read_optional_cpu_file(&configured_path)?;
+    let effective_before = read_effective_cpu_file(path, cgroup_root)?;
+    let configured_after = read_optional_cpu_file(&configured_path)?;
+    let effective_after = read_effective_cpu_file(path, cgroup_root)?;
+    if configured_before != configured_after || effective_before != effective_after {
+        bail!("managed child {name} CPU domain changed during discovery");
+    }
+
+    let effective = effective_before.trim();
+    if effective.is_empty() {
+        bail!("managed child {name} has an empty effective CPU set");
+    }
+    let cpus = parse_cpu_file(effective, &effective_path, name)?;
+    debug_assert!(!cpus.is_empty());
+    let constraint = configured_before
+        .as_deref()
+        .map(str::trim)
+        .filter(|configured| !configured.is_empty())
+        .map(|configured| parse_cpu_file(configured, &configured_path, name))
+        .transpose()?;
+    Ok((cpus, constraint))
 }
 
 fn resolved_parent(cgroup_root: &Path, configured: &Path) -> PathBuf {
@@ -195,6 +252,7 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::resolve_managed_cells_at;
+    use crate::cell_allocation::resolve_cell_allocation;
     use crate::policy::{self, CompiledPolicy};
 
     fn temporary_root(name: &str) -> PathBuf {
@@ -236,8 +294,13 @@ scope = "task_cell"
     fn add_child(parent: &Path, name: &str, effective_cpus: &str) -> PathBuf {
         let child = parent.join(name);
         fs::create_dir_all(&child).unwrap();
+        fs::write(child.join("cpuset.cpus"), effective_cpus).unwrap();
         fs::write(child.join("cpuset.cpus.effective"), effective_cpus).unwrap();
         child
+    }
+
+    fn set_cpuset(child: &Path, cpus: &str) {
+        fs::write(child.join("cpuset.cpus"), cpus).unwrap();
     }
 
     #[test]
@@ -322,6 +385,21 @@ scope = "task_cell"
             .unwrap_err()
             .to_string();
         assert!(error.contains("empty effective CPU set"), "{error}");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn missing_child_cpuset_files_inherit_the_parent_effective_domain() {
+        let root = temporary_root("inherited-controller");
+        let parent = root.join("workloads");
+        fs::create_dir_all(parent.join("batch")).unwrap();
+        fs::write(parent.join("cpuset.cpus.effective"), "0-3\n").unwrap();
+        let mut policy = policy("/workloads", 1, &[]);
+
+        resolve_managed_cells_at(&mut policy, &root).unwrap();
+
+        assert_eq!(policy.cells[&1], BTreeSet::from([0, 1, 2, 3]));
+        assert_eq!(policy.cell_cpu_constraints[&1], None);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -428,6 +506,87 @@ scope = "task_cell"
             BTreeMap::from([("alpha".into(), 1)])
         );
         assert!(!policy.cells.values().any(|cpus| cpus.contains(&1)));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn inherited_cpuset_is_unpinned_and_only_uses_unclaimed_cpus() {
+        let root = temporary_root("inherited-cpuset");
+        let parent = root.join("workloads");
+        fs::create_dir_all(&parent).unwrap();
+        add_child(&parent, "pinned", "0-1\n");
+        let inherited = add_child(&parent, "inherited", "0-3\n");
+        set_cpuset(&inherited, "\n");
+        let mut policy = policy("/workloads", 2, &[]);
+
+        resolve_managed_cells_at(&mut policy, &root).unwrap();
+        let allocation = resolve_cell_allocation(&policy, &BTreeSet::from([0, 1, 2, 3]))
+            .unwrap()
+            .unwrap();
+        let assignments = &policy.membership.as_ref().unwrap().assignments;
+        let pinned_id = assignments["pinned"];
+        let inherited_id = assignments["inherited"];
+
+        assert_eq!(allocation.cells[&pinned_id].primary.len(), 2);
+        assert_eq!(allocation.cells[&inherited_id].primary.len(), 1);
+        assert_eq!(allocation.cells[&0].primary.len(), 1);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn inherited_cpuset_never_owns_cpus_outside_its_effective_mask() {
+        let root = temporary_root("inherited-effective-bound");
+        let parent = root.join("workloads");
+        fs::create_dir_all(&parent).unwrap();
+        let child = add_child(&parent, "restricted", "0-3\n");
+        set_cpuset(&child, "\n");
+        let mut policy = policy("/workloads", 1, &[]);
+
+        resolve_managed_cells_at(&mut policy, &root).unwrap();
+        let allocation =
+            resolve_cell_allocation(&policy, &BTreeSet::from([0, 1, 2, 3, 4, 5, 6, 7]))
+                .unwrap()
+                .unwrap();
+        let cell_id = policy.membership.as_ref().unwrap().assignments["restricted"];
+
+        assert!(allocation.cells[&cell_id]
+            .primary
+            .is_subset(&BTreeSet::from([0, 1, 2, 3])));
+        assert!(allocation.cells[&cell_id]
+            .borrowable
+            .is_subset(&BTreeSet::from([0, 1, 2, 3])));
+        assert!(BTreeSet::from([4, 5, 6, 7]).is_subset(&allocation.cells[&0].primary));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn configured_cpuset_changes_constraints_without_reusing_the_slot() {
+        let root = temporary_root("constraint-change");
+        let parent = root.join("workloads");
+        fs::create_dir_all(&parent).unwrap();
+        let child = add_child(&parent, "alpha", "0-3\n");
+        set_cpuset(&child, "0-1\n");
+        let mut policy = policy("/workloads", 1, &[]);
+
+        resolve_managed_cells_at(&mut policy, &root).unwrap();
+        let cell_id = policy.membership.as_ref().unwrap().assignments["alpha"];
+        let slot_epoch = policy.cell_slot_epochs[&cell_id];
+        assert_eq!(
+            policy.cell_cpu_constraints[&cell_id],
+            Some(BTreeSet::from([0, 1]))
+        );
+
+        let pinned = policy.clone();
+        set_cpuset(&child, "\n");
+        resolve_managed_cells_at(&mut policy, &root).unwrap();
+
+        assert_ne!(policy, pinned);
+        assert_eq!(
+            policy.membership.as_ref().unwrap().assignments["alpha"],
+            cell_id
+        );
+        assert_eq!(policy.cell_slot_epochs[&cell_id], slot_epoch);
+        assert_eq!(policy.cell_cpu_constraints[&cell_id], None);
         fs::remove_dir_all(root).unwrap();
     }
 }

@@ -101,8 +101,8 @@ dispatch = [
 
 ## Cells and CPU ownership
 
-The two cell layouts turn overlapping CPU declarations into an attachment-time
-resource allocation:
+The two cell layouts turn CPU constraints into a userspace resource allocation.
+Static `[[cell]]` declarations use the original weighted allocator:
 
 - Cell ID 0 is reserved for a synthetic cell containing unannotated tasks.
   It claims every online CPU and uses `cell0_cpu_weight`.
@@ -121,6 +121,68 @@ resource allocation:
   every CPU it does not own.
 - External cell IDs are translated to dense BPF indices. The dense index is an
   implementation detail, not part of the annotation interface.
+
+### Managed-cell admission
+
+`[managed_cells]` uses Mitosis admission semantics. Snake requires a non-empty
+effective cpuset for each direct child, inheriting the nearest ancestor's
+`cpuset.cpus.effective` when the controller is not available in the child. A
+local `cpuset.cpus` is the optional allocation constraint. An empty or
+unavailable configured list means the cell is unpinned; a non-empty list is a
+hard constraint on its primary and borrowable masks.
+
+Managed allocation proceeds deterministically in ascending cell and CPU order:
+
+1. CPUs claimed by exactly one pinned cell are assigned to that cell.
+2. CPUs claimed by multiple pinned cells are divided among those claimants using
+   a frozen snapshot of their weighted target deficits.
+3. Unclaimed CPUs are divided among eligible unpinned cells, including synthetic
+   cell 0. A child's effective cpuset always bounds its allocation domain.
+
+Every cell has a one-CPU target floor, but constraints can make that target
+unreachable. Pinned cells never receive unclaimed CPUs, and unpinned cells never
+receive a CPU claimed by a pinned cell. Admission fails if there are fewer CPUs
+than cells, any cell receives no primary CPU, or the final primary masks do not
+own every available CPU exactly once.
+
+Managed policies may reserve capacity for cell 0:
+
+```toml
+[managed_cells]
+parent = "/workload.slice/workload-tw.slice"
+cell0_min_cpus = 4
+```
+
+`cell0_min_cpus` defaults to 0. The holdout takes unclaimed CPUs first. If more
+are needed, it spreads claimed-CPU selections across eligible children, prefers
+an exclusive CPU and then an LLC shared by more cells, and never takes a pinned
+child's last exclusive CPU or an unpinned child's protected one-CPU floor. The
+holdout may therefore stop below the requested minimum rather than starve a child.
+
+For both allocation modes, an unpinned cell's borrowable mask is its effective
+cpuset minus its primary mask. A pinned managed cell's borrowable mask is its
+configured constraint intersected with its effective cpuset, minus its primary
+mask. A CPU held out for cell 0 remains borrowable by a pinned child that
+includes it in its effective constraint.
+
+Managed policies can opt into demand resizing:
+
+```toml
+[managed_cells.resizing]
+sample_ms = 1000
+threshold_pct = 20.0
+cooldown_ms = 5000
+ewma_alpha = 0.3
+```
+
+Presence of the table enables resizing; the values above are its defaults.
+Snake samples cell runtime, preserves EWMA by `(cell_id, slot_epoch)`, and
+recomputes the full allocation when the hottest-to-coldest EWMA spread reaches
+`threshold_pct` after the cooldown. New identities inherit the mean surviving
+EWMA. Publication uses the same drained, banked topology transition as managed
+cell admission. Allocation and publication failures stop the scheduler.
+Runtime discovery races preserve the active topology and retry on the next
+reconciliation interval.
 
 `cpu_weight` and `cell0_cpu_weight` influence primary CPU ownership. They do
 not change a task's kernel scheduling weight and are not a promise of

@@ -63,6 +63,7 @@ pub struct CompiledPolicy {
     pub rungs: Vec<CompiledRung>,
     pub mask_tables: Vec<MaskTableSpec>,
     pub cells: BTreeMap<u32, BTreeSet<u32>>,
+    pub cell_cpu_constraints: BTreeMap<u32, Option<BTreeSet<u32>>>,
     pub cell_cpu_weights: BTreeMap<u32, u32>,
     pub cell_slot_epochs: BTreeMap<u32, u32>,
     pub queues: Option<QueuePolicy>,
@@ -84,6 +85,26 @@ pub struct ManagedCellsPolicy {
     pub exclude_children: Vec<String>,
     pub max_children: usize,
     pub reconcile_ms: u64,
+    pub cell0_min_cpus: usize,
+    pub resizing: Option<ManagedCellResizingPolicy>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ManagedCellResizingPolicy {
+    pub sample_ms: u64,
+    pub threshold_milli_pct: u32,
+    pub cooldown_ms: u64,
+    pub ewma_alpha_milli: u32,
+}
+
+impl ManagedCellResizingPolicy {
+    pub fn threshold_pct(&self) -> f64 {
+        f64::from(self.threshold_milli_pct) / 1_000.0
+    }
+
+    pub fn ewma_alpha(&self) -> f64 {
+        f64::from(self.ewma_alpha_milli) / 1_000.0
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -227,12 +248,26 @@ impl CompiledPolicy {
             ));
         }
         if let Some(managed) = &self.managed_cells {
+            let resizing = managed
+                .resizing
+                .as_ref()
+                .map_or_else(String::new, |resizing| {
+                    format!(
+                    " resizing=enabled(sample_ms={},threshold_pct={},cooldown_ms={},ewma_alpha={})",
+                    resizing.sample_ms,
+                    resizing.threshold_pct(),
+                    resizing.cooldown_ms,
+                    resizing.ewma_alpha(),
+                )
+                });
             output.push_str(&format!(
-                "managed_cells: parent={} max_children={} reconcile_ms={} excluded={}\n",
+                "managed_cells: parent={} max_children={} reconcile_ms={} cell0_min_cpus={} excluded={}{}\n",
                 managed.parent,
                 managed.max_children,
                 managed.reconcile_ms,
+                managed.cell0_min_cpus,
                 managed.exclude_children.join(","),
+                resizing,
             ));
         }
         output.push_str(
@@ -447,10 +482,42 @@ struct SemanticManagedCellsPolicy {
     max_children: usize,
     #[serde(default = "default_membership_reconcile_ms")]
     reconcile_ms: u64,
+    #[serde(default)]
+    cell0_min_cpus: usize,
+    resizing: Option<SemanticManagedCellResizingPolicy>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SemanticManagedCellResizingPolicy {
+    #[serde(default = "default_resizing_sample_ms")]
+    sample_ms: u64,
+    #[serde(default = "default_resizing_threshold_pct")]
+    threshold_pct: f64,
+    #[serde(default = "default_resizing_cooldown_ms")]
+    cooldown_ms: u64,
+    #[serde(default = "default_resizing_ewma_alpha")]
+    ewma_alpha: f64,
 }
 
 const fn default_managed_max_children() -> usize {
     MAX_QUEUE_CELLS - 1
+}
+
+const fn default_resizing_sample_ms() -> u64 {
+    1_000
+}
+
+const fn default_resizing_threshold_pct() -> f64 {
+    20.0
+}
+
+const fn default_resizing_cooldown_ms() -> u64 {
+    5_000
+}
+
+const fn default_resizing_ewma_alpha() -> f64 {
+    0.3
 }
 
 #[derive(Deserialize)]
@@ -612,6 +679,10 @@ pub fn compile_policy(source: &str) -> Result<CompiledPolicy, PolicyError> {
         fallback,
         rungs,
         mask_tables,
+        cell_cpu_constraints: cells
+            .iter()
+            .map(|(&cell_id, cpus)| (cell_id, Some(cpus.clone())))
+            .collect(),
         cells,
         cell_cpu_weights,
         cell_slot_epochs: BTreeMap::new(),
@@ -732,12 +803,77 @@ fn compile_managed_cells(
         }
     }
 
+    let resizing = managed
+        .resizing
+        .as_ref()
+        .map(|resizing| {
+            if resizing.sample_ms == 0 {
+                return Err(PolicyError(
+                    "managed cell resizing sample_ms must be positive".into(),
+                ));
+            }
+            if resizing.cooldown_ms == 0 {
+                return Err(PolicyError(
+                    "managed cell resizing cooldown_ms must be positive".into(),
+                ));
+            }
+            let threshold_milli_pct = scaled_policy_value(
+                resizing.threshold_pct,
+                1_000.0,
+                "managed cell resizing threshold_pct",
+                false,
+            )?;
+            let ewma_alpha_milli = scaled_policy_value(
+                resizing.ewma_alpha,
+                1_000.0,
+                "managed cell resizing ewma_alpha",
+                true,
+            )?;
+            if ewma_alpha_milli == 0 || ewma_alpha_milli > 1_000 {
+                return Err(PolicyError(
+                    "managed cell resizing ewma_alpha must be in (0, 1]".into(),
+                ));
+            }
+            Ok(ManagedCellResizingPolicy {
+                sample_ms: resizing.sample_ms,
+                threshold_milli_pct,
+                cooldown_ms: resizing.cooldown_ms,
+                ewma_alpha_milli,
+            })
+        })
+        .transpose()?;
+
     Ok(Some(ManagedCellsPolicy {
         parent: managed.parent.clone(),
         exclude_children: managed.exclude_children.clone(),
         max_children: managed.max_children,
         reconcile_ms: managed.reconcile_ms,
+        cell0_min_cpus: managed.cell0_min_cpus,
+        resizing,
     }))
+}
+
+fn scaled_policy_value(
+    value: f64,
+    scale: f64,
+    name: &str,
+    require_positive: bool,
+) -> Result<u32, PolicyError> {
+    if !value.is_finite() || value < 0.0 || (require_positive && value == 0.0) {
+        return Err(PolicyError(format!(
+            "{name} must be {} and finite",
+            if require_positive {
+                "positive"
+            } else {
+                "non-negative"
+            }
+        )));
+    }
+    let scaled = (value * scale).round();
+    if scaled > f64::from(u32::MAX) {
+        return Err(PolicyError(format!("{name} is too large")));
+    }
+    Ok(scaled as u32)
 }
 
 fn compile_membership(
@@ -3803,8 +3939,82 @@ scope = "task_cell"
         assert_eq!(managed.exclude_children, ["systemd-workaround.service"]);
         assert_eq!(managed.max_children, MAX_QUEUE_CELLS - 1);
         assert_eq!(managed.reconcile_ms, 1_000);
+        assert_eq!(managed.cell0_min_cpus, 0);
+        assert!(managed.resizing.is_none());
         assert!(policy.cells.is_empty());
         assert!(policy.membership.is_none());
+    }
+
+    #[test]
+    fn compiles_managed_cell_zero_holdout() {
+        compile_policy(
+            r#"
+[managed_cells]
+parent = "/workload.slice/workload-tw.slice"
+cell0_min_cpus = 2
+
+[queues]
+layout = "cell_llc"
+
+[[rung]]
+operation = "pick_idle_core"
+scope = "task_cell"
+"#,
+        )
+        .expect("managed cell-0 holdout should compile");
+    }
+
+    #[test]
+    fn compiles_opt_in_managed_cell_resizing() {
+        let policy = compile_policy(
+            r#"
+[managed_cells]
+parent = "/workload.slice/workload-tw.slice"
+
+[managed_cells.resizing]
+
+[queues]
+layout = "cell_llc"
+
+[[rung]]
+operation = "pick_idle_core"
+scope = "task_cell"
+"#,
+        )
+        .expect("managed resizing policy should compile");
+
+        assert!(policy.dump().contains("resizing=enabled"));
+        let resizing = policy.managed_cells.unwrap().resizing.unwrap();
+        assert_eq!(resizing.sample_ms, 1_000);
+        assert_eq!(resizing.threshold_pct(), 20.0);
+        assert_eq!(resizing.cooldown_ms, 5_000);
+        assert_eq!(resizing.ewma_alpha(), 0.3);
+    }
+
+    #[test]
+    fn managed_cell_resizing_rejects_invalid_parameters() {
+        for (fields, expected) in [
+            ("sample_ms = 0", "sample_ms must be positive"),
+            ("cooldown_ms = 0", "cooldown_ms must be positive"),
+            ("threshold_pct = -1", "threshold_pct must be non-negative"),
+            ("ewma_alpha = 0", "ewma_alpha must be positive"),
+            ("ewma_alpha = 1.1", "ewma_alpha must be in (0, 1]"),
+        ] {
+            let error = error_for(&format!(
+                r#"
+[managed_cells]
+parent = "/workloads"
+[managed_cells.resizing]
+{fields}
+[queues]
+layout = "cell"
+[[rung]]
+operation = "pick_idle"
+scope = "task_cell"
+"#
+            ));
+            assert!(error.contains(expected), "{error}");
+        }
     }
 
     #[test]
