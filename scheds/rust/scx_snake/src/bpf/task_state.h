@@ -34,6 +34,7 @@ struct snake_task_runtime {
 	u32			   queue_timing_cell_index;
 	u32			   queue_timing_depth_after_insert;
 	u32			   queue_timing_queue_class;
+	u32			   queued_dsq_index;
 	u8			   runtime_valid;
 	u8			   initialized;
 	u8			   runnable_accounted;
@@ -45,6 +46,8 @@ struct snake_task_runtime {
 	u8			   queue_class;
 	u8			   run_queue_class;
 	u8			   direct_cell_valid;
+	u8			   queued_dsq_class;
+	u8			   queued_dsq_accounted;
 };
 
 struct {
@@ -124,15 +127,14 @@ task_route_clear_selected_cpu(struct snake_task_runtime *runtime)
 		runtime->selected_cpu_valid = 0;
 }
 
-static __always_inline s32 task_route_take_selected_cpu(
-	struct snake_task_runtime *runtime, struct task_struct *p)
+static __always_inline s32
+task_route_take_selected_cpu(struct snake_task_runtime *runtime)
 {
 	s32 cpu = -1;
 
 	if (!runtime || !runtime->selected_cpu_valid)
 		return -1;
-	if (runtime->selected_cpu < nr_cpu_ids &&
-	    bpf_cpumask_test_cpu(runtime->selected_cpu, p->cpus_ptr))
+	if (runtime->selected_cpu < nr_cpu_ids)
 		cpu = runtime->selected_cpu;
 	task_route_clear_selected_cpu(runtime);
 	return cpu;

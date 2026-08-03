@@ -60,19 +60,23 @@ dsq_record_operation(const struct snake_fine_timing_ctx *fine, dsq_id_t source,
 		     dsq_id_t target, u32 operation, u32 outcome,
 		     u64 started_at)
 {
+	struct snake_fine_timing_event *event;
+
 	if (!started_at)
 		return;
-	struct snake_fine_timing_event event = {};
-
-	event.session_id		     = fine->session_id;
-	event.elapsed_ns		     = bpf_ktime_get_ns() - started_at;
-	event.source_dsq_id		     = source.raw;
-	event.target_dsq_id		     = target.raw;
-	event.operation			     = operation;
-	event.outcome			     = outcome;
-	event.queue_class =
+	event = fine_timing_reserve_dsq_operation(fine, operation, outcome);
+	if (!event)
+		return;
+	event->session_id    = fine->session_id;
+	event->elapsed_ns    = bpf_ktime_get_ns() - started_at;
+	event->source_dsq_id = source.raw;
+	event->target_dsq_id = target.raw;
+	event->stage	     = 0;
+	event->operation     = operation;
+	event->outcome	     = outcome;
+	event->queue_class =
 		dsq_queue_class(dsq_is_invalid(source) ? target : source);
-	fine_timing_record_dsq_operation(fine, &event);
+	bpf_ringbuf_submit(event, 0);
 }
 
 static __always_inline bool dsq_insert(struct task_struct *p, dsq_id_t target,
@@ -89,14 +93,14 @@ static __always_inline bool dsq_insert(struct task_struct *p, dsq_id_t target,
 	return inserted;
 }
 
-/* SCX_DSQ_LOCAL is contextual; record the concrete CPU-local destination. */
+/* Target the selected CPU explicitly; enqueue's contextual LOCAL is task_rq. */
 static __always_inline bool
-dsq_insert_local(struct task_struct *p, s32 cpu, u64 slice, u64 enq_flags,
-		 const struct snake_fine_timing_ctx *fine)
+dsq_insert_local_on(struct task_struct *p, s32 cpu, u64 slice, u64 enq_flags,
+		    const struct snake_fine_timing_ctx *fine)
 {
 	dsq_id_t target	    = cpu < 0 ? dsq_invalid() : dsq_local_on(cpu);
 	u64	 started_at = fine_timing_start(fine);
-	bool inserted = scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL, slice, enq_flags);
+	bool inserted = scx_bpf_dsq_insert(p, target.raw, slice, enq_flags);
 
 	dsq_record_operation(fine, dsq_invalid(), target, SNAKE_DSQ_OP_INSERT,
 			     inserted ? SNAKE_DSQ_OUTCOME_SUCCESS :

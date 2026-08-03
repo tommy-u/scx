@@ -1948,8 +1948,8 @@ scope = "task_cell"
         assert_eq!(resized.borrowable_cpus_added, vec![2]);
         assert_eq!(resized.before.as_ref().unwrap().primary_cpu_count, 1);
         assert_eq!(resized.after.as_ref().unwrap().borrowable_cpu_count, 2);
-        assert_eq!(resized.before.as_ref().unwrap().normal_dsq_count, 1);
-        assert_eq!(resized.after.as_ref().unwrap().normal_dsq_count, 1);
+        assert_eq!(resized.before.as_ref().unwrap().normal_dsq_count, 2);
+        assert_eq!(resized.after.as_ref().unwrap().normal_dsq_count, 2);
         let serialized = serde_json::to_value(resized).unwrap();
         assert!(serialized["before"].get("primary_cpus").is_none());
         assert!(serialized["after"].get("borrowable_cpus").is_none());

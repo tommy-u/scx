@@ -286,6 +286,8 @@ eight dispatch rungs. Queue rungs use the same mechanical
 | dispatch | `MIN_VTIME` | 3 | legacy pair | Compare both heads in the owner-cell clock domain. |
 | dispatch | `PEEK` | 4 | `CPU` (1), `LOCAL` (2), `REMOTE` (3), or `CELL` (4) | Record one candidate without moving it. |
 | dispatch | `CONSUME` | 5 | `MIN_VTIME` (5) | Select the earliest peek and try its packed bounded fallback. |
+| dispatch | `DRAIN` | 6 | `CELL_ORPHAN` (6) | Move at most one task from a same-cell shard with no consumers. |
+| dispatch | `STEAL` | 7 | `CELL_SIBLING` (7) | Move at most one task from a populated same-cell sibling shard. |
 
 Cell enqueue is first-success and requires terminal `AFFINITY`. Source-based
 cell dispatch advances a per-CPU cyclic cursor after a source supplies work;
@@ -296,12 +298,13 @@ identifiers. The global remote cursor bounded-scans flat queue descriptors,
 advances past empty or head-incompatible sources, and returns at most one remote
 candidate rather than exposing LLC IDs to BPF.
 
-The Mitosis cell ladder is an exact three-rung sequence: `TRY_DIRECT / CELL`,
-`CELL / CELL`, then `INSERT_CPU / CPU`. Its dispatch ladder peeks the local
-cell-LLC and CPU queues, then consumes minimum VTIME with packed `CPU` and
-`CELL_SIBLING` fallbacks. Ties prefer the cell queue. The CPU fallback is used
-only when a selected cell move races; sibling stealing is used only when both
-peeked queues were empty.
+The Mitosis enqueue ladder is an exact three-rung sequence: `TRY_DIRECT / CELL`,
+`TRY_INSERT / CELL`, then `INSERT / CPU`. Its expanded dispatch ladder is
+`DRAIN / CELL_ORPHAN`, `PEEK / CELL`, `PEEK / CPU`, `CONSUME / MIN_VTIME`
+with CPU fallback, then `STEAL / CELL_SIBLING`. Ties prefer the cell queue. The
+CPU fallback is used only when a selected cell move races; sibling stealing is
+used only when both peeked queues were empty. The legacy fused three-rung
+dispatch remains accepted for compatible policies.
 
 ## Stage 3: resolve semantic scopes into masks
 
@@ -326,7 +329,9 @@ queue and consumer mask per group, maps each CPU to its local queue, and selects
 one global clock domain. No cell record or LLC identifier is required by the
 BPF routing mechanism. For cell layouts, userspace adds cell 0, resolves all
 online CPUs to one primary owner, derives each cell's borrowable mask, assigns
-dense indices, and builds one normal queue per cell or populated cell/LLC pair.
+dense indices, and builds one normal queue per cell or every active cell/LLC
+pair. Empty cell/LLC descriptors preserve stable DSQ identities across
+same-cell CPU resizing.
 Every layout also emits one per-CPU escape route. BPF materializes consumer,
 primary, and borrowable masks while preparing each bank; the selected bank is
 immutable for the lifetime of one pinned callback reader.
@@ -342,7 +347,7 @@ Userspace encodes the lowered rungs into `snake_compiled_ladder` with:
 - at most sixteen fixed-size placement rungs;
 - enqueue and dispatch callback rung counts and arrays.
 
-ABI version 29 limits placement ladders to sixteen rungs and enqueue/dispatch
+ABI version 30 limits placement ladders to sixteen rungs and enqueue/dispatch
 ladders to eight rungs. It also limits generic placement to four mask tables,
 CPU and mask keys to 1024, queue cells to 32 including cell 0, and policy
 storage to two ladder slots. Userspace and BPF share definitions from

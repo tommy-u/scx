@@ -112,7 +112,7 @@ general resource elasticity**.
 Atomic slot publication is implemented in
 [runtime_policy.rs](../../scheds/rust/scx_snake/src/runtime_policy.rs#L112-L167) and
 [main.h](../../scheds/rust/scx_snake/src/bpf/main.h#L170-L212). Current
-`intf.h` and `POLICY_LOWERING.md` now agree on ABI 29, nine generic placement
+`intf.h` and `POLICY_LOWERING.md` now agree on ABI 30, nine generic placement
 rungs, the exact sixteen-rung expanded Mitosis ladder, and eight
 enqueue/dispatch rungs. The versioned `--validate-policy` JSON record exposes
 both placement limits to automation without loading BPF.

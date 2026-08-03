@@ -20,8 +20,18 @@ runtime counters -> EWMA demand -> proportional reallocation -> banked publish
 - `cell0_min_cpus` reserves CPUs without taking a child's last exclusive CPU.
 - Resizing is opt-in under `[managed_cells.resizing]`; identity is
   `(cell_id, slot_epoch)` and counter baselines include the active BPF bank.
-- Publication keeps Snake's drain/stage/flip/quiesce transaction. Allocation or
-  publication failure is fatal; borrowing masks are regenerated each time.
+- Structural publication keeps Snake's drain/stage/flip/quiesce transaction.
+  Same-identity resizing keeps stable cell/LLC DSQs live, then BPF drains shards
+  that lost all consumers. It briefly closes custom enqueue and uses the global
+  drain whenever an affinity DSQ on a CPU changing owner is non-empty,
+  preventing that CPU's old-owner clock from starving pinned work. Legacy
+  policies also retain the global drain. Allocation or publication failure is
+  fatal, and borrowing masks are regenerated each time.
+- Per-task custody markers balance normal and affinity depth at exact dispatch
+  moves or external dequeue callbacks. Post-close enqueues route CPU-local
+  without keeping a structural transition's inflight fence busy. Tasks already
+  moved local resolve their stored external cell ID and epoch against the new
+  bank before running.
 - Live discovery uses a stable cpuset snapshot; transient cgroup churn keeps the
   active topology and retries.
 

@@ -7,7 +7,7 @@
 #include "queue_enqueue.h"
 #include "queue_dispatch.h"
 
-static __noinline s32
+static __always_inline s32
 queue_pick_random_idle_cpu(const struct cpumask *candidates, bool whole_core)
 {
 	return cpu_pick_random_idle(candidates, whole_core);

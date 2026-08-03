@@ -145,6 +145,11 @@ static __always_inline int validate_queue_topology(u32 bank)
 		WRITE_ONCE(queue_topology_prepare_detail, 6);
 		return -EINVAL;
 	}
+	if (header->nr_normal_dsqs < header->nr_normal_queues ||
+	    header->nr_normal_dsqs > SNAKE_MAX_NORMAL_QUEUES) {
+		WRITE_ONCE(queue_topology_prepare_detail, 8);
+		return -EINVAL;
+	}
 	if (!header->nr_cpus || header->nr_cpus > nr_cpu_ids ||
 	    nr_cpu_ids > SNAKE_MAX_CPUS) {
 		WRITE_ONCE(queue_topology_prepare_detail, 7);
@@ -165,6 +170,7 @@ static __always_inline int validate_queue_topology(u32 bank)
 		if (!cell->valid || cell->clock_index != i ||
 		    !cell->cpu_weight || !cell->primary.valid ||
 		    !cell->nr_normal_queues ||
+		    cell->nr_normal_queues > SNAKE_MAX_CELL_LLCS ||
 		    cell->first_normal_queue >= header->nr_normal_queues ||
 		    cell->nr_normal_queues >
 			    header->nr_normal_queues - cell->first_normal_queue) {
@@ -182,8 +188,9 @@ static __always_inline int validate_queue_topology(u32 bank)
 		key = queue_slot_index(bank, SNAKE_MAX_NORMAL_QUEUES, i);
 		queue = bpf_map_lookup_elem(&normal_queues, &key);
 		if (!queue || !queue->valid || !queue->consumers.valid ||
-		    queue->consumer_cpu >= nr_cpu_ids ||
-		    !queue_cpu_slot(bank, queue->consumer_cpu)) {
+		    (queue->consumer_cpu != SNAKE_QUEUE_CPU_NONE &&
+		     (queue->consumer_cpu >= nr_cpu_ids ||
+		      !queue_cpu_slot(bank, queue->consumer_cpu)))) {
 			WRITE_ONCE(queue_topology_prepare_detail, 20001 + i * 10);
 			return -EINVAL;
 		}
@@ -271,7 +278,7 @@ static __always_inline int create_queue_topology_dsqs(u32 bank)
 	}
 	bpf_for(i, 0, SNAKE_MAX_NORMAL_QUEUES)
 	{
-		if (i >= header->nr_cpus)
+		if (i >= header->nr_normal_dsqs)
 			break;
 		ret = dsq_create(dsq_normal(i), -1);
 		if (ret)

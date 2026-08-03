@@ -157,15 +157,17 @@ normal cell work from affinity-constrained escape work.
 ### Normal queues and cell clocks
 
 Each cell has one VTIME clock. The `cell` layout creates one normal ordered DSQ
-per cell. The `cell_llc` layout creates one ordered DSQ for each cell/LLC pair
-that owns at least one CPU, but every shard for a cell uses that same cell
-clock. It does not create an independent fairness domain per LLC.
+per cell. The `cell_llc` layout precreates a bounded pool and keeps one active
+descriptor for every active cell/LLC pair, including temporarily consumerless
+pairs, but every shard for a cell uses that same cell clock. It does not create
+an independent fairness domain per LLC.
 
 Only CPUs owned by a cell consume its normal queues. A normal enqueue is safe
 only when the task may run on every CPU in the cell's primary mask. In
 `cell_llc` mode, a CPU first checks its local shard and may then dispatch the
-earliest head from another shard of the same cell. There is no cross-cell
-normal-queue stealing.
+earliest head from another shard of the same cell. The Mitosis dispatch profile
+also drains newly orphaned shards and steals from populated sibling shards.
+Neither path crosses a cell boundary.
 
 A static cell's `cpu_weight` controls how overlapping CPU claims are resolved
 into primary ownership. Managed child cells use equal admission weights;

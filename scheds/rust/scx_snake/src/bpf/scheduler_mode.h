@@ -10,7 +10,7 @@
 #include "queue_timing.h"
 #include "timing.h"
 
-static __always_inline int queue_try_direct_from_enqueue(
+static __always_inline int queue_try_direct_from_enqueue_impl(
 	struct snake_ladder_ctx *ctx, struct task_struct *p, u64 enq_flags,
 	const struct snake_fine_timing_ctx *fine, u64 callback_started_at,
 	bool expanded_mitosis)
@@ -42,12 +42,20 @@ static __always_inline int queue_try_direct_from_enqueue(
 		rung_started_at = rung_timing_start(callback_started_at);
 		if (__COMPAT_is_enq_cpu_selected(enq_flags))
 			goto out;
+		ret = queue_task_cell_affinity_restricted(
+			ctx, p, queue_task_cell_index(ctx, p));
+		if (ret) {
+			if (ret > 0)
+				ret = 0;
+			goto out;
+		}
 	} else if (__COMPAT_is_enq_cpu_selected(enq_flags)) {
 		return 0;
 	}
 	cpu = expanded_mitosis ?
 		      walk_expanded_mitosis_ladder(ctx, p, &walk_args) :
-		      walk_generic_policy_ladder(ctx, p, &walk_args);
+		      walk_generic_policy_ladder_from_enqueue(
+			      ctx, p, &walk_args);
 	if (cpu == -ENOENT)
 		goto out;
 	if (cpu < 0) {
@@ -83,8 +91,24 @@ out:
 	return ret;
 }
 
+static __noinline int queue_try_direct_from_enqueue_generic(
+	struct snake_ladder_ctx *ctx, struct task_struct *p, u64 enq_flags,
+	const struct snake_fine_timing_ctx *fine, u64 callback_started_at)
+{
+	return queue_try_direct_from_enqueue_impl(
+		ctx, p, enq_flags, fine, callback_started_at, false);
+}
+
+static __noinline int queue_try_direct_from_enqueue_expanded(
+	struct snake_ladder_ctx *ctx, struct task_struct *p, u64 enq_flags,
+	const struct snake_fine_timing_ctx *fine, u64 callback_started_at)
+{
+	return queue_try_direct_from_enqueue_impl(
+		ctx, p, enq_flags, fine, callback_started_at, true);
+}
+
 /* Route enqueue through the active queue topology or global fairness policy. */
-static __noinline int
+static __noinline __maybe_unused int
 scheduler_mode_enqueue_generic(
 	struct snake_ladder_ctx *ctx, struct task_struct *p, u64 enq_flags,
 	const struct snake_fine_timing_ctx *fine, u64 callback_started_at)
@@ -95,8 +119,8 @@ scheduler_mode_enqueue_generic(
 	if (queue_topology_enabled()) {
 		if (queue_transition_active())
 			return queue_transition_enqueue(ctx, p, enq_flags, fine);
-		ret = queue_try_direct_from_enqueue(
-			ctx, p, enq_flags, fine, callback_started_at, false);
+		ret = queue_try_direct_from_enqueue_generic(
+			ctx, p, enq_flags, fine, callback_started_at);
 		if (ret < 0)
 			return ret;
 		if (ret > 0)
@@ -123,33 +147,40 @@ scheduler_mode_enqueue_generic(
 	return fairness_enqueue(ctx, p, enq_flags, fine);
 }
 
-static __noinline int scheduler_mode_enqueue_expanded(
+/*
+ * Policies without direct dispatch never need to replay the placement ladder
+ * from enqueue. Keep that call graph out of their struct_ops program so the
+ * verifier does not explore an unreachable CPU-selection path.
+ */
+static __noinline int scheduler_mode_enqueue_no_direct(
 	struct snake_ladder_ctx *ctx, struct task_struct *p, u64 enq_flags,
 	const struct snake_fine_timing_ctx *fine, u64 callback_started_at)
 {
-	s32 cell_enqueued, ret;
-	u64 slice, stage_started_at;
+	s32 ret;
+	u64 stage_started_at;
 
-	if (queue_topology_enabled()) {
-		if (queue_transition_active())
-			return queue_transition_enqueue(ctx, p, enq_flags, fine);
-		ret = queue_try_direct_from_enqueue(
-			ctx, p, enq_flags, fine, callback_started_at, true);
-		if (ret < 0)
-			return ret;
-		if (ret > 0)
-			return 0;
-		ret = queue_ladder_enqueue(ctx, p, enq_flags, fine,
-					   callback_started_at);
-		if (ret == -EAGAIN)
-			return queue_transition_enqueue(ctx, p, enq_flags, fine);
-		if (ret)
-			return ret;
-		stage_started_at = fine_timing_start(fine);
-		fine_timing_finish(fine, SNAKE_FINE_TIMING_ENQUEUE_FINISH,
-				   stage_started_at);
-		return 0;
-	}
+	if (!queue_topology_enabled())
+		return -EINVAL;
+	if (queue_transition_active())
+		return queue_transition_enqueue(ctx, p, enq_flags, fine);
+	ret = queue_ladder_enqueue(ctx, p, enq_flags, fine,
+				   callback_started_at);
+	if (ret == -EAGAIN)
+		return queue_transition_enqueue(ctx, p, enq_flags, fine);
+	if (ret)
+		return ret;
+	stage_started_at = fine_timing_start(fine);
+	fine_timing_finish(fine, SNAKE_FINE_TIMING_ENQUEUE_FINISH,
+			   stage_started_at);
+	return 0;
+}
+
+static __noinline int scheduler_mode_enqueue_fairness(
+	struct snake_ladder_ctx *ctx, struct task_struct *p, u64 enq_flags,
+	const struct snake_fine_timing_ctx *fine, u64 callback_started_at)
+{
+	s32 cell_enqueued;
+	u64 slice;
 
 	slice = fairness_dispatch_slice(ctx, p, true);
 	cell_enqueued = try_enqueue_task_cell(
@@ -159,6 +190,56 @@ static __noinline int scheduler_mode_enqueue_expanded(
 	if (cell_enqueued > 0)
 		return 0;
 	return fairness_enqueue(ctx, p, enq_flags, fine);
+}
+
+static __noinline int scheduler_mode_enqueue_expanded_fallback(
+	struct snake_ladder_ctx *ctx, struct task_struct *p, u64 enq_flags,
+	const struct snake_fine_timing_ctx *fine, u64 callback_started_at)
+{
+	s32 ret;
+	u64 stage_started_at;
+
+	ret = queue_ladder_enqueue(ctx, p, enq_flags, fine,
+				   callback_started_at);
+	if (ret == -EAGAIN)
+		return queue_transition_enqueue(ctx, p, enq_flags, fine);
+	if (ret)
+		return ret;
+	stage_started_at = fine_timing_start(fine);
+	fine_timing_finish(fine, SNAKE_FINE_TIMING_ENQUEUE_FINISH,
+			   stage_started_at);
+	return 0;
+}
+
+static __always_inline int scheduler_mode_enqueue_expanded(
+	struct snake_ladder_ctx *ctx, struct task_struct *p, u64 enq_flags,
+	const struct snake_fine_timing_ctx *fine, u64 callback_started_at)
+{
+	s32 ret;
+
+	if (!queue_topology_enabled())
+		return -EINVAL;
+	if (queue_transition_active())
+		return queue_transition_enqueue(ctx, p, enq_flags, fine);
+	ret = queue_try_direct_from_enqueue_expanded(
+		ctx, p, enq_flags, fine, callback_started_at);
+	if (ret < 0)
+		return ret;
+	if (ret > 0)
+		return 0;
+	return scheduler_mode_enqueue_expanded_fallback(
+		ctx, p, enq_flags, fine, callback_started_at);
+}
+
+static __noinline void scheduler_mode_dispatch_error(s32 cpu, s32 ret,
+					       bool queue)
+{
+	if (queue)
+		scx_bpf_error("snake queue dispatch failed on CPU %d: %d", cpu,
+			      ret);
+	else
+		scx_bpf_error("snake fairness dispatch failed on CPU %d: %d", cpu,
+			      ret);
 }
 
 /* Route dispatch and consume the caller's active-ladder reference. */
@@ -174,8 +255,7 @@ static __always_inline void scheduler_mode_dispatch(
 							 callback_started_at);
 		stage_started_at = fine_timing_start(fine);
 		if (ret)
-			scx_bpf_error("snake queue dispatch failed on CPU %d",
-				      cpu);
+			scheduler_mode_dispatch_error(cpu, ret, true);
 		fine_timing_finish(fine, SNAKE_FINE_TIMING_DISPATCH_FINISH,
 				   stage_started_at);
 		release_timed_callback(ctx, SNAKE_CALLBACK_DISPATCH,
@@ -187,8 +267,7 @@ static __always_inline void scheduler_mode_dispatch(
 	release_timed_callback(ctx, SNAKE_CALLBACK_DISPATCH,
 			       callback_started_at);
 	if (ret)
-		scx_bpf_error("snake fairness dispatch failed on CPU %d: %d",
-			      cpu, ret);
+		scheduler_mode_dispatch_error(cpu, ret, false);
 }
 
 static __always_inline int scheduler_mode_runnable(

@@ -48,6 +48,62 @@ pub struct QueueTopology {
     pub cpu_queues: BTreeMap<u32, CpuQueue>,
 }
 
+pub fn same_host_queue_universe(active: &QueueTopology, candidate: &QueueTopology) -> bool {
+    active.layout == candidate.layout
+        && active
+            .cpu_queues
+            .iter()
+            .map(|(&cpu, queue)| (cpu, queue.llc_id))
+            .eq(candidate
+                .cpu_queues
+                .iter()
+                .map(|(&cpu, queue)| (cpu, queue.llc_id)))
+}
+
+pub fn preserves_resize_queue_identity(active: &QueueTopology, candidate: &QueueTopology) -> bool {
+    same_host_queue_universe(active, candidate)
+        && active
+            .cells
+            .iter()
+            .map(|cell| (cell.index, cell.external_id, cell.slot_epoch))
+            .eq(candidate
+                .cells
+                .iter()
+                .map(|cell| (cell.index, cell.external_id, cell.slot_epoch)))
+        && active
+            .normal_queues
+            .iter()
+            .map(|queue| (queue.index, queue.cell_index, queue.llc_id))
+            .eq(candidate
+                .normal_queues
+                .iter()
+                .map(|queue| (queue.index, queue.cell_index, queue.llc_id)))
+}
+
+pub fn ownership_changed_cpus(
+    active: &QueueTopology,
+    candidate: &QueueTopology,
+) -> Result<BTreeSet<u32>> {
+    if active.cpu_queues.len() != candidate.cpu_queues.len() {
+        bail!("queue topology CPU set changed during ownership comparison");
+    }
+    active
+        .cpu_queues
+        .iter()
+        .filter_map(|(&cpu, active_queue)| {
+            let candidate_queue = match candidate.cpu_queues.get(&cpu) {
+                Some(queue) => queue,
+                None => {
+                    return Some(Err(anyhow::anyhow!(
+                        "CPU {cpu} disappeared during ownership comparison"
+                    )))
+                }
+            };
+            (active_queue.owner_cell_index != candidate_queue.owner_cell_index).then_some(Ok(cpu))
+        })
+        .collect()
+}
+
 pub fn resolve_queue_topology(
     policy: &CompiledPolicy,
     available_cpus: &BTreeSet<u32>,
@@ -193,12 +249,25 @@ fn compile_queue_topology(
         .collect::<Vec<_>>();
     let mut normal_queues = Vec::new();
     let mut normal_by_cell_llc = BTreeMap::new();
+    let host_llcs = cpu_to_llc.values().copied().collect::<BTreeSet<_>>();
+    if layout == QueueLayout::CellLlc
+        && host_llcs.len() > crate::bpf_intf::SNAKE_MAX_CELL_LLCS as usize
+    {
+        bail!(
+            "cell-LLC queue topology has {} LLCs, maximum is {}",
+            host_llcs.len(),
+            crate::bpf_intf::SNAKE_MAX_CELL_LLCS
+        );
+    }
 
     for cell in &mut cells {
         let groups = match layout {
             QueueLayout::Cell => BTreeMap::from([(None, cell.primary.clone())]),
             QueueLayout::CellLlc => {
-                let mut by_llc: BTreeMap<Option<u32>, BTreeSet<u32>> = BTreeMap::new();
+                let mut by_llc = host_llcs
+                    .iter()
+                    .map(|&llc| (Some(llc), BTreeSet::new()))
+                    .collect::<BTreeMap<_, _>>();
                 for &cpu in &cell.primary {
                     by_llc
                         .entry(Some(cpu_to_llc[&cpu]))
@@ -210,9 +279,6 @@ fn compile_queue_topology(
             QueueLayout::Llc => unreachable!("LLC topology does not use cell allocation"),
         };
         for (llc_id, consumers) in groups {
-            if consumers.is_empty() {
-                continue;
-            }
             let index = u32::try_from(normal_queues.len())?;
             normal_queues.push(NormalQueue {
                 index,
@@ -225,14 +291,6 @@ fn compile_queue_topology(
             normal_by_cell_llc.insert((cell.index, llc_id), index);
         }
     }
-    if normal_queues.len() > allocation.cpu_owners.len() {
-        bail!(
-            "queue topology has {} normal queues for only {} CPUs",
-            normal_queues.len(),
-            allocation.cpu_owners.len()
-        );
-    }
-
     let cpu_queues = allocation
         .cpu_owners
         .iter()
@@ -331,6 +389,7 @@ fn compile_llc_queue_topology(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cell_allocation::CellResources;
     use crate::policy;
 
     fn compile(layout: &str) -> CompiledPolicy {
@@ -388,14 +447,21 @@ scope = "task_cell"
     }
 
     #[test]
-    fn cell_llc_layout_creates_only_owned_cell_llc_pairs() {
+    fn cell_llc_layout_keeps_stable_slots_for_every_cell_llc_pair() {
         let topology = topology("cell_llc");
 
-        assert!(topology.normal_queues.len() <= topology.cpu_queues.len());
+        assert_eq!(topology.normal_queues.len(), topology.cells.len() * 2);
+        assert!(topology
+            .cells
+            .iter()
+            .all(|cell| cell.normal_queues.len() == 2));
+        assert!(topology
+            .normal_queues
+            .iter()
+            .any(|queue| queue.consumers.is_empty()));
         for queue in &topology.normal_queues {
             assert_eq!(Some(queue.clock_index), queue.cell_index);
             assert!(queue.llc_id.is_some());
-            assert!(!queue.consumers.is_empty());
             assert!(queue
                 .consumers
                 .iter()
@@ -406,6 +472,98 @@ scope = "task_cell"
             assert_eq!(queue.cell_index, cpu.owner_cell_index);
             assert!(queue.consumers.contains(&cpu.cpu));
         }
+    }
+
+    #[test]
+    fn cell_llc_queue_indices_survive_cpu_ownership_changes() {
+        let allocation = |cell0: BTreeSet<u32>, cell7: BTreeSet<u32>| CellAllocation {
+            cells: BTreeMap::from([
+                (
+                    0,
+                    CellResources {
+                        id: 0,
+                        cpu_weight: 1,
+                        claimed: cell0.clone(),
+                        primary: cell0.clone(),
+                        borrowable: BTreeSet::new(),
+                    },
+                ),
+                (
+                    7,
+                    CellResources {
+                        id: 7,
+                        cpu_weight: 1,
+                        claimed: cell7.clone(),
+                        primary: cell7.clone(),
+                        borrowable: BTreeSet::new(),
+                    },
+                ),
+            ]),
+            cpu_owners: cell0
+                .iter()
+                .map(|&cpu| (cpu, 0))
+                .chain(cell7.iter().map(|&cpu| (cpu, 7)))
+                .collect(),
+        };
+        let cpu_to_llc = BTreeMap::from([(0, 10), (1, 10), (2, 20), (3, 20)]);
+        let before = compile_queue_topology(
+            QueueLayout::CellLlc,
+            allocation(BTreeSet::from([0, 2]), BTreeSet::from([1, 3])),
+            &cpu_to_llc,
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        let after = compile_queue_topology(
+            QueueLayout::CellLlc,
+            allocation(BTreeSet::from([0, 1, 2]), BTreeSet::from([3])),
+            &cpu_to_llc,
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        let identities = |topology: &QueueTopology| {
+            topology
+                .normal_queues
+                .iter()
+                .map(|queue| {
+                    let cell = &topology.cells[queue.cell_index.unwrap() as usize];
+                    ((cell.external_id, queue.llc_id.unwrap()), queue.index)
+                })
+                .collect::<BTreeMap<_, _>>()
+        };
+
+        assert_eq!(identities(&before), identities(&after));
+        assert!(same_host_queue_universe(&before, &after));
+        assert!(preserves_resize_queue_identity(&before, &after));
+        assert_eq!(
+            ownership_changed_cpus(&before, &after).unwrap(),
+            BTreeSet::from([1])
+        );
+        let lost = identities(&after)[&(7, 10)];
+        assert!(after.normal_queues[lost as usize].consumers.is_empty());
+
+        let mut changed_host = after.clone();
+        changed_host.cpu_queues.get_mut(&3).unwrap().llc_id = 30;
+        assert!(!same_host_queue_universe(&before, &changed_host));
+        assert!(!preserves_resize_queue_identity(&before, &changed_host));
+
+        let mut changed_epoch = after.clone();
+        changed_epoch.cells[1].slot_epoch += 1;
+        assert!(same_host_queue_universe(&before, &changed_epoch));
+        assert!(!preserves_resize_queue_identity(&before, &changed_epoch));
+    }
+
+    #[test]
+    fn cell_llc_layout_rejects_more_llcs_than_the_bpf_scan_bound() {
+        let policy = compile("cell_llc");
+        let cpus = (0..=crate::bpf_intf::SNAKE_MAX_CELL_LLCS).collect();
+        let cpu_to_llc = (0..=crate::bpf_intf::SNAKE_MAX_CELL_LLCS)
+            .map(|cpu| (cpu, cpu))
+            .collect();
+        let error = resolve_queue_topology(&policy, &cpus, &cpu_to_llc)
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("maximum is 32"), "{error}");
     }
 
     #[test]

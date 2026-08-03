@@ -189,7 +189,7 @@ fine_timing_record_elapsed(const struct snake_fine_timing_ctx *ctx, u32 stage,
 			   u64 elapsed_ns)
 {
 	struct snake_fine_timing_config *config;
-	struct snake_fine_timing_event	 event = {};
+	struct snake_fine_timing_event	*event;
 	u32				 callback, key = 0, mask;
 
 	if (!ctx || !ctx->active)
@@ -205,34 +205,42 @@ fine_timing_record_elapsed(const struct snake_fine_timing_ctx *ctx, u32 stage,
 	if (!(READ_ONCE(config->enabled_mask) & mask) ||
 	    READ_ONCE(config->session_ids[callback]) != ctx->session_id)
 		return;
-	event.session_id = ctx->session_id;
-	event.elapsed_ns = elapsed_ns;
-	event.stage	 = stage;
-	bpf_ringbuf_output(&fine_timing_events, &event, sizeof(event), 0);
+	event = bpf_ringbuf_reserve(&fine_timing_events, sizeof(*event), 0);
+	if (!event)
+		return;
+	event->session_id    = ctx->session_id;
+	event->elapsed_ns    = elapsed_ns;
+	event->source_dsq_id = 0;
+	event->target_dsq_id = 0;
+	event->stage	     = stage;
+	event->operation     = SNAKE_DSQ_OP_NONE;
+	event->outcome	     = SNAKE_DSQ_OUTCOME_NONE;
+	event->queue_class   = 0;
+	bpf_ringbuf_submit(event, 0);
 }
 
-static __noinline void
-fine_timing_record_dsq_operation(const struct snake_fine_timing_ctx *ctx,
-				 struct snake_fine_timing_event	    *sample)
+static __always_inline struct snake_fine_timing_event *
+fine_timing_reserve_dsq_operation(const struct snake_fine_timing_ctx *ctx,
+				  u32 operation, u32 outcome)
 {
 	struct snake_fine_timing_config *config;
 	u32				 callback, key = 0, mask;
 
-	if (!ctx || !ctx->active || !sample ||
-	    sample->operation == SNAKE_DSQ_OP_NONE ||
-	    sample->outcome == SNAKE_DSQ_OUTCOME_NONE)
-		return;
+	if (!ctx || !ctx->active || operation == SNAKE_DSQ_OP_NONE ||
+	    outcome == SNAKE_DSQ_OUTCOME_NONE)
+		return NULL;
 	callback = ctx->callback;
 	if (callback >= SNAKE_NR_FINE_TIMING_CALLBACKS)
-		return;
+		return NULL;
 	config = bpf_map_lookup_elem(&fine_timing_config, &key);
 	if (!config)
-		return;
+		return NULL;
 	mask = 1U << callback;
 	if (!(READ_ONCE(config->enabled_mask) & mask) ||
 	    READ_ONCE(config->session_ids[callback]) != ctx->session_id)
-		return;
-	bpf_ringbuf_output(&fine_timing_events, sample, sizeof(*sample), 0);
+		return NULL;
+	return bpf_ringbuf_reserve(&fine_timing_events,
+				   sizeof(struct snake_fine_timing_event), 0);
 }
 
 /* Global dispatch stays untimed; retain only the sampled transfer identity. */

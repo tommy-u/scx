@@ -93,9 +93,11 @@ enqueue = [
   { action = "insert", target = "cpu" },
 ]
 dispatch = [
+  { action = "drain", source = "cell_orphan" },
   { action = "peek", source = "cell" },
   { action = "peek", source = "cpu" },
-  { action = "consume", operation = "min_vtime", fallback = ["cpu", "cell_sibling"] },
+  { action = "consume", operation = "min_vtime", fallback = ["cpu"] },
+  { action = "steal", source = "cell_sibling" },
 ]
 ```
 
@@ -179,8 +181,14 @@ Presence of the table enables resizing; the values above are its defaults.
 Snake samples cell runtime, preserves EWMA by `(cell_id, slot_epoch)`, and
 recomputes the full allocation when the hottest-to-coldest EWMA spread reaches
 `threshold_pct` after the cooldown. New identities inherit the mean surviving
-EWMA. Publication uses the same drained, banked topology transition as managed
-cell admission. Allocation and publication failures stop the scheduler.
+EWMA. Resizes that preserve every cell identity publish new ownership masks
+without globally emptying normal queues; the dispatch drain rung moves backlog
+from cell/LLC shards that lost their final consumer. The transition first
+closes custom enqueue and requires the affinity DSQ of every CPU changing owner
+to be empty, falling back to a full drain when pinned work is queued there so a
+CPU cannot carry its old owner clock into the new cell. Cell creation, deletion,
+and slot-epoch reuse also use a global drain before publication. Allocation and
+publication failures stop the scheduler.
 Runtime discovery races preserve the active topology and retry on the next
 reconciliation interval.
 
@@ -214,16 +222,17 @@ Snake creates all queue-policy DSQs when the scheduler attaches.
 | Layout | Normal VTIME DSQs | Clock |
 | --- | --- | --- |
 | `llc` | One per discovered LLC | One global clock shared by every queue |
-| `cell` | One per cell | One per cell |
-| `cell_llc` | One for each cell/LLC pair that owns at least one CPU | One per cell, shared by all of that cell's LLC shards |
+| `cell` | A fixed pool of 32; one active descriptor per cell | One per cell |
+| `cell_llc` | A fixed pool of 32 times the discovered LLC count; one active descriptor per active cell/LLC pair | One per cell, shared by all of that cell's LLC shards |
 
 Every layout also creates exactly one affinity-safe DSQ per online CPU. In
 `llc`, all normal and CPU queues use the global clock. In cell layouts, each
 affinity queue uses the clock of the cell that owns its CPU. Snake does not
-create a cell-by-CPU matrix or any per-CPU clocks. `cell_llc` creates only
-populated ownership pairs, not the Cartesian product of all cells and LLCs.
-Every normal queue owns at least one CPU, so there are never more normal queues
-than online CPUs. CPU IDs may be sparse; descriptors remain keyed by real IDs.
+create a cell-by-CPU matrix or any per-CPU clocks. `cell_llc` precreates the
+bounded DSQ pool at attachment and keeps one descriptor for every active
+cell/LLC pair, including pairs with no current consumer. Stable indices let an
+in-place resize drain an orphaned shard without destroying or reusing its DSQ.
+CPU IDs may be sparse; per-CPU descriptors remain keyed by real IDs.
 
 In cell layouts, the affinity queues exist because a task whose affinity
 excludes any CPU in its cell's primary mask cannot safely sit on a normal DSQ
@@ -259,8 +268,9 @@ terminal, and a policy that enqueues to `cell` must dispatch from `cell`.
 With `direct_dispatch = true`, a successful cell-routed placement bypasses the
 custom enqueue ladder and inserts directly into the selected CPU's local DSQ.
 Primary, borrowable, and restricted-affinity rungs preserve their respective
-resource route. If sched_ext invokes `enqueue` without first invoking
-`select_cpu`, Snake retries the placement ladder there before queueing.
+resource route. The expanded Mitosis template also retries placement when
+sched_ext invokes `enqueue` without first invoking `select_cpu`. Generic cell
+policies use their configured queue insertion in that uncommon path.
 
 The explicit Mitosis enqueue ladder makes those decisions visible as three
 rungs. `try_direct(cell)` retries idle placement only when `select_cpu` was
@@ -316,11 +326,12 @@ the same cell. It never steals normal work from another cell. An `affinity`
 source consumes only that CPU's escape queue.
 
 The explicit Mitosis dispatch ladder does not use cyclic source priority. It
-peeks the local cell-LLC head, then the current CPU head, and chooses the lower
-VTIME while preferring the cell head on exact ties. If the winning cell move
-races and fails, it tries only the CPU DSQ. It scans sibling cell-LLC DSQs only
-when both local candidates were empty, starting after the local LLC, and never
-steals from another cell.
+first drains at most one queued task from a same-cell LLC shard that has lost
+all consumers. It then peeks the local cell-LLC head and current CPU head, and
+chooses the lower VTIME while preferring the cell head on exact ties. If the
+winning cell move races and fails, it tries only the CPU DSQ. When both local
+candidates are empty, the final rung scans populated sibling cell-LLC shards
+and steals at most one task. Neither drain nor steal crosses a cell boundary.
 
 ## Clocks and task coordinates
 
@@ -378,7 +389,8 @@ opportunity after every borrowed slice.
 Borrowing is deliberately limited:
 
 - It is select-time, idle-CPU borrowing for newly runnable or waking tasks.
-- It does not steal tasks that are already waiting in a normal DSQ.
+- It does not steal tasks that are already waiting in a normal DSQ; the
+  Mitosis dispatch ladder separately moves work only among same-cell shards.
 - It is work-conserving for wake-heavy workloads, not a general queued-work
   balancer.
 - Direct borrowing bypasses queue comparison at that instant, so it is not
@@ -413,8 +425,9 @@ expanded placement requires restarting Snake. The fused
 not need per-stage visibility.
 
 This profile models Mitosis cell discovery, CPU ownership, placement, direct
-dispatch, borrowing, and one VTIME domain per cell. It does not implement demand
-rebalancing, queued-work stealing, or slice shrinking.
+dispatch, borrowing, demand rebalancing with orphan draining, same-cell
+sibling-LLC stealing, and one VTIME domain per cell. Slice shrinking remains
+outside the profile.
 
 ## Live updates
 
@@ -424,11 +437,28 @@ weights, primary allocation, borrowable masks, normal queues, and CPU queues.
 For `llc`, CPU-to-local routes and normal consumer masks must also match. Restart
 Snake to change any of them through policy replacement.
 
-Managed-cell reconciliation may rebind that fixed pool. It first diverts new
-enqueues to CPU-local DSQs and waits for custom queues to empty, then stages the
-new descriptors and masks beside the policy in the inactive bank. One slot
-switch publishes the complete configuration. The old bank is retained until its
-callback readers quiesce, after which task membership is reconciled.
+Managed-cell reconciliation may rebind that fixed pool. Structural changes
+first divert new enqueues to CPU-local DSQs and wait for custom queues to empty,
+then stage new descriptors and masks beside the policy in the inactive bank.
+Same-identity CPU resizing skips that global drain because active cell/LLC DSQ
+indices remain stable, but only after custom enqueue is closed and affinity
+DSQs on CPUs changing owner are verified empty. A non-empty affected affinity
+DSQ selects the global drain path instead. After publication BPF marks newly
+consumerless normal queues for dispatch draining. One slot switch publishes the
+complete configuration. The old bank is retained until its callback readers
+quiesce, after which task membership is reconciled.
+
+Cell layouts publish logical custody before inserting into a normal or affinity
+DSQ. A successful iterator move clears that custody immediately; the sched_ext
+`dequeue` callback clears it for affinity, cpuset, scheduling-class, and other
+external removals. Structural drain checks both kernel DSQ depth and these
+logical counts, covering inserts that are not yet visible through
+`dsq_nr_queued()`. The enqueue transition gate checks the close flag before and
+after entering its inflight counter. Callbacks that observe an already-closed
+gate route to a terminal CPU-local DSQ without extending the drain wait.
+Tasks already moved to a CPU-local DSQ retain their external cell ID and epoch;
+on a bank-generation change, BPF resolves that identity to the new dense index
+before running rather than interpreting an old index in the new bank.
 
 Callback ladders are part of the double-buffered policy generation. Cell
 dispatch sources may be reordered, a full source pair may switch to or from

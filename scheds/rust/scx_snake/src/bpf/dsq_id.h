@@ -59,6 +59,9 @@ _Static_assert(SNAKE_MAX_CPUS <= (1U << SNAKE_DSQ_DATA_BITS),
 	       "CPU IDs must fit in a DSQ ID");
 _Static_assert(SNAKE_MAX_NORMAL_QUEUES <= (1U << SNAKE_DSQ_DATA_BITS),
 	       "normal queue IDs must fit in a DSQ ID");
+_Static_assert(SNAKE_MAX_QUEUE_CELLS * SNAKE_MAX_CELL_LLCS <=
+		       SNAKE_MAX_NORMAL_QUEUES,
+	       "the stable cell/LLC DSQ pool must fit normal queue storage");
 
 static __always_inline dsq_id_t dsq_from_raw(u64 raw)
 {

@@ -8,7 +8,7 @@ typedef unsigned int	   u32;
 typedef unsigned long long u64;
 #endif
 
-#define SNAKE_ABI_VERSION 29
+#define SNAKE_ABI_VERSION 30
 #define SNAKE_MAX_RUNGS 16
 #define SNAKE_MAX_GENERIC_RUNGS 9
 #define SNAKE_MAX_QUEUE_RUNGS 8
@@ -18,6 +18,7 @@ typedef unsigned long long u64;
 #define SNAKE_MASK_BYTES (SNAKE_MAX_CPUS / 8)
 #define SNAKE_MAX_MASK_TABLES 4
 #define SNAKE_MAX_QUEUE_CELLS 32
+#define SNAKE_MAX_CELL_LLCS 32
 #define SNAKE_MAX_NORMAL_QUEUES SNAKE_MAX_CPUS
 #define SNAKE_QUEUE_MODE_NONE 0U
 #define SNAKE_QUEUE_MODE_GLOBAL 1U
@@ -28,6 +29,7 @@ typedef unsigned long long u64;
 #define SNAKE_QUEUE_CLASS_AFFINITY 1U
 #define SNAKE_QUEUE_CLASS_FAIRNESS 2U
 #define SNAKE_QUEUE_CELL_NONE 0xffffffffU
+#define SNAKE_QUEUE_CPU_NONE 0xffffffffU
 #define SNAKE_RUNG_F_INTERSECT_TASK_ALLOWED (1U << 0)
 #define SNAKE_RUNG_F_PICK_IDLE_CORE (1U << 1)
 #define SNAKE_RUNG_F_PICK_RANDOM (1U << 2)
@@ -273,6 +275,8 @@ enum snake_dispatch_opcode {
 	SNAKE_DISPATCH_OP_MIN_VTIME = 3,
 	SNAKE_DISPATCH_OP_PEEK       = 4,
 	SNAKE_DISPATCH_OP_CONSUME    = 5,
+	SNAKE_DISPATCH_OP_DRAIN      = 6,
+	SNAKE_DISPATCH_OP_STEAL      = 7,
 };
 
 enum snake_queue_input {
@@ -282,6 +286,8 @@ enum snake_queue_input {
 	SNAKE_QUEUE_INPUT_REMOTE,
 	SNAKE_QUEUE_INPUT_CELL,
 	SNAKE_QUEUE_INPUT_MIN_VTIME,
+	SNAKE_QUEUE_INPUT_CELL_ORPHAN,
+	SNAKE_QUEUE_INPUT_CELL_SIBLING,
 };
 
 enum snake_dispatch_fallback {
@@ -316,6 +322,7 @@ struct snake_queue_header {
 	u32 mode;
 	u32 nr_cells;
 	u32 nr_normal_queues;
+	u32 nr_normal_dsqs;
 	u32 nr_cpus;
 	u64 topology_generation;
 };

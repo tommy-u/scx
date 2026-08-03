@@ -20,6 +20,7 @@ u32				   queue_topology_prepare_stage;
 s32				   queue_topology_prepare_error;
 u32				   queue_topology_prepare_detail;
 u32				   queue_draining;
+struct snake_mask_data		   queue_transition_cpus;
 u32				   callback_timing_sample_rate;
 u64				   select_fine_timing_session_id;
 u64				   dispatch_fine_timing_session_id;
@@ -113,12 +114,62 @@ int prepare_ladder(void *ctx)
 	return ret;
 }
 
+static __always_inline s32
+queue_affinity_drain_ready_slot(s32 active, bool changed_only)
+{
+	u32 i;
+
+	bpf_for(i, 0, SNAKE_MAX_CPUS)
+	{
+		struct snake_affinity_queue_runtime *affinity_runtime;
+		s32 queued;
+
+		if (i >= nr_cpu_ids)
+			break;
+		if (!queue_cpu_slot(active, i))
+			continue;
+		if (changed_only &&
+		    !queue_mask_contains(&queue_transition_cpus, i))
+			continue;
+		queued = dsq_nr_queued(dsq_affinity(i));
+		if (queued < 0)
+			return queued;
+		if (queued > 0)
+			return -EAGAIN;
+		affinity_runtime = queue_affinity_runtime(i);
+		if (!affinity_runtime)
+			return -EINVAL;
+		if (READ_ONCE(affinity_runtime->nr_queued))
+			return -EAGAIN;
+	}
+	return 0;
+}
+
+/* Affinity DSQs cannot safely retain an old owner clock across CPU transfer. */
+SEC("syscall")
+int queue_affinity_drain_ready(void *ctx)
+{
+	struct snake_queue_header *header;
+	s32			    active;
+
+	(void)ctx;
+	if (!queue_transition_active())
+		return -EINVAL;
+	active = active_ladder_slot();
+	if (active < 0 || active >= SNAKE_LADDER_SLOTS)
+		return -EINVAL;
+	header = queue_config_slot(active);
+	if (!header || header->mode == SNAKE_QUEUE_MODE_NONE)
+		return 0;
+	return queue_affinity_drain_ready_slot(active, true);
+}
+
 /* Report when every reusable custom DSQ is empty during a topology change. */
 SEC("syscall")
 int queue_drain_ready(void *ctx)
 {
 	struct snake_queue_header *header;
-	s32			    active;
+	s32			    active, ret;
 	u32			    i;
 
 	(void)ctx;
@@ -130,19 +181,88 @@ int queue_drain_ready(void *ctx)
 	header = queue_config_slot(active);
 	if (!header || header->mode == SNAKE_QUEUE_MODE_NONE)
 		return 0;
-	bpf_for(i, 0, SNAKE_MAX_CPUS)
-	{
-		if (i >= nr_cpu_ids)
-			break;
-		if (dsq_nr_queued(dsq_affinity(i)) > 0)
-			return -EAGAIN;
-	}
+	ret = queue_affinity_drain_ready_slot(active, false);
+	if (ret)
+		return ret;
 	bpf_for(i, 0, SNAKE_MAX_NORMAL_QUEUES)
 	{
-		if (i >= header->nr_cpus)
+		struct snake_normal_queue_runtime *runtime;
+		s32 queued;
+
+		if (i >= header->nr_normal_queues)
 			break;
-		if (dsq_nr_queued(dsq_normal(i)) > 0)
+		queued = dsq_nr_queued(dsq_normal(i));
+		if (queued < 0)
+			return queued;
+		if (queued > 0)
 			return -EAGAIN;
+		runtime = queue_normal_runtime(i);
+		if (!runtime)
+			return -EINVAL;
+		if (READ_ONCE(runtime->nr_queued))
+			return -EAGAIN;
+	}
+	return 0;
+}
+
+/* Publish consumer presence before checking tracked depth, interlocking enqueue. */
+SEC("syscall")
+int queue_refresh_runtime(void *ctx)
+{
+	struct snake_queue_header *header;
+	s32 active;
+	u32 i;
+
+	(void)ctx;
+	active = active_ladder_slot();
+	if (active < 0 || active >= SNAKE_LADDER_SLOTS)
+		return -EINVAL;
+	header = queue_config_slot(active);
+	if (!header || header->mode == SNAKE_QUEUE_MODE_NONE)
+		return 0;
+	bpf_for(i, 0, SNAKE_MAX_NORMAL_QUEUES)
+	{
+		struct snake_normal_queue_runtime *runtime;
+		struct snake_normal_queue *queue;
+		volatile unsigned long mb = 0;
+		u32 cell_offset = 0;
+		bool has_consumers;
+
+		if (i >= header->nr_normal_queues)
+			break;
+		queue = queue_normal_slot(active, i);
+		runtime = queue_normal_runtime(i);
+		if (!queue || !runtime)
+			return -EINVAL;
+		has_consumers = queue->consumer_cpu != SNAKE_QUEUE_CPU_NONE;
+		if (header->mode == SNAKE_QUEUE_MODE_CELL) {
+			struct snake_queue_cell *cell =
+				queue_cell_slot(active, queue->cell_index);
+
+			if (!cell || i < cell->first_normal_queue)
+				return -EINVAL;
+			cell_offset = i - cell->first_normal_queue;
+			if (cell_offset >= cell->nr_normal_queues ||
+			    cell_offset >= SNAKE_MAX_CELL_LLCS)
+				return -EINVAL;
+		}
+		WRITE_ONCE(runtime->cell_index, queue->cell_index);
+		WRITE_ONCE(runtime->cell_offset, cell_offset);
+		WRITE_ONCE(runtime->has_consumers, has_consumers);
+		if (header->mode != SNAKE_QUEUE_MODE_CELL)
+			continue;
+		__sync_fetch_and_add(&mb, 0);
+		if (has_consumers) {
+			if (queue_normal_drain_disable(runtime))
+				return -EINVAL;
+			if (READ_ONCE(runtime->nr_queued))
+				queue_kick_idle_cell_cpu(active,
+						 queue->cell_index);
+		} else if (READ_ONCE(runtime->nr_queued)) {
+			if (queue_normal_drain_enable(runtime))
+				return -EINVAL;
+			queue_kick_idle_cell_cpu(active, queue->cell_index);
+		}
 	}
 	return 0;
 }
@@ -162,15 +282,12 @@ static __noinline s32 snake_select_cpu_impl(struct task_struct *p,
 		.enqueue_flags	     = 0,
 		.select_flags	     = 0,
 		.callback_started_at = callback_started_at,
+		.scope_started_at    = bpf_ktime_get_ns(),
 		.local_llc_route_cpu = SNAKE_QUEUE_CELL_NONE,
 		.local_llc_cell_index = SNAKE_QUEUE_CELL_NONE,
 	};
-	u64 enqueue_flags = 0;
-	u64 select_flags = 0;
 	u64 fine_stage_started_at =
 		fine_timing_select_start(callback_started_at);
-	u64 select_started_at = bpf_ktime_get_ns();
-	u32 queue_cell_index  = SNAKE_QUEUE_CELL_NONE;
 	s32 cpu, ret;
 
 	fine_timing = fine_timing_begin(SNAKE_FINE_TIMING_CALLBACK_SELECT_CPU,
@@ -191,26 +308,23 @@ static __noinline s32 snake_select_cpu_impl(struct task_struct *p,
 	cpu = expanded_mitosis ?
 		      walk_expanded_mitosis_ladder(&ladder_ctx, p, &walk_args) :
 		      walk_generic_policy_ladder(&ladder_ctx, p, &walk_args);
-	enqueue_flags	      = walk_args.enqueue_flags;
-	select_flags	      = walk_args.select_flags;
-	queue_cell_index      = walk_args.queue_cell_index;
 	fine_timing_finish_select(SNAKE_FINE_TIMING_SELECT_POLICY_LADDER,
 				  fine_stage_started_at);
 	if (cpu >= 0) {
 		if (queue_topology_enabled()) {
 			if (queue_transition_active())
 				goto direct_dispatch;
-			if (select_flags & SNAKE_SELECT_F_BORROWED) {
+			if (walk_args.select_flags & SNAKE_SELECT_F_BORROWED) {
 				fine_stage_started_at =
 					fine_timing_select_start(
 						callback_started_at);
 				ret = !queue_cell_mode_enabled() ? -EINVAL :
-				      queue_cell_index ==
+				      walk_args.queue_cell_index ==
 						      SNAKE_QUEUE_CELL_NONE ?
 					      -EINVAL :
 					      queue_fairness_direct_borrow(
 						      &ladder_ctx, p, cpu,
-						      queue_cell_index,
+						      walk_args.queue_cell_index,
 						      &fine_timing);
 				fine_timing_finish_select(
 					SNAKE_FINE_TIMING_SELECT_QUEUE_TARGET,
@@ -227,18 +341,21 @@ static __noinline s32 snake_select_cpu_impl(struct task_struct *p,
 				goto out_success;
 			}
 			if (queue_direct_dispatch_enabled(&ladder_ctx) &&
-			    !(enqueue_flags & SCX_ENQ_PREEMPT)) {
+			    !(walk_args.enqueue_flags & SCX_ENQ_PREEMPT)) {
 				if (!queue_cell_mode_enabled())
 					goto direct_dispatch;
 				fine_stage_started_at = fine_timing_select_start(
 					callback_started_at);
-				ret = select_flags & SNAKE_SELECT_F_AFFINITY ?
+				ret = walk_args.select_flags &
+						      SNAKE_SELECT_F_AFFINITY ?
 					      queue_fairness_direct_affinity(
 						      &ladder_ctx, p, cpu,
-						      queue_cell_index, &fine_timing) :
+						      walk_args.queue_cell_index,
+						      &fine_timing) :
 					      queue_fairness_direct_primary(
 						      &ladder_ctx, p, cpu,
-						      queue_cell_index, &fine_timing);
+						      walk_args.queue_cell_index,
+						      &fine_timing);
 				fine_timing_finish_select(
 					SNAKE_FINE_TIMING_SELECT_QUEUE_TARGET,
 					fine_stage_started_at);
@@ -271,7 +388,7 @@ static __noinline s32 snake_select_cpu_impl(struct task_struct *p,
 		}
 	direct_dispatch:
 		if (fairness_is_ordered() &&
-		    (enqueue_flags & SCX_ENQ_PREEMPT)) {
+		    (walk_args.enqueue_flags & SCX_ENQ_PREEMPT)) {
 			fine_stage_started_at =
 				fine_timing_select_start(callback_started_at);
 			stat_inc(
@@ -286,9 +403,9 @@ static __noinline s32 snake_select_cpu_impl(struct task_struct *p,
 		}
 		fine_stage_started_at =
 			fine_timing_select_start(callback_started_at);
-		ret = dsq_insert_local(
+		ret = dsq_insert_local_on(
 			p, cpu, fairness_dispatch_slice(&ladder_ctx, p, true),
-			enqueue_flags, &fine_timing);
+			walk_args.enqueue_flags, &fine_timing);
 		fine_timing_finish_select(
 			SNAKE_FINE_TIMING_SELECT_DIRECT_INSERT,
 			fine_stage_started_at);
@@ -333,7 +450,8 @@ static __noinline s32 snake_select_cpu_impl(struct task_struct *p,
 	}
 
 out_success:
-	finish_select(&ladder_ctx, select_started_at, callback_started_at);
+	finish_select(&ladder_ctx, walk_args.scope_started_at,
+		      callback_started_at);
 out:
 	release_timed_callback(&ladder_ctx, SNAKE_CALLBACK_SELECT_CPU,
 			       callback_started_at);
@@ -352,16 +470,14 @@ s32 BPF_STRUCT_OPS(snake_select_cpu_expanded, struct task_struct *p,
 	return snake_select_cpu_impl(p, prev_cpu, wake_flags, true);
 }
 
-static __noinline void snake_enqueue_impl(struct task_struct *p,
-				   u64 enq_flags,
-				   bool expanded_mitosis)
+static __noinline void
+snake_enqueue_impl(struct task_struct *p, u64 enq_flags)
 {
 	struct snake_ladder_ctx	     ladder_ctx = {};
 	struct snake_fine_timing_ctx fine_timing;
-	s32			     ret;
+	s32			     ret = 0;
 	u64  callback_started_at = callback_timing_start();
 	u64  stage_started_at;
-	bool queue_error = false;
 
 	fine_timing	 = fine_timing_begin(SNAKE_FINE_TIMING_CALLBACK_ENQUEUE,
 					     callback_started_at);
@@ -378,15 +494,54 @@ static __noinline void snake_enqueue_impl(struct task_struct *p,
 			   SNAKE_FINE_TIMING_ENQUEUE_ACQUIRE_LADDER,
 			   stage_started_at);
 	stat_inc(&ladder_ctx, SNAKE_STAT_ENQUEUES);
-	ret = expanded_mitosis ?
-		      scheduler_mode_enqueue_expanded(
-			      &ladder_ctx, p, enq_flags, &fine_timing,
-			      callback_started_at) :
-		      scheduler_mode_enqueue_generic(
-			      &ladder_ctx, p, enq_flags, &fine_timing,
-			      callback_started_at);
-	if (ret && queue_topology_enabled()) {
-		queue_error	 = true;
+	ret = scheduler_mode_enqueue_fairness(
+		&ladder_ctx, p, enq_flags, &fine_timing, callback_started_at);
+	release_timed_callback(&ladder_ctx, SNAKE_CALLBACK_ENQUEUE,
+			       callback_started_at);
+	if (ret)
+		scx_bpf_error("snake fairness enqueue failed for pid %d: %d",
+			      p->pid, ret);
+}
+
+static __noinline void snake_enqueue_expanded_impl(struct task_struct *p,
+					   u64 enq_flags)
+{
+	struct snake_ladder_ctx	     ladder_ctx = {};
+	struct snake_fine_timing_ctx fine_timing;
+	s32			     ret = 0;
+	s32			     gate;
+	u64 callback_started_at = callback_timing_start();
+	u64 stage_started_at;
+	bool queue_tracked = false;
+
+	fine_timing = fine_timing_begin(SNAKE_FINE_TIMING_CALLBACK_ENQUEUE,
+					callback_started_at);
+	stage_started_at = fine_timing_start(&fine_timing);
+	if (acquire_active_ladder(&ladder_ctx)) {
+		fine_timing_finish(&fine_timing,
+				   SNAKE_FINE_TIMING_ENQUEUE_ACQUIRE_LADDER,
+				   stage_started_at);
+		scx_bpf_error(
+			"snake failed to acquire active ladder in enqueue");
+		return;
+	}
+	fine_timing_finish(&fine_timing,
+			   SNAKE_FINE_TIMING_ENQUEUE_ACQUIRE_LADDER,
+			   stage_started_at);
+	stat_inc(&ladder_ctx, SNAKE_STAT_ENQUEUES);
+	gate = queue_enqueue_inflight_gate();
+	if (gate < 0) {
+		ret = gate;
+	} else {
+		queue_tracked = gate != SNAKE_QUEUE_ENQUEUE_CLOSED;
+		ret = gate == SNAKE_QUEUE_ENQUEUE_OPEN ?
+			      scheduler_mode_enqueue_expanded(
+				      &ladder_ctx, p, enq_flags, &fine_timing,
+				      callback_started_at) :
+			      queue_transition_enqueue(
+				      &ladder_ctx, p, enq_flags, &fine_timing);
+	}
+	if (ret) {
 		stage_started_at = fine_timing_start(&fine_timing);
 		scx_bpf_error("snake queue enqueue failed for pid %d", p->pid);
 		fine_timing_finish(&fine_timing,
@@ -395,20 +550,78 @@ static __noinline void snake_enqueue_impl(struct task_struct *p,
 	}
 	release_timed_callback(&ladder_ctx, SNAKE_CALLBACK_ENQUEUE,
 			       callback_started_at);
-	if (ret && !queue_error)
-		scx_bpf_error("snake fairness enqueue failed for pid %d: %d",
-			      p->pid, ret);
+	if (queue_tracked && queue_enqueue_inflight_exit())
+		scx_bpf_error("snake queue enqueue tracking underflow for pid %d",
+			      p->pid);
+}
+
+static __noinline void snake_enqueue_no_direct_impl(struct task_struct *p,
+					      u64 enq_flags)
+{
+	struct snake_ladder_ctx	     ladder_ctx = {};
+	struct snake_fine_timing_ctx fine_timing;
+	s32			     ret = 0;
+	s32			     gate;
+	u64 callback_started_at = callback_timing_start();
+	u64 stage_started_at;
+	bool queue_tracked = false;
+
+	fine_timing = fine_timing_begin(SNAKE_FINE_TIMING_CALLBACK_ENQUEUE,
+					callback_started_at);
+	stage_started_at = fine_timing_start(&fine_timing);
+	if (acquire_active_ladder(&ladder_ctx)) {
+		fine_timing_finish(&fine_timing,
+				   SNAKE_FINE_TIMING_ENQUEUE_ACQUIRE_LADDER,
+				   stage_started_at);
+		scx_bpf_error(
+			"snake failed to acquire active ladder in enqueue");
+		return;
+	}
+	fine_timing_finish(&fine_timing,
+			   SNAKE_FINE_TIMING_ENQUEUE_ACQUIRE_LADDER,
+			   stage_started_at);
+	stat_inc(&ladder_ctx, SNAKE_STAT_ENQUEUES);
+	gate = queue_enqueue_inflight_gate();
+	if (gate < 0) {
+		ret = gate;
+	} else {
+		queue_tracked = gate != SNAKE_QUEUE_ENQUEUE_CLOSED;
+		ret = gate == SNAKE_QUEUE_ENQUEUE_OPEN ?
+			      scheduler_mode_enqueue_no_direct(
+				      &ladder_ctx, p, enq_flags, &fine_timing,
+				      callback_started_at) :
+			      queue_transition_enqueue(
+				      &ladder_ctx, p, enq_flags, &fine_timing);
+	}
+	if (ret) {
+		stage_started_at = fine_timing_start(&fine_timing);
+		scx_bpf_error("snake queue enqueue failed for pid %d", p->pid);
+		fine_timing_finish(&fine_timing,
+				   SNAKE_FINE_TIMING_ENQUEUE_FINISH,
+				   stage_started_at);
+	}
+	release_timed_callback(&ladder_ctx, SNAKE_CALLBACK_ENQUEUE,
+			       callback_started_at);
+	if (queue_tracked && queue_enqueue_inflight_exit())
+		scx_bpf_error("snake queue enqueue tracking underflow for pid %d",
+			      p->pid);
 }
 
 void BPF_STRUCT_OPS(snake_enqueue, struct task_struct *p, u64 enq_flags)
 {
-	snake_enqueue_impl(p, enq_flags, false);
+	snake_enqueue_impl(p, enq_flags);
 }
 
 void BPF_STRUCT_OPS(snake_enqueue_expanded, struct task_struct *p,
 		    u64 enq_flags)
 {
-	snake_enqueue_impl(p, enq_flags, true);
+	snake_enqueue_expanded_impl(p, enq_flags);
+}
+
+void BPF_STRUCT_OPS(snake_enqueue_no_direct, struct task_struct *p,
+		    u64 enq_flags)
+{
+	snake_enqueue_no_direct_impl(p, enq_flags);
 }
 
 void BPF_STRUCT_OPS(snake_dispatch, s32 cpu, struct task_struct *prev)
@@ -576,6 +789,17 @@ void BPF_STRUCT_OPS(snake_quiescent, struct task_struct *p, u64 deq_flags)
 			   stage_started_at);
 }
 
+void BPF_STRUCT_OPS(snake_dequeue, struct task_struct *p, u64 deq_flags)
+{
+	struct snake_task_runtime *runtime = task_state_lookup(p);
+	s32 ret = queue_custom_account_dequeue(runtime);
+
+	if (ret < 0)
+		scx_bpf_error(
+			"snake custom queue dequeue failed for pid %d flags %llu: %d",
+			p->pid, deq_flags, ret);
+}
+
 void BPF_STRUCT_OPS(snake_set_weight, struct task_struct *p, u32 weight)
 {
 	struct snake_ladder_ctx ladder_ctx = {};
@@ -658,7 +882,8 @@ void BPF_STRUCT_OPS(snake_exit, struct scx_exit_info *ei)
 SCX_OPS_DEFINE(
 	snake_ops, .select_cpu = (void *)snake_select_cpu,
 	.init_task = (void *)snake_init_task, .enqueue = (void *)snake_enqueue,
-	.dispatch = (void *)snake_dispatch, .runnable = (void *)snake_runnable,
+	.dequeue = (void *)snake_dequeue, .dispatch = (void *)snake_dispatch,
+	.runnable = (void *)snake_runnable,
 	.running = (void *)snake_running, .stopping = (void *)snake_stopping,
 	.quiescent  = (void *)snake_quiescent,
 	.set_weight = (void *)snake_set_weight, .init = (void *)snake_init,

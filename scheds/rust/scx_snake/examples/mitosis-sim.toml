@@ -26,9 +26,11 @@ enqueue = [
   { action = "insert", target = "cpu" },
 ]
 dispatch = [
+  { action = "drain", source = "cell_orphan" },
   { action = "peek", source = "cell" },
   { action = "peek", source = "cpu" },
-  { action = "consume", operation = "min_vtime", fallback = ["cpu", "cell_sibling"] },
+  { action = "consume", operation = "min_vtime", fallback = ["cpu"] },
+  { action = "steal", source = "cell_sibling" },
 ]
 
 # Expose each Mitosis idle-selection stage separately so its attempts, hits,

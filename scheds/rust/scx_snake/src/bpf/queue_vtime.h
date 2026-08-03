@@ -168,6 +168,39 @@ static __noinline void queue_clear_rehome_if_cell(
 		WRITE_ONCE(annotation->needs_rehome, 1);
 }
 
+static __noinline u32 queue_fairness_resolve_runtime_cell(
+	const struct snake_ladder_ctx *ctx, struct task_struct *p,
+	struct snake_task_runtime *runtime)
+{
+	struct snake_queue_header *header = queue_config(ctx);
+	struct snake_queue_cell   *cell;
+	u32			 *encoded;
+	u32 external_id, cell_epoch, cell_index, key;
+
+	if (!ctx || !runtime || !runtime->cell_initialized || !header)
+		goto fallback;
+	external_id = READ_ONCE(runtime->cell_external_id);
+	cell_epoch = READ_ONCE(runtime->cell_epoch);
+	if (external_id >= SNAKE_MAX_CPUS)
+		goto fallback;
+	key = queue_slot_index(ctx->slot, SNAKE_MAX_CPUS, external_id);
+	encoded = bpf_map_lookup_elem(&queue_cell_lookup, &key);
+	if (!encoded || !READ_ONCE(*encoded))
+		goto fallback;
+	cell_index = READ_ONCE(*encoded) - 1;
+	if (cell_index >= READ_ONCE(header->nr_cells))
+		goto fallback;
+	cell = queue_cell(ctx, cell_index);
+	if (!cell || !READ_ONCE(cell->valid) ||
+	    READ_ONCE(cell->external_id) != external_id ||
+	    READ_ONCE(cell->slot_epoch) != cell_epoch)
+		goto fallback;
+	return cell_index;
+
+fallback:
+	return queue_task_cell_index(ctx, p);
+}
+
 static __always_inline struct snake_task_runtime *
 queue_fairness_prepare_task_for_cell(struct snake_ladder_ctx *ctx,
 				     struct task_struct *p, u32 cell_index,
@@ -298,15 +331,26 @@ queue_fairness_prepare_runnable(struct snake_ladder_ctx		   *ctx,
 				const struct snake_fine_timing_ctx *fine)
 {
 	struct snake_task_runtime *runtime;
+	struct snake_queue_header *header;
 	u64			   stage_started_at = fine_timing_start(fine);
+	u32			   cell_index;
 
 	runtime = fairness_task(ctx, p, false);
 	fine_timing_finish(fine, SNAKE_FINE_TIMING_ENQUEUE_PREPARE_ROUTE_LOOKUP,
 			   stage_started_at);
 
-	if (runtime && runtime->direct_cell_valid)
+	if (runtime && runtime->direct_cell_valid) {
+		cell_index = runtime->direct_cell_index;
+		header = queue_config(ctx);
+		if (header && runtime->topology_generation !=
+			      READ_ONCE(header->topology_generation)) {
+			cell_index = queue_fairness_resolve_runtime_cell(ctx, p,
+								  runtime);
+			runtime->direct_cell_index = cell_index;
+		}
 		return queue_fairness_prepare_runnable_for_cell(
-			ctx, p, runtime->direct_cell_index, false, fine);
+			ctx, p, cell_index, false, fine);
+	}
 	return queue_fairness_prepare_runnable_for_cell(
 		ctx, p, queue_task_cell_index(ctx, p), true, fine);
 }
@@ -391,7 +435,7 @@ queue_fairness_prepare_affinity(struct snake_ladder_ctx	  *ctx,
 	return 0;
 }
 
-static __always_inline bool queue_fairness_rehome_pending(
+static __noinline bool queue_fairness_rehome_pending(
 	const struct snake_ladder_ctx *ctx, struct task_struct *p,
 	struct snake_task_runtime *runtime)
 {
@@ -451,6 +495,7 @@ static __always_inline int queue_fairness_running(
 	const struct snake_fine_timing_ctx *fine)
 {
 	struct snake_task_runtime *runtime = fairness_task(ctx, p, false);
+	struct snake_queue_header *header = queue_config(ctx);
 	struct snake_vtime_domain *domain;
 	struct snake_cpu_queue	  *cpuq;
 	u64			   adjusted_vruntime;
@@ -462,14 +507,33 @@ static __always_inline int queue_fairness_running(
 				fairness_task_weight(p);
 	queue_timing_complete_pending(runtime);
 
-	if (runtime && runtime->direct_cell_valid) {
-		u32 direct_cell_index = runtime->direct_cell_index;
+	if (runtime && runtime->cell_initialized && header &&
+	    runtime->topology_generation !=
+		    READ_ONCE(header->topology_generation)) {
+		u32 cell_index =
+			queue_fairness_resolve_runtime_cell(ctx, p, runtime);
+		bool direct = runtime->direct_cell_valid;
 
-		runtime		      = queue_fairness_prepare_task_for_cell(
-			ctx, p, direct_cell_index, false, fine);
+		runtime = queue_fairness_prepare_task_for_cell(
+			ctx, p, cell_index, false, fine);
 		if (!runtime)
 			return -EINVAL;
-		queue_clear_rehome_if_cell(ctx, p, direct_cell_index);
+		if (direct) {
+			runtime->direct_cell_index = cell_index;
+			queue_clear_rehome_if_cell(ctx, p, cell_index);
+			runtime->direct_cell_valid = 0;
+		} else {
+			stat_inc(ctx, SNAKE_STAT_QUEUE_STALE_REHOME_RUNS);
+		}
+	} else if (runtime && runtime->direct_cell_valid) {
+		u32 cell_index = runtime->direct_cell_index;
+
+		runtime = queue_fairness_prepare_task_for_cell(
+			ctx, p, cell_index, false, fine);
+		if (!runtime)
+			return -EINVAL;
+		runtime->direct_cell_index = cell_index;
+		queue_clear_rehome_if_cell(ctx, p, cell_index);
 		runtime->direct_cell_valid = 0;
 	} else if (runtime && runtime->cell_initialized &&
 		   runtime->queue_class == SNAKE_QUEUE_CLASS_NORMAL &&
@@ -526,6 +590,7 @@ static __always_inline int queue_fairness_stopping(struct snake_ladder_ctx *ctx,
 						   u64 *runtime_ns)
 {
 	struct snake_task_runtime *runtime = fairness_task(ctx, p, false);
+	struct snake_queue_header *header = queue_config(ctx);
 	u64			   current, delta, scaled, service;
 	u32			   weight;
 
@@ -548,6 +613,15 @@ static __always_inline int queue_fairness_stopping(struct snake_ladder_ctx *ctx,
 	if (runtime->run_queue_class == SNAKE_QUEUE_CLASS_AFFINITY)
 		runtime->affinity_vruntime += scaled;
 	runtime->runtime_valid = 0;
+	stat_add(ctx,
+		 runtime->run_direct ? SNAKE_STAT_VTIME_DIRECT_RUNTIME_NS :
+				       SNAKE_STAT_VTIME_QUEUED_RUNTIME_NS,
+		 delta);
+	if (!header || runtime->topology_generation !=
+		       READ_ONCE(header->topology_generation)) {
+		*runtime_ns = delta;
+		return 0;
+	}
 	cell_stat_add(ctx, runtime->run_cell_index, SNAKE_CELL_STAT_RUNTIME_NS,
 		      delta);
 	if (runtime->run_cell_index == runtime->run_owner_cell_index) {
@@ -562,10 +636,6 @@ static __always_inline int queue_fairness_stopping(struct snake_ladder_ctx *ctx,
 			cell_stat_add(ctx, runtime->run_owner_cell_index,
 				      SNAKE_CELL_STAT_FOREIGN_AFFINITY_RUNTIME_NS, delta);
 	}
-	stat_add(ctx,
-		 runtime->run_direct ? SNAKE_STAT_VTIME_DIRECT_RUNTIME_NS :
-				       SNAKE_STAT_VTIME_QUEUED_RUNTIME_NS,
-		 delta);
 	*runtime_ns = delta;
 	return 0;
 }

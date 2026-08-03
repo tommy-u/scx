@@ -187,8 +187,8 @@ constrain task execution. See
 [`examples/mitosis-sim.toml`](examples/mitosis-sim.toml) is the Production
 managed-cell profile. It combines dynamic child-cgroup cells, cell/LLC queues,
 Mitosis-style preferred idle selection, cell-aware direct dispatch, borrowing,
-combined `min_vtime` dispatch, and EWMA demand rebalancing. Queued-work stealing
-and slice shrinking are intentionally outside this profile.
+expanded `min_vtime` dispatch, same-cell sibling-LLC stealing, orphan draining,
+and EWMA demand rebalancing. Slice shrinking remains outside this profile.
 
 Its preferred idle selection is expanded into 16 observable placement rungs.
 LLC-local, primary, borrowable, and restricted-affinity scopes each run
@@ -236,8 +236,9 @@ CPU weights into disjoint primary masks. Managed cells instead use Mitosis
 admission: exclusive constraints are honored first, contested CPUs are divided
 by target deficit, and unclaimed CPUs go only to unpinned cells and cell 0.
 Userspace adds synthetic cell 0 for `NoCell` tasks and creates
-either one normal DSQ per cell or one per populated cell/LLC pair. All LLC
-shards of a cell share one cell clock. Exactly one affinity escape DSQ is
+one active normal descriptor per cell, or per active cell/LLC pair, from a
+fixed DSQ pool created at attach. All LLC shards of a cell share one cell
+clock. Exactly one affinity escape DSQ is
 created per online CPU, and each escape queue uses the clock of the cell that
 owns its CPU. Snake never creates a cell-by-CPU DSQ matrix or per-CPU clocks.
 
@@ -249,9 +250,11 @@ resource accounting. Every policy with `[queues]`, including
 `kernel-default-sim.toml`, requires `--fairness vtime`.
 
 Queue CPU weights assign real dequeue capacity. Borrowing helps tasks at wakeup
-but cannot drain work already waiting in an undersized cell's normal DSQ; such
-a policy can still hit the sched_ext runnable-task watchdog while other cells'
-CPUs are idle. Size weights for the workload's sustained runnable demand.
+but cannot move work already waiting in an undersized cell onto CPUs owned by
+another cell. Same-cell orphan draining and sibling-LLC stealing preserve work
+conservation across that cell's own shards, but a policy can still hit the
+sched_ext runnable-task watchdog while other cells' CPUs are idle. Size weights
+for the workload's sustained runnable demand.
 
 ## How scheduling works
 
@@ -294,8 +297,9 @@ global future and eligible DSQs with an aggregate clock.
 With `[queues]`, an ordinary selection records a CPU hint and still flows
 through the configured enqueue ladder unless `direct_dispatch = true`. Cell
 direct dispatch routes primary, borrowed, and restricted-affinity hits to the
-correct local DSQ; `enqueue` retries the same ladder when sched_ext skipped
-`select_cpu`. Cell layouts otherwise choose a normal cell DSQ or a per-CPU
+correct local DSQ. The expanded Mitosis template retries the same ladder from
+`enqueue` when sched_ext skipped `select_cpu`; generic cell policies fall back
+to their configured queue insertion. Cell layouts otherwise choose a normal cell DSQ or a per-CPU
 affinity escape and dispatch them cyclically or by `min_vtime`. The
 global `llc` layout instead tries its local normal DSQ, falls back to a CPU DSQ,
 and compares CPU, local, and one remotely scanned head. A successful
@@ -423,10 +427,13 @@ dispatch sources or add the cell callback pair, but may not change the resolved
 topology or remove a target/source that may still contain queued work.
 
 Managed-cell reconciliation is the topology-changing exception. Snake routes
-new work through CPU-local DSQs while it drains the fixed custom-DSQ pool,
-prepares policy and topology together in the inactive bank, atomically switches
-banks, waits for old readers, and only then publishes the new membership
-directory. A failed candidate leaves the active bank running.
+new work through CPU-local DSQs while it prepares policy and topology together
+in the inactive bank. Structural changes drain the fixed custom-DSQ pool.
+Same-identity resizing may retain normal cell/LLC backlog for dispatch draining,
+but only when affinity DSQs on CPUs changing owner are empty; otherwise it also
+uses the full drain.
+Snake atomically switches banks, waits for old readers, and only then publishes
+the new membership directory. A failed candidate leaves the active bank running.
 
 The interactive cell demo generates three cells from the host's online CPUs,
 including one overlapping cell, and moves two bursty tasks between them. Run

@@ -23,7 +23,7 @@ use std::fs;
 use std::io::Write;
 use std::mem::{size_of, MaybeUninit};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -364,6 +364,14 @@ fn encode_ladder(
                         }
                         _ => bail!("unsupported peek source {}", source.as_str()),
                     };
+                }
+                (QueueDispatchAction::Drain, Some(QueueDispatchSource::CellOrphan), None) => {
+                    destination.opcode = bpf_intf::snake_dispatch_opcode_SNAKE_DISPATCH_OP_DRAIN;
+                    destination.input = bpf_intf::snake_queue_input_SNAKE_QUEUE_INPUT_CELL_ORPHAN;
+                }
+                (QueueDispatchAction::Steal, Some(QueueDispatchSource::CellSibling), None) => {
+                    destination.opcode = bpf_intf::snake_dispatch_opcode_SNAKE_DISPATCH_OP_STEAL;
+                    destination.input = bpf_intf::snake_queue_input_SNAKE_QUEUE_INPUT_CELL_SIBLING;
                 }
                 (QueueDispatchAction::Consume, None, Some(QueueDispatchOperation::MinVtime)) => {
                     destination.opcode = bpf_intf::snake_dispatch_opcode_SNAKE_DISPATCH_OP_CONSUME;
@@ -842,6 +850,36 @@ fn encode_queue_topology(
     topology: &queue_topology::QueueTopology,
     generation: u64,
 ) -> Result<EncodedQueueTopology> {
+    let nr_normal_dsqs = match topology.layout {
+        policy::QueueLayout::Llc => u32::try_from(topology.normal_queues.len())?,
+        policy::QueueLayout::Cell => bpf_intf::SNAKE_MAX_QUEUE_CELLS,
+        policy::QueueLayout::CellLlc => {
+            let first = topology
+                .cells
+                .first()
+                .context("cell-LLC topology has no cells")?;
+            let nr_llcs = u32::try_from(first.normal_queues.len())?;
+            if nr_llcs == 0 || nr_llcs > bpf_intf::SNAKE_MAX_CELL_LLCS {
+                bail!("cell-LLC topology has invalid LLC count {nr_llcs}");
+            }
+            if topology
+                .cells
+                .iter()
+                .any(|cell| cell.normal_queues.len() != first.normal_queues.len())
+            {
+                bail!("cell-LLC topology does not have a complete cell/LLC queue matrix");
+            }
+            bpf_intf::SNAKE_MAX_QUEUE_CELLS
+                .checked_mul(nr_llcs)
+                .context("cell-LLC DSQ capacity overflow")?
+        }
+    };
+    if nr_normal_dsqs > bpf_intf::SNAKE_MAX_NORMAL_QUEUES {
+        bail!(
+            "queue topology requires {nr_normal_dsqs} normal DSQs, maximum is {}",
+            bpf_intf::SNAKE_MAX_NORMAL_QUEUES
+        );
+    }
     let mut cell_lookup = vec![0_u32; policy::MAX_CELL_IDS as usize];
     let mut cells = (0..bpf_intf::SNAKE_MAX_QUEUE_CELLS)
         .map(|_| bpf_intf::snake_queue_cell {
@@ -919,10 +957,11 @@ fn encode_queue_topology(
             clock_index: queue
                 .cell_index
                 .map_or(bpf_intf::SNAKE_QUEUE_CELL_NONE, |_| queue.clock_index),
-            consumer_cpu: *queue
+            consumer_cpu: queue
                 .consumers
                 .first()
-                .context("normal queue has no consumer CPU")?,
+                .copied()
+                .unwrap_or(bpf_intf::SNAKE_QUEUE_CPU_NONE),
             reserved: [0; 4],
             consumers: mask_tables::serialize_entry(&queue.consumers)?,
         };
@@ -947,6 +986,7 @@ fn encode_queue_topology(
             mode,
             nr_cells: topology.cells.len().try_into()?,
             nr_normal_queues: topology.normal_queues.len().try_into()?,
+            nr_normal_dsqs,
             nr_cpus,
             topology_generation: generation,
         },
@@ -1055,6 +1095,14 @@ fn uses_expanded_mitosis_select(policy: &CompiledPolicy) -> bool {
     policy.rungs.len() > policy::MAX_GENERIC_RUNGS
 }
 
+fn uses_enqueue_direct_retry(policy: &CompiledPolicy) -> bool {
+    uses_expanded_mitosis_select(policy)
+        && policy
+            .queues
+            .as_ref()
+            .is_some_and(|queues| queues.direct_dispatch)
+}
+
 fn validate_select_cpu_variant_replacement(
     active: &CompiledPolicy,
     candidate: &CompiledPolicy,
@@ -1063,6 +1111,21 @@ fn validate_select_cpu_variant_replacement(
         bail!(
             "replacement changes the attachment-time select_cpu variant; restart Snake to apply it"
         );
+    }
+    Ok(())
+}
+
+fn validate_enqueue_variant_replacement(
+    active: &CompiledPolicy,
+    candidate: &CompiledPolicy,
+) -> Result<()> {
+    let active_variant = (uses_enqueue_direct_retry(active), active.queues.is_some());
+    let candidate_variant = (
+        uses_enqueue_direct_retry(candidate),
+        candidate.queues.is_some(),
+    );
+    if active_variant != candidate_variant {
+        bail!("replacement changes the attachment-time enqueue variant; restart Snake to apply it");
     }
     Ok(())
 }
@@ -1119,25 +1182,94 @@ fn set_active_ladder(skel: &mut BpfSkel<'_>, slot: u32) -> Result<()> {
 }
 
 fn set_queue_draining(skel: &mut BpfSkel<'_>, draining: bool) -> Result<()> {
-    skel.maps
+    let draining_ptr = &mut skel
+        .maps
         .bss_data
         .as_mut()
         .context("BPF bss map is not memory mapped")?
-        .queue_draining = u32::from(draining);
+        .queue_draining as *mut u32;
+    // The BPF enqueue gate orders two reads around its atomic inflight increment.
+    unsafe { &*(draining_ptr.cast::<AtomicU32>()) }.store(u32::from(draining), Ordering::Release);
     Ok(())
+}
+
+fn set_queue_transition_cpus(
+    skel: &mut BpfSkel<'_>,
+    active: &queue_topology::QueueTopology,
+    candidate: &queue_topology::QueueTopology,
+) -> Result<()> {
+    let changed = queue_topology::ownership_changed_cpus(active, candidate)?;
+    let mask = mask_tables::serialize_entry(&changed)?;
+    let destination = &mut skel
+        .maps
+        .bss_data
+        .as_mut()
+        .context("BPF bss map is not memory mapped")?
+        .queue_transition_cpus;
+    destination.valid = mask.valid;
+    destination.bits.copy_from_slice(&mask.bits);
+    Ok(())
+}
+
+fn queue_enqueues_inflight(skel: &BpfSkel<'_>) -> Result<bool> {
+    let raw = skel
+        .maps
+        .queue_enqueue_inflight
+        .lookup_percpu(&0_u32.to_ne_bytes(), MapFlags::ANY)
+        .context("reading per-CPU queue enqueue interlock")?
+        .context("queue enqueue interlock map has no entry")?;
+    for (cpu, bytes) in raw.iter().enumerate() {
+        let value = u32::from_ne_bytes(
+            bytes
+                .as_slice()
+                .try_into()
+                .with_context(|| format!("queue enqueue interlock CPU {cpu} has invalid width"))?,
+        );
+        if value != 0 {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn wait_for_queue_enqueues_quiescent(skel: &BpfSkel<'_>, timeout: Duration) -> Result<()> {
+    let deadline = Instant::now() + timeout;
+    while queue_enqueues_inflight(skel)? {
+        if Instant::now() >= deadline {
+            bail!("timed out waiting for custom queue enqueue callbacks to quiesce");
+        }
+        std::thread::sleep(SLOT_QUIESCENCE_POLL_INTERVAL);
+    }
+    Ok(())
+}
+
+fn affinity_queues_empty(skel: &mut BpfSkel<'_>) -> Result<bool> {
+    let output = skel
+        .progs
+        .queue_affinity_drain_ready
+        .test_run(ProgramInput::default())
+        .context("checking affinity queues before CPU ownership transfer")?;
+    match output.return_value as i32 {
+        0 => Ok(true),
+        result if result == -libc::EAGAIN => Ok(false),
+        result => bail!("checking affinity queue drain failed: {result}"),
+    }
 }
 
 fn wait_for_queue_drain(skel: &mut BpfSkel<'_>, timeout: Duration) -> Result<()> {
     let deadline = Instant::now() + timeout;
     loop {
-        let output = skel
-            .progs
-            .queue_drain_ready
-            .test_run(ProgramInput::default())
-            .context("checking queue topology drain")?;
-        let result = output.return_value as i32;
-        if result == 0 {
-            return Ok(());
+        let mut result = -libc::EAGAIN;
+        if !queue_enqueues_inflight(skel)? {
+            let output = skel
+                .progs
+                .queue_drain_ready
+                .test_run(ProgramInput::default())
+                .context("checking queue topology drain")?;
+            result = output.return_value as i32;
+            if result == 0 && !queue_enqueues_inflight(skel)? {
+                return Ok(());
+            }
         }
         if result != -libc::EAGAIN {
             bail!("checking queue topology drain failed: {result}");
@@ -1147,6 +1279,21 @@ fn wait_for_queue_drain(skel: &mut BpfSkel<'_>, timeout: Duration) -> Result<()>
         }
         std::thread::sleep(SLOT_QUIESCENCE_POLL_INTERVAL);
     }
+}
+
+fn refresh_queue_runtime(skel: &mut BpfSkel<'_>) -> Result<()> {
+    let output = skel
+        .progs
+        .queue_refresh_runtime
+        .test_run(ProgramInput::default())
+        .context("refreshing normal queue runtime state")?;
+    if output.return_value != 0 {
+        bail!(
+            "refreshing normal queue runtime state failed: {}",
+            output.return_value as i32
+        );
+    }
+    Ok(())
 }
 
 fn write_ladder_slot(
@@ -1251,6 +1398,7 @@ fn clear_slot_stats(skel: &mut BpfSkel<'_>, slot: u32) -> Result<()> {
 struct BpfPolicyBackend<'skel, 'object, 'topology> {
     skel: &'skel mut BpfSkel<'object>,
     queue_topology: Option<&'topology queue_topology::QueueTopology>,
+    previous_slot: u32,
 }
 
 impl runtime_policy::PolicyBackend for BpfPolicyBackend<'_, '_, '_> {
@@ -1280,7 +1428,18 @@ impl runtime_policy::PolicyBackend for BpfPolicyBackend<'_, '_, '_> {
     }
 
     fn publish_ladder(&mut self, slot: u32) -> Result<()> {
-        set_active_ladder(self.skel, slot)
+        set_active_ladder(self.skel, slot)?;
+        if let Err(error) = refresh_queue_runtime(self.skel) {
+            let rollback = set_active_ladder(self.skel, self.previous_slot)
+                .and_then(|_| refresh_queue_runtime(self.skel));
+            return match rollback {
+                Ok(()) => Err(error).context("refreshing published queue runtime; rolled back"),
+                Err(rollback_error) => Err(error).context(format!(
+                    "refreshing published queue runtime failed and rollback failed: {rollback_error:#}"
+                )),
+            };
+        }
+        Ok(())
     }
 }
 
@@ -1949,6 +2108,22 @@ fn topology_cell_names(policy: &CompiledPolicy) -> BTreeMap<u32, String> {
         .collect()
 }
 
+fn policy_dispatches_orphan_queues(policy: &CompiledPolicy) -> bool {
+    let Some(queues) = policy.queues.as_ref() else {
+        return false;
+    };
+    queues.layout == policy::QueueLayout::CellLlc
+        && queues.dispatch.len() == 5
+        && queues.dispatch.first().is_some_and(|rung| {
+            rung.action == QueueDispatchAction::Drain
+                && rung.source == Some(QueueDispatchSource::CellOrphan)
+        })
+        && queues.dispatch.last().is_some_and(|rung| {
+            rung.action == QueueDispatchAction::Steal
+                && rung.source == Some(QueueDispatchSource::CellSibling)
+        })
+}
+
 struct Scheduler<'object, 'policy> {
     skel: BpfSkel<'object>,
     struct_ops: Option<libbpf_rs::Link>,
@@ -2025,16 +2200,27 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
             skel.progs.snake_select_cpu.as_libbpf_object().as_ptr()
         };
         skel.struct_ops.snake_ops_mut().select_cpu = selected_select_cpu;
-        let selected_enqueue = if expanded_mitosis {
+        let enqueue_direct_retry = uses_enqueue_direct_retry(&runtime.compiled);
+        let selected_enqueue = if enqueue_direct_retry {
             skel.progs.snake_enqueue.set_autoload(false);
             skel.progs.snake_enqueue_expanded.set_autoload(true);
+            skel.progs.snake_enqueue_no_direct.set_autoload(false);
             skel.progs
                 .snake_enqueue_expanded
+                .as_libbpf_object()
+                .as_ptr()
+        } else if runtime.compiled.queues.is_some() {
+            skel.progs.snake_enqueue.set_autoload(false);
+            skel.progs.snake_enqueue_expanded.set_autoload(false);
+            skel.progs.snake_enqueue_no_direct.set_autoload(true);
+            skel.progs
+                .snake_enqueue_no_direct
                 .as_libbpf_object()
                 .as_ptr()
         } else {
             skel.progs.snake_enqueue.set_autoload(true);
             skel.progs.snake_enqueue_expanded.set_autoload(false);
+            skel.progs.snake_enqueue_no_direct.set_autoload(false);
             skel.progs.snake_enqueue.as_libbpf_object().as_ptr()
         };
         skel.struct_ops.snake_ops_mut().enqueue = selected_enqueue;
@@ -2066,6 +2252,7 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
             mask_tables,
         )?;
         set_active_ladder(&mut skel, 0)?;
+        refresh_queue_runtime(&mut skel)?;
         runtime.active_slot = 0;
         let membership = if let Some(policy) = &runtime.compiled.membership {
             let mut manager = MembershipManager::new(policy, &runtime.compiled.cell_slot_epochs)
@@ -2238,6 +2425,7 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
         let mut backend = BpfPolicyBackend {
             skel: &mut self.skel,
             queue_topology: active_queue_topology.as_ref(),
+            previous_slot,
         };
         let response = runtime_policy::replace_policy(
             self.runtime,
@@ -2261,6 +2449,7 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
                     );
                 }
                 validate_select_cpu_variant_replacement(&previous_policy, policy)?;
+                validate_enqueue_variant_replacement(&previous_policy, policy)?;
                 validate_queue_callback_replacement(&previous_policy, policy)?;
                 let tables = resolve_mask_tables(policy)?;
                 activated_tables = Some(tables.clone());
@@ -2343,6 +2532,7 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
             bail!("candidate changes attachment-time task membership; restart Snake to apply it");
         }
         validate_select_cpu_variant_replacement(&self.runtime.compiled, &policy)?;
+        validate_enqueue_variant_replacement(&self.runtime.compiled, &policy)?;
         validate_queue_callback_replacement(&self.runtime.compiled, &policy)?;
         resolve_mask_tables(&policy).context("resolving candidate policy mask tables")?;
         Ok(runtime_policy::PolicyValidationResponse::from_policy(
@@ -2547,6 +2737,7 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
         let mut backend = BpfPolicyBackend {
             skel: &mut self.skel,
             queue_topology: self.queue_topology.as_ref(),
+            previous_slot: self.runtime.active_slot,
         };
         let reset_result =
             runtime_policy::reset_stats(self.runtime, &resolved_tables, &mut backend);
@@ -3102,6 +3293,25 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
                     return Err(error);
                 }
             };
+        let active_topology = self
+            .queue_topology
+            .as_ref()
+            .context("managed reconciliation has no active queue topology")?;
+        if !queue_topology::same_host_queue_universe(active_topology, &topology) {
+            let error = anyhow!(
+                "host CPU/LLC topology changed during managed reconciliation; restart Snake"
+            );
+            let detail = format!("{error:#}");
+            transition.fail_stage("resolution", resolution_started.elapsed(), detail.clone());
+            self.inspector.record_topology_transition(transition.finish(
+                inspection::TopologyTransitionOutcome::Rejected,
+                None,
+                unix_time_ms(),
+                transition_started.elapsed(),
+                Some(detail),
+            ));
+            return Err(error);
+        }
         let tables = match resolve_mask_tables(&candidate)
             .context("resolving live managed cell mask tables")
         {
@@ -3164,6 +3374,7 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
             let mut backend = BpfPolicyBackend {
                 skel: &mut self.skel,
                 queue_topology: Some(&topology),
+                previous_slot,
             };
             runtime_policy::activate_compiled_policy(
                 self.runtime,
@@ -3190,7 +3401,6 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
             }
         };
         transition.complete_stage("publication", publication_started.elapsed());
-
         let quiescence_started = Instant::now();
         if let Err(error) =
             wait_for_slot_quiescent(&self.skel, previous_slot, SLOT_QUIESCENCE_TIMEOUT)
@@ -3327,6 +3537,26 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
         if self.queue_topology.as_ref() == Some(&topology) {
             return Ok(false);
         }
+        let active_topology = self
+            .queue_topology
+            .as_ref()
+            .context("managed demand resize has no active queue topology")?;
+        if !queue_topology::same_host_queue_universe(active_topology, &topology) {
+            let error =
+                anyhow!("host CPU/LLC topology changed during managed resizing; restart Snake");
+            let detail = format!("{error:#}");
+            transition.fail_stage("resolution", resolution_started.elapsed(), detail.clone());
+            self.inspector.record_topology_transition(transition.finish(
+                inspection::TopologyTransitionOutcome::Rejected,
+                None,
+                unix_time_ms(),
+                transition_started.elapsed(),
+                Some(detail),
+            ));
+            return Err(error);
+        }
+        let mut dispatch_managed = policy_dispatches_orphan_queues(&self.runtime.compiled)
+            && queue_topology::preserves_resize_queue_identity(active_topology, &topology);
         transition.complete_stage("resolution", resolution_started.elapsed());
         transition.cell_changes = inspection::topology_transition_changes(
             self.queue_topology.as_ref(),
@@ -3338,7 +3568,9 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
         let frozen_metrics = self.metrics()?;
 
         let drain_started = Instant::now();
-        if let Err(error) = set_queue_draining(&mut self.skel, true) {
+        if let Err(error) = set_queue_transition_cpus(&mut self.skel, active_topology, &topology)
+            .and_then(|_| set_queue_draining(&mut self.skel, true))
+        {
             let detail = format!("{error:#}");
             transition.fail_stage("drain", drain_started.elapsed(), detail.clone());
             self.inspector.record_topology_transition(transition.finish(
@@ -3350,7 +3582,17 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
             ));
             return Err(error);
         }
-        if let Err(error) = wait_for_queue_drain(&mut self.skel, SLOT_QUIESCENCE_TIMEOUT) {
+        let drain_result = (|| {
+            if dispatch_managed {
+                wait_for_queue_enqueues_quiescent(&self.skel, SLOT_QUIESCENCE_TIMEOUT)?;
+                dispatch_managed = affinity_queues_empty(&mut self.skel)?;
+            }
+            if !dispatch_managed {
+                wait_for_queue_drain(&mut self.skel, SLOT_QUIESCENCE_TIMEOUT)?;
+            }
+            Ok::<_, anyhow::Error>(())
+        })();
+        if let Err(error) = drain_result {
             let detail = format!("{error:#}");
             transition.fail_stage("drain", drain_started.elapsed(), detail.clone());
             self.inspector.record_topology_transition(transition.finish(
@@ -3361,6 +3603,7 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
                 Some(detail),
             ));
             set_queue_draining(&mut self.skel, false)?;
+            warn!("managed demand resize deferred while draining: {error:#}");
             return Ok(false);
         }
         transition.complete_stage("drain", drain_started.elapsed());
@@ -3372,6 +3615,7 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
             let mut backend = BpfPolicyBackend {
                 skel: &mut self.skel,
                 queue_topology: Some(&topology),
+                previous_slot,
             };
             runtime_policy::activate_compiled_policy(
                 self.runtime,
@@ -3398,12 +3642,20 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
             }
         };
         transition.complete_stage("publication", publication_started.elapsed());
-
         let quiescence_started = Instant::now();
-        if let Err(error) =
+        let quiescence =
             wait_for_slot_quiescent(&self.skel, previous_slot, SLOT_QUIESCENCE_TIMEOUT)
                 .context("waiting for the retired managed rebalance bank")
-        {
+                .and_then(|_| {
+                    if dispatch_managed {
+                        refresh_queue_runtime(&mut self.skel).context(
+                            "refreshing queue runtime after retired managed callbacks quiesced",
+                        )
+                    } else {
+                        Ok(())
+                    }
+                });
+        if let Err(error) = quiescence {
             let detail = format!("{error:#}");
             transition.fail_stage("quiescence", quiescence_started.elapsed(), detail.clone());
             self.inspector.record_topology_transition(transition.finish(
@@ -4013,11 +4265,13 @@ scope = "task_allowed"
         const EXPECTED_MAPS: &[&str] = &[
             ".data.uei_dump",
             "active_ladder",
+            "affinity_queue_runtime",
             "bpf_bpf.bss",
             "bpf_bpf.data",
             "bpf_bpf.kconfig",
             "bpf_bpf.rodata",
             "callback_timing",
+            "cell_queue_runtime",
             "cell_stats",
             "cell_vtime_domains",
             "compiled_ladders",
@@ -4030,11 +4284,13 @@ scope = "task_allowed"
             "mask_scratch",
             "mask_slots",
             "normal_queue_masks",
+            "normal_queue_runtime",
             "normal_queues",
             "queue_cell_lookup",
             "queue_cell_masks",
             "queue_cells",
             "queue_cpu_states",
+            "queue_enqueue_inflight",
             "queue_header",
             "queue_timing_events",
             "rung_timing_events",
@@ -4046,11 +4302,15 @@ scope = "task_allowed"
         ];
         const EXPECTED_PROGRAMS: &[&str] = &[
             "prepare_ladder",
+            "queue_affinity_drain_ready",
             "queue_drain_ready",
+            "queue_refresh_runtime",
             "scx_lib_init_probe",
+            "snake_dequeue",
             "snake_dispatch",
             "snake_enqueue",
             "snake_enqueue_expanded",
+            "snake_enqueue_no_direct",
             "snake_exit",
             "snake_init",
             "snake_init_task",
@@ -4117,6 +4377,7 @@ scope = "task_allowed"
                 ".select_cpu=(void*)snake_select_cpu,",
                 ".init_task=(void*)snake_init_task,",
                 ".enqueue=(void*)snake_enqueue,",
+                ".dequeue=(void*)snake_dequeue,",
                 ".dispatch=(void*)snake_dispatch,",
                 ".runnable=(void*)snake_runnable,",
                 ".running=(void*)snake_running,",
@@ -4149,12 +4410,14 @@ scope = "task_allowed"
             );
         }
         assert!(state.contains("queue_config(const struct snake_ladder_ctx *ctx)"));
-        assert!(state.contains("queue_slot_index(ctx->slot, SNAKE_MAX_QUEUE_CELLS"));
+        assert!(state.contains("queue_cell_mask_slot(ctx->slot, index, kind)"));
+        assert!(state.contains("queue_slot_index(slot, SNAKE_MAX_QUEUE_CELLS"));
         assert!(state.contains("queue_slot_index(ctx->slot, SNAKE_MAX_NORMAL_QUEUES"));
         assert!(state.contains("queue_cpu_slot(ctx->slot, cpu)"));
         assert!(state.contains("queue_slot_index(slot, SNAKE_MAX_CPUS"));
         assert!(bank.contains("Pin one complete policy and topology slot"));
         assert!(init.contains("prepare_queue_topology(u32 slot)"));
+        assert!(init.contains("i >= header->nr_normal_dsqs"));
         assert!(main.contains("prepare_queue_topology(slot)"));
 
         let validation = init
@@ -4170,19 +4433,158 @@ scope = "task_allowed"
 
     #[test]
     fn live_topology_transition_stops_custom_inserts_until_old_readers_drain() {
+        let source = include_str!("main.rs");
         let main = include_str!("bpf/main.bpf.c");
+        let state = include_str!("bpf/queue_state.h");
         let enqueue = include_str!("bpf/queue_enqueue.h");
         let init = include_str!("bpf/queue_init.h");
 
         assert!(main.contains("queue_draining;"));
+        assert!(!main.contains("u32\t\t\t\t   queue_enqueue_inflight;"));
+        assert!(state.contains("} queue_enqueue_inflight SEC(\".maps\")"));
+        assert!(state.contains("BPF_MAP_TYPE_PERCPU_ARRAY"));
+        assert!(state.contains("queue_enqueue_inflight_gate("));
+        let gate = state
+            .split_once("queue_enqueue_inflight_gate(")
+            .and_then(|(_, body)| body.split_once("queue_enqueue_inflight_exit("))
+            .map(|(body, _)| body)
+            .expect("queue enqueue gate should have one bounded body");
+        assert_eq!(gate.matches("queue_transition_active()").count(), 2);
+        assert_text_order(
+            gate,
+            &[
+                "queue_transition_active()",
+                "__sync_fetch_and_add(inflight, 1)",
+                "queue_transition_active()",
+            ],
+        );
+        assert!(main.contains("queue_enqueue_inflight_exit()"));
+        let close = source
+            .split_once("fn set_queue_draining(")
+            .and_then(|(_, body)| body.split_once("fn queue_enqueues_inflight("))
+            .map(|(body, _)| body)
+            .expect("queue transition close should have one bounded helper");
+        assert!(close.contains("AtomicU32"));
+        assert!(close.contains("store(u32::from(draining), Ordering::Release)"));
+        let inflight_reader = source
+            .split_once("fn queue_enqueues_inflight(")
+            .and_then(|(_, body)| body.split_once("fn wait_for_queue_drain("))
+            .map(|(body, _)| body)
+            .unwrap();
+        assert!(inflight_reader.contains(".queue_enqueue_inflight"));
+        assert!(inflight_reader.contains(".lookup_percpu"));
         assert!(main.contains("SEC(\"syscall\")\nint queue_drain_ready"));
         assert!(main.contains("if (queue_transition_active())"));
         assert!(main.contains("goto direct_dispatch;"));
         assert!(enqueue.contains("queue_transition_enqueue("));
         assert!(enqueue.contains("if (queue_transition_active())"));
         assert!(init.contains("header->nr_cpus"));
+        assert!(main.contains("if (!queue_cpu_slot(active, i))"));
+        assert!(main.contains("if (queued < 0)\n\t\t\treturn queued;"));
         assert!(main.contains("dsq_nr_queued(dsq_affinity(i))"));
         assert!(main.contains("dsq_nr_queued(dsq_normal(i))"));
+        assert!(main.contains("READ_ONCE(runtime->nr_queued)"));
+    }
+
+    #[test]
+    fn managed_resize_fences_affinity_queues_before_optimized_publication() {
+        let source = include_str!("main.rs");
+        let bpf = include_str!("bpf/main.bpf.c");
+        let resize = source
+            .split_once("fn activate_resized_managed_topology(")
+            .and_then(|(_, body)| body.split_once("fn run(&mut self, shutdown:"))
+            .map(|(body, _)| body)
+            .expect("managed resize activation should be bounded");
+        let affinity_check = bpf
+            .split_once("queue_affinity_drain_ready_slot(")
+            .and_then(|(_, body)| body.split_once("int queue_affinity_drain_ready(void *ctx)"))
+            .map(|(body, _)| body)
+            .expect("affinity drain checker should be bounded");
+        let normalized_bpf = bpf.split_whitespace().collect::<String>();
+
+        assert!(affinity_check.contains("dsq_nr_queued(dsq_affinity(i))"));
+        assert!(affinity_check.contains("affinity_queue_runtime"));
+        assert!(affinity_check.contains("READ_ONCE(affinity_runtime->nr_queued)"));
+        assert!(affinity_check.contains("queue_mask_contains(&queue_transition_cpus, i)"));
+        assert!(normalized_bpf.contains("structsnake_mask_dataqueue_transition_cpus;"));
+        assert_text_order(
+            resize,
+            &[
+                "set_queue_transition_cpus(",
+                "set_queue_draining(&mut self.skel, true)",
+                "wait_for_queue_enqueues_quiescent(",
+                "affinity_queues_empty(",
+                "if !dispatch_managed",
+                "wait_for_queue_drain(&mut self.skel",
+                "activate_compiled_policy(",
+            ],
+        );
+        assert!(resize.contains("set_queue_draining(&mut self.skel, false)"));
+    }
+
+    #[test]
+    fn queued_local_tasks_resolve_cell_identity_after_a_topology_bank_change() {
+        let vtime = include_str!("bpf/queue_vtime.h");
+        let resolver = vtime
+            .split_once("queue_fairness_resolve_runtime_cell(")
+            .and_then(|(_, body)| body.split_once("queue_fairness_prepare_task_for_cell("))
+            .map(|(body, _)| body)
+            .expect("queue fairness should resolve stored cell identity");
+
+        assert!(resolver.contains("runtime->cell_external_id"));
+        assert!(resolver.contains("runtime->cell_epoch"));
+        assert!(resolver.contains("queue_cell_lookup"));
+        assert!(resolver.contains("cell->slot_epoch"));
+        assert!(resolver.contains("queue_task_cell_index(ctx, p)"));
+
+        let runnable = vtime
+            .split_once("queue_fairness_prepare_runnable(")
+            .and_then(|(_, body)| body.split_once("queue_fairness_cancel_direct("))
+            .map(|(body, _)| body)
+            .expect("queue runnable preparation should be bounded");
+        assert!(runnable.contains("cell_index = runtime->direct_cell_index"));
+        assert!(runnable.contains("runtime->topology_generation !="));
+        assert!(runnable.contains("queue_fairness_resolve_runtime_cell("));
+
+        let running = vtime
+            .split_once("queue_fairness_running(")
+            .and_then(|(_, body)| body.split_once("queue_fairness_stopping("))
+            .map(|(body, _)| body)
+            .expect("queue running accounting should be bounded");
+        assert!(running.contains("runtime->topology_generation !="));
+        assert!(running.contains("queue_fairness_resolve_runtime_cell("));
+        assert_text_order(
+            running,
+            &[
+                "runtime->topology_generation !=",
+                "runtime->direct_cell_valid",
+                "queue_task_cell_index(ctx, p) != runtime->cell_index",
+            ],
+        );
+        let direct_fast_path = running
+            .split_once("} else if (runtime && runtime->direct_cell_valid) {")
+            .and_then(|(_, body)| {
+                body.split_once("} else if (runtime && runtime->cell_initialized")
+            })
+            .map(|(body, _)| body)
+            .expect("same-generation direct path should be bounded");
+        assert!(direct_fast_path.contains("runtime->direct_cell_index"));
+        assert!(!direct_fast_path.contains("queue_fairness_resolve_runtime_cell("));
+
+        let stopping = vtime
+            .split_once("queue_fairness_stopping(")
+            .map(|(_, body)| body)
+            .expect("queue stopping accounting should exist");
+        assert!(stopping.contains("runtime->topology_generation !="));
+        assert!(!stopping.contains("queue_fairness_resolve_runtime_cell("));
+        let stale_attribution = stopping
+            .split_once("runtime->topology_generation !=")
+            .map(|(_, body)| body)
+            .expect("stopping should guard stale per-cell attribution");
+        assert_text_order(
+            stale_attribution,
+            &["return 0", "cell_stat_add(ctx, runtime->run_cell_index"],
+        );
     }
 
     #[test]
@@ -4284,6 +4686,63 @@ scope = "task_allowed"
             .find("if applied")
             .expect("applied resizes should update event counters");
         assert!(attempt < cooldown && cooldown < applied);
+    }
+
+    #[test]
+    fn managed_resize_uses_dispatch_drain_only_when_queue_identity_supports_it() {
+        let source = include_str!("main.rs");
+        let lifecycle = source
+            .split_once("fn reconcile_managed_cells_if_due(")
+            .and_then(|(_, body)| body.split_once("fn activate_resized_managed_topology("))
+            .map(|(body, _)| body)
+            .expect("managed lifecycle activation should be present");
+        let resize = source
+            .split_once("fn activate_resized_managed_topology(")
+            .and_then(|(_, body)| body.split_once("fn run(&mut self, shutdown:"))
+            .map(|(body, _)| body)
+            .expect("managed resize activation should be present");
+
+        assert!(lifecycle.contains("set_queue_draining(&mut self.skel, true)"));
+        assert!(lifecycle.contains("wait_for_queue_drain(&mut self.skel"));
+        assert!(lifecycle.contains("same_host_queue_universe"));
+        assert!(resize.contains("let mut dispatch_managed ="));
+        assert!(resize.contains("policy_dispatches_orphan_queues"));
+        assert!(resize.contains("preserves_resize_queue_identity"));
+        assert!(resize.contains("same_host_queue_universe"));
+        assert!(resize.contains("if !dispatch_managed"));
+        assert!(resize.contains("set_queue_draining(&mut self.skel, true)"));
+        assert!(resize.contains("wait_for_queue_drain(&mut self.skel"));
+        assert!(resize.contains("BpfPolicyBackend"));
+        assert!(source.contains("refreshing published queue runtime; rolled back"));
+        let retired_quiescence = resize
+            .find("wait_for_slot_quiescent(&self.skel, previous_slot")
+            .expect("resize should wait for retired callbacks");
+        let post_quiescence_refresh = resize[retired_quiescence..]
+            .find("refresh_queue_runtime(&mut self.skel)")
+            .expect("resize should refresh runtime after retired callbacks quiesce");
+        assert!(post_quiescence_refresh > 0);
+
+        let expanded = policy::compile_policy(include_str!("../examples/mitosis-sim.toml"))
+            .expect("Mitosis policy should compile");
+        assert!(policy_dispatches_orphan_queues(&expanded));
+
+        let legacy = policy::compile_policy(
+            r#"
+[queues]
+layout = "cell_llc"
+enqueue = [{ target = "cell" }, { target = "affinity" }]
+dispatch = [
+  { action = "peek", source = "cell" },
+  { action = "peek", source = "cpu" },
+  { action = "consume", operation = "min_vtime", fallback = ["cpu", "cell_sibling"] },
+]
+[[rung]]
+operation = "pick_idle"
+scope = "task_cell"
+"#,
+        )
+        .expect("legacy Mitosis policy should compile");
+        assert!(!policy_dispatches_orphan_queues(&legacy));
     }
 
     #[test]
@@ -4405,6 +4864,7 @@ scope = "task_allowed"
             "u32 queue_timing_cell_index",
             "u32 queue_timing_depth_after_insert",
             "u32 queue_timing_queue_class",
+            "u32 queued_dsq_index",
             "u8 runtime_valid",
             "u8 initialized",
             "u8 runnable_accounted",
@@ -4416,6 +4876,8 @@ scope = "task_allowed"
             "u8 queue_class",
             "u8 run_queue_class",
             "u8 direct_cell_valid",
+            "u8 queued_dsq_class",
+            "u8 queued_dsq_accounted",
         ];
 
         let bpf_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bpf");
@@ -4440,7 +4902,7 @@ scope = "task_allowed"
         assert_eq!(declarations, EXPECTED_DECLARATIONS);
 
         type TaskRuntime = bpf_skel::types::snake_task_runtime;
-        assert_eq!(size_of::<TaskRuntime>(), 176);
+        assert_eq!(size_of::<TaskRuntime>(), 184);
         assert_eq!(std::mem::align_of::<TaskRuntime>(), 8);
         assert_eq!(offset_of!(TaskRuntime, queue_cpumask), 0);
         assert_eq!(offset_of!(TaskRuntime, started_exec_runtime), 8);
@@ -4473,17 +4935,20 @@ scope = "task_allowed"
             156
         );
         assert_eq!(offset_of!(TaskRuntime, queue_timing_queue_class), 160);
-        assert_eq!(offset_of!(TaskRuntime, runtime_valid), 164);
-        assert_eq!(offset_of!(TaskRuntime, initialized), 165);
-        assert_eq!(offset_of!(TaskRuntime, runnable_accounted), 166);
-        assert_eq!(offset_of!(TaskRuntime, has_sleep_lag), 167);
-        assert_eq!(offset_of!(TaskRuntime, run_direct), 168);
-        assert_eq!(offset_of!(TaskRuntime, cell_initialized), 169);
-        assert_eq!(offset_of!(TaskRuntime, affinity_initialized), 170);
-        assert_eq!(offset_of!(TaskRuntime, selected_cpu_valid), 171);
-        assert_eq!(offset_of!(TaskRuntime, queue_class), 172);
-        assert_eq!(offset_of!(TaskRuntime, run_queue_class), 173);
-        assert_eq!(offset_of!(TaskRuntime, direct_cell_valid), 174);
+        assert_eq!(offset_of!(TaskRuntime, queued_dsq_index), 164);
+        assert_eq!(offset_of!(TaskRuntime, runtime_valid), 168);
+        assert_eq!(offset_of!(TaskRuntime, initialized), 169);
+        assert_eq!(offset_of!(TaskRuntime, runnable_accounted), 170);
+        assert_eq!(offset_of!(TaskRuntime, has_sleep_lag), 171);
+        assert_eq!(offset_of!(TaskRuntime, run_direct), 172);
+        assert_eq!(offset_of!(TaskRuntime, cell_initialized), 173);
+        assert_eq!(offset_of!(TaskRuntime, affinity_initialized), 174);
+        assert_eq!(offset_of!(TaskRuntime, selected_cpu_valid), 175);
+        assert_eq!(offset_of!(TaskRuntime, queue_class), 176);
+        assert_eq!(offset_of!(TaskRuntime, run_queue_class), 177);
+        assert_eq!(offset_of!(TaskRuntime, direct_cell_valid), 178);
+        assert_eq!(offset_of!(TaskRuntime, queued_dsq_class), 179);
+        assert_eq!(offset_of!(TaskRuntime, queued_dsq_accounted), 180);
     }
 
     #[test]
@@ -4934,7 +5399,7 @@ scope = "task_allowed"
             );
         }
 
-        assert!(fairness.contains("static __noinline s32\nqueue_pick_random_idle_cpu("));
+        assert!(fairness.contains("static __always_inline s32\nqueue_pick_random_idle_cpu("));
         assert!(vtime.contains("static __noinline void queue_clear_rehome_if_cell("));
         assert!(vtime.contains("static __noinline void\nqueue_fairness_cancel_direct("));
         assert!(ladder.contains("validate_queue_ladders("));
@@ -5089,12 +5554,213 @@ scope = "task_allowed"
             .find("queue_mitosis_steal_sibling(")
             .expect("empty local candidates should trigger sibling stealing");
         assert!(empty < steal);
-        assert!(arbitration.contains("if (winner == &cell_candidate)"));
+        assert!(arbitration.contains("if (winner == &cell_candidate && cpu_candidate.valid)"));
         assert!(arbitration.contains("queue_fairness_move(ctx, cpu_candidate.dsq"));
 
         assert!(ladder.contains("SNAKE_ENQUEUE_OP_TRY_DIRECT"));
         assert!(ladder.contains("SNAKE_ENQUEUE_OP_INSERT_CPU"));
         assert!(ladder.contains("SNAKE_DISPATCH_FALLBACK_CELL_SIBLING"));
+    }
+
+    #[test]
+    fn expanded_mitosis_dispatch_orders_drain_arbitration_and_steal() {
+        let bpf_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bpf");
+        let dispatch = fs::read_to_string(bpf_dir.join("queue_dispatch.h")).unwrap();
+        let ladder = fs::read_to_string(bpf_dir.join("queue_ladder.h")).unwrap();
+
+        assert!(ladder.contains("ladder->nr_dispatch_rungs != 5"));
+        assert!(ladder.contains("SNAKE_DISPATCH_OP_DRAIN"));
+        assert!(ladder.contains("SNAKE_DISPATCH_OP_STEAL"));
+        assert!(ladder.contains("queue_mitosis_expanded_dispatch_ladder("));
+        assert!(ladder.contains("return enqueue_cell ? 0 : -EINVAL;"));
+
+        let expanded = dispatch
+            .split_once("queue_mitosis_expanded_dispatch(")
+            .and_then(|(_, body)| body.split_once("struct snake_remote_scan_loop_ctx"))
+            .map(|(body, _)| body)
+            .expect("expanded Mitosis dispatch should have a dedicated bounded path");
+        assert_text_order(
+            expanded,
+            &[
+                "queue_mitosis_drain_orphan(",
+                "queue_dispatch_peek_local(",
+                "queue_dispatch_peek_cpu(",
+            ],
+        );
+        let empty = expanded
+            .find("!cell_candidate.valid && !cpu_candidate.valid")
+            .expect("stealing should require two empty local candidates");
+        let steal = expanded
+            .find("queue_mitosis_steal_sibling(")
+            .expect("empty local candidates should trigger sibling stealing");
+        assert!(empty < steal);
+        assert!(expanded.contains("queue_fairness_move("));
+        assert!(expanded.contains("if (winner == &cell_candidate && cpu_candidate.valid)"));
+    }
+
+    #[test]
+    fn orphan_drain_uses_unbanked_pending_state_and_enqueue_interlock() {
+        let bpf_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bpf");
+        let state = fs::read_to_string(bpf_dir.join("queue_state.h")).unwrap();
+        let enqueue = fs::read_to_string(bpf_dir.join("queue_enqueue.h")).unwrap();
+        let dispatch = fs::read_to_string(bpf_dir.join("queue_dispatch.h")).unwrap();
+        let main = fs::read_to_string(bpf_dir.join("main.bpf.c")).unwrap();
+
+        assert!(state.contains("struct snake_normal_queue_runtime"));
+        assert!(state.contains("struct snake_cell_queue_runtime"));
+        assert!(state.contains("} normal_queue_runtime SEC(\".maps\")"));
+        assert!(state.contains("} cell_queue_runtime SEC(\".maps\")"));
+        assert!(state.contains("sizeof(struct snake_normal_queue_runtime) == 64"));
+        assert!(state.contains("sizeof(struct snake_cell_queue_runtime) == 64"));
+        assert!(state.contains("__sync_fetch_and_add(&runtime->nr_queued, 1)"));
+        assert!(state.contains("READ_ONCE(runtime->has_consumers)"));
+        assert!(enqueue.contains("queue_custom_account_enqueue("));
+        assert!(state.contains("queue_normal_account_dequeue("));
+        assert!(dispatch.contains("READ_ONCE(cell_runtime->llcs_to_drain)"));
+        let move_helper = dispatch
+            .split_once("queue_fairness_move(")
+            .and_then(|(_, body)| body.split_once("struct snake_queue_candidate"))
+            .map(|(body, _)| body)
+            .unwrap();
+        assert!(!move_helper.contains("queue_normal_account_dequeue("));
+        assert!(!move_helper.contains("scx_bpf_error("));
+        assert!(main.contains("SEC(\"syscall\")\nint queue_refresh_runtime"));
+
+        let drain = dispatch
+            .split_once("queue_mitosis_drain_orphan(")
+            .and_then(|(_, body)| body.split_once("queue_mitosis_expanded_dispatch("))
+            .map(|(body, _)| body)
+            .unwrap();
+        assert_text_order(
+            drain,
+            &[
+                "queue_cell_runtime(cpuq->owner_cell_index)",
+                "READ_ONCE(cell_runtime->llcs_to_drain)",
+                "if (!drain_mask)",
+            ],
+        );
+        assert!(drain.contains("(local_offset + offset) % cell->nr_normal_queues"));
+        assert!(drain.contains("cell->nr_normal_queues > SNAKE_MAX_CELL_LLCS"));
+        let regained_consumers = drain
+            .split_once("if (READ_ONCE(runtime->has_consumers))")
+            .and_then(|(_, body)| body.split_once("pending ="))
+            .map(|(body, _)| body)
+            .unwrap();
+        assert!(regained_consumers.contains("queue_normal_drain_disable"));
+        let regained_recheck = drain
+            .split_once("if (READ_ONCE(runtime->has_consumers))")
+            .and_then(|(_, body)| body.split_once("continue;"))
+            .map(|(body, _)| body)
+            .unwrap();
+        assert!(regained_recheck.contains("!READ_ONCE(runtime->has_consumers)"));
+        assert!(regained_recheck.contains("queue_normal_drain_enable"));
+        let stale_bank = drain
+            .split_once("READ_ONCE(runtime->cell_index) != cpuq->owner_cell_index")
+            .and_then(|(_, body)| body.split_once("READ_ONCE(runtime->has_consumers)"))
+            .map(|(body, _)| body)
+            .unwrap();
+        assert!(stale_bank.contains("continue"));
+        assert!(!stale_bank.contains("return -EINVAL"));
+
+        let steal = dispatch
+            .split_once("queue_mitosis_steal_sibling(")
+            .and_then(|(_, body)| body.split_once("queue_mitosis_ladder_dispatch("))
+            .map(|(body, _)| body)
+            .unwrap();
+        assert!(!steal.contains("READ_ONCE(runtime->draining)"));
+    }
+
+    #[test]
+    fn orphan_drain_kicks_an_idle_cpu_from_the_current_cell() {
+        let bpf_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bpf");
+        let intf = fs::read_to_string(bpf_dir.join("intf.h")).unwrap();
+        let state = fs::read_to_string(bpf_dir.join("queue_state.h")).unwrap();
+        let dispatch = fs::read_to_string(bpf_dir.join("queue_dispatch.h")).unwrap();
+        let main = fs::read_to_string(bpf_dir.join("main.bpf.c")).unwrap();
+
+        let helper = state
+            .split_once("queue_kick_idle_cell_cpu(")
+            .and_then(|(_, body)| body.split_once("\n}"))
+            .map(|(body, _)| body)
+            .expect("orphan draining should have a bounded cell idle-kick helper");
+        let helper = helper.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert_text_order(
+            &helper,
+            &[
+                "queue_cell_mask_slot(slot, cell_index, SNAKE_QUEUE_MASK_PRIMARY)",
+                "scx_bpf_pick_idle_cpu(primary, SCX_PICK_IDLE_CORE)",
+                "if (cpu < 0)",
+                "scx_bpf_pick_idle_cpu(primary, 0)",
+                "scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE)",
+            ],
+        );
+        assert!(!helper.contains("SNAKE_QUEUE_MASK_BORROWABLE"));
+
+        let normalized_state = state.split_whitespace().collect::<Vec<_>>().join(" ");
+        let normalized_main = main.split_whitespace().collect::<Vec<_>>().join(" ");
+        let normalized_dispatch = dispatch.split_whitespace().collect::<Vec<_>>().join(" ");
+        let drain = dispatch
+            .split_once("queue_mitosis_drain_orphan(")
+            .and_then(|(_, body)| body.split_once("queue_mitosis_expanded_dispatch("))
+            .map(|(body, _)| body)
+            .unwrap();
+        assert!(normalized_state.contains("queue_kick_idle_cell_cpu(ctx->slot, cell_index)"));
+        assert!(normalized_main.contains("queue_kick_idle_cell_cpu(active, queue->cell_index)"));
+        let refresh_consumers = main
+            .split_once("if (has_consumers) {")
+            .and_then(|(_, body)| body.split_once("} else if"))
+            .map(|(body, _)| body)
+            .expect("consumer refresh should have a bounded branch");
+        assert!(refresh_consumers.contains("READ_ONCE(runtime->nr_queued)"));
+        assert!(refresh_consumers.contains("queue_kick_idle_cell_cpu("));
+        assert!(normalized_dispatch
+            .contains("queue_kick_idle_cell_cpu(ctx->slot, cpuq->owner_cell_index)"));
+        assert_eq!(drain.matches("queue_kick_idle_cell_cpu(").count(), 3);
+
+        let queue_cell = intf
+            .split_once("struct snake_queue_cell {")
+            .and_then(|(_, body)| body.split_once("};"))
+            .map(|(body, _)| body)
+            .unwrap();
+        assert!(!queue_cell.contains("drain_cpu"));
+        assert!(!state.contains("READ_ONCE(runtime->drain_cpu)"));
+    }
+
+    #[test]
+    fn custom_queue_depth_follows_dequeue_custody() {
+        let bpf_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bpf");
+        let task_state = fs::read_to_string(bpf_dir.join("task_state.h")).unwrap();
+        let state = fs::read_to_string(bpf_dir.join("queue_state.h")).unwrap();
+        let enqueue = fs::read_to_string(bpf_dir.join("queue_enqueue.h")).unwrap();
+        let dispatch = fs::read_to_string(bpf_dir.join("queue_dispatch.h")).unwrap();
+        let main = fs::read_to_string(bpf_dir.join("main.bpf.c")).unwrap();
+
+        for marker in [
+            "queued_dsq_index",
+            "queued_dsq_class",
+            "queued_dsq_accounted",
+        ] {
+            assert!(
+                task_state.contains(marker),
+                "missing task custody marker {marker}"
+            );
+        }
+        assert!(state.contains("struct snake_affinity_queue_runtime"));
+        assert!(state.contains("} affinity_queue_runtime SEC(\".maps\")"));
+        assert!(state.contains("queue_custom_account_enqueue("));
+        assert!(state.contains("queue_custom_account_dequeue("));
+        assert!(enqueue.matches("queue_custom_account_enqueue(").count() >= 2);
+
+        let move_helper = dispatch
+            .split_once("queue_fairness_move(")
+            .and_then(|(_, body)| body.split_once("struct snake_queue_candidate"))
+            .map(|(body, _)| body)
+            .unwrap();
+        assert!(!move_helper.contains("queue_normal_account_dispatch("));
+        assert!(main.contains("BPF_STRUCT_OPS(snake_dequeue"));
+        assert!(main.contains("queue_custom_account_dequeue("));
+        assert!(main.contains(".dequeue = (void *)snake_dequeue"));
+        assert!(main.contains("READ_ONCE(affinity_runtime->nr_queued)"));
     }
 
     #[test]
@@ -5400,8 +6066,8 @@ scope = "task_allowed"
 
         assert!(main.contains("#include \"scheduler_mode.h\""));
         for symbol in [
-            "static __noinline int scheduler_mode_enqueue_generic(",
-            "static __noinline int scheduler_mode_enqueue_expanded(",
+            "static __noinline __maybe_unused int scheduler_mode_enqueue_generic(",
+            "static __always_inline int scheduler_mode_enqueue_expanded(",
         ] {
             assert!(normalized_mode.contains(symbol));
         }
@@ -5456,33 +6122,76 @@ scope = "task_allowed"
             );
         }
 
-        for symbol in [
-            "scheduler_mode_enqueue_generic(",
-            "scheduler_mode_enqueue_expanded(",
-        ] {
-            let mode_body = mode
-                .split_once(symbol)
-                .and_then(|(_, body)| body.split_once("\nstatic "))
-                .map(|(body, _)| body)
-                .unwrap_or_else(|| panic!("{symbol} should have one bounded body"));
-            assert!(mode_body.contains("queue_ladder_enqueue("));
-            assert!(mode_body.contains("fairness_enqueue("));
-        }
+        let generic_enqueue = mode
+            .split_once("scheduler_mode_enqueue_generic(")
+            .and_then(|(_, body)| body.split_once("\nstatic "))
+            .map(|(body, _)| body)
+            .expect("generic enqueue should have one bounded body");
+        assert!(generic_enqueue.contains("queue_ladder_enqueue("));
+        assert!(generic_enqueue.contains("fairness_enqueue("));
+        let no_direct_enqueue = mode
+            .split_once("scheduler_mode_enqueue_no_direct(")
+            .and_then(|(_, body)| body.split_once("\nstatic "))
+            .map(|(body, _)| body)
+            .expect("queue-only enqueue should have one bounded body");
+        assert!(no_direct_enqueue.contains("queue_ladder_enqueue("));
+        assert!(!no_direct_enqueue.contains("fairness_enqueue("));
+        let fairness_enqueue = mode
+            .split_once("scheduler_mode_enqueue_fairness(")
+            .and_then(|(_, body)| body.split_once("\nstatic "))
+            .map(|(body, _)| body)
+            .expect("fairness enqueue should have one bounded body");
+        assert!(!fairness_enqueue.contains("queue_ladder_enqueue("));
+        assert!(fairness_enqueue.contains("fairness_enqueue("));
+        let expanded_fallback = mode
+            .split_once("scheduler_mode_enqueue_expanded_fallback(")
+            .and_then(|(_, body)| body.split_once("\nstatic "))
+            .map(|(body, _)| body)
+            .expect("expanded enqueue fallback should have one bounded body");
+        assert!(mode.contains("static __noinline int scheduler_mode_enqueue_expanded_fallback("));
+        assert!(expanded_fallback.contains("queue_ladder_enqueue("));
+        let expanded_enqueue = mode
+            .split_once("scheduler_mode_enqueue_expanded(")
+            .and_then(|(_, body)| body.split_once("\nstatic "))
+            .map(|(body, _)| body)
+            .expect("expanded enqueue should have one bounded body");
+        assert!(expanded_enqueue.contains("if (!queue_topology_enabled())"));
+        assert!(mode.contains("static __always_inline int scheduler_mode_enqueue_expanded("));
+        assert!(expanded_enqueue.contains("scheduler_mode_enqueue_expanded_fallback("));
+        assert!(!expanded_enqueue.contains("queue_ladder_enqueue("));
+        assert!(!expanded_enqueue.contains("fairness_enqueue("));
 
         let enqueue_impl = main
-            .split_once("static __noinline void snake_enqueue_impl(")
-            .and_then(|(_, body)| body.split_once("void BPF_STRUCT_OPS(snake_enqueue"))
+            .split_once("snake_enqueue_impl(")
+            .and_then(|(_, body)| body.split_once("snake_enqueue_expanded_impl("))
             .map(|(body, _)| body)
             .expect("snake enqueue implementation should be bounded");
-        for symbol in [
-            "scheduler_mode_enqueue_generic(",
-            "scheduler_mode_enqueue_expanded(",
-        ] {
-            assert!(enqueue_impl.contains(symbol));
-        }
+        assert!(enqueue_impl.contains("scheduler_mode_enqueue_fairness("));
+        assert!(!enqueue_impl.contains("scheduler_mode_enqueue_expanded("));
+        assert!(!enqueue_impl.contains("scheduler_mode_enqueue_no_direct("));
         assert!(!enqueue_impl.contains("queue_ladder_enqueue("));
         assert!(!enqueue_impl.contains("fairness_enqueue("));
         assert_eq!(enqueue_impl.matches("release_timed_callback(").count(), 1);
+
+        let expanded_impl = main
+            .split_once("snake_enqueue_expanded_impl(")
+            .and_then(|(_, body)| {
+                body.split_once("static __noinline void snake_enqueue_no_direct_impl(")
+            })
+            .map(|(body, _)| body)
+            .expect("expanded enqueue implementation should be bounded");
+        assert!(expanded_impl.contains("scheduler_mode_enqueue_expanded("));
+        assert!(!expanded_impl.contains("scheduler_mode_enqueue_fairness("));
+        assert_eq!(expanded_impl.matches("release_timed_callback(").count(), 1);
+
+        let no_direct_impl = main
+            .split_once("static __noinline void snake_enqueue_no_direct_impl(")
+            .and_then(|(_, body)| body.split_once("void BPF_STRUCT_OPS(snake_enqueue"))
+            .map(|(body, _)| body)
+            .expect("no-direct enqueue implementation should be bounded");
+        assert!(no_direct_impl.contains("scheduler_mode_enqueue_no_direct("));
+        assert!(!no_direct_impl.contains("queue_try_direct_from_enqueue"));
+        assert_eq!(no_direct_impl.matches("release_timed_callback(").count(), 1);
 
         for symbol in ["scheduler_mode_set_weight(", "scheduler_mode_init_task("] {
             assert!(mode.contains(symbol), "mode facade is missing {symbol}");
@@ -5558,20 +6267,16 @@ scope = "task_allowed"
         assert_eq!(post_acquire.matches("return ").count(), 1);
 
         let enqueue = main
-            .split_once("static __noinline void snake_enqueue_impl(")
-            .and_then(|(_, body)| body.split_once("void BPF_STRUCT_OPS(snake_enqueue"))
+            .split_once("snake_enqueue_impl(")
+            .and_then(|(_, body)| body.split_once("snake_enqueue_expanded_impl("))
             .map(|(body, _)| body)
             .unwrap();
-        assert!(enqueue.contains("scheduler_mode_enqueue_expanded("));
         assert_text_order(
             enqueue,
             &[
-                "scheduler_mode_enqueue_generic(",
-                "if (ret && queue_topology_enabled())",
-                "snake queue enqueue failed",
-                "SNAKE_FINE_TIMING_ENQUEUE_FINISH",
+                "scheduler_mode_enqueue_fairness(",
                 "release_timed_callback(",
-                "if (ret && !queue_error)",
+                "if (ret)",
                 "snake fairness enqueue failed",
             ],
         );
@@ -5586,13 +6291,13 @@ scope = "task_allowed"
             &[
                 "queue_topology_enabled()",
                 "queue_ladder_dispatch(",
-                "snake queue dispatch failed",
+                "scheduler_mode_dispatch_error(cpu, ret, true)",
                 "SNAKE_FINE_TIMING_DISPATCH_FINISH",
                 "release_timed_callback(",
                 "return;",
                 "fairness_dispatch(",
                 "release_timed_callback(",
-                "snake fairness dispatch failed",
+                "scheduler_mode_dispatch_error(cpu, ret, false)",
             ],
         );
     }
@@ -5638,9 +6343,14 @@ scope = "task_allowed"
         ));
         let generic_walk = ladder
             .split_once("walk_generic_policy_ladder(struct snake_ladder_ctx *ctx")
-            .and_then(|(_, body)| body.split_once("walk_expanded_mitosis_ladder("))
+            .and_then(|(_, body)| body.split_once("struct snake_enqueue_ladder_loop_ctx"))
             .map(|(body, _)| body)
             .expect("generic policy walker should have one definition");
+        let enqueue_walk = ladder
+            .split_once("struct snake_enqueue_ladder_loop_ctx")
+            .and_then(|(_, body)| body.split_once("walk_expanded_mitosis_ladder("))
+            .map(|(body, _)| body)
+            .expect("enqueue policy walker should have one definition");
         let atomic_walk = ladder
             .split_once("walk_expanded_mitosis_ladder(struct snake_ladder_ctx *ctx")
             .and_then(|(_, body)| body.split_once("#endif"))
@@ -5660,6 +6370,10 @@ scope = "task_allowed"
             );
         }
         assert!(!generic_walk.contains("bpf_loop("));
+        assert!(enqueue_walk.contains("bpf_loop(SNAKE_MAX_GENERIC_RUNGS,"));
+        assert!(enqueue_walk.contains("walk_generic_enqueue_ladder_callback"));
+        assert!(enqueue_walk.contains("execute_direct_enqueue_rung("));
+        assert!(!enqueue_walk.contains("result = walk_policy_rung("));
         assert!(!atomic_walk.contains("bpf_loop("));
         for (base, kind) in [
             (0, "SNAKE_QUEUE_MASK_LOCAL_LLC"),
@@ -5670,6 +6384,9 @@ scope = "task_allowed"
         }
         assert!(normalized_atomic.contains("ctx, p, 12, walk_args)"));
         assert!(normalized_ladder.contains("expanded_mitosis_finish_stage("));
+        assert!(
+            normalized_ladder.contains("static __always_inline s32 expanded_mitosis_finish_stage(")
+        );
         assert!(!atomic_walk.contains("ctx->ladder->rungs["));
         assert!(normalized_ladder.contains(
             "static __always_inline bool queue_atomic_rung_is_valid(const struct snake_rung *rung)"
@@ -5710,9 +6427,9 @@ scope = "task_allowed"
         assert!(
             normalized_select.contains("walk_generic_policy_ladder(&ladder_ctx, p, &walk_args)")
         );
-        assert!(normalized_select.contains("enqueue_flags = walk_args.enqueue_flags;"));
-        assert!(normalized_select.contains("select_flags = walk_args.select_flags;"));
-        assert!(normalized_select.contains("queue_cell_index = walk_args.queue_cell_index;"));
+        assert!(normalized_select.contains("walk_args.enqueue_flags & SCX_ENQ_PREEMPT"));
+        assert!(normalized_select.contains("walk_args.select_flags & SNAKE_SELECT_F_BORROWED"));
+        assert!(normalized_select.contains("walk_args.queue_cell_index"));
     }
 
     #[test]
@@ -5725,13 +6442,27 @@ scope = "task_allowed"
 
         assert!(normalized_ladder.contains("u64 enqueue_flags;"));
         assert!(normalized_ladder.contains("u64 select_flags;"));
-        assert!(normalized_main.contains("enqueue_flags = walk_args.enqueue_flags;"));
-        assert!(normalized_main.contains("select_flags = walk_args.select_flags;"));
+        assert!(normalized_main.contains("walk_args.enqueue_flags"));
+        assert!(normalized_main.contains("walk_args.select_flags"));
         assert!(normalized_main.contains(
-            "ret = dsq_insert_local( p, cpu, fairness_dispatch_slice(&ladder_ctx, p, true), enqueue_flags, &fine_timing);"
+            "ret = dsq_insert_local_on( p, cpu, fairness_dispatch_slice(&ladder_ctx, p, true), walk_args.enqueue_flags, &fine_timing);"
         ));
         assert!(!normalized_main
-            .contains("fairness_dispatch_slice(&ladder_ctx, p, true), select_flags"));
+            .contains("fairness_dispatch_slice(&ladder_ctx, p, true), walk_args.select_flags"));
+    }
+
+    #[test]
+    fn direct_dispatch_targets_the_selected_cpu_explicitly() {
+        let bpf_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bpf");
+        let dsq = fs::read_to_string(bpf_dir.join("dsq.h")).unwrap();
+        let direct = dsq
+            .split_once("dsq_insert_local_on(")
+            .and_then(|(_, body)| body.split_once("dsq_insert_vtime("))
+            .map(|(body, _)| body)
+            .expect("direct dispatch should have a selected-CPU DSQ helper");
+
+        assert!(direct.contains("scx_bpf_dsq_insert(p, target.raw"));
+        assert!(!direct.contains("scx_bpf_dsq_insert(p, SCX_DSQ_LOCAL,"));
     }
 
     #[test]
@@ -5755,6 +6486,8 @@ scope = "task_allowed"
         assert_eq!(unavailable.matches("scx_bpf_error(").count(), 1);
 
         let normalized = ladder.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(normalized
+            .contains("static __always_inline void expanded_mitosis_record_unavailable_stage("));
         assert!(normalized.contains(
             "walk_expanded_mitosis_candidates( struct snake_ladder_ctx *ctx, struct task_struct *p, u32 base, const struct cpumask *candidates, struct snake_ladder_walk_args *walk_args)"
         ));
@@ -5778,15 +6511,22 @@ scope = "task_allowed"
         assert!(bpf_main.contains("BPF_STRUCT_OPS(snake_select_cpu,"));
         assert!(bpf_main.contains("BPF_STRUCT_OPS(snake_select_cpu_expanded,"));
         assert!(bpf_main.contains("BPF_STRUCT_OPS(snake_enqueue_expanded,"));
+        assert!(bpf_main.contains("BPF_STRUCT_OPS(snake_enqueue_no_direct,"));
         assert!(normalized_bpf.contains(
-            "static __noinline void snake_enqueue_impl(struct task_struct *p, u64 enq_flags, bool expanded_mitosis)"
+            "static __noinline void snake_enqueue_impl(struct task_struct *p, u64 enq_flags)"
+        ));
+        assert!(normalized_bpf.contains(
+            "static __noinline void snake_enqueue_expanded_impl(struct task_struct *p, u64 enq_flags)"
         ));
         assert!(scheduler_mode.contains("scheduler_mode_enqueue_generic("));
         assert!(scheduler_mode.contains("scheduler_mode_enqueue_expanded("));
+        assert!(scheduler_mode.contains("scheduler_mode_enqueue_no_direct("));
+        assert!(scheduler_mode.contains("scheduler_mode_enqueue_fairness("));
         assert!(userspace.contains("snake_select_cpu_expanded.set_autoload(false)"));
         assert!(userspace.contains("snake_select_cpu.set_autoload(false)"));
         assert!(userspace.contains("snake_enqueue_expanded.set_autoload(false)"));
         assert!(userspace.contains("snake_enqueue.set_autoload(false)"));
+        assert!(userspace.contains("snake_enqueue_no_direct.set_autoload(false)"));
         assert!(userspace.contains("snake_ops_mut().select_cpu = selected_select_cpu"));
         assert!(userspace.contains("snake_ops_mut().enqueue = selected_enqueue"));
         assert_text_order(
@@ -5825,6 +6565,50 @@ scope = "task_allowed"
             &userspace,
             &[
                 "rodata.expanded_mitosis_select = u32::from(uses_expanded_mitosis_select(&runtime.compiled));",
+                "scx_ops_load!(skel, snake_ops, uei)",
+            ],
+        );
+    }
+
+    #[test]
+    fn enqueue_direct_dispatch_variant_is_attachment_time_configuration() {
+        let no_direct = policy::compile_policy(policy_source()).unwrap();
+        let direct = policy::compile_policy(include_str!("../examples/mitosis-sim.toml")).unwrap();
+        let generic_cell_direct_source = include_str!("../examples/cell-llc-queues.toml")
+            .replacen("[queues]", "[queues]\ndirect_dispatch = true", 1)
+            .replace("scope = \"task_allowed\"", "scope = \"task_cell\"");
+        let generic_cell_direct = policy::compile_policy(&generic_cell_direct_source).unwrap();
+        let llc_direct = policy::compile_policy(
+            r#"
+[queues]
+layout = "llc"
+direct_dispatch = true
+
+[[rung]]
+operation = "pick_idle"
+scope = "task_allowed"
+"#,
+        )
+        .unwrap();
+
+        assert!(!uses_enqueue_direct_retry(&no_direct));
+        assert!(uses_enqueue_direct_retry(&direct));
+        assert!(!uses_enqueue_direct_retry(&generic_cell_direct));
+        assert!(!uses_enqueue_direct_retry(&llc_direct));
+        assert!(validate_enqueue_variant_replacement(&no_direct, &no_direct).is_ok());
+        assert!(validate_enqueue_variant_replacement(&direct, &direct).is_ok());
+        let error = validate_enqueue_variant_replacement(&no_direct, &direct)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("attachment-time enqueue variant"));
+        assert!(error.contains("restart Snake"));
+
+        let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let userspace = fs::read_to_string(manifest.join("src/main.rs")).unwrap();
+        assert_text_order(
+            &userspace,
+            &[
+                "let enqueue_direct_retry = uses_enqueue_direct_retry(&runtime.compiled);",
                 "scx_ops_load!(skel, snake_ops, uei)",
             ],
         );
@@ -6008,6 +6792,19 @@ scope = "task_allowed"
     }
 
     #[test]
+    fn queue_dispatch_rehome_check_has_a_stack_boundary() {
+        let queue_vtime = fs::read_to_string(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bpf/queue_vtime.h"),
+        )
+        .unwrap();
+        let normalized = queue_vtime.split_whitespace().collect::<Vec<_>>().join(" ");
+
+        assert!(normalized.contains(
+            "static __noinline bool queue_fairness_rehome_pending( const struct snake_ladder_ctx *ctx, struct task_struct *p, struct snake_task_runtime *runtime)"
+        ));
+    }
+
+    #[test]
     fn queue_dispatch_min_vtime_has_a_stack_boundary() {
         let queue_dispatch = fs::read_to_string(
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bpf/queue_dispatch.h"),
@@ -6020,6 +6817,28 @@ scope = "task_allowed"
 
         assert!(normalized.contains("static __noinline s32 queue_fairness_dispatch_min("));
         assert!(normalized.contains("const struct snake_queue_dispatch_min_args *args)"));
+    }
+
+    #[test]
+    fn dispatch_error_formatting_has_a_stack_boundary() {
+        let scheduler_mode = fs::read_to_string(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bpf/scheduler_mode.h"),
+        )
+        .unwrap();
+        let normalized = scheduler_mode
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        assert!(normalized.contains(
+            "static __noinline void scheduler_mode_dispatch_error(s32 cpu, s32 ret, bool queue)"
+        ));
+        assert_eq!(
+            scheduler_mode
+                .matches("scheduler_mode_dispatch_error(cpu, ret,")
+                .count(),
+            2
+        );
     }
 
     #[test]
@@ -6066,7 +6885,10 @@ scope = "task_allowed"
                 .and_then(|(_, body)| body.split_once('}'))
                 .map(|(body, _)| body)
                 .expect("queue loop should check bpf_loop errors");
-            assert!(loop_error.contains("return nr_loops;"));
+            assert!(
+                loop_error.contains("return nr_loops;")
+                    || loop_error.contains("result = nr_loops;")
+            );
             assert!(!loop_error.contains("scx_bpf_error"));
         }
     }
@@ -6133,27 +6955,28 @@ scope = "task_allowed"
                 "shared DSQ owner is missing {operation}"
             );
         }
-        assert!(shared.contains("fine_timing_record_dsq_operation"));
+        assert!(shared.contains("fine_timing_reserve_dsq_operation"));
         assert!(shared.contains("static __noinline bool\ndsq_move_to_local"));
     }
 
     #[test]
-    fn dsq_fine_timing_reuses_the_caller_event_stack() {
+    fn dsq_fine_timing_reserves_events_without_a_stack_copy() {
         let bpf_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bpf");
         let dsq = fs::read_to_string(bpf_dir.join("dsq.h")).unwrap();
         let timing = fs::read_to_string(bpf_dir.join("timing.h")).unwrap();
         let recorder = timing
-            .split_once("fine_timing_record_dsq_operation(")
+            .split_once("fine_timing_reserve_dsq_operation(")
             .unwrap()
             .1
             .split_once("/* Global dispatch stays untimed")
             .unwrap()
             .0;
 
-        assert!(dsq.contains("event.session_id"));
+        assert!(dsq.contains("event->session_id"));
         assert!(dsq.contains("fine->session_id"));
-        assert!(!recorder.contains("event;"));
-        assert!(recorder.contains("sample, sizeof(*sample), 0"));
+        assert!(!dsq.contains("struct snake_fine_timing_event event ="));
+        assert!(recorder.contains("bpf_ringbuf_reserve("));
+        assert!(dsq.contains("bpf_ringbuf_submit(event, 0)"));
     }
 
     #[test]
@@ -6275,7 +7098,7 @@ scope = "task_allowed"
         assert!(shared.contains("scx_bpf_test_and_clear_cpu_idle(selected)"));
         assert_eq!(shared.matches("scx_bpf_put_idle_cpumask(idle)").count(), 2);
         assert!(ladder.contains("return cpu_pick_random_idle(p->cpus_ptr, whole_core);"));
-        assert!(queue.contains("static __noinline s32\nqueue_pick_random_idle_cpu("));
+        assert!(queue.contains("static __always_inline s32\nqueue_pick_random_idle_cpu("));
         assert!(queue.contains("return cpu_pick_random_idle(candidates, whole_core);"));
         let ladder_wrapper = ladder
             .split_once("pick_random_idle(")
@@ -6642,7 +7465,7 @@ scope = "task_allowed"
         let policy = policy::compile_policy(policy_source()).expect("policy should compile");
         let encoded = encode_ladder(&policy, 42).expect("ladder should encode");
 
-        assert_eq!(bpf_intf::SNAKE_ABI_VERSION, 29);
+        assert_eq!(bpf_intf::SNAKE_ABI_VERSION, 30);
         assert_eq!(bpf_intf::SNAKE_MAX_RUNGS, 16);
         assert_eq!(bpf_intf::snake_stat_SNAKE_STAT_VTIME_CLOCK_CAS_RETRIES, 212);
         assert_eq!(
@@ -6928,7 +7751,7 @@ scope = "task_cell"
         .unwrap();
         let encoded = encode_ladder(&policy, 9).unwrap();
 
-        assert_eq!(bpf_intf::SNAKE_ABI_VERSION, 29);
+        assert_eq!(bpf_intf::SNAKE_ABI_VERSION, 30);
         assert_eq!(encoded.nr_enqueue_rungs, 3);
         assert_eq!(encoded.enqueue_rungs[0].opcode, 5);
         assert_eq!(encoded.enqueue_rungs[0].input, 4);
@@ -6948,6 +7771,51 @@ scope = "task_cell"
         assert_eq!(encoded.dispatch_rungs[2].opcode, 5);
         assert_eq!(encoded.dispatch_rungs[2].input, 5);
         assert_eq!(encoded.dispatch_rungs[2].data, 1 | (4 << 8));
+    }
+
+    #[test]
+    fn encodes_explicit_mitosis_drain_dispatch_and_steal_ladders() {
+        let policy = policy::compile_policy(
+            r#"
+[queues]
+layout = "cell_llc"
+direct_dispatch = true
+enqueue = [
+  { action = "try_direct", target = "cell" },
+  { action = "try_insert", target = "cell" },
+  { action = "insert", target = "cpu" },
+]
+dispatch = [
+  { action = "drain", source = "cell_orphan" },
+  { action = "peek", source = "cell" },
+  { action = "peek", source = "cpu" },
+  { action = "consume", operation = "min_vtime", fallback = ["cpu"] },
+  { action = "steal", source = "cell_sibling" },
+]
+
+[[cell]]
+id = 7
+cpus = "0-3"
+
+[[rung]]
+operation = "pick_idle_prefer_previous"
+scope = "task_cell"
+"#,
+        )
+        .unwrap();
+        let encoded = encode_ladder(&policy, 10).unwrap();
+
+        assert_eq!(bpf_intf::SNAKE_ABI_VERSION, 30);
+        assert_eq!(encoded.nr_dispatch_rungs, 5);
+        assert_eq!(
+            encoded
+                .dispatch_rungs
+                .iter()
+                .take(5)
+                .map(|rung| (rung.opcode, rung.input, rung.data))
+                .collect::<Vec<_>>(),
+            vec![(6, 6, 0), (4, 4, 0), (4, 1, 0), (5, 5, 1), (7, 7, 0),]
+        );
     }
 
     #[test]
@@ -7020,7 +7888,7 @@ scope = "task_allowed"
             &[
                 "queue_direct_dispatch_enabled(&ladder_ctx)",
                 "queue_fairness_select_cpu(",
-                "dsq_insert_local(",
+                "dsq_insert_local_on(",
             ],
         );
     }
@@ -7128,6 +7996,10 @@ scope = "task_cell"
         assert_eq!(encoded.header.mode, bpf_intf::SNAKE_QUEUE_MODE_CELL);
         assert_eq!(encoded.header.nr_cells, 2);
         assert_eq!(encoded.header.nr_cpus, 4);
+        assert_eq!(
+            encoded.header.nr_normal_dsqs,
+            bpf_intf::SNAKE_MAX_QUEUE_CELLS * 2
+        );
         assert_eq!(encoded.cell_lookup[0], 1);
         assert_eq!(encoded.cell_lookup[7], 2);
         assert_eq!(encoded.cells[0].external_id, 0);
@@ -7151,6 +8023,29 @@ scope = "task_cell"
         );
         assert!(bpf_intf::SNAKE_AFFINITY_DSQ_BASE > bpf_intf::SNAKE_VTIME_CPU_DSQ_BASE);
         assert!(bpf_intf::SNAKE_NORMAL_DSQ_BASE > bpf_intf::SNAKE_AFFINITY_DSQ_BASE);
+
+        let one_cell_policy = policy::compile_policy(
+            r#"
+[queues]
+layout = "cell_llc"
+[[rung]]
+operation = "pick_idle"
+scope = "task_cell"
+"#,
+        )
+        .unwrap();
+        let one_cell_topology = queue_topology::resolve_queue_topology(
+            &one_cell_policy,
+            &std::collections::BTreeSet::from([0, 1, 2, 3]),
+            &BTreeMap::from([(0, 10), (1, 10), (2, 20), (3, 20)]),
+        )
+        .unwrap()
+        .unwrap();
+        let one_cell_encoded = encode_queue_topology(&one_cell_topology, 8).unwrap();
+        assert_eq!(
+            one_cell_encoded.header.nr_normal_dsqs,
+            encoded.header.nr_normal_dsqs
+        );
     }
 
     #[test]
@@ -7178,6 +8073,10 @@ scope = "task_cell"
         let encoded = encode_queue_topology(&topology, 7).unwrap();
 
         assert_eq!(encoded.header.nr_cpus, 2);
+        assert_eq!(
+            encoded.header.nr_normal_dsqs,
+            bpf_intf::SNAKE_MAX_QUEUE_CELLS
+        );
         assert_eq!(encoded.cpu_queues[0].valid, 0);
         assert_eq!(encoded.cpu_queues[1].valid, 1);
         assert_eq!(encoded.cpu_queues[2].valid, 0);
@@ -7208,6 +8107,7 @@ scope = "task_allowed"
         assert_eq!(encoded.header.mode, bpf_intf::SNAKE_QUEUE_MODE_GLOBAL);
         assert_eq!(encoded.header.nr_cells, 0);
         assert_eq!(encoded.header.nr_normal_queues, 2);
+        assert_eq!(encoded.header.nr_normal_dsqs, 2);
         assert!(encoded.cell_lookup.iter().all(|value| *value == 0));
         assert_eq!(encoded.normal_queues[0].cell_index, u32::MAX);
         assert_eq!(encoded.normal_queues[0].clock_index, u32::MAX);
@@ -7554,8 +8454,7 @@ scope = "task_cell"
             .expect("queue stopping should have one definition");
         let foreign = stopping
             .split_once("if (runtime->run_cell_index == runtime->run_owner_cell_index)")
-            .and_then(|(_, body)| body.split_once("\n\tstat_add(ctx,"))
-            .map(|(body, _)| body)
+            .map(|(_, body)| body)
             .expect("foreign runtime accounting should be bounded");
 
         let affinity = foreign
@@ -7578,7 +8477,7 @@ scope = "task_cell"
         let cpu_pick = include_str!("bpf/cpu_pick.h");
         let ladder = include_str!("bpf/ladder.h");
 
-        assert!(intf.contains("#define SNAKE_ABI_VERSION 29"));
+        assert!(intf.contains("#define SNAKE_ABI_VERSION 30"));
         assert!(intf.contains("SNAKE_OP_PICK_IDLE_PREFER_PREVIOUS = 8"));
         assert!(intf.contains("SNAKE_INPUT_TASK_ALLOWED_RESTRICTED = 5"));
         assert!(intf.contains("SNAKE_QUEUE_MASK_LOCAL_LLC"));
@@ -7644,35 +8543,45 @@ scope = "task_cell"
             .collect::<Vec<_>>()
             .join(" ");
 
-        assert!(
-            normalized_mode.contains("static __always_inline int queue_try_direct_from_enqueue(")
-        );
+        assert!(normalized_mode
+            .contains("static __always_inline int queue_try_direct_from_enqueue_impl("));
+        assert!(normalized_mode
+            .contains("static __noinline int queue_try_direct_from_enqueue_generic("));
+        assert!(normalized_mode
+            .contains("static __noinline int queue_try_direct_from_enqueue_expanded("));
 
         let retry = scheduler_mode
-            .split_once("queue_try_direct_from_enqueue(")
-            .and_then(|(_, body)| body.split_once("scheduler_mode_enqueue_generic("))
+            .split_once("queue_try_direct_from_enqueue_impl(")
+            .and_then(|(_, body)| body.split_once("queue_try_direct_from_enqueue_generic("))
             .map(|(body, _)| body)
             .expect("cell enqueue should have one direct-placement retry helper");
         assert!(retry.contains("__COMPAT_is_enq_cpu_selected(enq_flags)"));
         assert!(retry.contains("walk_expanded_mitosis_ladder(ctx, p, &walk_args)"));
-        assert!(retry.contains("walk_generic_policy_ladder(ctx, p, &walk_args)"));
+        assert!(retry.contains("walk_generic_policy_ladder_from_enqueue("));
         assert!(retry.contains("queue_fairness_direct_primary("));
         assert!(retry.contains("queue_fairness_direct_borrow("));
         assert!(retry.contains("queue_fairness_direct_affinity("));
         assert!(retry.contains("scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE)"));
+        let restriction_check = retry
+            .find("queue_task_cell_affinity_restricted(")
+            .expect("enqueue retry should classify restricted work before selecting a CPU");
+        let expanded_walk = retry
+            .find("walk_expanded_mitosis_ladder(ctx, p, &walk_args)")
+            .expect("expanded enqueue retry should walk unrestricted placement");
+        assert!(restriction_check < expanded_walk);
 
         let generic_enqueue = scheduler_mode
             .split_once("scheduler_mode_enqueue_generic(")
             .and_then(|(_, body)| body.split_once("scheduler_mode_enqueue_expanded("))
             .map(|(body, _)| body)
             .expect("generic scheduler mode enqueue should exist");
-        assert!(generic_enqueue.contains("callback_started_at, false"));
+        assert!(generic_enqueue.contains("queue_try_direct_from_enqueue_generic("));
         let expanded_enqueue = scheduler_mode
             .split_once("scheduler_mode_enqueue_expanded(")
             .and_then(|(_, body)| body.split_once("scheduler_mode_dispatch("))
             .map(|(body, _)| body)
             .expect("expanded scheduler mode enqueue should exist");
-        assert!(expanded_enqueue.contains("callback_started_at, true"));
+        assert!(expanded_enqueue.contains("queue_try_direct_from_enqueue_expanded("));
     }
 
     #[test]

@@ -1,5 +1,6 @@
 # Split each cell's normal VTIME storage at LLC boundaries while retaining one
-# clock per cell. Only cell/LLC pairs that own CPUs receive a DSQ.
+# clock per cell. The fixed pool has one descriptor per active cell/LLC pair;
+# only pairs that own CPUs are consumers.
 # This example assumes CPUs 0-7 are online; multiple LLCs expose its sharding.
 fallback = "any_allowed"
 

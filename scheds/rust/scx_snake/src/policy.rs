@@ -151,6 +151,8 @@ pub struct QueueEnqueueRung {
 pub enum QueueDispatchAction {
     Peek = 1,
     Consume = 2,
+    Drain = 3,
+    Steal = 4,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -162,6 +164,7 @@ pub enum QueueDispatchSource {
     Local = 4,
     Remote = 5,
     CellSibling = 6,
+    CellOrphan = 7,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -332,6 +335,8 @@ impl QueueDispatchAction {
         match self {
             Self::Peek => "peek",
             Self::Consume => "consume",
+            Self::Drain => "drain",
+            Self::Steal => "steal",
         }
     }
 }
@@ -345,6 +350,7 @@ impl QueueDispatchSource {
             Self::Local => "local",
             Self::Remote => "remote",
             Self::CellSibling => "cell_sibling",
+            Self::CellOrphan => "cell_orphan",
         }
     }
 }
@@ -1296,7 +1302,7 @@ fn compile_queue_dispatch(
         .iter()
         .any(|rung| rung.action.is_some() || !rung.fallback.is_empty())
     {
-        return compile_mitosis_queue_dispatch(rungs);
+        return compile_mitosis_queue_dispatch(rungs, layout);
     }
 
     let mut compiled: Vec<QueueDispatchRung> = Vec::with_capacity(rungs.len());
@@ -1363,15 +1369,18 @@ fn compile_queue_dispatch(
 
 fn compile_mitosis_queue_dispatch(
     rungs: &[SemanticQueueDispatchRung],
+    layout: QueueLayout,
 ) -> Result<Vec<QueueDispatchRung>, PolicyError> {
     let mut compiled = Vec::with_capacity(rungs.len());
     for rung in rungs {
         let action = match rung.action.as_deref() {
             Some("peek") => QueueDispatchAction::Peek,
             Some("consume") => QueueDispatchAction::Consume,
+            Some("drain") => QueueDispatchAction::Drain,
+            Some("steal") => QueueDispatchAction::Steal,
             Some(action) => {
                 return Err(PolicyError(format!(
-                    "unknown cell dispatch action `{action}`; expected `peek` or `consume`"
+                    "unknown cell dispatch action `{action}`; expected `drain`, `peek`, `consume`, or `steal`"
                 )))
             }
             None => {
@@ -1383,9 +1392,11 @@ fn compile_mitosis_queue_dispatch(
         let source = match rung.source.as_deref() {
             Some("cell") => Some(QueueDispatchSource::Cell),
             Some("cpu") => Some(QueueDispatchSource::Cpu),
+            Some("cell_sibling") => Some(QueueDispatchSource::CellSibling),
+            Some("cell_orphan") => Some(QueueDispatchSource::CellOrphan),
             Some(source) => {
                 return Err(PolicyError(format!(
-                    "unknown explicit cell dispatch source `{source}`; expected `cell` or `cpu`"
+                    "unknown explicit cell dispatch source `{source}`; expected `cell`, `cpu`, `cell_sibling`, or `cell_orphan`"
                 )))
             }
             None => None,
@@ -1418,7 +1429,7 @@ fn compile_mitosis_queue_dispatch(
         });
     }
 
-    let expected = vec![
+    let legacy = vec![
         QueueDispatchRung {
             action: QueueDispatchAction::Peek,
             source: Some(QueueDispatchSource::Cell),
@@ -1438,9 +1449,46 @@ fn compile_mitosis_queue_dispatch(
             fallback: vec![QueueDispatchSource::Cpu, QueueDispatchSource::CellSibling],
         },
     ];
-    if compiled != expected {
+    let expanded = vec![
+        QueueDispatchRung {
+            action: QueueDispatchAction::Drain,
+            source: Some(QueueDispatchSource::CellOrphan),
+            operation: None,
+            fallback: Vec::new(),
+        },
+        QueueDispatchRung {
+            action: QueueDispatchAction::Peek,
+            source: Some(QueueDispatchSource::Cell),
+            operation: None,
+            fallback: Vec::new(),
+        },
+        QueueDispatchRung {
+            action: QueueDispatchAction::Peek,
+            source: Some(QueueDispatchSource::Cpu),
+            operation: None,
+            fallback: Vec::new(),
+        },
+        QueueDispatchRung {
+            action: QueueDispatchAction::Consume,
+            source: None,
+            operation: Some(QueueDispatchOperation::MinVtime),
+            fallback: vec![QueueDispatchSource::Cpu],
+        },
+        QueueDispatchRung {
+            action: QueueDispatchAction::Steal,
+            source: Some(QueueDispatchSource::CellSibling),
+            operation: None,
+            fallback: Vec::new(),
+        },
+    ];
+    if compiled == expanded && layout != QueueLayout::CellLlc {
         return Err(PolicyError(
-            "explicit cell dispatch ladder must peek cell, peek CPU, then consume min_vtime with CPU and cell_sibling fallbacks"
+            "orphan drain dispatch requires queue layout `cell_llc`".into(),
+        ));
+    }
+    if compiled != legacy && compiled != expanded {
+        return Err(PolicyError(
+            "explicit cell dispatch ladder must use either the legacy three-stage Mitosis sequence or drain orphan, peek cell, peek CPU, consume min_vtime with CPU fallback, then steal cell sibling"
                 .into(),
         ));
     }
@@ -2389,9 +2437,11 @@ scope = "{scope}"
                 .map(QueueDispatchRung::describe)
                 .collect::<Vec<_>>(),
             vec![
+                "drain(cell_orphan)",
                 "peek(cell)",
                 "peek(cpu)",
-                "consume(min_vtime;fallback=cpu,cell_sibling)",
+                "consume(min_vtime;fallback=cpu)",
+                "steal(cell_sibling)",
             ]
         );
     }
@@ -2445,6 +2495,116 @@ scope = "task_cell"
                 "peek(cpu)",
                 "consume(min_vtime;fallback=cpu,cell_sibling)",
             ]
+        );
+    }
+
+    #[test]
+    fn compiles_explicit_mitosis_drain_dispatch_and_steal_ladders() {
+        let policy = compile_policy(
+            r#"
+[queues]
+layout = "cell_llc"
+direct_dispatch = true
+enqueue = [
+  { action = "try_direct", target = "cell" },
+  { action = "try_insert", target = "cell" },
+  { action = "insert", target = "cpu" },
+]
+dispatch = [
+  { action = "drain", source = "cell_orphan" },
+  { action = "peek", source = "cell" },
+  { action = "peek", source = "cpu" },
+  { action = "consume", operation = "min_vtime", fallback = ["cpu"] },
+  { action = "steal", source = "cell_sibling" },
+]
+
+[[cell]]
+id = 7
+cpus = "0-3"
+
+[[rung]]
+operation = "pick_idle_prefer_previous"
+scope = "task_cell"
+"#,
+        )
+        .expect("expanded Mitosis dispatch ladder should compile");
+
+        assert_eq!(
+            policy
+                .queues
+                .unwrap()
+                .dispatch
+                .iter()
+                .map(QueueDispatchRung::describe)
+                .collect::<Vec<_>>(),
+            vec![
+                "drain(cell_orphan)",
+                "peek(cell)",
+                "peek(cpu)",
+                "consume(min_vtime;fallback=cpu)",
+                "steal(cell_sibling)",
+            ]
+        );
+    }
+
+    #[test]
+    fn expanded_mitosis_dispatch_accepts_generic_cell_enqueue() {
+        let policy = compile_policy(
+            r#"
+[queues]
+layout = "cell_llc"
+enqueue = [{ target = "cell" }, { target = "affinity" }]
+dispatch = [
+  { action = "drain", source = "cell_orphan" },
+  { action = "peek", source = "cell" },
+  { action = "peek", source = "cpu" },
+  { action = "consume", operation = "min_vtime", fallback = ["cpu"] },
+  { action = "steal", source = "cell_sibling" },
+]
+[[rung]]
+operation = "pick_idle"
+scope = "task_cell"
+"#,
+        )
+        .expect("expanded dispatch should not require direct-dispatch enqueue");
+
+        let queues = policy.queues.unwrap();
+        assert!(!queues.direct_dispatch);
+        assert_eq!(queues.enqueue.len(), 2);
+        assert_eq!(queues.dispatch.len(), 5);
+    }
+
+    #[test]
+    fn orphan_drain_dispatch_requires_cell_llc_layout() {
+        let error = error_for(
+            r#"
+[queues]
+layout = "cell"
+direct_dispatch = true
+enqueue = [
+  { action = "try_direct", target = "cell" },
+  { action = "try_insert", target = "cell" },
+  { action = "insert", target = "cpu" },
+]
+dispatch = [
+  { action = "drain", source = "cell_orphan" },
+  { action = "peek", source = "cell" },
+  { action = "peek", source = "cpu" },
+  { action = "consume", operation = "min_vtime", fallback = ["cpu"] },
+  { action = "steal", source = "cell_sibling" },
+]
+[[cell]]
+id = 7
+cpus = "0-3"
+[[rung]]
+operation = "pick_idle_prefer_previous"
+scope = "task_cell"
+"#,
+        );
+
+        assert!(
+            error.contains("requires queue layout `cell_llc`"),
+            "{error}"
         );
     }
 
