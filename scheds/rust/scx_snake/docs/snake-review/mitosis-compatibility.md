@@ -108,7 +108,7 @@ An illustrative current policy is:
 [managed_cells]
 parent = "/sys/fs/cgroup/workloads"
 exclude_children = ["system.slice"]
-max_children = 31
+max_children = 255
 reconcile_ms = 1000
 cell0_min_cpus = 1
 

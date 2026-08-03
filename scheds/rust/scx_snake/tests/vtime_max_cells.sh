@@ -234,23 +234,23 @@ done
 
 cpus=$(nproc)
 online_cpu_list=$(< /sys/devices/system/cpu/online)
-(( cpus >= 32 )) || fail "requires at least 32 CPUs"
+(( cpus >= 256 )) || fail "requires at least 256 CPUs"
 if [[ -n ${expected_cpus} && ${expected_cpus} -gt 0 && ${cpus} -ne ${expected_cpus} ]]; then
     fail "expected ${expected_cpus} CPUs, found ${cpus}"
 fi
 
-write_policy "${policy}" 31
-write_policy "${invalid_policy}" 32
+write_policy "${policy}" 255
+write_policy "${invalid_policy}" 256
 
 if "${snake_bin}" --policy "${invalid_policy}" --dump-compiled-policy \
     >"${invalid_log}" 2>&1; then
-    fail "a queue policy with 32 declared cells unexpectedly compiled"
+    fail "a queue policy with 256 declared cells unexpectedly compiled"
 fi
-grep -q 'at most 31 declared cells' "${invalid_log}" ||
-    fail "32-cell rejection returned the wrong error"
+grep -q 'at most 255 declared cells' "${invalid_log}" ||
+    fail "256-cell rejection returned the wrong error"
 
 "${snake_bin}" --policy "${policy}" --dump-compiled-policy >"${topology_dump}" ||
-    fail "failed to dump the 31-cell queue topology"
+    fail "failed to dump the 255-cell queue topology"
 
 if ! python3 - "${topology_dump}" "${layout}" "${cpus}" \
     "${online_cpu_list}" "${cell0_weight}" >"${topology_env}" <<'PY'
@@ -319,8 +319,8 @@ layout = header.group(1)
 clock_count, cell_count, normal_count, affinity_count = map(int, header.groups()[1:])
 if layout != expected_layout:
     raise SystemExit(f"layout mismatch: {layout} != {expected_layout}")
-if cell_count != 32:
-    raise SystemExit(f"expected 32 total cells, found {cell_count}")
+if cell_count != 256:
+    raise SystemExit(f"expected 256 total cells, found {cell_count}")
 if clock_count != cell_count:
     raise SystemExit(f"expected one clock per cell, found {clock_count} clocks")
 if affinity_count != cpu_count:
@@ -359,10 +359,10 @@ for line in lines:
         "normal_ids": normal_ids,
     }
 
-if set(cells) != set(range(32)):
+if set(cells) != set(range(256)):
     raise SystemExit(f"unexpected dense cell indices: {sorted(cells)}")
-if {cell["external_id"] for cell in cells.values()} != set(range(32)):
-    raise SystemExit("external cell IDs are not exactly 0 through 31")
+if {cell["external_id"] for cell in cells.values()} != set(range(256)):
+    raise SystemExit("external cell IDs are not exactly 0 through 255")
 expected_weights = {index: (cell0_weight if index == 0 else 1) for index in cells}
 observed_weights = {index: cell["weight"] for index, cell in cells.items()}
 if observed_weights != expected_weights:
@@ -432,7 +432,7 @@ if normal_count > cpu_count:
     raise SystemExit(
         f"normal queue count scales past CPU count: {normal_count} > {cpu_count}"
     )
-# A cell-by-CPU design would create 32 * cpu_count normal queues. The actual
+# A cell-by-CPU design would create 256 * cpu_count normal queues. The actual
 # topology must instead be one queue per cell or per nonempty cell/LLC pair.
 if normal_count >= cell_count * cpu_count:
     raise SystemExit("normal topology unexpectedly has a cell-by-CPU queue shape")
@@ -492,8 +492,8 @@ if advertised_queues != set(queues):
     )
 
 if layout == "cell":
-    if normal_count != 32:
-        raise SystemExit(f"cell layout expected 32 normal queues, found {normal_count}")
+    if normal_count != 256:
+        raise SystemExit(f"cell layout expected 256 normal queues, found {normal_count}")
     if any(queue["llc_id"] is not None for queue in queues.values()):
         raise SystemExit("cell layout unexpectedly emitted LLC-sharded queues")
     if any(len(cell["normal_ids"]) != 1 for cell in cells.values()):
@@ -515,7 +515,7 @@ else:
         )
 
 clock_indices = {queue["clock_index"] for queue in queues.values()}
-if clock_indices != set(range(32)):
+if clock_indices != set(range(256)):
     raise SystemExit(
         f"normal queues do not use exactly one clock namespace per cell: {clock_indices}"
     )
@@ -544,7 +544,7 @@ wait_for_enabled || fail "scheduler did not attach"
 # Each explicit cell gets a CPU-bound task. Stopping the task before assigning
 # its cell makes its first runnable transition deterministic and gives the
 # borrowable rung an idle-CPU opportunity before saturation.
-for ((cell_id = 1; cell_id <= 31; cell_id++)); do
+for ((cell_id = 1; cell_id <= 255; cell_id++)); do
     start_stopped_worker
     cell_pids+=("${worker_pid}")
     "${snake_bin}" --set-thread-cell "${worker_pid}:${cell_id}" >/dev/null ||
@@ -556,14 +556,14 @@ scheduler_enabled || fail "scheduler exited while starting cell workers"
 
 # Force an observed clock translation for every explicit cell. The workers are
 # already CPU-bound, so one second is many scheduler slices between updates.
-for ((cell_id = 1; cell_id <= 31; cell_id++)); do
-    next_cell=$(((cell_id % 31) + 1))
+for ((cell_id = 1; cell_id <= 255; cell_id++)); do
+    next_cell=$(((cell_id % 255) + 1))
     "${snake_bin}" --set-thread-cell "${cell_pids[cell_id - 1]}:${next_cell}" \
         >/dev/null || fail "failed to move worker from cell ${cell_id} to ${next_cell}"
 done
 sleep 1
 scheduler_enabled || fail "scheduler exited during cross-cell transition"
-for ((cell_id = 1; cell_id <= 31; cell_id++)); do
+for ((cell_id = 1; cell_id <= 255; cell_id++)); do
     "${snake_bin}" --set-thread-cell "${cell_pids[cell_id - 1]}:${cell_id}" \
         >/dev/null || fail "failed to return worker to cell ${cell_id}"
 done
@@ -625,7 +625,7 @@ with open(log_path, encoding="utf-8") as stream:
 if not records:
     raise SystemExit("no cell statistics records were emitted")
 
-expected_cells = set(range(32))
+expected_cells = set(range(256))
 seen_cells = set()
 runtime = {cell: 0 for cell in expected_cells}
 primary = {cell: 0 for cell in expected_cells}
@@ -714,7 +714,7 @@ if sum(affinity_enqueues.values()) == 0 or sum(affinity_dispatches.values()) == 
 if affinity_enqueues[1] == 0 or affinity_dispatches[1] == 0:
     raise SystemExit("the cell-1 restricted task did not traverse an affinity queue")
 missing_transitions = [
-    cell for cell in range(1, 32) if clock_transitions[cell] == 0
+    cell for cell in range(1, 256) if clock_transitions[cell] == 0
 ]
 if missing_transitions:
     raise SystemExit(

@@ -236,7 +236,7 @@ operation = "pick_idle"
 scope = "task_cell_borrowable"
 ```
 
-Cell queue mode reserves ID 0 for `NoCell` tasks and permits at most 31 declared
+Cell queue mode reserves ID 0 for `NoCell` tasks and permits at most 255 declared
 cells. Userspace creates synthetic cell 0, resolves overlapping declarations
 into dense cells with disjoint primary masks, and derives borrowable masks.
 These masks do not consume generic placement mask-table slots.

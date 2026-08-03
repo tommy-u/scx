@@ -150,7 +150,7 @@ cpus = "0-7"
 cpu_weight = 2
 ```
 
-For cell layouts, userspace enforces a maximum of 31 declared queue cells plus
+For cell layouts, userspace enforces a maximum of 255 declared queue cells plus
 synthetic cell 0, positive weights, and complete callback pairs. For `llc`, it
 rejects cells and validates unique peek sources, terminal consume and CPU insert
 rungs, and an exact bounded fallback source set. Queue policies are accepted at
@@ -347,9 +347,9 @@ Userspace encodes the lowered rungs into `snake_compiled_ladder` with:
 - at most sixteen fixed-size placement rungs;
 - enqueue and dispatch callback rung counts and arrays.
 
-ABI version 31 limits placement ladders to sixteen rungs and enqueue/dispatch
+ABI version 32 limits placement ladders to sixteen rungs and enqueue/dispatch
 ladders to eight rungs. It also limits generic placement to four mask tables,
-CPU and mask keys to 1024, queue cells to 32 including cell 0, and policy
+CPU and mask keys to 1024, queue cells to 256 including cell 0, and policy
 storage to two ladder slots. Userspace and BPF share definitions from
 [`src/bpf/intf.h`](../src/bpf/intf.h); an ABI-version mismatch is rejected.
 
