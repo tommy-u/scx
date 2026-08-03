@@ -12,6 +12,7 @@ import {
   appendCellRebalanceSample,
   callbackSampleRateOptions,
   cellLayoutDiagramModel,
+  cellPlacementAtlasModel,
   cellRebalanceAnalysisModel,
   cellRebalanceSample,
   cellUtilizationModel,
@@ -52,6 +53,57 @@ import {
   topologyLifecycleSignature,
   workloadAssignmentRequest,
 } from "../../src/web/inspection.js";
+
+test("cell placement atlas follows physical topology for sparse SMT CPUs", () => {
+  const model = cellPlacementAtlasModel({
+    cells: [
+      {
+        id: 1,
+        key: "1:3",
+        epoch: 3,
+        label: "latency.slice",
+        taskCount: 9,
+        primaryCpus: [0, 158],
+        borrowableCpus: [2],
+        normalQueues: [{ dsq: 101 }],
+        affinityGroups: [{ queueCount: 2 }],
+      },
+      {
+        id: 2,
+        key: "2:8",
+        epoch: 8,
+        label: "batch.slice",
+        taskCount: 4,
+        primaryCpus: [2],
+        borrowableCpus: [0, 158],
+        normalQueues: [{ dsq: 202 }],
+        affinityGroups: [],
+      },
+    ],
+    hostTopology: {
+      topology_order: [0, 158, 2, 160],
+      cpus: [
+        { cpu: 0, node: 0, package: 0, llc: 0, core: 0 },
+        { cpu: 158, node: 0, package: 0, llc: 0, core: 0 },
+        { cpu: 2, node: 1, package: 1, llc: 0, core: 0 },
+        { cpu: 160, node: 1, package: 1, llc: 0, core: 0 },
+      ],
+    },
+  });
+
+  assert.equal(model.cells[0].key, "1:3");
+  assert.equal(model.cells[0].taskCount, 9);
+  assert.equal(model.cells[0].dsqCount, 3);
+  assert.deepEqual(model.llcs.map((llc) => llc.topologyKey), ["0:0:0", "1:1:0"]);
+  assert.deepEqual(model.llcs[0].cores[0].cpus.map((cpu) => cpu.cpu), [0, 158]);
+  assert.deepEqual(model.llcs[0].cores[0].cpus.map((cpu) => cpu.ownerCellId), [1, 1]);
+  assert.deepEqual(model.llcs[1].cores[0].cpus.map((cpu) => cpu.cpu), [2, 160]);
+  assert.equal(model.llcs[1].cores[0].cpus[0].ownerCellId, 2);
+  assert.equal(model.llcs[1].cores[0].cpus[1].ownerCellId, null);
+  assert.deepEqual(model.llcs[1].cores[0].cpus[0].borrowableCellIds, [1]);
+  assert.equal(model.ownedCpuCount, 3);
+  assert.equal(model.unownedCpuCount, 1);
+});
 
 test("scheduler uptime labels tick from the latest control poll", () => {
   assert.equal(schedulerUptimeLabel(null, 10_000, 12_000), "—");
@@ -3766,6 +3818,9 @@ test("Cells page renders a live cell and DSQ layout diagram", () => {
   );
 
   assert.match(page, /<h2 id="cellsTitle">Cells &amp; DSQs<\/h2>/);
+  assert.match(page, /<h3 id="cellPlacementTitle">CPU placement<\/h3>/);
+  assert.match(page, /id="cellPlacementLegend"/);
+  assert.match(page, /id="cellPlacementAtlas"/);
   assert.match(page, /<h3>Live cell layout<\/h3>/);
   assert.match(page, /id="cellWorkspaceTabs"[^>]*role="tablist"/);
   assert.match(page, /id="cellLayoutTab"[^>]*role="tab"/);
@@ -3790,6 +3845,8 @@ test("Cells page renders a live cell and DSQ layout diagram", () => {
   assert.match(page, /id="cellChangesPanel"[^>]*role="tabpanel"/);
   assert.match(page, /id="topologyTransitionList"/);
   assert.match(script, /cellLayoutDiagramModel/);
+  assert.match(script, /cellPlacementAtlasModel/);
+  assert.match(script, /renderCellPlacementAtlas/);
   assert.match(script, /cellUtilizationModel/);
   assert.match(script, /renderCellUtilization/);
   assert.match(script, /CELL_UTILIZATION_RENDER_INTERVAL_MS = 1_000/);
@@ -3817,6 +3874,8 @@ test("Cells page renders a live cell and DSQ layout diagram", () => {
   assert.match(script, /Primary CPUs/);
   assert.match(script, /Borrowable/);
   assert.match(stylesheet, /\.cell-layout-summary/);
+  assert.match(stylesheet, /\.cell-placement-atlas/);
+  assert.match(stylesheet, /\.cell-placement-core/);
   assert.match(stylesheet, /\.cell-utilization-grid/);
   assert.match(stylesheet, /\.capacity-stack/);
   assert.match(stylesheet, /\.rebalance-trend-svg\s*\{[^}]*height:\s*58px/s);

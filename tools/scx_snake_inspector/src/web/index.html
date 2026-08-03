@@ -407,6 +407,19 @@
             <button class="secondary-button" id="clearWorkloadCell" type="button">Clear override</button>
             <p class="control-message hidden" id="workloadAssignmentNotice" role="status"></p>
           </section>
+          <section class="cell-placement-overview" aria-labelledby="cellPlacementTitle" data-feedback-key="Cells:CPU-placement">
+            <header class="cell-placement-heading">
+              <div>
+                <h3 id="cellPlacementTitle">CPU placement</h3>
+                <p>Primary ownership across the physical host topology</p>
+              </div>
+              <span id="cellPlacementSummary">Waiting for topology</span>
+            </header>
+            <div class="cell-placement-body">
+              <div class="cell-placement-legend" id="cellPlacementLegend" aria-label="Cell ownership legend"></div>
+              <div class="cell-placement-atlas" id="cellPlacementAtlas" aria-label="Cell CPU placement"></div>
+            </div>
+          </section>
           <div class="cells-layout">
             <section class="cell-browser" aria-label="Configured cells" data-feedback-key="Cells:Cell-browser">
               <header class="cell-browser-heading">

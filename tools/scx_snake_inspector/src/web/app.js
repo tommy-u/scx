@@ -26,6 +26,7 @@ import {
   callbackSampleRateOptions,
   captureKeyedRenderState,
   cellLayoutDiagramModel,
+  cellPlacementAtlasModel,
   cellQueueFacts,
   cellRebalanceAnalysisModel,
   cellRebalanceSample,
@@ -159,6 +160,9 @@ const elements = {
   cellsView: document.querySelector("#cellsView"),
   cellWorkspaceTabs: document.querySelector("#cellWorkspaceTabs"),
   cellLayoutPanel: document.querySelector("#cellLayoutPanel"),
+  cellPlacementSummary: document.querySelector("#cellPlacementSummary"),
+  cellPlacementLegend: document.querySelector("#cellPlacementLegend"),
+  cellPlacementAtlas: document.querySelector("#cellPlacementAtlas"),
   cellUtilizationPanel: document.querySelector("#cellUtilizationPanel"),
   cellUtilizationNotice: document.querySelector("#cellUtilizationNotice"),
   cellUtilizationSummary: document.querySelector("#cellUtilizationSummary"),
@@ -760,6 +764,14 @@ function bindControls() {
   });
   window.addEventListener("hashchange", () => renderRoute({ focusHeading: true }));
   elements.cellList.addEventListener("click", (event) => {
+    const control = event.target.closest("[data-cell-select]");
+    if (!control) {
+      return;
+    }
+    state.selectedCellId = Number(control.dataset.cellId);
+    renderCells();
+  });
+  elements.cellPlacementLegend.addEventListener("click", (event) => {
     const control = event.target.closest("[data-cell-select]");
     if (!control) {
       return;
@@ -4781,6 +4793,9 @@ function renderCells() {
   if (!state.inspection || !state.topology) {
     elements.cellList.replaceChildren();
     elements.cellDetail.replaceChildren();
+    elements.cellPlacementLegend.replaceChildren();
+    elements.cellPlacementAtlas.replaceChildren();
+    elements.cellPlacementSummary.textContent = "Waiting for topology";
     return;
   }
   const topology = queueTopologyModel(
@@ -4805,11 +4820,18 @@ function renderCells() {
   if (diagram.cells.length === 0 && !hasGlobalQueues) {
     elements.cellList.innerHTML = '<p class="empty-state">The active policy defines no cells or resolved queues.</p>';
     elements.cellDetail.replaceChildren();
+    elements.cellPlacementLegend.replaceChildren();
+    elements.cellPlacementAtlas.innerHTML = '<p class="empty-state">No cell CPU ownership is resolved.</p>';
+    elements.cellPlacementSummary.textContent = "No resolved cells";
     return;
   }
   if (!diagram.cells.some((cell) => cell.id === state.selectedCellId)) {
     state.selectedCellId = diagram.cells[0]?.id ?? null;
   }
+  renderCellPlacementAtlas(cellPlacementAtlasModel({
+    cells: diagram.cells,
+    hostTopology: state.topology,
+  }));
   replaceKeyedHtml(
     elements.cellList,
     `${renderCellLayoutSummary(diagram.summary)}
@@ -5016,6 +5038,77 @@ function renderCellLayoutSummary(summary) {
       <div><dt>Layout</dt><dd>${escapeHtml(layout)}</dd></div>
       <div class="cell-capture-state"><dt>Queue samples</dt><dd>${escapeHtml(summary.captureState)}</dd></div>
     </dl>`;
+}
+
+function cellPlacementSeriesClass(colorIndex) {
+  return `series-${Math.max(0, Number(colorIndex) || 0) % 6}`;
+}
+
+function renderCellPlacementLegendCell(cell) {
+  const selected = cell.id === state.selectedCellId;
+  const identity = `Cell ${formatCount(cell.id)}${cell.epoch > 0 ? ` · epoch ${formatCount(cell.epoch)}` : ""}`;
+  return `
+    <button class="cell-placement-legend-row ${cellPlacementSeriesClass(cell.colorIndex)}${selected ? " selected" : ""}"
+      type="button" data-cell-select data-cell-id="${cell.id}" aria-pressed="${selected}"
+      data-render-key="placement-cell:${escapeHtml(cell.key)}">
+      <i aria-hidden="true"></i>
+      <span><strong>${escapeHtml(cell.label)}</strong><small>${escapeHtml(identity)}</small></span>
+      <span><strong>${formatCount(cell.primaryCpuCount)} CPUs</strong><small>${formatCount(cell.taskCount)} tasks · ${formatCount(cell.dsqCount)} DSQs</small></span>
+    </button>`;
+}
+
+function renderCellPlacementCpu(cpu, selectedCellId) {
+  const owned = cpu.ownerCellId === selectedCellId;
+  const borrowable = cpu.borrowableCellIds.includes(selectedCellId);
+  const related = selectedCellId == null || owned || borrowable;
+  const owner = cpu.ownerCellId == null ? "Unowned" : `Cell ${formatCount(cpu.ownerCellId)}`;
+  const access = borrowable && !owned ? " · borrowable by selected cell" : "";
+  const conflict = cpu.conflicting ? " · conflicting primary owners" : "";
+  return `
+    <span class="cell-placement-cpu ${cpu.ownerColorIndex == null ? "unowned" : cellPlacementSeriesClass(cpu.ownerColorIndex)}${owned ? " selected" : ""}${borrowable && !owned ? " borrowable" : ""}${related ? "" : " dimmed"}${cpu.conflicting ? " conflicting" : ""}"
+      role="img" aria-label="CPU ${formatCount(cpu.cpu)} · ${escapeHtml(owner + access + conflict)}"
+      title="CPU ${formatCount(cpu.cpu)} · ${escapeHtml(owner + access + conflict)}">
+      ${formatCount(cpu.cpu)}
+    </span>`;
+}
+
+function renderCellPlacementCore(core, selectedCellId) {
+  const coreLabel = core.core == null ? "Core ?" : `Core ${formatCount(core.core)}`;
+  return `
+    <div class="cell-placement-core" data-render-key="placement-core:${escapeHtml(core.coreTopologyKey)}">
+      <small>${escapeHtml(coreLabel)}</small>
+      <div>${core.cpus.map((cpu) => renderCellPlacementCpu(cpu, selectedCellId)).join("")}</div>
+    </div>`;
+}
+
+function renderCellPlacementLlc(llc, selectedCellId) {
+  return `
+    <section class="cell-placement-llc" data-render-key="placement-llc:${escapeHtml(llc.topologyKey)}">
+      <header><strong>${escapeHtml(utilizationLlcLabel(llc))}</strong><span>${formatCount(llc.cores.length)} cores</span></header>
+      <div class="cell-placement-cores">${llc.cores.map((core) => renderCellPlacementCore(core, selectedCellId)).join("")}</div>
+    </section>`;
+}
+
+function renderCellPlacementAtlas(model) {
+  const unowned = model.unownedCpuCount > 0
+    ? ` · ${formatCount(model.unownedCpuCount)} unowned`
+    : " · all owned";
+  const conflicts = model.conflictingCpuIds.length > 0
+    ? ` · ${formatCount(model.conflictingCpuIds.length)} conflicts`
+    : "";
+  elements.cellPlacementSummary.textContent = `${formatCount(model.cells.length)} cells · ${formatCount(model.cpuCount)} CPUs${unowned}${conflicts}`;
+  replaceKeyedHtml(
+    elements.cellPlacementLegend,
+    model.cells.length > 0
+      ? model.cells.map(renderCellPlacementLegendCell).join("")
+      : '<p class="empty-state">No cells are defined.</p>',
+  );
+  replaceKeyedHtml(
+    elements.cellPlacementAtlas,
+    model.llcs.length > 0
+      ? `<div class="cell-placement-llcs">${model.llcs.map((llc) => renderCellPlacementLlc(llc, state.selectedCellId)).join("")}</div>`
+      : '<p class="empty-state">Host CPU topology is unavailable.</p>',
+  );
 }
 
 function utilizationLlcLabel(llc) {

@@ -3569,6 +3569,119 @@ export function cellLayoutDiagramModel({
   };
 }
 
+export function cellPlacementAtlasModel({ cells = [], hostTopology = null } = {}) {
+  const cpuInfo = new Map(
+    (hostTopology?.cpus || [])
+      .map((cpu) => [Number(cpu.cpu), cpu])
+      .filter(([cpu]) => Number.isSafeInteger(cpu) && cpu >= 0),
+  );
+  const requestedOrder = (hostTopology?.topology_order || hostTopology?.numeric_order || [])
+    .map(Number)
+    .filter((cpu) => Number.isSafeInteger(cpu) && cpu >= 0 && cpuInfo.has(cpu));
+  const orderedCpuIds = [...new Set([
+    ...requestedOrder,
+    ...[...cpuInfo.keys()].sort((left, right) => left - right),
+  ])];
+  const cpuOrder = new Map(orderedCpuIds.map((cpu, index) => [cpu, index]));
+  const atlasCells = [...cells]
+    .filter((cell) => Number.isSafeInteger(Number(cell.id)))
+    .sort((left, right) => Number(left.id) - Number(right.id))
+    .map((cell, colorIndex) => ({
+      id: Number(cell.id),
+      key: cell.key || `${Number(cell.id)}:${Math.max(0, finiteValue(cell.epoch) ?? 0)}`,
+      epoch: Math.max(0, finiteValue(cell.epoch) ?? 0),
+      label: cell.label || `Cell ${Number(cell.id)}`,
+      taskCount: Math.max(0, finiteValue(cell.taskCount) ?? 0),
+      primaryCpuCount: new Set((cell.primaryCpus || []).map(Number)).size,
+      borrowableCpuCount: new Set((cell.borrowableCpus || []).map(Number)).size,
+      dsqCount: (cell.normalQueues || []).length
+        + (cell.affinityGroups || []).reduce(
+          (total, group) => total + Math.max(0, finiteValue(group.queueCount) ?? 0),
+          0,
+        ),
+      primaryCpus: [...new Set((cell.primaryCpus || []).map(Number))],
+      borrowableCpus: [...new Set((cell.borrowableCpus || []).map(Number))],
+      colorIndex,
+    }));
+  const ownerByCpu = new Map();
+  const conflictingCpuIds = new Set();
+  const borrowableByCpu = new Map();
+  for (const cell of atlasCells) {
+    for (const cpu of cell.primaryCpus) {
+      if (ownerByCpu.has(cpu) && ownerByCpu.get(cpu).id !== cell.id) {
+        conflictingCpuIds.add(cpu);
+      } else {
+        ownerByCpu.set(cpu, cell);
+      }
+    }
+    for (const cpu of cell.borrowableCpus) {
+      const borrowers = borrowableByCpu.get(cpu) || [];
+      borrowers.push(cell.id);
+      borrowableByCpu.set(cpu, borrowers);
+    }
+  }
+
+  const llcGroups = new Map();
+  for (const cpu of orderedCpuIds) {
+    const location = utilizationTopologyLocation(cpuInfo.get(cpu));
+    const llc = llcGroups.get(location.topologyKey) || {
+      ...location,
+      order: cpuOrder.get(cpu) ?? Number.MAX_SAFE_INTEGER,
+      cores: new Map(),
+    };
+    const core = llc.cores.get(location.coreTopologyKey) || {
+      ...location,
+      order: cpuOrder.get(cpu) ?? Number.MAX_SAFE_INTEGER,
+      cpus: [],
+    };
+    const owner = conflictingCpuIds.has(cpu) ? null : ownerByCpu.get(cpu) || null;
+    core.cpus.push({
+      cpu,
+      ownerCellId: owner?.id ?? null,
+      ownerKey: owner?.key ?? null,
+      ownerColorIndex: owner?.colorIndex ?? null,
+      conflicting: conflictingCpuIds.has(cpu),
+      borrowableCellIds: [...new Set(borrowableByCpu.get(cpu) || [])]
+        .sort((left, right) => left - right),
+    });
+    llc.cores.set(location.coreTopologyKey, core);
+    llcGroups.set(location.topologyKey, llc);
+  }
+  const llcs = [...llcGroups.values()]
+    .sort((left, right) => left.order - right.order)
+    .map((llc) => ({
+      nodeId: llc.nodeId,
+      packageId: llc.packageId,
+      llcId: llc.llcId,
+      topologyKey: llc.topologyKey,
+      cores: [...llc.cores.values()]
+        .sort((left, right) => left.order - right.order)
+        .map((core) => ({
+          nodeId: core.nodeId,
+          packageId: core.packageId,
+          llcId: core.llcId,
+          core: core.core,
+          coreTopologyKey: core.coreTopologyKey,
+          cpus: core.cpus.sort((left, right) => (
+            (cpuOrder.get(left.cpu) ?? Number.MAX_SAFE_INTEGER)
+              - (cpuOrder.get(right.cpu) ?? Number.MAX_SAFE_INTEGER)
+            || left.cpu - right.cpu
+          )),
+        })),
+    }));
+  const ownedCpuCount = orderedCpuIds.filter((cpu) => (
+    ownerByCpu.has(cpu) && !conflictingCpuIds.has(cpu)
+  )).length;
+  return {
+    cells: atlasCells,
+    llcs,
+    cpuCount: orderedCpuIds.length,
+    ownedCpuCount,
+    unownedCpuCount: orderedCpuIds.length - ownedCpuCount - conflictingCpuIds.size,
+    conflictingCpuIds: [...conflictingCpuIds].sort((left, right) => left - right),
+  };
+}
+
 export function rungPercentages(metrics) {
   const attempts = Math.max(0, Number(metrics?.attempts) || 0);
   if (attempts === 0) {
