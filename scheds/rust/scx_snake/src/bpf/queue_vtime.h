@@ -632,7 +632,8 @@ static __always_inline int queue_fairness_stopping(struct snake_ladder_ctx *ctx,
 			      SNAKE_CELL_STAT_BORROWED_RUNTIME_NS, delta);
 		cell_stat_add(ctx, runtime->run_owner_cell_index,
 			      SNAKE_CELL_STAT_LENT_RUNTIME_NS, delta);
-		if (runtime->run_queue_class == SNAKE_QUEUE_CLASS_AFFINITY)
+		if (runtime->run_queue_class == SNAKE_QUEUE_CLASS_AFFINITY &&
+		    p->nr_cpus_allowed < nr_cpu_ids)
 			cell_stat_add(ctx, runtime->run_owner_cell_index,
 				      SNAKE_CELL_STAT_FOREIGN_AFFINITY_RUNTIME_NS, delta);
 	}

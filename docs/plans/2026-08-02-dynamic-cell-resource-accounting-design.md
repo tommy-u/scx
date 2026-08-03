@@ -46,9 +46,9 @@ cell work.
 ## Data Flow
 
 Snake already exports task-cell runtime per CPU. It will additionally export
-affinity-queue runtime per CPU. When an affinity run's task cell differs from the
-cell owning its execution CPU, the inspector classifies it as foreign pinned
-runtime. Other foreign runtime is flexible borrowed-in work.
+CPU-restricted affinity-queue runtime. When a restricted affinity run's task
+cell differs from the cell owning its execution CPU, the inspector classifies it
+as foreign pinned runtime. Other foreign runtime is flexible borrowed-in work.
 
 The inspector already samples per-CPU `/proc/stat`. It combines host time, Snake
 runtime, cell runtime, active primary ownership, and cell identity into one

@@ -223,7 +223,7 @@ pub struct CellMetrics {
     pub borrowed_runtime_ns: u64,
     #[stat(desc = "Runtime other cells consumed on CPUs owned by this cell")]
     pub lent_runtime_ns: u64,
-    #[stat(desc = "Affinity-constrained runtime from other cells on CPUs owned by this cell")]
+    #[stat(desc = "CPU-restricted affinity runtime from other cells on CPUs owned by this cell")]
     pub foreign_affinity_runtime_ns: u64,
     #[stat(desc = "Tasks inserted into normal cell queues")]
     pub normal_enqueues: u64,

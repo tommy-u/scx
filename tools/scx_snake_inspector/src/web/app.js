@@ -6092,7 +6092,7 @@ function renderRawCellStats(stats, cellId) {
     ["primary_runtime_ns", "Primary runtime", "duration"],
     ["borrowed_runtime_ns", "Borrowed runtime", "duration"],
     ["lent_runtime_ns", "Lent runtime", "duration"],
-    ["foreign_affinity_runtime_ns", "Foreign affinity runtime", "duration"],
+    ["foreign_affinity_runtime_ns", "Foreign pinned runtime", "duration"],
     ["normal_enqueues", "Normal enqueues", "number"],
     ["affinity_enqueues", "Affinity enqueues", "number"],
     ["normal_dispatches", "Normal dispatches", "number"],

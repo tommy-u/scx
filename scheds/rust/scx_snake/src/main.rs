@@ -8461,6 +8461,7 @@ scope = "task_cell"
             .split_once("runtime->run_queue_class == SNAKE_QUEUE_CLASS_AFFINITY")
             .map(|(_, body)| body)
             .expect("foreign affinity accounting should be conditional");
+        assert!(foreign.contains("p->nr_cpus_allowed < nr_cpu_ids"));
         assert!(affinity.contains("runtime->run_owner_cell_index"));
         assert!(affinity.contains("SNAKE_CELL_STAT_FOREIGN_AFFINITY_RUNTIME_NS"));
         assert_eq!(
