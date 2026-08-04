@@ -1178,6 +1178,133 @@ fn install_queue_topology(
     Ok(())
 }
 
+struct EncodedManagedMembership {
+    root: bpf_intf::snake_managed_cgroup_root,
+    entries: Vec<(
+        bpf_intf::snake_managed_cgroup_key,
+        bpf_intf::snake_managed_cgroup_value,
+    )>,
+}
+
+fn encode_managed_membership(
+    policy: &CompiledPolicy,
+    slot: u32,
+    generation: u64,
+) -> Result<EncodedManagedMembership> {
+    if slot >= bpf_intf::SNAKE_LADDER_SLOTS {
+        bail!("invalid managed membership slot {slot}");
+    }
+    let Some(membership) = policy.membership.as_ref() else {
+        return Ok(EncodedManagedMembership {
+            root: bpf_intf::snake_managed_cgroup_root {
+                cgid: 0,
+                generation,
+                enabled: 0,
+                reserved: 0,
+            },
+            entries: Vec::new(),
+        });
+    };
+    let Some(parent_inode) = membership.parent_inode else {
+        return Ok(EncodedManagedMembership {
+            root: bpf_intf::snake_managed_cgroup_root {
+                cgid: 0,
+                generation,
+                enabled: 0,
+                reserved: 0,
+            },
+            entries: Vec::new(),
+        });
+    };
+    let child_inodes = membership
+        .child_inodes
+        .as_ref()
+        .context("managed membership has no child cgroup identities")?;
+    let mut entries =
+        Vec::with_capacity(membership.assignments.len() + membership.excluded_child_inodes.len());
+    for (name, &cell_id) in &membership.assignments {
+        let &cgid = child_inodes
+            .get(name)
+            .with_context(|| format!("managed child {name} has no cgroup identity"))?;
+        let cell_epoch = policy.cell_slot_epochs.get(&cell_id).copied().unwrap_or(0);
+        entries.push((
+            bpf_intf::snake_managed_cgroup_key {
+                cgid,
+                slot,
+                reserved: 0,
+            },
+            bpf_intf::snake_managed_cgroup_value {
+                cell_id,
+                cell_epoch,
+                status: bpf_intf::snake_managed_cgroup_status_SNAKE_MANAGED_CGROUP_ASSIGNED,
+                reserved: 0,
+            },
+        ));
+    }
+    for &cgid in membership.excluded_child_inodes.values() {
+        entries.push((
+            bpf_intf::snake_managed_cgroup_key {
+                cgid,
+                slot,
+                reserved: 0,
+            },
+            bpf_intf::snake_managed_cgroup_value {
+                cell_id: 0,
+                cell_epoch: 0,
+                status: bpf_intf::snake_managed_cgroup_status_SNAKE_MANAGED_CGROUP_EXCLUDED,
+                reserved: 0,
+            },
+        ));
+    }
+    if entries.len() > bpf_intf::SNAKE_MAX_QUEUE_CELLS as usize {
+        bail!("managed membership exceeds BPF cgroup capacity");
+    }
+    Ok(EncodedManagedMembership {
+        root: bpf_intf::snake_managed_cgroup_root {
+            cgid: parent_inode,
+            generation,
+            enabled: 1,
+            reserved: 0,
+        },
+        entries,
+    })
+}
+
+fn install_managed_membership(
+    skel: &mut BpfSkel<'_>,
+    slot: u32,
+    generation: u64,
+    policy: &CompiledPolicy,
+) -> Result<()> {
+    let encoded = encode_managed_membership(policy, slot, generation)?;
+    let stale_keys = skel
+        .maps
+        .managed_cgroup_assignments
+        .keys()
+        .filter(|key| {
+            key.get(8..12)
+                .and_then(|bytes| bytes.try_into().ok())
+                .is_some_and(|bytes| u32::from_ne_bytes(bytes) == slot)
+        })
+        .collect::<Vec<_>>();
+    for key in stale_keys {
+        skel.maps
+            .managed_cgroup_assignments
+            .delete(&key)
+            .with_context(|| format!("clearing managed cgroup mapping from slot {slot}"))?;
+    }
+    for (key, value) in encoded.entries {
+        skel.maps
+            .managed_cgroup_assignments
+            .update(bytes_of(&key), bytes_of(&value), MapFlags::ANY)
+            .with_context(|| format!("installing managed cgroup {} in slot {slot}", key.cgid))?;
+    }
+    skel.maps
+        .managed_cgroup_roots
+        .update(&slot.to_ne_bytes(), bytes_of(&encoded.root), MapFlags::ANY)
+        .with_context(|| format!("publishing managed cgroup root for slot {slot}"))
+}
+
 fn validate_queue_callback_replacement(
     active: &CompiledPolicy,
     candidate: &CompiledPolicy,
@@ -1551,6 +1678,15 @@ impl runtime_policy::PolicyBackend for BpfPolicyBackend<'_, '_, '_> {
         install_queue_topology(self.skel, slot, generation, self.queue_topology)
     }
 
+    fn write_managed_membership(
+        &mut self,
+        slot: u32,
+        generation: u64,
+        policy: &CompiledPolicy,
+    ) -> Result<()> {
+        install_managed_membership(self.skel, slot, generation, policy)
+    }
+
     fn prepare_ladder(&mut self, slot: u32) -> Result<()> {
         prepare_ladder_slot(self.skel, slot)
     }
@@ -1816,6 +1952,28 @@ fn aggregate_raw_stats(
         managed_identity_correction_latency_ns_total: 0,
         managed_identity_correction_latency_ns_max: 0,
         managed_identity_correction_latency_buckets: Vec::new(),
+        managed_mapped_cell0_runtime_ns: value(
+            bpf_intf::snake_stat_SNAKE_STAT_MANAGED_MAPPED_CELL0_RUNTIME_NS,
+        ),
+        managed_mapped_cell0_timeslices: value(
+            bpf_intf::snake_stat_SNAKE_STAT_MANAGED_MAPPED_CELL0_TIMESLICES,
+        ),
+        managed_mapped_affected_tasks: value(
+            bpf_intf::snake_stat_SNAKE_STAT_MANAGED_MAPPED_AFFECTED_TASKS,
+        ),
+        managed_mapped_uncorrected_exits: value(
+            bpf_intf::snake_stat_SNAKE_STAT_MANAGED_MAPPED_UNCORRECTED_EXITS,
+        ),
+        managed_unresolved_cell0_runtime_ns: value(
+            bpf_intf::snake_stat_SNAKE_STAT_MANAGED_UNRESOLVED_CELL0_RUNTIME_NS,
+        ),
+        managed_unresolved_cell0_timeslices: value(
+            bpf_intf::snake_stat_SNAKE_STAT_MANAGED_UNRESOLVED_CELL0_TIMESLICES,
+        ),
+        managed_unresolved_affected_tasks: value(
+            bpf_intf::snake_stat_SNAKE_STAT_MANAGED_UNRESOLVED_AFFECTED_TASKS,
+        ),
+        managed_unresolved_exits: value(bpf_intf::snake_stat_SNAKE_STAT_MANAGED_UNRESOLVED_EXITS),
         fairness_mode: fairness.as_str().into(),
         select_calls: value(bpf_intf::snake_stat_SNAKE_STAT_SELECT_CALLS),
         dispatch_calls: value(bpf_intf::snake_stat_SNAKE_STAT_DISPATCH_CALLS),
@@ -2027,6 +2185,18 @@ fn aggregate_raw_cell_stats(
                     group_fallback_runtime_ns: value(
                         dense,
                         bpf_intf::snake_cell_stat_SNAKE_CELL_STAT_GROUP_FALLBACK_RUNTIME_NS,
+                    )?,
+                    managed_cell0_runtime_ns: value(
+                        dense,
+                        bpf_intf::snake_cell_stat_SNAKE_CELL_STAT_MANAGED_CELL0_RUNTIME_NS,
+                    )?,
+                    managed_cell0_timeslices: value(
+                        dense,
+                        bpf_intf::snake_cell_stat_SNAKE_CELL_STAT_MANAGED_CELL0_TIMESLICES,
+                    )?,
+                    managed_affected_tasks: value(
+                        dense,
+                        bpf_intf::snake_cell_stat_SNAKE_CELL_STAT_MANAGED_AFFECTED_TASKS,
                     )?,
                     normal_enqueues: value(
                         dense,
@@ -2429,6 +2599,7 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
         skel.struct_ops.snake_ops_mut().exit_dump_len = opts.exit_dump_len;
         let mut skel = scx_ops_load!(skel, snake_ops, uei)?;
         install_queue_topology(&mut skel, 0, runtime.generation, queue_topology)?;
+        install_managed_membership(&mut skel, 0, runtime.generation, &runtime.compiled)?;
         set_active_ladder(&mut skel, bpf_intf::SNAKE_LADDER_SLOT_INVALID)?;
         install_ladder_slot(
             &mut skel,
@@ -3278,7 +3449,11 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
         let mut stale = Vec::new();
         let mut task_mappings = Vec::new();
         for &tid in &tracked_tids {
-            match task_cells::inspect_thread_cell(&self.skel.maps.task_cells, tid)? {
+            match task_cells::inspect_thread_cell_with_managed(
+                &self.skel.maps.task_cells,
+                &self.skel.maps.managed_task_cells,
+                tid,
+            )? {
                 Some(task) => task_mappings.push(inspection::TaskMappingInspectionView {
                     tid: task.tid,
                     tgid: task.tgid,
@@ -3314,7 +3489,11 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
                 if tracked_tids.contains(&tid) {
                     continue;
                 }
-                let Some(task) = task_cells::inspect_thread_cell(&self.skel.maps.task_cells, tid)?
+                let Some(task) = task_cells::inspect_thread_cell_with_managed(
+                    &self.skel.maps.task_cells,
+                    &self.skel.maps.managed_task_cells,
+                    tid,
+                )?
                 else {
                     continue;
                 };
@@ -4716,6 +4895,9 @@ scope = "task_allowed"
             "fine_timing_config",
             "fine_timing_events",
             "ladder_readers",
+            "managed_cgroup_assignments",
+            "managed_cgroup_roots",
+            "managed_task_cells",
             "mask_data",
             "mask_scratch",
             "mask_slots",
@@ -4750,6 +4932,7 @@ scope = "task_allowed"
             "snake_enqueue_expanded",
             "snake_enqueue_no_direct",
             "snake_exit",
+            "snake_exit_task",
             "snake_init",
             "snake_init_task",
             "snake_quiescent",
@@ -4815,6 +4998,7 @@ scope = "task_allowed"
                 ".select_cpu=(void*)snake_select_cpu,",
                 ".init_task=(void*)snake_init_task,",
                 ".enqueue=(void*)snake_enqueue,",
+                ".exit_task=(void*)snake_exit_task,",
                 ".dequeue=(void*)snake_dequeue,",
                 ".dispatch=(void*)snake_dispatch,",
                 ".runnable=(void*)snake_runnable,",
@@ -5415,15 +5599,18 @@ scope = "task_cell"
         assert_eq!(owners.len(), 1, "task storage must have one raw owner");
         assert_eq!(owners[0].0.file_name().unwrap(), "task_state.h");
         let owner = &owners[0].1;
-        assert_eq!(owner.matches("bpf_task_storage_get(").count(), 3);
-        assert_eq!(owner.matches("BPF_MAP_TYPE_TASK_STORAGE").count(), 2);
+        assert_eq!(owner.matches("bpf_task_storage_get(").count(), 5);
+        assert_eq!(owner.matches("BPF_MAP_TYPE_TASK_STORAGE").count(), 3);
         assert!(owner.contains("BPF_LOCAL_STORAGE_GET_F_CREATE"));
         assert!(owner.contains("} task_runtimes SEC(\".maps\");"));
         assert!(owner.contains("} task_cells SEC(\".maps\");"));
+        assert!(owner.contains("} managed_task_cells SEC(\".maps\");"));
         for wrapper in [
             "task_state_lookup(",
             "task_state_get_or_create(",
             "task_annotation(",
+            "managed_task_cell_lookup(",
+            "managed_task_cell_get_or_create(",
             "task_state_init_queue_mask(",
             "task_route_record_selected_cpu(",
             "task_route_take_selected_cpu(",
@@ -5440,13 +5627,132 @@ scope = "task_cell"
                 continue;
             }
             assert!(
-                !source.contains("task_runtimes") && !source.contains("task_cells"),
+                !source.contains("task_runtimes")
+                    && !source.contains("task_cells")
+                    && !source.contains("managed_task_cells"),
                 "{} bypasses task-state ownership",
                 path.display()
             );
             assert!(!source.contains("BPF_MAP_TYPE_TASK_STORAGE"));
             assert!(!source.contains("BPF_LOCAL_STORAGE_GET_F_CREATE"));
         }
+    }
+
+    #[test]
+    fn managed_cells_use_banked_bpf_membership_and_exit_accounting() {
+        let bpf_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bpf");
+        let intf = fs::read_to_string(bpf_dir.join("intf.h")).unwrap();
+        let task_state = fs::read_to_string(bpf_dir.join("task_state.h")).unwrap();
+        let managed = fs::read_to_string(bpf_dir.join("managed_membership.h")).unwrap();
+        let main = fs::read_to_string(bpf_dir.join("main.bpf.c")).unwrap();
+
+        for needle in [
+            "struct snake_managed_cgroup_key",
+            "struct snake_managed_cgroup_value",
+            "struct snake_managed_task_cell",
+            "SNAKE_MANAGED_CGROUP_ASSIGNED",
+            "SNAKE_MANAGED_CGROUP_EXCLUDED",
+            "SNAKE_MANAGED_CGROUP_UNRESOLVED",
+        ] {
+            assert!(
+                intf.contains(needle),
+                "managed membership ABI is missing {needle}"
+            );
+        }
+        assert!(task_state.contains("} managed_task_cells SEC(\".maps\");"));
+        assert!(task_state.contains("task_effective_cell("));
+        assert!(managed.contains("managed_membership_refresh("));
+        assert!(managed.contains("managed_membership_refresh_cgroup_slot("));
+        assert!(managed.contains("bpf_cgroup_ancestor("));
+        assert!(managed.contains("managed_membership_account_runtime("));
+        assert!(managed.contains("managed_membership_exit_task("));
+        for needle in [
+            "SNAKE_STAT_MANAGED_MAPPED_CELL0_RUNTIME_NS",
+            "SNAKE_STAT_MANAGED_MAPPED_CELL0_TIMESLICES",
+            "SNAKE_STAT_MANAGED_MAPPED_AFFECTED_TASKS",
+            "SNAKE_STAT_MANAGED_MAPPED_UNCORRECTED_EXITS",
+            "SNAKE_STAT_MANAGED_UNRESOLVED_CELL0_RUNTIME_NS",
+            "SNAKE_STAT_MANAGED_UNRESOLVED_CELL0_TIMESLICES",
+            "SNAKE_STAT_MANAGED_UNRESOLVED_AFFECTED_TASKS",
+            "SNAKE_STAT_MANAGED_UNRESOLVED_EXITS",
+        ] {
+            assert!(
+                intf.contains(needle),
+                "managed accounting is missing {needle}"
+            );
+        }
+        for needle in [
+            "SNAKE_CELL_STAT_MANAGED_CELL0_RUNTIME_NS",
+            "SNAKE_CELL_STAT_MANAGED_CELL0_TIMESLICES",
+            "SNAKE_CELL_STAT_MANAGED_AFFECTED_TASKS",
+        ] {
+            assert!(
+                intf.contains(needle),
+                "per-cell accounting is missing {needle}"
+            );
+        }
+        assert!(managed.contains("args->cancelled"));
+        assert!(main.contains("BPF_STRUCT_OPS(snake_exit_task"));
+        assert!(main.contains(".exit_task = (void *)snake_exit_task"));
+        assert_eq!(
+            main.matches("managed_membership_refresh_current(&ladder_ctx, p)")
+                .count(),
+            3,
+            "select_cpu, runnable, and stopping must refresh managed identity"
+        );
+    }
+
+    #[test]
+    fn managed_cgroup_encoder_banks_assigned_and_excluded_children() {
+        let mut compiled = policy::compile_policy(
+            r#"
+[[cell]]
+id = 7
+cpus = "0-1"
+
+[queues]
+layout = "cell_llc"
+
+[membership]
+parent = "/workloads"
+
+[[membership.assignment]]
+child = "batch"
+cell = 7
+
+[[rung]]
+operation = "pick_idle"
+scope = "task_cell"
+"#,
+        )
+        .unwrap();
+        compiled.cell_slot_epochs.insert(7, 4);
+        let membership = compiled.membership.as_mut().unwrap();
+        membership.parent_inode = Some(100);
+        membership.child_inodes = Some(BTreeMap::from([("batch".into(), 101)]));
+        membership
+            .excluded_child_inodes
+            .insert("system".into(), 102);
+
+        let encoded = encode_managed_membership(&compiled, 1, 9).unwrap();
+
+        assert_eq!(encoded.root.cgid, 100);
+        assert_eq!(encoded.root.generation, 9);
+        assert_eq!(encoded.root.enabled, 1);
+        assert_eq!(encoded.entries.len(), 2);
+        assert_eq!(encoded.entries[0].0.slot, 1);
+        assert_eq!(encoded.entries[0].0.cgid, 101);
+        assert_eq!(
+            encoded.entries[0].1.status,
+            bpf_intf::snake_managed_cgroup_status_SNAKE_MANAGED_CGROUP_ASSIGNED
+        );
+        assert_eq!(encoded.entries[0].1.cell_id, 7);
+        assert_eq!(encoded.entries[0].1.cell_epoch, 4);
+        assert_eq!(encoded.entries[1].0.cgid, 102);
+        assert_eq!(
+            encoded.entries[1].1.status,
+            bpf_intf::snake_managed_cgroup_status_SNAKE_MANAGED_CGROUP_EXCLUDED
+        );
     }
 
     #[test]
@@ -7983,14 +8289,14 @@ scope = "task_allowed"
         let policy = policy::compile_policy(policy_source()).expect("policy should compile");
         let encoded = encode_ladder(&policy, 42).expect("ladder should encode");
 
-        assert_eq!(bpf_intf::SNAKE_ABI_VERSION, 33);
+        assert_eq!(bpf_intf::SNAKE_ABI_VERSION, 34);
         assert_eq!(bpf_intf::SNAKE_MAX_RUNGS, 17);
-        assert_eq!(bpf_intf::snake_stat_SNAKE_STAT_VTIME_CLOCK_CAS_RETRIES, 219);
+        assert_eq!(bpf_intf::snake_stat_SNAKE_STAT_VTIME_CLOCK_CAS_RETRIES, 227);
         assert_eq!(
             bpf_intf::snake_stat_SNAKE_STAT_VTIME_CLOCK_CAS_EXHAUSTIONS,
-            220
+            228
         );
-        assert_eq!(bpf_intf::snake_stat_SNAKE_NR_STATS, 221);
+        assert_eq!(bpf_intf::snake_stat_SNAKE_NR_STATS, 229);
         assert_eq!(size_of::<bpf_intf::snake_callback_timing>(), 520);
         assert_eq!(offset_of!(bpf_intf::snake_callback_timing, total_ns), 0);
         assert_eq!(offset_of!(bpf_intf::snake_callback_timing, buckets), 8);
@@ -8269,7 +8575,7 @@ scope = "task_cell"
         .unwrap();
         let encoded = encode_ladder(&policy, 9).unwrap();
 
-        assert_eq!(bpf_intf::SNAKE_ABI_VERSION, 33);
+        assert_eq!(bpf_intf::SNAKE_ABI_VERSION, 34);
         assert_eq!(encoded.nr_enqueue_rungs, 3);
         assert_eq!(encoded.enqueue_rungs[0].opcode, 5);
         assert_eq!(encoded.enqueue_rungs[0].input, 4);
@@ -8323,7 +8629,7 @@ scope = "task_cell"
         .unwrap();
         let encoded = encode_ladder(&policy, 10).unwrap();
 
-        assert_eq!(bpf_intf::SNAKE_ABI_VERSION, 33);
+        assert_eq!(bpf_intf::SNAKE_ABI_VERSION, 34);
         assert_eq!(encoded.nr_dispatch_rungs, 5);
         assert_eq!(
             encoded
@@ -8920,7 +9226,7 @@ scope = "task_cell"
     }
 
     #[test]
-    fn queue_task_mapping_validates_the_annotated_slot_epoch() {
+    fn queue_task_mapping_validates_the_effective_slot_epoch() {
         let queue =
             fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bpf/queue.h"))
                 .unwrap();
@@ -8932,7 +9238,8 @@ scope = "task_cell"
             .map(|(body, _)| body)
             .expect("task-cell resolver should have one definition");
 
-        assert!(resolver.contains("READ_ONCE(annotation->cell_epoch)"));
+        assert!(resolver.contains("task_effective_cell(p, &cell_id, &cell_epoch)"));
+        assert!(resolver.contains("READ_ONCE(cell->slot_epoch) != cell_epoch"));
         assert!(resolver.contains("READ_ONCE(cell->slot_epoch)"));
     }
 
@@ -9023,7 +9330,7 @@ scope = "task_cell"
         let cpu_pick = include_str!("bpf/cpu_pick.h");
         let ladder = include_str!("bpf/ladder.h");
 
-        assert!(intf.contains("#define SNAKE_ABI_VERSION 33"));
+        assert!(intf.contains("#define SNAKE_ABI_VERSION 34"));
         assert!(intf.contains("#define SNAKE_MAX_QUEUE_CELLS 256"));
         assert!(intf.contains("#define SNAKE_MAX_NORMAL_QUEUES 8192"));
         assert!(intf.contains("SNAKE_OP_PICK_IDLE_PREFER_PREVIOUS = 8"));

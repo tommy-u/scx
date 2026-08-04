@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 #include "main.h"
 #include "queue.h"
+#include "managed_membership.h"
 #include "queue_init.h"
 #include "mask_table_init.h"
 #include "fairness.h"
@@ -310,6 +311,9 @@ static __noinline s32 snake_select_cpu_impl(struct task_struct *p,
 	}
 	fine_timing_finish_select(SNAKE_FINE_TIMING_SELECT_ACQUIRE_LADDER,
 				  fine_stage_started_at);
+	ret = managed_membership_refresh_current(&ladder_ctx, p);
+	if (ret && ret != -ENOENT)
+		stat_inc(&ladder_ctx, SNAKE_STAT_INVALID_ERRORS);
 	stat_inc(&ladder_ctx, SNAKE_STAT_SELECT_CALLS);
 
 	fine_stage_started_at = fine_timing_select_start(callback_started_at);
@@ -681,6 +685,9 @@ void BPF_STRUCT_OPS(snake_runnable, struct task_struct *p, u64 enq_flags)
 	fine_timing_finish(&fine_timing,
 			   SNAKE_FINE_TIMING_RUNNABLE_ACQUIRE_LADDER,
 			   stage_started_at);
+	ret = managed_membership_refresh_current(&ladder_ctx, p);
+	if (ret && ret != -ENOENT)
+		stat_inc(&ladder_ctx, SNAKE_STAT_INVALID_ERRORS);
 	ret = scheduler_mode_runnable(&ladder_ctx, p, &fine_timing);
 	if (ret)
 		scx_bpf_error(
@@ -750,8 +757,13 @@ void BPF_STRUCT_OPS(snake_stopping, struct task_struct *p, bool runnable)
 	fine_timing_finish(&fine_timing,
 			   SNAKE_FINE_TIMING_STOPPING_ACQUIRE_LADDER,
 			   stage_started_at);
+	ret = managed_membership_refresh_current(&ladder_ctx, p);
+	if (ret && ret != -ENOENT)
+		stat_inc(&ladder_ctx, SNAKE_STAT_INVALID_ERRORS);
 	ret = scheduler_mode_stopping(&ladder_ctx, p, &runtime_ns,
 				      &fine_timing);
+	if (!ret)
+		managed_membership_account_runtime(&ladder_ctx, p, runtime_ns);
 	stage_started_at = fine_timing_start(&fine_timing);
 	if (ret)
 		scx_bpf_error("snake stopping accounting failed for pid %d: %d",
@@ -824,8 +836,18 @@ void BPF_STRUCT_OPS(snake_set_weight, struct task_struct *p, u32 weight)
 s32 BPF_STRUCT_OPS(snake_init_task, struct task_struct *p,
 		   struct scx_init_task_args *args)
 {
+	s32 ret = scheduler_mode_init_task(p);
+
+	if (ret)
+		return ret;
 	(void)args;
-	return scheduler_mode_init_task(p);
+	return managed_membership_refresh(p);
+}
+
+void BPF_STRUCT_OPS(snake_exit_task, struct task_struct *p,
+		    struct scx_exit_task_args *args)
+{
+	managed_membership_exit_task(p, args);
 }
 
 /* Validate the published ladder before the scheduler can attach. */
@@ -890,6 +912,7 @@ void BPF_STRUCT_OPS(snake_exit, struct scx_exit_info *ei)
 SCX_OPS_DEFINE(
 	snake_ops, .select_cpu = (void *)snake_select_cpu,
 	.init_task = (void *)snake_init_task, .enqueue = (void *)snake_enqueue,
+	.exit_task = (void *)snake_exit_task,
 	.dequeue = (void *)snake_dequeue, .dispatch = (void *)snake_dispatch,
 	.runnable = (void *)snake_runnable,
 	.running = (void *)snake_running, .stopping = (void *)snake_stopping,

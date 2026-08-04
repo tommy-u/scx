@@ -71,25 +71,29 @@ Required behavior:
 
 ## P1: high-priority correctness and scale risks
 
-### Managed task identity has a polling window
+### Managed topology publication has a measurable window
 
-Direct-child identity, exclusions, stable IDs, and slot epochs are implemented,
-but descendant task membership is written through recurring userspace scans. A
-new thread or cgroup move may therefore run temporarily with cell 0 or its former
-assignment. Epoch validation prevents reuse aliasing; it does not remove this
-visibility delay.
+Dynamic descendant membership is now resolved from cgroup ancestry in BPF. New
+threads and moves between already published children do not wait for a
+userspace per-thread write. Direct-child creation, deletion, replacement, and
+cpuset changes still wait for userspace to publish a new topology bank. A task
+under an unpublished child therefore runs in cell 0 with `unresolved` status.
 
-Required campaigns measure fork/exec and cgroup-move exposure at high churn. A
-production decision must either accept and bound the window or move identity
-inheritance/refresh into a cgroup-native BPF path.
+Required campaigns exercise fork/exec, cgroup moves, and direct-child churn at
+high rates. Gate on `managed_mapped_cell0_runtime_ns` and
+`managed_unresolved_cell0_runtime_ns`, their timeslice/affected-task counters,
+and the two exit categories. The mapped category should remain zero in steady
+state; the unresolved category directly bounds the topology polling cost,
+including tasks that exit before userspace sees them.
 
-### Membership clear failure is not retried
+### Static membership clear failure is not retried
 
-The removal path forgets the task and retained pidfd before clearing managed task
-storage. A non-exit error is logged, but the next reconciliation has no state with
-which to retry
+The legacy explicit `[membership]` removal path forgets the task and retained
+pidfd before clearing its task storage. A non-exit error is logged, but the next
+reconciliation has no state with which to retry
 ([membership.rs](../../src/membership.rs#L107-L121)). A stale
-managed cell can later become visible when a manual override is cleared.
+static managed cell can later become visible when a manual override is cleared.
+Dynamic `[managed_cells]` does not use this per-thread clear path.
 
 Required behavior: retain known task and pidfd until clear succeeds or task exit is
 confirmed. Add a deterministic injected-failure retry test.
@@ -374,7 +378,7 @@ Production readiness should not be declared until all of the following are true:
 2. every declared resource policy has a forward-progress/work-conservation contract;
 3. CPU hotplug is either supported or safely rejected;
 4. diagnostics cannot affect scheduler lifetime;
-5. polling-based managed identity is either replaced or its fork/move exposure is
+5. BPF managed identity and the remaining direct-child publication window are
    measured and accepted for the target workload;
 6. privileged CI runs the important FIFO, VTIME, queue, and EEVDF contracts;
 7. scale curves exist for target CPU/cell/task counts with and without inspector;

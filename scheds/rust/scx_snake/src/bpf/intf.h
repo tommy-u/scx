@@ -8,7 +8,7 @@ typedef unsigned int	   u32;
 typedef unsigned long long u64;
 #endif
 
-#define SNAKE_ABI_VERSION 33
+#define SNAKE_ABI_VERSION 34
 #define SNAKE_MAX_RUNGS 17
 #define SNAKE_EXPANDED_MITOSIS_RUNGS 16
 #define SNAKE_MAX_GENERIC_RUNGS 9
@@ -318,6 +318,51 @@ struct snake_task_cell {
 	u32 reserved;
 };
 
+enum snake_managed_cgroup_status {
+	SNAKE_MANAGED_CGROUP_NONE = 0,
+	SNAKE_MANAGED_CGROUP_ASSIGNED,
+	SNAKE_MANAGED_CGROUP_EXCLUDED,
+	SNAKE_MANAGED_CGROUP_ROOT,
+	SNAKE_MANAGED_CGROUP_UNRESOLVED,
+};
+
+struct snake_managed_cgroup_key {
+	u64 cgid;
+	u32 slot;
+	u32 reserved;
+};
+
+struct snake_managed_cgroup_value {
+	u32 cell_id;
+	u32 cell_epoch;
+	u32 status;
+	u32 reserved;
+};
+
+struct snake_managed_cgroup_root {
+	u64 cgid;
+	u64 generation;
+	u32 enabled;
+	u32 reserved;
+};
+
+/* BPF-owned managed membership; manual and LLC annotations remain separate. */
+struct snake_managed_task_cell {
+	u64 cgid;
+	u64 generation;
+	u64 pending_since_ns;
+	u64 cell0_runtime_ns;
+	u64 cell0_timeslices;
+	u32 cell_id;
+	u32 cell_epoch;
+	u32 status;
+	u32 episode_kind;
+	u32 needs_rehome;
+	u32 affected;
+	u32 uncorrected;
+	u32 reserved;
+};
+
 /* Serialized userspace CPU mask stored in immutable queue descriptors. */
 struct snake_mask_data {
 	u32 valid;
@@ -376,6 +421,9 @@ enum snake_cell_stat {
 	SNAKE_CELL_STAT_GROUP_RUNTIME_NS,
 	SNAKE_CELL_STAT_GROUP_PREFERRED_RUNTIME_NS,
 	SNAKE_CELL_STAT_GROUP_FALLBACK_RUNTIME_NS,
+	SNAKE_CELL_STAT_MANAGED_CELL0_RUNTIME_NS,
+	SNAKE_CELL_STAT_MANAGED_CELL0_TIMESLICES,
+	SNAKE_CELL_STAT_MANAGED_AFFECTED_TASKS,
 	SNAKE_NR_CELL_STATS,
 };
 
@@ -462,6 +510,14 @@ enum snake_stat {
 	SNAKE_STAT_EEVDF_LAG_CLAMPS,
 	SNAKE_STAT_EEVDF_RUN_LAG_CLAMPS,
 	SNAKE_STAT_EEVDF_ACCOUNTING_ERRORS,
+	SNAKE_STAT_MANAGED_MAPPED_CELL0_RUNTIME_NS,
+	SNAKE_STAT_MANAGED_MAPPED_CELL0_TIMESLICES,
+	SNAKE_STAT_MANAGED_MAPPED_AFFECTED_TASKS,
+	SNAKE_STAT_MANAGED_MAPPED_UNCORRECTED_EXITS,
+	SNAKE_STAT_MANAGED_UNRESOLVED_CELL0_RUNTIME_NS,
+	SNAKE_STAT_MANAGED_UNRESOLVED_CELL0_TIMESLICES,
+	SNAKE_STAT_MANAGED_UNRESOLVED_AFFECTED_TASKS,
+	SNAKE_STAT_MANAGED_UNRESOLVED_EXITS,
 	SNAKE_STAT_GLOBAL_NR,
 	SNAKE_STAT_RUNG_ATTEMPT_BASE = SNAKE_STAT_GLOBAL_NR,
 	SNAKE_STAT_RUNG_HIT_BASE =

@@ -29,7 +29,7 @@ and fixed ABI encoder ([main.rs](../../src/main.rs#L245-L333)).
 | Active policy | Two BPF slots plus active index | Scheduler lifetime | Atomic index switch |
 | Queue topology and DSQ descriptors | Rust then BPF maps | Attachment | Restart only |
 | Manual task-cell annotation | BPF task storage | Task or scheduler lifetime | Thread pidfd map update |
-| Managed membership | Rust polling manager plus task storage | Attachment policy | Periodic `cgroup.threads` reconciliation |
+| Managed membership | Banked cgroup directory plus BPF task storage | Task and topology generation | BPF ancestor resolution; userspace publishes topology |
 | Per-task fairness and queue routing | BPF task storage | Task lifetime | Scheduler callbacks |
 | Global or cell clocks | BPF array maps with spin locks | Scheduler lifetime | `running` and `stopping` paths |
 | Statistics | Per-CPU BPF maps | Slot/generation | Scheduler callbacks; reset switches bank |
@@ -190,13 +190,14 @@ Manual annotation uses `PIDFD_THREAD` to update BPF task storage and avoids TID
 reuse races. It does not provide inheritance or batching
 ([CELL_POLICY.md](../CELL_POLICY.md#L163-L182)).
 
-Managed membership is materially different from Mitosis. Snake recursively reads
-`cgroup.threads` under explicitly assigned trees, retains pidfds, and reconciles
-at a configured interval
-([membership.rs](../../src/membership.rs#L85-L149),
-[membership.rs](../../src/membership.rs#L209-L275)). It does
-not make a direct child cgroup into a cell automatically, and task identity still
-travels through per-thread task-storage writes.
+Static `[membership]` recursively reads `cgroup.threads`, retains pidfds, and
+writes per-thread task storage. Dynamic `[managed_cells]` is different: userspace
+discovers direct children and publishes their cgroup IDs, exclusions, cell IDs,
+and slot epochs in a banked directory. BPF resolves the nearest published
+ancestor and caches it in BPF-owned task storage, refreshing on a cgroup-ID or
+bank-generation change. A newly created direct child is unresolved until the
+next userspace topology publication; existing descendants and live moves do not
+wait for a per-thread scan.
 
 ## Live rehome state machine
 

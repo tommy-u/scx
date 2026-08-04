@@ -1,5 +1,11 @@
 # Userspace Cgroup Cell Membership
 
+This document specifies the explicit `[membership]` compatibility path. Dynamic
+`[managed_cells]` policies now publish a banked cgroup-ID directory and resolve
+descendant membership in BPF; see [Task Cell Annotations](CELL_POLICY.md). The
+userspace scan and pidfd writes below remain accurate only for explicit static
+assignments.
+
 Snake can derive task-to-cell assignments from a cgroup-v2 subtree without
 putting cgroup policy in BPF. Userspace owns paths, lifecycle, and validation;
 BPF receives the resolved cell slot and slot epoch for assigned threads.

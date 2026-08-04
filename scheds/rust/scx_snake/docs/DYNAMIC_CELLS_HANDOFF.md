@@ -68,7 +68,8 @@ runtime counters -> EWMA demand -> proportional reallocation -> banked publish
 
 ## Status
 
-- Implemented: managed admission, cell 0 holdout, effective-cpuset bounds,
+- Implemented: managed admission, banked BPF cgroup identity and inheritance,
+  exact mapped/unresolved cell-0 exposure counters, cell 0 holdout, effective-cpuset bounds,
   demand EWMA tracking and rebalancing, weighted banked publication,
   orphan draining, sibling-LLC stealing, VTIME slice controls, stats gauges, and
   focused VM coverage.

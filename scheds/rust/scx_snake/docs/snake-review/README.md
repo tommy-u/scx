@@ -4,6 +4,10 @@ Assessment date: 2026-08-03
 
 Current baseline: `c365457b`
 
+Roadmap update: 2026-08-03
+
+Roadmap baseline: `3e933731e8c8f09676365fcbd50a1088a3464d93`
+
 Scope: `scx_snake`, `scx_snake_inspector`, `scx_mitosis`, and selected Rust
 schedulers used as prior art
 
@@ -13,7 +17,8 @@ Snake is a coherent experimental scheduler whose userspace control plane compile
 placement, queue, and managed-resource policy into bounded BPF state. It now has
 the main mechanisms needed for a guarded single-host Mitosis simulation:
 
-- polling-based direct-child lifecycle with stable IDs and slot epochs;
+- polling-based direct-child topology lifecycle with stable IDs and slot epochs,
+  plus BPF ancestor resolution for task membership;
 - cpuset-aware allocation with configurable cell-0 holdout;
 - elapsed-time demand sampling, EWMA, threshold/cooldown control, and live CPU
   ownership rebalancing;
@@ -21,23 +26,24 @@ the main mechanisms needed for a guarded single-host Mitosis simulation:
 - cell/LLC VTIME queues, direct borrowing, same-cell orphan draining, and
   sibling-LLC stealing;
 - live VTIME base-slice and pinned-waiter shrinking controls;
-- Inspector views for managed capacity, rebalance state, physical-core placement,
-  and host-tax accounting.
+- Inspector views for managed identity exposure, capacity, rebalance state,
+  physical-core placement, and host-tax accounting.
 
 That is enough implementation for a tightly controlled canary on a noncritical
 host. It is not unrestricted-production readiness. Observer errors can still
 detach the scheduler, queued work cannot consume idle CPUs owned by another cell,
-CPU hotplug has no safe contract, managed identity is eventually reconciled by
-userspace polling, and scale/soak/rollback/browser evidence remains incomplete.
+CPU hotplug has no safe contract, a newly created child is unresolved until the
+next topology publication, and scale/soak/rollback/browser evidence remains
+incomplete.
 
 | Dimension | Estimate | Interpretation |
 | --- | ---: | --- |
 | Snake experimental feature implementation | **90%** | The intended policy, managed-cell, fairness, and observability mechanisms are broadly present. |
 | Snake production readiness | **45%** | Important lifecycle contracts and operational evidence remain open. |
 | Static scheduling-data-plane parity with Mitosis | **88%** | Queue domains, affinity escapes, VTIME, borrowing, draining, stealing, and slice control exist. |
-| Mitosis dynamic control/resource plane | **82%** | Lifecycle, holdout, demand EWMA, rebalancing, and banked publication exist; identity remains polling-based and hotplug is unsupported. |
-| Overall end-to-end Mitosis behavior parity | **85% +/-5%** | A managed Mitosis profile is runnable, but production-scale and failure evidence is incomplete. |
-| Inspector, current baseline | **90%** | Managed accounting and physical-core views are strong; sparse scaling and browser E2E remain. |
+| Mitosis dynamic control/resource plane | **88%** | BPF identity, lifecycle, holdout, demand EWMA, rebalancing, and banked publication exist; topology events and hotplug still differ. |
+| Overall end-to-end Mitosis behavior parity | **88% +/-4%** | A managed Mitosis profile is runnable, but production-scale and failure evidence is incomplete. |
+| Inspector, current baseline | **92%** | Managed identity, accounting, and physical-core views are strong; sparse scaling and browser E2E remain. |
 
 These are engineering judgments, not coverage percentages. The scoring rubric and
 feature evidence are in [Feature completeness](feature-completeness.md).
@@ -49,10 +55,11 @@ feature evidence are in [Feature completeness](feature-completeness.md).
    changes, draining, and same-cell stealing are implemented. Work should now
    concentrate on failure isolation and runtime evidence.
 
-2. **Managed identity is safe against slot reuse but not cgroup-native.** Threads
-   receive `(cell_id, slot_epoch)` through recurring userspace reconciliation.
-   This avoids stale slot aliasing, but fork/move visibility has a polling window
-   that Mitosis avoids with BPF cgroup identity.
+2. **Managed task identity is now cgroup-derived in BPF.** Userspace publishes a
+   banked direct-child cgroup directory; new threads and live moves resolve the
+   nearest assigned ancestor without a per-thread userspace write. The remaining
+   window is topology publication for a newly created or replaced direct child,
+   and exact mapped/unresolved cell-0 runtime and exit counters measure it.
 
 3. **Banked topology changes are narrower than hotplug support.** Managed cell and
    CPU-owner changes stage policy, masks, descriptors, and routes together in an
@@ -79,12 +86,12 @@ feature evidence are in [Feature completeness](feature-completeness.md).
 
 | Area | Implemented now | Still unproven or limited |
 | --- | --- | --- |
-| Managed lifecycle | Direct-child reconciliation, exclusions, stable IDs, slot epochs, managed workload VM fixture | Immediate fork/move identity; polling/churn scale |
+| Managed lifecycle | Direct-child reconciliation, BPF descendant identity, exclusions, stable IDs, slot epochs, managed workload VM fixture | New-child publication latency and churn scale |
 | Resource allocation | Effective-cpuset claims, deterministic ownership, cell-0 minimum, infeasible-plan rejection | CPU hotplug and heterogeneous capacity |
 | Dynamic control | Elapsed-time samples, runtime EWMA, threshold/cooldown, rebalances, live telemetry | Long soak, oscillation bounds at production scale |
 | Publication and queues | Complete bank staging, reader quiescence, full structural drain, in-place resize, orphan drain, sibling steal | Fault-injection breadth and cross-cell queued work |
 | Latency controls | Live VTIME base slice and optional waiter-aware shrinking | Pinned-latency/fairness trade-off evidence |
-| Inspector | Managed allocation/rebalance views, capacity lanes, physical-core placement, host-tax accounting | Sparse 1,024-CPU pipeline and real-browser E2E |
+| Inspector | Managed identity exposure, allocation/rebalance views, capacity lanes, physical-core placement, host-tax accounting | Sparse 1,024-CPU pipeline and real-browser E2E |
 | Runtime validation | Focused managed workload, churn/reuse, resize, queued affinity, drain/steal VM tests | Scheduled multi-kernel gate, scale/soak, canary and rollback evidence |
 
 ## Roadmap priorities
@@ -104,7 +111,7 @@ Priority meanings:
 | `queued-cross-cell-progress` | Define the cross-cell queued-backlog contract | **P0** | Every supported resource profile either guarantees progress or rejects/alerts before watchdog exposure. |
 | `hotplug-contract` | Support or safely reject CPU hotplug | **P0** | Online/offline changes are transactional, or detected and followed by controlled detach. |
 | `eevdf-shares` | Fix or remove exposed EEVDF weighted shares | **P0** | Nice-weight ratios pass equal, mixed, sleeper, yield, and affinity VM cases. |
-| `identity-hardening` | Close userspace reconciliation windows | **P1** | Fork, exec, cgroup move, and slot reuse cannot transiently run with the wrong managed identity under churn. |
+| `managed-topology-latency` | Bound direct-child publication latency | **P1** | Mapped cell-0 runtime is zero in steady state and unresolved runtime stays below an accepted production threshold during churn. |
 | `scale-soak-rollback` | Build operational evidence | **P1** | Target-host scale curves, sustained soak, canary rollback, and restart-under-load campaigns pass. |
 | `browser-vm-ci` | Automate privileged and browser evidence | **P1** | Managed VM coverage is scheduled across supported kernels and real-browser workflows run in CI. |
 | `inspector-scaling` | Make collection and rendering sparse | **P1** | Cost scales with active topology/traffic rather than configured `CPUs^2`. |
@@ -116,7 +123,8 @@ Priority meanings:
 
 | Milestone | Current signal |
 | --- | --- |
-| Direct-child lifecycle and epoch-safe reuse | Implemented with userspace polling and managed VM coverage |
+| BPF managed task identity | Banked cgroup mappings, ancestor inheritance, live-move refresh, manual override precedence, and exact cell-0 exposure counters |
+| Direct-child lifecycle and epoch-safe reuse | Implemented with userspace topology polling and managed VM coverage |
 | Complete banked managed topology | Policy/resource routes stage together; old readers quiesce before reuse |
 | Cpuset allocation and cell-0 holdout | Implemented with deterministic feasibility checks |
 | Demand EWMA and controlled rebalance | Implemented with live parameters and Inspector telemetry |
@@ -130,7 +138,7 @@ Priority meanings:
 flowchart LR
     A[Observer isolation] --> B[Cross-cell backlog contract]
     B --> C[Hotplug contract]
-    C --> D[Identity churn hardening]
+    C --> D[Identity and topology churn evidence]
     D --> E[Scale and soak]
     E --> F[Canary and rollback exercise]
     F --> G[Restricted production decision]
