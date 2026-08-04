@@ -44,6 +44,16 @@ static __always_inline const struct cpumask *queue_task_cell_idle_source(
 		return NULL;
 	}
 
+	if (kind == SNAKE_QUEUE_MASK_GROUP_LLC) {
+		u32 group_queue_index;
+
+		source = queue_task_group_consumers(ctx, p, cell_index,
+						    &group_queue_index);
+		if (!source)
+			*errorp = -ENOENT;
+		return source;
+	}
+
 	if (kind != SNAKE_QUEUE_MASK_LOCAL_LLC) {
 		source = queue_cell_mask(ctx, cell_index, kind);
 		if (!source)
@@ -216,7 +226,12 @@ static __noinline s32 queue_pick_task_cell_preferred_cpu(
 	if (restricted)
 		return restricted < 0 ? restricted : -ENOENT;
 
-	if (kind == SNAKE_QUEUE_MASK_LOCAL_LLC) {
+	if (kind == SNAKE_QUEUE_MASK_GROUP_LLC) {
+		u32 group_queue_index;
+
+		source = queue_task_group_consumers(ctx, p, cell_index,
+						    &group_queue_index);
+	} else if (kind == SNAKE_QUEUE_MASK_LOCAL_LLC) {
 		route_cpu = prev_cpu >= 0 && prev_cpu < nr_cpu_ids &&
 				    bpf_cpumask_test_cpu(prev_cpu, primary) ?
 				    prev_cpu :
@@ -231,7 +246,7 @@ static __noinline s32 queue_pick_task_cell_preferred_cpu(
 		source = queue_cell_mask(ctx, cell_index, kind);
 	}
 	if (!source)
-		return -EINVAL;
+		return kind == SNAKE_QUEUE_MASK_GROUP_LLC ? -ENOENT : -EINVAL;
 	scratch = runtime->queue_cpumask;
 	if (!scratch)
 		return -EINVAL;

@@ -12,7 +12,9 @@ use crate::parameters::{BpfSliceParameters, UserspaceParameters};
 use crate::queue_timing::QueueTimingControlResponse;
 use crate::runtime_policy::{PolicyUpdateResponse, PolicyValidationResponse};
 use crate::stats::Metrics;
-use crate::task_cells::{ThreadCellAssignment, ThreadCellResponse};
+use crate::task_cells::{
+    ThreadCellAssignment, ThreadCellResponse, ThreadLlcGroupAssignment, ThreadLlcGroupResponse,
+};
 
 #[derive(Clone, Debug, serde::Deserialize, Eq, PartialEq, serde::Serialize)]
 pub struct CallbackTimingRateResponse {
@@ -47,6 +49,10 @@ pub enum SchedulerRequest {
     ClearThreadCell {
         tid: i32,
     },
+    SetThreadLlcGroup(ThreadLlcGroupAssignment),
+    ClearThreadLlcGroup {
+        tid: i32,
+    },
     SetFineTiming {
         callback: FineTimingCallback,
         enabled: bool,
@@ -70,6 +76,7 @@ pub enum SchedulerResponse {
     PolicyValidation(std::result::Result<PolicyValidationResponse, String>),
     ReplacePolicy(std::result::Result<PolicyUpdateResponse, String>),
     ThreadCell(std::result::Result<ThreadCellResponse, String>),
+    ThreadLlcGroup(std::result::Result<ThreadLlcGroupResponse, String>),
     FineTiming(std::result::Result<FineTimingControlResponse, String>),
     QueueTiming(std::result::Result<QueueTimingControlResponse, String>),
     CallbackTimingSampleRate(std::result::Result<CallbackTimingRateResponse, String>),
@@ -202,6 +209,55 @@ pub fn clear_running_thread_cell(tid: i32) -> Result<ThreadCellResponse> {
         .context("connecting to the running scx scheduler")?;
     request_clear_thread_cell(&mut client, tid)
         .with_context(|| format!("clearing cell annotation for TID {tid}"))
+}
+
+pub fn request_set_thread_llc_group(
+    client: &mut StatsClient,
+    assignment: ThreadLlcGroupAssignment,
+) -> Result<ThreadLlcGroupResponse> {
+    client.request(
+        "stats",
+        vec![
+            ("target".into(), "thread_llc_group_set".into()),
+            ("tid".into(), assignment.tid.to_string()),
+            ("group_id".into(), assignment.group_id.to_string()),
+        ],
+    )
+}
+
+pub fn request_clear_thread_llc_group(
+    client: &mut StatsClient,
+    tid: i32,
+) -> Result<ThreadLlcGroupResponse> {
+    client.request(
+        "stats",
+        vec![
+            ("target".into(), "thread_llc_group_clear".into()),
+            ("tid".into(), tid.to_string()),
+        ],
+    )
+}
+
+pub fn set_running_thread_llc_group(
+    assignment: ThreadLlcGroupAssignment,
+) -> Result<ThreadLlcGroupResponse> {
+    let mut client = StatsClient::new()
+        .connect(Some(UPDATE_TIMEOUT_MS))
+        .context("connecting to the running scx scheduler")?;
+    request_set_thread_llc_group(&mut client, assignment).with_context(|| {
+        format!(
+            "assigning TID {} to LLC group {}",
+            assignment.tid, assignment.group_id
+        )
+    })
+}
+
+pub fn clear_running_thread_llc_group(tid: i32) -> Result<ThreadLlcGroupResponse> {
+    let mut client = StatsClient::new()
+        .connect(Some(UPDATE_TIMEOUT_MS))
+        .context("connecting to the running scx scheduler")?;
+    request_clear_thread_llc_group(&mut client, tid)
+        .with_context(|| format!("clearing LLC group annotation for TID {tid}"))
 }
 
 pub fn request_policy_update(
@@ -527,6 +583,53 @@ scope = "task_allowed"
 
         assert_eq!(response.tid, 4812);
         assert_eq!(response.cell_id, Some(7));
+        assert!(response.rehome_requested);
+        worker.join().expect("worker should finish");
+        drop(server);
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn thread_llc_group_assignment_round_trips_through_the_control_socket() {
+        let path = socket_path("llc-group-set");
+        let server = StatsServer::new(stats::server_data())
+            .set_path(&path)
+            .launch()
+            .expect("test server should launch");
+        let (responses, requests) = server.channels();
+        let worker = thread::spawn(move || {
+            let SchedulerRequest::SetThreadLlcGroup(assignment) =
+                requests.recv().expect("request should arrive")
+            else {
+                panic!("expected a thread LLC group request");
+            };
+            assert_eq!(assignment.tid, 4812);
+            assert_eq!(assignment.group_id, 9001);
+            responses
+                .send(SchedulerResponse::ThreadLlcGroup(Ok(
+                    ThreadLlcGroupResponse {
+                        tid: 4812,
+                        group_id: Some(9001),
+                        rehome_requested: true,
+                    },
+                )))
+                .expect("response should send");
+        });
+
+        let mut client = StatsClient::new()
+            .set_path(&path)
+            .connect(Some(1_000))
+            .expect("client should connect");
+        let response = request_set_thread_llc_group(
+            &mut client,
+            ThreadLlcGroupAssignment {
+                tid: 4812,
+                group_id: 9001,
+            },
+        )
+        .expect("group assignment should be acknowledged");
+
+        assert_eq!(response.group_id, Some(9001));
         assert!(response.rehome_requested);
         worker.join().expect("worker should finish");
         drop(server);

@@ -100,7 +100,7 @@ At 1,024 CPUs and 256 cells, one full metrics request reads approximately:
 
 ```text
 74 global stats × 1024 CPUs × 8 bytes
-+ 256 cells × 10 stats × 1024 CPUs × 8 bytes
++ 256 cells × 13 stats × 1024 CPUs × 8 bytes
 + 7 callbacks × 1024 CPUs × 520 bytes
 = 25,305,088 bytes
 ```

@@ -64,25 +64,42 @@ static __always_inline bool queue_mitosis_callback_ladders(
 static __always_inline bool queue_mitosis_expanded_enqueue_ladder(
 	const struct snake_compiled_ladder *ladder)
 {
-	const struct snake_queue_rung *enqueue0, *enqueue1, *enqueue2;
+	const struct snake_queue_rung *first, *group = NULL, *cell, *cpu;
+	u32 cell_index = 0, cpu_index;
 
-	if (!ladder || ladder->nr_enqueue_rungs != 3)
+	if (!ladder || ladder->nr_enqueue_rungs < 2 ||
+	    ladder->nr_enqueue_rungs > 4)
 		return false;
-	enqueue0 = MEMBER_VPTR(ladder->enqueue_rungs, [0]);
-	enqueue1 = MEMBER_VPTR(ladder->enqueue_rungs, [1]);
-	enqueue2 = MEMBER_VPTR(ladder->enqueue_rungs, [2]);
-	if (!enqueue0 || !enqueue1 || !enqueue2)
+	first = MEMBER_VPTR(ladder->enqueue_rungs, [0]);
+	if (!first)
 		return false;
-	return enqueue0->opcode == SNAKE_ENQUEUE_OP_TRY_DIRECT &&
-	       enqueue0->input == SNAKE_QUEUE_INPUT_CELL &&
-	       enqueue0->flags == SNAKE_QUEUE_RUNG_F_DIRECT_DISPATCH &&
-	       !enqueue0->reserved && !enqueue0->data &&
-	       enqueue1->opcode == SNAKE_ENQUEUE_OP_CELL &&
-	       enqueue1->input == SNAKE_QUEUE_INPUT_CELL && !enqueue1->flags &&
-	       !enqueue1->reserved && !enqueue1->data &&
-	       enqueue2->opcode == SNAKE_ENQUEUE_OP_INSERT_CPU &&
-	       enqueue2->input == SNAKE_QUEUE_INPUT_CPU && !enqueue2->flags &&
-	       !enqueue2->reserved && !enqueue2->data;
+	if (first->opcode == SNAKE_ENQUEUE_OP_TRY_DIRECT &&
+	    first->input == SNAKE_QUEUE_INPUT_CELL) {
+		if (first->flags != SNAKE_QUEUE_RUNG_F_DIRECT_DISPATCH ||
+		    first->reserved || first->data)
+			return false;
+		cell_index++;
+	}
+	first = MEMBER_VPTR(ladder->enqueue_rungs, [cell_index]);
+	if (first && first->opcode == SNAKE_ENQUEUE_OP_CELL &&
+	    first->input == SNAKE_QUEUE_INPUT_GROUP_LLC) {
+		group = first;
+		cell_index++;
+	}
+	cpu_index = cell_index + 1;
+	if (cpu_index + 1 != ladder->nr_enqueue_rungs)
+		return false;
+	cell = MEMBER_VPTR(ladder->enqueue_rungs, [cell_index]);
+	cpu = MEMBER_VPTR(ladder->enqueue_rungs, [cpu_index]);
+	if (!cell || !cpu)
+		return false;
+	return (!group || (!group->flags && !group->reserved && !group->data)) &&
+	       cell->opcode == SNAKE_ENQUEUE_OP_CELL &&
+	       cell->input == SNAKE_QUEUE_INPUT_CELL && !cell->flags &&
+	       !cell->reserved && !cell->data &&
+	       cpu->opcode == SNAKE_ENQUEUE_OP_INSERT_CPU &&
+	       cpu->input == SNAKE_QUEUE_INPUT_CPU && !cpu->flags &&
+	       !cpu->reserved && !cpu->data;
 }
 
 static __always_inline bool queue_mitosis_expanded_dispatch_ladder(

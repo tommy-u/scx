@@ -34,6 +34,30 @@ pub struct ThreadCellAssignment {
     pub cell_id: u32,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ThreadLlcGroupAssignment {
+    pub tid: i32,
+    pub group_id: u64,
+}
+
+impl FromStr for ThreadLlcGroupAssignment {
+    type Err = String;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        let (tid, group_id) = value
+            .split_once(':')
+            .ok_or_else(|| "expected TID:GROUP".to_owned())?;
+        let tid = parse_tid(tid)?;
+        let group_id = group_id
+            .parse::<u64>()
+            .map_err(|error| format!("invalid LLC group ID `{group_id}`: {error}"))?;
+        if group_id == 0 {
+            return Err("LLC group ID must be nonzero".into());
+        }
+        Ok(Self { tid, group_id })
+    }
+}
+
 impl FromStr for ThreadCellAssignment {
     type Err = String;
 
@@ -73,6 +97,13 @@ pub struct ThreadCellResponse {
     pub rehome_requested: bool,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ThreadLlcGroupResponse {
+    pub tid: i32,
+    pub group_id: Option<u64>,
+    pub rehome_requested: bool,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ThreadCellSnapshot {
     pub tid: i32,
@@ -85,6 +116,8 @@ pub struct ThreadCellSnapshot {
     pub allowed_cpus: String,
     pub cgroup: String,
     pub needs_rehome: bool,
+    pub llc_group_id: Option<u64>,
+    pub llc_group_generation: u32,
 }
 
 struct TaskStatus {
@@ -108,6 +141,23 @@ impl fmt::Display for ThreadCellResponse {
                 self.tid
             ),
             None => write!(formatter, "thread {} cell annotation cleared", self.tid),
+        }
+    }
+}
+
+impl fmt::Display for ThreadLlcGroupResponse {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.group_id {
+            Some(group_id) => write!(
+                formatter,
+                "thread {} assigned to LLC group {}; placement update requested",
+                self.tid, group_id
+            ),
+            None => write!(
+                formatter,
+                "thread {} LLC group annotation cleared; placement update requested",
+                self.tid
+            ),
         }
     }
 }
@@ -138,6 +188,38 @@ pub fn set_thread_cell(
             },
         )
     })
+}
+
+pub fn set_thread_llc_group(
+    map: &impl MapCore,
+    assignment: ThreadLlcGroupAssignment,
+) -> Result<bool> {
+    update_task_cell(map, assignment.tid, |value| {
+        apply_llc_group(value, assignment.group_id)
+    })
+}
+
+pub fn clear_thread_llc_group(map: &impl MapCore, tid: i32) -> Result<bool> {
+    if tid <= 0 {
+        bail!("TID must be positive");
+    }
+    let pidfd = open_thread(tid)?;
+    let Some(mut value) = lookup_task_cell(map, &pidfd, tid)? else {
+        return Ok(false);
+    };
+    let changed = clear_llc_group(&mut value);
+    if value.flags == 0 && value.llc_group_id == 0 {
+        map.delete(&pidfd.as_raw_fd().to_ne_bytes())
+            .with_context(|| format!("clearing LLC group annotation for TID {tid}"))?;
+    } else if changed {
+        map.update(
+            &pidfd.as_raw_fd().to_ne_bytes(),
+            bytes_of(&value),
+            MapFlags::ANY,
+        )
+        .with_context(|| format!("clearing LLC group annotation for TID {tid}"))?;
+    }
+    Ok(changed)
 }
 
 pub(crate) fn set_managed_task_cell(
@@ -190,7 +272,32 @@ fn empty_task_cell() -> bpf_intf::snake_task_cell {
         managed_cell_id: 0,
         managed_cell_epoch: 0,
         flags: 0,
+        llc_group_id: 0,
+        llc_group_generation: 0,
+        reserved: 0,
     }
+}
+
+fn next_group_generation(generation: u32) -> u32 {
+    generation.wrapping_add(1).max(1)
+}
+
+fn apply_llc_group(value: &mut bpf_intf::snake_task_cell, group_id: u64) -> bool {
+    if value.llc_group_id == group_id {
+        return false;
+    }
+    value.llc_group_id = group_id;
+    value.llc_group_generation = next_group_generation(value.llc_group_generation);
+    true
+}
+
+fn clear_llc_group(value: &mut bpf_intf::snake_task_cell) -> bool {
+    if value.llc_group_id == 0 {
+        return false;
+    }
+    value.llc_group_id = 0;
+    value.llc_group_generation = next_group_generation(value.llc_group_generation);
+    true
 }
 
 fn apply_manual_cell(value: &mut bpf_intf::snake_task_cell, cell: CellRef) -> bool {
@@ -225,7 +332,12 @@ fn clear_manual_cell(value: &mut bpf_intf::snake_task_cell) -> bool {
     let previous = (value.cell_id, value.cell_epoch);
     value.flags &= !bpf_intf::SNAKE_TASK_CELL_F_MANUAL;
     if value.flags & bpf_intf::SNAKE_TASK_CELL_F_MANAGED == 0 {
-        return false;
+        value.cell_id = 0;
+        value.cell_epoch = 0;
+        if previous != (0, 0) {
+            value.needs_rehome = 1;
+        }
+        return value.llc_group_id != 0;
     }
     value.cell_id = value.managed_cell_id;
     value.cell_epoch = value.managed_cell_epoch;
@@ -239,7 +351,11 @@ fn clear_managed_cell(value: &mut bpf_intf::snake_task_cell) -> bool {
     value.flags &= !bpf_intf::SNAKE_TASK_CELL_F_MANAGED;
     value.managed_cell_id = 0;
     value.managed_cell_epoch = 0;
-    value.flags & bpf_intf::SNAKE_TASK_CELL_F_MANUAL != 0
+    if value.flags & bpf_intf::SNAKE_TASK_CELL_F_MANUAL == 0 {
+        value.cell_id = 0;
+        value.cell_epoch = 0;
+    }
+    value.flags & bpf_intf::SNAKE_TASK_CELL_F_MANUAL != 0 || value.llc_group_id != 0
 }
 
 fn update_task_cell<T>(
@@ -333,6 +449,8 @@ pub fn inspect_thread_cell(map: &impl MapCore, tid: i32) -> Result<Option<Thread
         value.cell_id,
         value.cell_epoch,
         value.needs_rehome != 0,
+        (value.llc_group_id != 0).then_some(value.llc_group_id),
+        value.llc_group_generation,
     )
 }
 
@@ -341,6 +459,8 @@ pub(crate) fn inspect_thread(
     cell_id: u32,
     cell_epoch: u32,
     needs_rehome: bool,
+    llc_group_id: Option<u64>,
+    llc_group_generation: u32,
 ) -> Result<Option<ThreadCellSnapshot>> {
     let status = match fs::read_to_string(format!("/proc/{tid}/status")) {
         Ok(status) => status,
@@ -367,6 +487,8 @@ pub(crate) fn inspect_thread(
         allowed_cpus: status.allowed_cpus,
         cgroup,
         needs_rehome,
+        llc_group_id,
+        llc_group_generation,
     }))
 }
 
@@ -449,6 +571,19 @@ mod tests {
     }
 
     #[test]
+    fn parses_a_thread_llc_group_assignment() {
+        assert_eq!(
+            "4812:9001".parse::<ThreadLlcGroupAssignment>().unwrap(),
+            ThreadLlcGroupAssignment {
+                tid: 4812,
+                group_id: 9001,
+            }
+        );
+        assert!("4812:0".parse::<ThreadLlcGroupAssignment>().is_err());
+        assert!("0:9001".parse::<ThreadLlcGroupAssignment>().is_err());
+    }
+
+    #[test]
     fn rejects_malformed_or_out_of_range_assignments() {
         assert!("4812".parse::<ThreadCellAssignment>().is_err());
         assert!("0:7".parse::<ThreadCellAssignment>().is_err());
@@ -524,6 +659,37 @@ mod tests {
         assert!(clear_manual_cell(&mut value));
         assert_eq!(value.cell_id, 3);
         assert_eq!(value.needs_rehome, 1);
+    }
+
+    #[test]
+    fn llc_group_updates_preserve_cell_layers_and_advance_generation() {
+        let mut value = empty_task_cell();
+        apply_managed_cell(&mut value, CellRef::static_cell(7));
+        value.needs_rehome = 0;
+
+        assert!(apply_llc_group(&mut value, 9001));
+        assert_eq!(value.cell_id, 7);
+        assert_eq!(value.llc_group_id, 9001);
+        assert_eq!(value.llc_group_generation, 1);
+        assert!(!apply_llc_group(&mut value, 9001));
+        assert_eq!(value.llc_group_generation, 1);
+
+        assert!(clear_llc_group(&mut value));
+        assert_eq!(value.cell_id, 7);
+        assert_eq!(value.llc_group_id, 0);
+        assert_eq!(value.llc_group_generation, 2);
+    }
+
+    #[test]
+    fn clearing_the_last_cell_layer_preserves_an_llc_group_annotation() {
+        let mut value = empty_task_cell();
+        apply_manual_cell(&mut value, CellRef::static_cell(7));
+        apply_llc_group(&mut value, 42);
+
+        assert!(clear_manual_cell(&mut value));
+        assert_eq!(value.cell_id, 0);
+        assert_eq!(value.flags, 0);
+        assert_eq!(value.llc_group_id, 42);
     }
 
     #[test]

@@ -78,6 +78,35 @@ impl ValidationReport {
         }
     }
 
+    pub(crate) fn compiled(policy: &CompiledPolicy) -> Self {
+        if let Err(error) = resolve_mask_tables(policy) {
+            return Self::failure(ValidationError {
+                code: "mask_resolution_failed",
+                message: format!("{error:#}"),
+                line: None,
+                column: None,
+            });
+        }
+        if let Err(error) = resolve_host_queue_topology(policy) {
+            return Self::failure(ValidationError {
+                code: "queue_topology_resolution_failed",
+                message: format!("{error:#}"),
+                line: None,
+                column: None,
+            });
+        }
+        Self::success(policy)
+    }
+
+    pub(crate) fn configuration_failure(message: String) -> Self {
+        Self::failure(ValidationError {
+            code: "profile_configuration_failed",
+            message,
+            line: None,
+            column: None,
+        })
+    }
+
     fn failure(error: ValidationError) -> Self {
         Self {
             schema_version: SCHEMA_VERSION,
@@ -149,21 +178,5 @@ pub fn validate_policy_source(source: &str) -> ValidationReport {
             column: None,
         });
     }
-    if let Err(error) = resolve_mask_tables(&policy) {
-        return ValidationReport::failure(ValidationError {
-            code: "mask_resolution_failed",
-            message: format!("{error:#}"),
-            line: None,
-            column: None,
-        });
-    }
-    if let Err(error) = resolve_host_queue_topology(&policy) {
-        return ValidationReport::failure(ValidationError {
-            code: "queue_topology_resolution_failed",
-            message: format!("{error:#}"),
-            line: None,
-            column: None,
-        });
-    }
-    ValidationReport::success(&policy)
+    ValidationReport::compiled(&policy)
 }

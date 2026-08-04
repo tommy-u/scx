@@ -8,8 +8,9 @@ typedef unsigned int	   u32;
 typedef unsigned long long u64;
 #endif
 
-#define SNAKE_ABI_VERSION 32
-#define SNAKE_MAX_RUNGS 16
+#define SNAKE_ABI_VERSION 33
+#define SNAKE_MAX_RUNGS 17
+#define SNAKE_EXPANDED_MITOSIS_RUNGS 16
 #define SNAKE_MAX_GENERIC_RUNGS 9
 #define SNAKE_MAX_QUEUE_RUNGS 8
 #define SNAKE_LADDER_SLOTS 2
@@ -256,6 +257,7 @@ enum snake_queue_mask_kind {
 	SNAKE_QUEUE_MASK_PRIMARY    = 1,
 	SNAKE_QUEUE_MASK_BORROWABLE = 2,
 	SNAKE_QUEUE_MASK_LOCAL_LLC  = 3,
+	SNAKE_QUEUE_MASK_GROUP_LLC  = 4,
 };
 
 enum snake_enqueue_opcode {
@@ -288,6 +290,7 @@ enum snake_queue_input {
 	SNAKE_QUEUE_INPUT_MIN_VTIME,
 	SNAKE_QUEUE_INPUT_CELL_ORPHAN,
 	SNAKE_QUEUE_INPUT_CELL_SIBLING,
+	SNAKE_QUEUE_INPUT_GROUP_LLC,
 };
 
 enum snake_dispatch_fallback {
@@ -310,6 +313,9 @@ struct snake_task_cell {
 	u32 managed_cell_id;
 	u32 managed_cell_epoch;
 	u32 flags;
+	u64 llc_group_id;
+	u32 llc_group_generation;
+	u32 reserved;
 };
 
 /* Serialized userspace CPU mask stored in immutable queue descriptors. */
@@ -367,6 +373,9 @@ enum snake_cell_stat {
 	SNAKE_CELL_STAT_AFFINITY_DISPATCHES,
 	SNAKE_CELL_STAT_CLOCK_TRANSITIONS,
 	SNAKE_CELL_STAT_FOREIGN_AFFINITY_RUNTIME_NS,
+	SNAKE_CELL_STAT_GROUP_RUNTIME_NS,
+	SNAKE_CELL_STAT_GROUP_PREFERRED_RUNTIME_NS,
+	SNAKE_CELL_STAT_GROUP_FALLBACK_RUNTIME_NS,
 	SNAKE_NR_CELL_STATS,
 };
 

@@ -232,6 +232,8 @@ pub struct TaskMappingInspectionView {
     pub allowed_cpus: String,
     pub cgroup: String,
     pub needs_rehome: bool,
+    pub llc_group_id: Option<String>,
+    pub llc_group_generation: u32,
     pub source: String,
     pub membership: String,
 }
@@ -352,6 +354,7 @@ pub struct Inspector {
     queue_topology: Option<QueueTopologyInspectionView>,
     slots: [Option<SlotPolicy>; 2],
     assignments: BTreeMap<i32, u32>,
+    group_assignments: BTreeMap<i32, u64>,
     topology_transitions: VecDeque<TopologyTransitionInspectionView>,
     next_topology_transition_id: u64,
 }
@@ -374,6 +377,7 @@ impl Inspector {
             queue_topology: queue_topology.as_ref().map(queue_topology_view),
             slots,
             assignments: BTreeMap::new(),
+            group_assignments: BTreeMap::new(),
             topology_transitions: VecDeque::new(),
             next_topology_transition_id: 1,
         }
@@ -437,6 +441,20 @@ impl Inspector {
         self.assignments
             .iter()
             .map(|(&tid, &cell_id)| (tid, cell_id))
+    }
+
+    pub fn set_group_assignment(&mut self, tid: i32, group_id: u64) {
+        self.group_assignments.insert(tid, group_id);
+    }
+
+    pub fn clear_group_assignment(&mut self, tid: i32) {
+        self.group_assignments.remove(&tid);
+    }
+
+    pub fn group_assignments(&self) -> impl Iterator<Item = (i32, u64)> + '_ {
+        self.group_assignments
+            .iter()
+            .map(|(&tid, &group_id)| (tid, group_id))
     }
 
     pub fn snapshot(
@@ -1097,6 +1115,11 @@ fn data_reference(policy: &CompiledPolicy, rung: &CompiledRung) -> FieldReferenc
                     "Cell-local LLC CPUs",
                     "Use primary CPUs in the task cell's preferred LLC.",
                 ),
+                Self::QueueMask(QueueMaskKind::GroupLlc) => choice(
+                    "queue_mask:4",
+                    "LLC group CPUs",
+                    "Use primary CPUs in the LLC selected for the task's co-location group.",
+                ),
             }
         }
     }
@@ -1105,6 +1128,7 @@ fn data_reference(policy: &CompiledPolicy, rung: &CompiledRung) -> FieldReferenc
     candidates.push(DataChoice::QueueMask(QueueMaskKind::Primary));
     candidates.push(DataChoice::QueueMask(QueueMaskKind::Borrowable));
     candidates.push(DataChoice::QueueMask(QueueMaskKind::LocalLlc));
+    candidates.push(DataChoice::QueueMask(QueueMaskKind::GroupLlc));
     for table in &policy.mask_tables {
         candidates.push(DataChoice::Table(table.id, table.name.clone()));
     }

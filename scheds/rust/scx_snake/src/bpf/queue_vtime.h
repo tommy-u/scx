@@ -448,7 +448,31 @@ static __noinline bool queue_fairness_rehome_pending(
 	annotation = task_annotation(p);
 	if (annotation && READ_ONCE(annotation->needs_rehome))
 		return true;
+	if (annotation && READ_ONCE(annotation->llc_group_generation) !=
+			  runtime->llc_group_generation)
+		return true;
+	if (!annotation && runtime->llc_group_id)
+		return true;
 	return queue_task_cell_index(ctx, p) != runtime->cell_index;
+}
+
+static __always_inline void
+queue_fairness_adopt_llc_group(struct task_struct *p,
+			      struct snake_task_runtime *runtime)
+{
+	struct snake_task_cell *annotation;
+
+	if (!runtime)
+		return;
+	annotation = task_annotation(p);
+	if (!annotation) {
+		runtime->llc_group_id = 0;
+		runtime->llc_group_generation = 0;
+		return;
+	}
+	runtime->llc_group_id = READ_ONCE(annotation->llc_group_id);
+	runtime->llc_group_generation =
+		READ_ONCE(annotation->llc_group_generation);
 }
 
 static __always_inline bool
@@ -580,6 +604,24 @@ static __always_inline int queue_fairness_running(
 	runtime->started_exec_runtime = p->se.sum_exec_runtime;
 	runtime->service_budget	      = p->scx.slice;
 	runtime->runtime_valid	      = 1;
+	runtime->run_grouped	      = 0;
+	runtime->run_group_preferred = 0;
+	runtime->run_group_normal_queue = SNAKE_QUEUE_CELL_NONE;
+	{
+		struct snake_task_cell *annotation = task_annotation(p);
+		u32 preferred_queue;
+
+		if (annotation && READ_ONCE(annotation->llc_group_id)) {
+			runtime->run_grouped = 1;
+			if (!queue_task_group_normal_index(ctx, p,
+						   runtime->cell_index,
+						   &preferred_queue)) {
+				runtime->run_group_normal_queue = preferred_queue;
+				runtime->run_group_preferred =
+					cpuq->normal_queue_index == preferred_queue;
+			}
+		}
+	}
 	slice_shrink_on_running(ctx, p);
 	cell_stat_inc(ctx, runtime->run_cell_index,
 		      runtime->run_queue_class == SNAKE_QUEUE_CLASS_AFFINITY ?
@@ -628,6 +670,15 @@ static __always_inline int queue_fairness_stopping(struct snake_ladder_ctx *ctx,
 	}
 	cell_stat_add(ctx, runtime->run_cell_index, SNAKE_CELL_STAT_RUNTIME_NS,
 		      delta);
+	if (runtime->run_grouped) {
+		cell_stat_add(ctx, runtime->run_cell_index,
+			      SNAKE_CELL_STAT_GROUP_RUNTIME_NS, delta);
+		cell_stat_add(ctx, runtime->run_cell_index,
+			      runtime->run_group_preferred ?
+				      SNAKE_CELL_STAT_GROUP_PREFERRED_RUNTIME_NS :
+				      SNAKE_CELL_STAT_GROUP_FALLBACK_RUNTIME_NS,
+			      delta);
+	}
 	if (runtime->run_cell_index == runtime->run_owner_cell_index) {
 		cell_stat_add(ctx, runtime->run_cell_index,
 			      SNAKE_CELL_STAT_PRIMARY_RUNTIME_NS, delta);

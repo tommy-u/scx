@@ -109,7 +109,8 @@ scope = "task_allowed"
 ```
 
 A generic policy contains one to nine rungs. The exact 16-rung expanded
-Mitosis template is also supported; other 10-16 rung arrangements are rejected.
+Mitosis template and its 17-rung LLC-grouping form are also supported; other
+wide arrangements are rejected.
 Fallback is `previous_cpu` by default; `any_allowed` instead distributes
 fallback hints across the affinity mask. Invalid operations and
 operation/scope combinations are rejected before BPF is loaded. See
@@ -209,6 +210,32 @@ separately. Generic and expanded callbacks are selected before BPF load, so a
 live update that crosses between those ladder classes requires a scheduler
 restart. The fused `pick_idle_prefer_previous` operation remains available to
 other policies.
+
+### Intra-cell LLC grouping
+
+`--profile mitosis-sim-grouping` derives a grouping-enabled policy from the
+same embedded `mitosis-sim.toml`; it does not introduce a second configuration
+file. A nonzero group ID is an optional per-thread annotation, independent of
+the thread's managed or manual cell assignment:
+
+```bash
+sudo ./target/release/scx_snake --profile mitosis-sim-grouping
+sudo ./target/release/scx_snake --set-thread-llc-group 4812:9001
+sudo ./target/release/scx_snake --clear-thread-llc-group 4812
+```
+
+Within a cell, rendezvous hashing maps every thread with the same group ID to
+the same active LLC queue. Different IDs spread statistically, and changing a
+cell's active LLC set remaps only groups whose selected queue changed. The
+mapping is a soft preference: task affinity, a busy preferred LLC, fallback
+enqueue, and same-cell stealing can run a grouped thread elsewhere. Group
+annotations are not inherited by new threads. Live updates advance an
+annotation generation so an old queued execution is not replenished and the
+next enqueue adopts the new group.
+
+Per-cell statistics export total grouped runtime plus preferred-LLC and
+fallback runtime. The Inspector can set or clear one group ID across a TID,
+TGID, or cgroup subtree and displays these counters in **Cells & tasks**.
 
 ### Queue policies
 
@@ -361,8 +388,8 @@ cargo build --release -p scx_snake
 sudo ./target/release/scx_snake --profile mitosis-sim --stats 1
 ```
 
-`--profile mitosis-sim` uses VTIME automatically. Its policy is embedded in the
-binary at build time from
+`--profile mitosis-sim` and `--profile mitosis-sim-grouping` use VTIME
+automatically. Their shared base policy is embedded in the binary at build time from
 [`examples/mitosis-sim.toml`](examples/mitosis-sim.toml), so the TOML file does
 not need to be distributed with the executable. The checked-in TOML remains the
 single source of truth; changing it requires rebuilding Snake.

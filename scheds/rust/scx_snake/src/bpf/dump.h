@@ -260,12 +260,14 @@ void BPF_STRUCT_OPS(snake_dump_task, struct scx_dump_ctx *dctx,
 	annotation = task_annotation(p);
 	if (annotation)
 		scx_bpf_dump(
-			"TASK[%d] annotation_cell=%u annotation_epoch=%u managed_cell=%u managed_epoch=%u needs_rehome=%u flags=%x\n",
+			"TASK[%d] annotation_cell=%u annotation_epoch=%u managed_cell=%u managed_epoch=%u needs_rehome=%u flags=%x llc_group=%llu llc_group_generation=%u\n",
 			p->pid, READ_ONCE(annotation->cell_id),
 			READ_ONCE(annotation->cell_epoch),
 			READ_ONCE(annotation->managed_cell_id),
 			READ_ONCE(annotation->managed_cell_epoch),
-			READ_ONCE(annotation->needs_rehome), READ_ONCE(annotation->flags));
+			READ_ONCE(annotation->needs_rehome), READ_ONCE(annotation->flags),
+			READ_ONCE(annotation->llc_group_id),
+			READ_ONCE(annotation->llc_group_generation));
 	if (runtime) {
 		scx_bpf_dump(
 			"TASK[%d] cpu=%d slice=%llu dsq_vtime=%llu cell=%u external=%u epoch=%u topology_generation=%llu queue_class=%u queue_index=%u\n",
