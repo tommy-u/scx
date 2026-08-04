@@ -22,8 +22,29 @@
     "#fca50a",
     "#fcffa4",
   ];
+  const THEME_DEFAULTS = {
+    axis: "#43515d",
+    label: "#25313b",
+    canvas: "#ffffff",
+    "boundary-node": "#ffffff",
+    "boundary-package": "#d7dee4",
+    "boundary-llc": "#98a8b5",
+    "boundary-core": "#536471",
+    "band-boundary": "#6f7f8b",
+    selection: "#00d6a3",
+  };
   const number = new Intl.NumberFormat("en-US");
   let renderer = null;
+
+  function themeColor(name) {
+    if (!root.document || typeof root.getComputedStyle !== "function") {
+      return THEME_DEFAULTS[name];
+    }
+    const value = root.getComputedStyle(root.document.documentElement)
+      .getPropertyValue(`--heatmap-${name}`)
+      .trim();
+    return value || THEME_DEFAULTS[name];
+  }
 
   function resolveElement(value, fallbackId) {
     if (value && typeof value !== "string") return value;
@@ -348,7 +369,7 @@
 
   function drawAxes(context, matrix, geometry) {
     const { cellSize, margins, matrixSize } = geometry;
-    context.fillStyle = "#43515d";
+    context.fillStyle = themeColor("axis");
     context.font = "10px ui-monospace, SFMono-Regular, Menlo, monospace";
     context.textBaseline = "middle";
     for (const index of axisLabelIndices(matrix.order.length)) {
@@ -361,7 +382,7 @@
       context.fillText(String(matrix.order[index]), 0, 0);
       context.restore();
     }
-    context.fillStyle = "#25313b";
+    context.fillStyle = themeColor("label");
     context.font = "600 11px ui-sans-serif, system-ui, sans-serif";
     context.textAlign = "center";
     context.fillText("Destination CPU", margins.left + matrixSize / 2, margins.top + matrixSize + 40);
@@ -374,7 +395,12 @@
 
   function drawBoundaries(context, matrix, geometry) {
     const widths = { node: 3, package: 2.5, llc: 2, core: 1 };
-    const colors = { node: "#ffffff", package: "#d7dee4", llc: "#98a8b5", core: "#536471" };
+    const colors = {
+      node: themeColor("boundary-node"),
+      package: themeColor("boundary-package"),
+      llc: themeColor("boundary-llc"),
+      core: themeColor("boundary-core"),
+    };
     for (const boundary of topologyBoundaries(matrix.topology, matrix.order)) {
       const offset = boundary.index * geometry.cellSize;
       context.beginPath();
@@ -403,7 +429,9 @@
       const x = margins.left + boundary.index * cellSize;
       context.beginPath();
       context.lineWidth = boundary.level === "llc" ? 2 : 1;
-      context.strokeStyle = boundary.level === "llc" ? "#ffffff" : "#6f7f8b";
+      context.strokeStyle = boundary.level === "llc"
+        ? themeColor("boundary-node")
+        : themeColor("band-boundary");
       context.moveTo(x, usageTop);
       context.lineTo(x, usageTop + usageHeight);
       context.stroke();
@@ -426,7 +454,9 @@
       const x = margins.left + boundary.index * cellSize;
       context.beginPath();
       context.lineWidth = boundary.level === "llc" ? 2 : 1;
-      context.strokeStyle = boundary.level === "llc" ? "#ffffff" : "#6f7f8b";
+      context.strokeStyle = boundary.level === "llc"
+        ? themeColor("boundary-node")
+        : themeColor("band-boundary");
       context.moveTo(x, irqTop);
       context.lineTo(x, irqTop + irqHeight);
       context.stroke();
@@ -449,7 +479,9 @@
       const x = margins.left + boundary.index * cellSize;
       context.beginPath();
       context.lineWidth = boundary.level === "llc" ? 2 : 1;
-      context.strokeStyle = boundary.level === "llc" ? "#ffffff" : "#6f7f8b";
+      context.strokeStyle = boundary.level === "llc"
+        ? themeColor("boundary-node")
+        : themeColor("band-boundary");
       context.moveTo(x, lossTop);
       context.lineTo(x, lossTop + lossHeight);
       context.stroke();
@@ -457,7 +489,7 @@
   }
 
   function drawBandLabel(context, label, x, y) {
-    context.fillStyle = "#25313b";
+    context.fillStyle = themeColor("label");
     context.font = "600 10px ui-sans-serif, system-ui, sans-serif";
     context.textAlign = "right";
     context.textBaseline = "middle";
@@ -475,7 +507,7 @@
       const intensity = normalizeCount(group.utilizationPct, 100, scale);
       context.fillStyle = infernoColor(intensity);
       context.fillRect(left, top, Math.ceil(width), height);
-      context.strokeStyle = "#ffffff";
+      context.strokeStyle = themeColor("boundary-node");
       context.lineWidth = isCore ? 1 : 2;
       context.strokeRect(left, top, Math.ceil(width), height);
       context.font = "600 9px ui-sans-serif, system-ui, sans-serif";
@@ -493,8 +525,8 @@
   function drawLlcAnnotations(context, matrix, geometry) {
     const groups = topologyGroups(matrix.topology, matrix.order, "llc")
       .filter((group) => group.value != null);
-    context.fillStyle = "#43515d";
-    context.strokeStyle = "#98a8b5";
+    context.fillStyle = themeColor("axis");
+    context.strokeStyle = themeColor("boundary-llc");
     context.lineWidth = 1;
     context.font = "600 9px ui-sans-serif, system-ui, sans-serif";
     context.textAlign = "center";
@@ -525,7 +557,7 @@
     const row = matrix.positions.get(renderer.pinnedPair.from);
     const column = matrix.positions.get(renderer.pinnedPair.to);
     if (row == null || column == null) return;
-    context.strokeStyle = "#00d6a3";
+    context.strokeStyle = themeColor("selection");
     context.lineWidth = Math.max(2, Math.min(4, geometry.cellSize / 2));
     context.strokeRect(
       geometry.margins.left + column * geometry.cellSize + 1,
@@ -640,7 +672,7 @@
     renderer.canvas.width = Math.ceil(geometry.width * pixelRatio);
     renderer.canvas.height = Math.ceil(geometry.height * pixelRatio);
     context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
-    context.fillStyle = "#ffffff";
+    context.fillStyle = themeColor("canvas");
     context.fillRect(0, 0, geometry.width, geometry.height);
     context.fillStyle = "#11161c";
     context.fillRect(geometry.margins.left, geometry.margins.top, geometry.matrixSize, geometry.matrixSize);
@@ -829,6 +861,7 @@
     renderer.canvas.removeEventListener("pointermove", showTooltip);
     renderer.canvas.removeEventListener("pointerleave", hideTooltip);
     renderer.canvas.removeEventListener("click", pinMigrationPair);
+    root.document?.removeEventListener("mitosis-theme-change", scheduleDraw);
     renderer.resizeObserver?.disconnect();
     renderer = null;
   }
@@ -858,6 +891,7 @@
     canvas.addEventListener("pointermove", showTooltip);
     canvas.addEventListener("pointerleave", hideTooltip);
     canvas.addEventListener("click", pinMigrationPair);
+    root.document?.addEventListener("mitosis-theme-change", scheduleDraw);
     if (typeof root.ResizeObserver === "function" && viewport) {
       renderer.resizeObserver = new root.ResizeObserver(scheduleDraw);
       renderer.resizeObserver.observe(viewport);

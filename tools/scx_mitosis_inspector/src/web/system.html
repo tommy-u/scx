@@ -4,6 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>System stats</title>
+    <script src="/assets/theme.js"></script>
     <link rel="stylesheet" href="/assets/style.css">
   </head>
   <body>
@@ -33,7 +34,15 @@
           <a href="/">Callbacks</a>
           <a class="active" aria-current="page" href="/system">System</a>
           <a href="/stats">Scheduler</a>
+          <a href="/config">Configuration</a>
+          <span class="navigation-group-label navigation-group-label-secondary">Reference</span>
+          <a href="/appendix">Appendix</a>
         </nav>
+        <label class="workspace-theme-control">
+          <span>Dark mode</span>
+          <input type="checkbox" role="switch" data-theme-toggle aria-label="Use dark mode">
+          <span class="theme-switch-track" aria-hidden="true"><span></span></span>
+        </label>
       </aside>
 
       <main id="app" tabindex="-1" aria-label="Host system statistics">

@@ -84,6 +84,60 @@ impl CellMetrics {
 
 #[stat_doc]
 #[derive(Clone, Debug, Default, Serialize, Deserialize, Stats)]
+pub struct BorrowFlowMetrics {
+    #[stat(desc = "Cell consuming another cell's CPU capacity")]
+    pub borrower_cell: u32,
+    #[stat(desc = "Cell supplying CPU capacity")]
+    pub lender_cell: u32,
+    #[stat(desc = "Borrowed runtime in the latest collection interval (ns)")]
+    pub runtime_ns: u64,
+    #[stat(desc = "Borrowed runtime as a percentage of borrower runtime")]
+    pub borrower_runtime_pct: f64,
+    #[stat(desc = "Borrowed runtime as a percentage of lender CPU capacity")]
+    pub lender_capacity_pct: f64,
+}
+
+pub(crate) fn build_borrow_flows(
+    runtime: &[[u64; crate::MAX_CELLS]; crate::MAX_CELLS],
+    borrower_runtime: &[u64; crate::MAX_CELLS],
+    lender_capacity: &[u64; crate::MAX_CELLS],
+    active: &[bool; crate::MAX_CELLS],
+) -> BTreeMap<String, BorrowFlowMetrics> {
+    let mut flows = BTreeMap::new();
+    for lender in 0..crate::MAX_CELLS {
+        for borrower in 0..crate::MAX_CELLS {
+            let runtime_ns = runtime[lender][borrower];
+            if lender == borrower || runtime_ns == 0 || !active[lender] || !active[borrower] {
+                continue;
+            }
+
+            let borrower_runtime_pct = if borrower_runtime[borrower] > 0 {
+                100.0 * runtime_ns as f64 / borrower_runtime[borrower] as f64
+            } else {
+                0.0
+            };
+            let lender_capacity_pct = if lender_capacity[lender] > 0 {
+                100.0 * runtime_ns as f64 / lender_capacity[lender] as f64
+            } else {
+                0.0
+            };
+            flows.insert(
+                format!("{borrower}_from_{lender}"),
+                BorrowFlowMetrics {
+                    borrower_cell: borrower as u32,
+                    lender_cell: lender as u32,
+                    runtime_ns,
+                    borrower_runtime_pct,
+                    lender_capacity_pct,
+                },
+            );
+        }
+    }
+    flows
+}
+
+#[stat_doc]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, Stats)]
 #[stat(top)]
 pub struct Metrics {
     #[stat(desc = "Number of cells")]
@@ -126,6 +180,8 @@ pub struct Metrics {
         desc = "1 if the cell-0 holdout has taken a CPU already claimed by a workload cell, else 0"
     )]
     pub enforced_holdout: u64,
+    #[stat(desc = "Pairwise cell borrowing in the latest collection interval")]
+    pub borrow_flows: BTreeMap<String, BorrowFlowMetrics>,
     #[stat(desc = "Per-cell metrics")]
     pub cells: BTreeMap<u32, CellMetrics>,
 }
@@ -177,6 +233,7 @@ pub fn server_data() -> StatsServerData<(), Metrics> {
     StatsServerData::new()
         .add_meta(Metrics::meta())
         .add_meta(CellMetrics::meta())
+        .add_meta(BorrowFlowMetrics::meta())
         .add_ops("top", StatsOps { open, close: None })
 }
 
@@ -187,4 +244,61 @@ pub fn monitor(intv: Duration, shutdown: Arc<AtomicBool>) -> Result<()> {
         || shutdown.load(Ordering::Relaxed),
         |metrics| metrics.format(&mut std::io::stdout()),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_borrow_flows;
+    use crate::MAX_CELLS;
+
+    #[test]
+    fn borrow_flows_preserve_borrower_and_lender_direction() {
+        let mut runtime = [[0u64; MAX_CELLS]; MAX_CELLS];
+        let mut borrower_runtime = [0u64; MAX_CELLS];
+        let mut lender_capacity = [0u64; MAX_CELLS];
+        let mut active = [false; MAX_CELLS];
+
+        // Rows are lenders and columns are borrowers.
+        runtime[0][1] = 250;
+        runtime[2][1] = 750;
+        borrower_runtime[1] = 2_000;
+        lender_capacity[0] = 1_000;
+        lender_capacity[2] = 3_000;
+        active[0] = true;
+        active[1] = true;
+        active[2] = true;
+
+        let flows = build_borrow_flows(&runtime, &borrower_runtime, &lender_capacity, &active);
+
+        assert_eq!(flows.len(), 2);
+        let from_zero = &flows["1_from_0"];
+        assert_eq!(from_zero.borrower_cell, 1);
+        assert_eq!(from_zero.lender_cell, 0);
+        assert_eq!(from_zero.runtime_ns, 250);
+        assert_eq!(from_zero.borrower_runtime_pct, 12.5);
+        assert_eq!(from_zero.lender_capacity_pct, 25.0);
+        let from_two = &flows["1_from_2"];
+        assert_eq!(from_two.borrower_cell, 1);
+        assert_eq!(from_two.lender_cell, 2);
+        assert_eq!(from_two.borrower_runtime_pct, 37.5);
+        assert_eq!(from_two.lender_capacity_pct, 25.0);
+    }
+
+    #[test]
+    fn borrow_flows_exclude_own_runtime_stale_cells_and_zero_edges() {
+        let mut runtime = [[0u64; MAX_CELLS]; MAX_CELLS];
+        let mut borrower_runtime = [0u64; MAX_CELLS];
+        let mut lender_capacity = [0u64; MAX_CELLS];
+        let mut active = [false; MAX_CELLS];
+
+        runtime[0][0] = 900;
+        runtime[0][1] = 100;
+        borrower_runtime[0] = 900;
+        borrower_runtime[1] = 100;
+        lender_capacity[0] = 1_000;
+        active[0] = true;
+
+        let flows = build_borrow_flows(&runtime, &borrower_runtime, &lender_capacity, &active);
+        assert!(flows.is_empty());
+    }
 }

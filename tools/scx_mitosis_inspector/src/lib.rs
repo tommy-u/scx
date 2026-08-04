@@ -13,6 +13,7 @@ pub mod host_context;
 pub mod migration_history;
 pub mod model;
 pub mod probe_manifest;
+pub mod scheduler_config;
 pub mod stats;
 pub mod system_stats;
 pub mod topology;

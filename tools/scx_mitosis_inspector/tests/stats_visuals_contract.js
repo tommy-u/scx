@@ -32,12 +32,18 @@ async function testStatsVisuals() {
   const chartsScript = html.indexOf('<script src="/assets/charts.js" defer>');
   const statsScript = html.indexOf('<script src="/assets/stats.js" defer>');
   const historySection = html.indexOf('id="cellHistoryHeading"');
+  const borrowingSection = html.indexOf('id="borrowingHeading"');
   const rawMetrics = html.indexOf('id="globalStatsHeading"');
 
   assert(chartsScript >= 0, "stats page loads the shared chart helper");
   assert(chartsScript < statsScript, "chart helper loads before stats renderer");
   assert(historySection >= 0, "stats page exposes a cell history section");
+  assert(borrowingSection >= 0, "stats page exposes pairwise borrowing");
+  assert(borrowingSection < historySection, "borrowing is visible before history");
   assert(historySection < rawMetrics, "cell history appears before raw metrics");
+  assert(html.includes('id="borrowMatrixHead"'));
+  assert(html.includes('id="borrowMatrixBody"'));
+  assert(html.includes('id="borrowFlowsBody"'));
   assert(html.includes('id="cellUtilizationChart"'));
   assert(html.includes('id="cellBalanceChart"'));
 
@@ -69,6 +75,15 @@ async function testStatsVisuals() {
 
   const snapshot = {
     metrics: {
+      borrow_flows: {
+        "1_from_0": {
+          borrower_cell: 1,
+          lender_cell: 0,
+          runtime_ns: 250000000,
+          borrower_runtime_pct: 12.5,
+          lender_capacity_pct: 25,
+        },
+      },
       cells: {
         0: {
           smoothed_util_pct: 61,
@@ -137,6 +152,16 @@ async function testStatsVisuals() {
   );
   assert.strictEqual(lineCharts[0].options.unit, "%");
   assert.strictEqual(lineCharts[1].options.unit, "%");
+
+  const matrixHead = element("#borrowMatrixHead");
+  const matrixBody = element("#borrowMatrixBody");
+  const flowBody = element("#borrowFlowsBody");
+  assert.strictEqual(matrixHead.children[0].children.length, 3, "axis plus two lender columns");
+  assert.strictEqual(matrixBody.children.length, 2, "one matrix row per borrower");
+  assert.strictEqual(flowBody.children.length, 1, "one directional borrow edge");
+  assert.strictEqual(flowBody.children[0].children[0].textContent, "Cell 1");
+  assert.strictEqual(flowBody.children[0].children[1].textContent, "Cell 0");
+  assert.strictEqual(flowBody.children[0].children[2].textContent, "250");
 }
 
 testStatsVisuals()

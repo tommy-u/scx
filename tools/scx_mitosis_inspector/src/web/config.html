@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Mitosis configuration</title>
+    <script src="/assets/theme.js"></script>
+    <link rel="stylesheet" href="/assets/style.css">
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="topbar-product">
+        <div class="product-title">
+          <h1>Mitosis inspector</h1>
+          <p>Scheduler activity and runtime statistics</p>
+        </div>
+      </div>
+      <div class="topbar-actions">
+        <div class="reset-stats-control">
+          <button class="reset-all-stats" id="resetAllStats" type="button">Reset all stats</button>
+          <span id="resetStatsStatus" role="status" aria-live="polite"></span>
+        </div>
+        <div class="status" id="status" role="status" aria-live="polite">
+          <span class="status-dot" aria-hidden="true"></span>
+          <span id="statusText">Loading</span>
+        </div>
+      </div>
+    </header>
+
+    <div class="workspace-shell">
+      <aside class="workspace-sidebar">
+        <nav class="workspace-navigation" aria-label="Inspector workspaces">
+          <span class="navigation-group-label">Observe</span>
+          <a href="/">Callbacks</a>
+          <a href="/system">System</a>
+          <a href="/stats">Scheduler</a>
+          <a class="active" aria-current="page" href="/config">Configuration</a>
+          <span class="navigation-group-label navigation-group-label-secondary">Reference</span>
+          <a href="/appendix">Appendix</a>
+        </nav>
+        <label class="workspace-theme-control">
+          <span>Dark mode</span>
+          <input type="checkbox" role="switch" data-theme-toggle aria-label="Use dark mode">
+          <span class="theme-switch-track" aria-hidden="true"><span></span></span>
+        </label>
+      </aside>
+
+      <main id="app" tabindex="-1" aria-label="Mitosis scheduler configuration">
+        <header class="view-heading">
+          <div>
+            <h2>Configuration</h2>
+            <p>Running process and complete command-line option inventory</p>
+          </div>
+        </header>
+
+        <section class="summary" aria-label="Configuration summary" data-feedback-key="Configuration:Summary">
+          <dl>
+            <div><dt>Process</dt><dd id="configurationPid">--</dd></div>
+            <div><dt>Version</dt><dd id="configurationVersion">--</dd></div>
+            <div><dt>Options</dt><dd id="configurationOptionCount">--</dd></div>
+            <div><dt>Explicit</dt><dd id="configurationExplicitCount">--</dd></div>
+            <div><dt>Defaults</dt><dd id="configurationDefaultCount">--</dd></div>
+            <div><dt>Disabled / unset</dt><dd id="configurationInactiveCount">--</dd></div>
+          </dl>
+        </section>
+
+        <section class="table-section" aria-labelledby="runningCommandHeading" data-feedback-key="Configuration:Running-command">
+          <div class="section-heading">
+            <div>
+              <h2 id="runningCommandHeading">Running command</h2>
+              <p id="configurationExecutable">Executable unavailable</p>
+            </div>
+          </div>
+          <pre class="configuration-command"><code id="configurationCommandLine">Waiting for scheduler process</code></pre>
+        </section>
+
+        <section class="table-section" aria-labelledby="configurationOptionsHeading" data-feedback-key="Configuration:Options">
+          <div class="configuration-heading">
+            <div>
+              <h2 id="configurationOptionsHeading">Parameters and flags</h2>
+              <p id="configurationMatchCount">Waiting for option inventory</p>
+            </div>
+            <div class="configuration-toolbar">
+              <label class="configuration-search">
+                <span>Search</span>
+                <input id="configurationSearch" type="search" autocomplete="off" placeholder="Flag, value, or description">
+              </label>
+              <fieldset class="segmented configuration-state-filter" aria-label="Configuration state">
+                <label><input type="radio" name="configurationState" value="all" checked><span>All</span></label>
+                <label><input type="radio" name="configurationState" value="explicit"><span>Explicit</span></label>
+                <label><input type="radio" name="configurationState" value="default"><span>Default</span></label>
+                <label><input type="radio" name="configurationState" value="disabled"><span>Disabled</span></label>
+                <label><input type="radio" name="configurationState" value="unset"><span>Unset</span></label>
+              </fieldset>
+            </div>
+          </div>
+          <div class="configuration-group" id="activeConfigurationSection">
+            <div class="section-heading">
+              <h3>Active</h3>
+              <p>Explicit and default values</p>
+            </div>
+            <div class="table-scroll">
+              <table id="configurationTable">
+                <thead>
+                  <tr>
+                    <th scope="col">State</th>
+                    <th scope="col">Option</th>
+                    <th scope="col">Current value</th>
+                    <th scope="col">Default</th>
+                    <th scope="col">Group</th>
+                    <th scope="col">Description</th>
+                  </tr>
+                </thead>
+                <tbody id="configurationRows"></tbody>
+              </table>
+            </div>
+          </div>
+          <div class="configuration-group" id="inactiveConfigurationSection">
+            <div class="section-heading">
+              <h3>Inactive</h3>
+              <p>Unset values and disabled flags</p>
+            </div>
+            <div class="table-scroll">
+              <table id="inactiveConfigurationTable">
+                <thead>
+                  <tr>
+                    <th scope="col">State</th>
+                    <th scope="col">Option</th>
+                    <th scope="col">Current value</th>
+                    <th scope="col">Default</th>
+                    <th scope="col">Group</th>
+                    <th scope="col">Description</th>
+                  </tr>
+                </thead>
+                <tbody id="inactiveConfigurationRows"></tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+    <script src="/assets/feedback.js" defer></script>
+    <script src="/assets/reset.js" defer></script>
+    <script src="/assets/config.js" defer></script>
+  </body>
+</html>

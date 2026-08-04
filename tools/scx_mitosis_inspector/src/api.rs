@@ -17,19 +17,24 @@ use serde_json::json;
 use crate::collector::Snapshot;
 use crate::host_context::HostContextView;
 use crate::migration_history::{MigrationHistory, MigrationWindowView};
+use crate::scheduler_config::SchedulerConfigSnapshot;
 use crate::stats::StatsSnapshot;
 use crate::system_stats::SystemStatsSnapshot;
 
 const INDEX_HTML: &str = include_str!("web/index.html");
+const APPENDIX_HTML: &str = include_str!("web/appendix.html");
+const CONFIG_HTML: &str = include_str!("web/config.html");
 const STATS_HTML: &str = include_str!("web/stats.html");
 const SYSTEM_HTML: &str = include_str!("web/system.html");
 const APP_JS: &str = include_str!("web/app.js");
 const CHARTS_JS: &str = include_str!("web/charts.js");
+const CONFIG_JS: &str = include_str!("web/config.js");
 const FEEDBACK_JS: &str = include_str!("web/feedback.js");
 const HEATMAP_JS: &str = include_str!("web/heatmap.js");
 const RESET_JS: &str = include_str!("web/reset.js");
 const STATS_JS: &str = include_str!("web/stats.js");
 const SYSTEM_JS: &str = include_str!("web/system.js");
+const THEME_JS: &str = include_str!("web/theme.js");
 const STYLE_CSS: &str = include_str!("web/style.css");
 const WEB_CACHE_CONTROL: &str = "no-store";
 
@@ -42,6 +47,7 @@ pub struct ApiContext {
     migrations: Arc<RwLock<MigrationHistory>>,
     migration_window_ms: u64,
     reset_requested: Arc<AtomicBool>,
+    scheduler_config: SchedulerConfigSnapshot,
 }
 
 impl ApiContext {
@@ -62,24 +68,35 @@ impl ApiContext {
             migrations,
             migration_window_ms,
             reset_requested,
+            scheduler_config: SchedulerConfigSnapshot::default(),
         }
+    }
+
+    pub fn with_scheduler_config(mut self, scheduler_config: SchedulerConfigSnapshot) -> Self {
+        self.scheduler_config = scheduler_config;
+        self
     }
 }
 
 pub fn router(context: ApiContext) -> Router {
     Router::new()
         .route("/", get(index))
+        .route("/appendix", get(appendix_page))
+        .route("/config", get(config_page))
         .route("/stats", get(stats_page))
         .route("/system", get(system_page))
         .route("/assets/app.js", get(app_script))
         .route("/assets/charts.js", get(charts_script))
+        .route("/assets/config.js", get(config_script))
         .route("/assets/feedback.js", get(feedback_script))
         .route("/assets/heatmap.js", get(heatmap_script))
         .route("/assets/reset.js", get(reset_script))
         .route("/assets/stats.js", get(stats_script))
         .route("/assets/system.js", get(system_script))
+        .route("/assets/theme.js", get(theme_script))
         .route("/assets/style.css", get(stylesheet))
         .route("/api/counters", get(counters))
+        .route("/api/config", get(config_snapshot))
         .route("/api/migrations", get(migration_snapshot))
         .route("/api/reset", post(reset_inspector))
         .route("/api/host-context", get(host_context))
@@ -90,6 +107,14 @@ pub fn router(context: ApiContext) -> Router {
 
 async fn index() -> Html<&'static str> {
     Html(INDEX_HTML)
+}
+
+async fn appendix_page() -> Html<&'static str> {
+    Html(APPENDIX_HTML)
+}
+
+async fn config_page() -> Html<&'static str> {
+    Html(CONFIG_HTML)
 }
 
 async fn stats_page() -> Html<&'static str> {
@@ -106,6 +131,10 @@ async fn app_script() -> (HeaderMap, &'static str) {
 
 async fn charts_script() -> (HeaderMap, &'static str) {
     content("application/javascript; charset=utf-8", CHARTS_JS)
+}
+
+async fn config_script() -> (HeaderMap, &'static str) {
+    content("application/javascript; charset=utf-8", CONFIG_JS)
 }
 
 async fn feedback_script() -> (HeaderMap, &'static str) {
@@ -126,6 +155,10 @@ async fn stats_script() -> (HeaderMap, &'static str) {
 
 async fn system_script() -> (HeaderMap, &'static str) {
     content("application/javascript; charset=utf-8", SYSTEM_JS)
+}
+
+async fn theme_script() -> (HeaderMap, &'static str) {
+    content("application/javascript; charset=utf-8", THEME_JS)
 }
 
 async fn stylesheet() -> (HeaderMap, &'static str) {
@@ -150,6 +183,10 @@ async fn counters(State(context): State<ApiContext>) -> Json<Snapshot> {
             .expect("snapshot lock poisoned")
             .clone(),
     )
+}
+
+async fn config_snapshot(State(context): State<ApiContext>) -> Json<SchedulerConfigSnapshot> {
+    Json(context.scheduler_config)
 }
 
 #[derive(Deserialize)]

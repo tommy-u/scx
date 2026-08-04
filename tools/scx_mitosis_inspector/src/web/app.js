@@ -37,11 +37,11 @@ let migrationWindowMs = null;
 let migrationMaxWindowMs = null;
 
 const chartColors = {
-  blue: "#2878a6",
-  green: "#16795b",
-  orange: "#b86b25",
-  red: "#b44949",
-  purple: "#7557a6",
+  blue: "var(--series-blue)",
+  green: "var(--series-green)",
+  orange: "var(--series-orange)",
+  red: "var(--series-red)",
+  purple: "var(--series-purple)",
 };
 
 function setActiveSection(activeLink) {
@@ -723,6 +723,9 @@ window.addEventListener("resize", () => {
   if (latestSnapshot) renderVisualizations(latestSnapshot);
 });
 window.addEventListener("hashchange", scheduleSectionUpdate);
+document.addEventListener?.("mitosis-theme-change", () => {
+  if (latestSnapshot) renderVisualizations(latestSnapshot);
+});
 updateActiveSection();
 refreshHostContext().catch(() => {});
 refresh();

@@ -4,6 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Scheduler stats</title>
+    <script src="/assets/theme.js"></script>
     <link rel="stylesheet" href="/assets/style.css">
   </head>
   <body>
@@ -33,7 +34,15 @@
           <a href="/">Callbacks</a>
           <a href="/system">System</a>
           <a class="active" aria-current="page" href="/stats">Scheduler</a>
+          <a href="/config">Configuration</a>
+          <span class="navigation-group-label navigation-group-label-secondary">Reference</span>
+          <a href="/appendix">Appendix</a>
         </nav>
+        <label class="workspace-theme-control">
+          <span>Dark mode</span>
+          <input type="checkbox" role="switch" data-theme-toggle aria-label="Use dark mode">
+          <span class="theme-switch-track" aria-hidden="true"><span></span></span>
+        </label>
       </aside>
 
       <main class="stats-main" id="app" tabindex="-1" aria-label="Mitosis scheduler stats">
@@ -50,6 +59,41 @@
             <div><dt>Cells</dt><dd id="cellCount">--</dd></div>
             <div><dt>Last refresh</dt><dd id="refreshed">--</dd></div>
           </dl>
+        </section>
+
+        <section class="table-section" aria-labelledby="borrowingHeading" data-feedback-key="Scheduler:Borrowing-flows">
+          <div class="section-heading">
+            <div>
+              <h2 id="borrowingHeading">Cell borrowing flows</h2>
+              <p>Rows borrow from lending columns · latest scheduler interval</p>
+            </div>
+          </div>
+          <div class="borrowing-layout">
+            <div class="borrowing-matrix-wrap">
+              <div class="table-scroll">
+                <table id="borrowMatrix" class="borrowing-matrix" aria-label="Borrower by lender capacity matrix">
+                  <thead id="borrowMatrixHead"></thead>
+                  <tbody id="borrowMatrixBody"></tbody>
+                </table>
+              </div>
+            </div>
+            <div class="borrowing-edges">
+              <div class="table-scroll">
+                <table id="borrowFlowsTable">
+                  <thead>
+                    <tr>
+                      <th scope="col">Borrower</th>
+                      <th scope="col">Lender</th>
+                      <th scope="col">Runtime ms</th>
+                      <th scope="col">Borrower runtime</th>
+                      <th scope="col">Lender capacity</th>
+                    </tr>
+                  </thead>
+                  <tbody id="borrowFlowsBody"></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
         </section>
 
         <section class="table-section" aria-labelledby="cellHistoryHeading" data-feedback-key="Scheduler:Cell-history">

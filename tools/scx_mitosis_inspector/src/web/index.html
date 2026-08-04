@@ -4,6 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Mitosis inspector</title>
+    <script src="/assets/theme.js"></script>
     <link rel="stylesheet" href="/assets/style.css">
   </head>
   <body>
@@ -33,6 +34,9 @@
           <a class="active" aria-current="page" href="/">Callbacks</a>
           <a href="/system">System</a>
           <a href="/stats">Scheduler</a>
+          <a href="/config">Configuration</a>
+          <span class="navigation-group-label navigation-group-label-secondary">Reference</span>
+          <a href="/appendix">Appendix</a>
         </nav>
         <nav class="section-navigation" id="sectionNavigation" aria-label="Callback page sections">
           <span class="navigation-group-label">On this page</span>
@@ -53,6 +57,11 @@
           <a href="#cpu-utilization">CPU utilization</a>
           <a href="#migration-locality">Migration locality</a>
         </nav>
+        <label class="workspace-theme-control">
+          <span>Dark mode</span>
+          <input type="checkbox" role="switch" data-theme-toggle aria-label="Use dark mode">
+          <span class="theme-switch-track" aria-hidden="true"><span></span></span>
+        </label>
         <button class="workspace-feedback-button" id="openFeedback" type="button" aria-controls="feedbackDrawer">
           <span>Review feedback</span>
           <span class="feedback-count" id="feedbackCount" aria-label="0 feedback drafts">0</span>

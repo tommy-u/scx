@@ -18,6 +18,26 @@
   };
   const FONT = '11px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
 
+  function themeColor(name) {
+    if (typeof document === "undefined" || typeof getComputedStyle !== "function") {
+      return COLORS[name];
+    }
+    const value = getComputedStyle(document.documentElement)
+      .getPropertyValue(`--chart-${name}`)
+      .trim();
+    return value || COLORS[name];
+  }
+
+  function seriesColor(value) {
+    if (typeof value === "string" && value.startsWith("var(")
+        && typeof document !== "undefined" && typeof getComputedStyle === "function") {
+      const property = value.slice(4, -1).trim();
+      return getComputedStyle(document.documentElement).getPropertyValue(property).trim()
+        || themeColor("bar");
+    }
+    return value || themeColor("bar");
+  }
+
   class History {
     constructor(maxPoints) {
       this.maxPoints = Math.max(1, Math.floor(Number(maxPoints) || 120));
@@ -117,7 +137,7 @@
   }
 
   function drawEmpty(context, width, height) {
-    context.fillStyle = COLORS.muted;
+    context.fillStyle = themeColor("muted");
     context.textAlign = "center";
     context.fillText("No data", width / 2, height / 2);
   }
@@ -181,7 +201,7 @@
       if (!item || !Array.isArray(item.points)) {
         continue;
       }
-      context.strokeStyle = item.color || COLORS.bar;
+      context.strokeStyle = seriesColor(item.color);
       context.lineWidth = 1.5;
       context.beginPath();
       let drawing = false;
@@ -198,7 +218,7 @@
         }
       }
       context.stroke();
-      context.fillStyle = item.color || COLORS.bar;
+      context.fillStyle = seriesColor(item.color);
       for (const point of item.points) {
         if (!point || !Number.isFinite(point.x) || !Number.isFinite(point.y)) {
           continue;
@@ -212,7 +232,7 @@
 
   function drawTimeAxis(context, margin, width, height, min, max) {
     const label = (value) => new Date(value).toISOString().slice(11, 19);
-    context.fillStyle = COLORS.axis;
+    context.fillStyle = themeColor("axis");
     context.textAlign = "left";
     context.fillText(label(min), margin.left, height - 9);
     context.textAlign = "right";
@@ -226,12 +246,12 @@
       const ratio = index / ticks;
       const y = margin.top + ratio * plotHeight;
       const value = max - ratio * (max - min);
-      context.strokeStyle = COLORS.grid;
+      context.strokeStyle = themeColor("grid");
       context.beginPath();
       context.moveTo(margin.left, y);
       context.lineTo(width - margin.right, y);
       context.stroke();
-      context.fillStyle = COLORS.axis;
+      context.fillStyle = themeColor("axis");
       context.textAlign = "right";
       context.fillText(formatValue(value, unit), margin.left - 7, y);
     }
@@ -249,9 +269,9 @@
       if (x + itemWidth > startX + maxWidth) {
         break;
       }
-      context.fillStyle = item.color || COLORS.bar;
+      context.fillStyle = seriesColor(item.color);
       context.fillRect(x, y - 2, 12, 3);
-      context.fillStyle = COLORS.text;
+      context.fillStyle = themeColor("text");
       context.fillText(label, x + 17, y);
       x += itemWidth;
     }
@@ -283,14 +303,14 @@
     safeItems.forEach((item, index) => {
       const y = top + index * (rowHeight + gap);
       const value = Math.max(0, item.value);
-      context.fillStyle = COLORS.text;
+      context.fillStyle = themeColor("text");
       context.textAlign = "right";
       context.fillText(truncate(context, String(item.label || ""), labelWidth - 12), labelWidth, y + rowHeight / 2);
-      context.fillStyle = COLORS.grid;
+      context.fillStyle = themeColor("grid");
       context.fillRect(labelWidth + 8, y, plotWidth, rowHeight);
-      context.fillStyle = item.color || COLORS.bar;
+      context.fillStyle = seriesColor(item.color);
       context.fillRect(labelWidth + 8, y, (value / maxValue) * plotWidth, rowHeight);
-      context.fillStyle = COLORS.text;
+      context.fillStyle = themeColor("text");
       context.textAlign = "left";
       context.fillText(
         formatValue(item.value, config.unit),
@@ -329,10 +349,10 @@
       const barHeight = (value / maxValue) * plotHeight;
       const x = margin.left + index * slotWidth + (slotWidth - barWidth) / 2;
       const y = margin.top + plotHeight - barHeight;
-      context.fillStyle = COLORS.bar;
+      context.fillStyle = themeColor("bar");
       context.fillRect(x, y, barWidth, barHeight);
       if (index % labelStride === 0 || index === safeBuckets.length - 1) {
-        context.fillStyle = COLORS.axis;
+        context.fillStyle = themeColor("axis");
         context.textAlign = "center";
         context.fillText(
           truncate(context, String(bucket.label || ""), slotWidth * labelStride - 4),

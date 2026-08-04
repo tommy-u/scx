@@ -203,10 +203,9 @@ struct Scheduler<'a> {
     // These are the per-cell cstats.
     // Note these are accumulated across all CPUs.
     prev_cell_stats: [[u64; NR_CSTATS]; MAX_CELLS],
-    // Per-cell running_ns tracking for demand metrics
-    prev_cell_running_ns: [u64; MAX_CELLS],
-    prev_cell_own_ns: [u64; MAX_CELLS],
-    prev_cell_lent_ns: [u64; MAX_CELLS],
+    // Per-CPU running_ns tracking keeps interval attribution correct when CPU
+    // ownership moves between cells.
+    prev_cpu_running_ns: Vec<[u64; MAX_CELLS]>,
     metrics: Metrics,
     stats_server: Option<StatsServer<(), Metrics>>,
     last_configuration_seq: Option<u32>,
@@ -414,9 +413,7 @@ impl<'a> Scheduler<'a> {
             monitor_interval: Duration::from_secs(opts.monitor_interval_s),
             cells: HashMap::new(),
             prev_cell_stats: [[0; NR_CSTATS]; MAX_CELLS],
-            prev_cell_running_ns: [0; MAX_CELLS],
-            prev_cell_own_ns: [0; MAX_CELLS],
-            prev_cell_lent_ns: [0; MAX_CELLS],
+            prev_cpu_running_ns: Vec::new(),
             metrics: Metrics::default(),
             stats_server: Some(stats_server),
             last_configuration_seq: None,
@@ -1101,23 +1098,13 @@ impl<'a> Scheduler<'a> {
 
     /// Compute per-cell demand metrics (utilization, borrowed, lent) from BPF running_ns counters.
     fn collect_demand_metrics(&mut self, cpu_ctxs: &[bpf_intf::cpu_ctx]) -> Result<()> {
-        // Per-cell cumulative counters derived from BPF per-CPU running_ns:
-        //   total_running_ns[c] = total time tasks in cell c ran (on any CPU)
-        //   on_own_ns[c]        = time tasks in cell c ran on CPUs owned by cell c
-        //   lent_ns[c]          = time foreign tasks ran on CPUs owned by cell c
-        let mut total_running_ns = [0u64; MAX_CELLS];
-        let mut on_own_ns = [0u64; MAX_CELLS];
-        let mut lent_ns = [0u64; MAX_CELLS];
+        // Rows are CPU-owning lenders and columns are task-owning borrowers.
+        let mut interval_runtime = [[0u64; MAX_CELLS]; MAX_CELLS];
+        self.prev_cpu_running_ns
+            .resize(cpu_ctxs.len(), [0; MAX_CELLS]);
 
-        for cpu_ctx in cpu_ctxs.iter() {
+        for (cpu, cpu_ctx) in cpu_ctxs.iter().enumerate() {
             let owner = cpu_ctx.cell as usize;
-            for cell in 0..MAX_CELLS {
-                let ns = cpu_ctx.running_ns[cell];
-                total_running_ns[cell] += ns;
-                if owner == cell {
-                    on_own_ns[cell] += ns;
-                }
-            }
             if owner >= MAX_CELLS {
                 bail!(
                     "CPU has invalid cell assignment {} (MAX_CELLS={})",
@@ -1125,14 +1112,30 @@ impl<'a> Scheduler<'a> {
                     MAX_CELLS
                 );
             }
-            // Lent time: non-owner cell tasks running on this CPU
-            let total_on_cpu: u64 = cpu_ctx.running_ns.iter().sum();
-            let owner_on_cpu = cpu_ctx.running_ns[owner];
-            lent_ns[owner] += total_on_cpu.saturating_sub(owner_on_cpu);
+            for borrower in 0..MAX_CELLS {
+                let current = cpu_ctx.running_ns[borrower];
+                let delta = current.saturating_sub(self.prev_cpu_running_ns[cpu][borrower]);
+                self.prev_cpu_running_ns[cpu][borrower] = current;
+                interval_runtime[owner][borrower] =
+                    interval_runtime[owner][borrower].saturating_add(delta);
+            }
         }
 
-        // Compute deltas since last collection interval
         let interval_ns = self.monitor_interval.as_nanos() as u64;
+        let mut borrower_runtime = [0u64; MAX_CELLS];
+        let mut lender_capacity = [0u64; MAX_CELLS];
+        let mut active = [false; MAX_CELLS];
+
+        for cell in 0..MAX_CELLS {
+            borrower_runtime[cell] = (0..MAX_CELLS)
+                .map(|lender| interval_runtime[lender][cell])
+                .fold(0u64, u64::saturating_add);
+            if let Some(cell_info) = self.cells.get(&(cell as u32)) {
+                active[cell] = true;
+                lender_capacity[cell] =
+                    (cell_info.cpus.weight() as u64).saturating_mul(interval_ns);
+            }
+        }
 
         let mut global_running_delta = 0u64;
         let mut global_borrowed_delta = 0u64;
@@ -1140,14 +1143,14 @@ impl<'a> Scheduler<'a> {
         let mut global_capacity = 0u64;
 
         for cell in 0..MAX_CELLS {
-            let delta_running =
-                total_running_ns[cell].saturating_sub(self.prev_cell_running_ns[cell]);
-            let delta_on_own = on_own_ns[cell].saturating_sub(self.prev_cell_own_ns[cell]);
-            let delta_lent = lent_ns[cell].saturating_sub(self.prev_cell_lent_ns[cell]);
-
-            self.prev_cell_running_ns[cell] = total_running_ns[cell];
-            self.prev_cell_own_ns[cell] = on_own_ns[cell];
-            self.prev_cell_lent_ns[cell] = lent_ns[cell];
+            let delta_running = borrower_runtime[cell];
+            let delta_on_own = interval_runtime[cell][cell];
+            let delta_lent = interval_runtime[cell]
+                .iter()
+                .enumerate()
+                .filter(|(borrower, _)| *borrower != cell)
+                .map(|(_, runtime)| *runtime)
+                .fold(0u64, u64::saturating_add);
 
             if delta_running == 0 && delta_lent == 0 {
                 continue;
@@ -1221,6 +1224,12 @@ impl<'a> Scheduler<'a> {
 
         self.metrics
             .update_demand(global_util_pct, global_borrow_pct, global_lent_pct);
+        self.metrics.borrow_flows = stats::build_borrow_flows(
+            &interval_runtime,
+            &borrower_runtime,
+            &lender_capacity,
+            &active,
+        );
 
         Ok(())
     }
