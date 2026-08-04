@@ -6189,19 +6189,6 @@ function renderCellUtilization(model, force = false) {
     <div><dt>Managed rebalances</dt><dd>${formatCount(model.managedRebalanceCount)}</dd></div>
     <div><dt>Last managed rebalance</dt><dd>${escapeHtml(formatTimestamp(model.managedLastRebalanceAtMs))}</dd></div>`
     : "";
-  const membership = model.managedMembership;
-  const managedMembershipSummary = model.managedCells
-      || Object.values(membership).some((value) => value > 0)
-    ? `
-    <div><dt>Mapped cell-0 runtime</dt><dd>${formatCellMetric(membership.mappedCell0RuntimeNs, "duration")}</dd></div>
-    <div><dt>Mapped cell-0 slices</dt><dd>${formatCount(membership.mappedCell0Timeslices)}</dd></div>
-    <div><dt>Mapped affected tasks</dt><dd>${formatCount(membership.mappedAffectedTasks)}</dd></div>
-    <div><dt>Uncorrected exits</dt><dd>${formatCount(membership.mappedUncorrectedExits)}</dd></div>
-    <div><dt>Unresolved cell-0 runtime</dt><dd>${formatCellMetric(membership.unresolvedCell0RuntimeNs, "duration")}</dd></div>
-    <div><dt>Unresolved cell-0 slices</dt><dd>${formatCount(membership.unresolvedCell0Timeslices)}</dd></div>
-    <div><dt>Unresolved affected tasks</dt><dd>${formatCount(membership.unresolvedAffectedTasks)}</dd></div>
-    <div><dt>Unresolved exits</dt><dd>${formatCount(membership.unresolvedExits)}</dd></div>`
-    : "";
   elements.cellUtilizationSummary.innerHTML = `
     <div><dt>Cell service</dt><dd>${cellRuntimeNs === null ? "—" : `${formatUtilizationCores(utilizationCores(cellRuntimeNs, model.observedMs))} CPUs`}</dd></div>
     <div><dt>Snake capacity</dt><dd>${model.host.snakeOverlayReady ? `${formatUtilizationCores(utilizationCores(host.snakeCapacityNs ?? 0, hostObservedMs))} CPUs` : "—"}</dd></div>
@@ -6211,8 +6198,7 @@ function renderCellUtilization(model, force = false) {
     <div><dt>SoftIRQ</dt><dd>${formatUtilizationCores(utilizationCores(host.softirqNs ?? 0, hostObservedMs))} CPUs</dd></div>
     <div><dt>Accounting overage</dt><dd>${accountingOverageNs === null ? "—" : `${formatUtilizationCores(utilizationCores(accountingOverageNs, hostObservedMs))} CPUs`}</dd></div>
     <div><dt>Host window</dt><dd>${hostObservedMs > 0 ? escapeHtml(formatDuration(hostObservedMs)) : "—"}</dd></div>
-    ${managedRebalanceSummary}
-    ${managedMembershipSummary}`;
+    ${managedRebalanceSummary}`;
   replaceKeyedHtml(
     elements.cellUtilizationGrid,
     model.cellStatus === "ready"
@@ -6628,14 +6614,6 @@ function renderCellDetail(cell, queueFacts, statsModel) {
         </dl>
       </div>
       <div class="cell-stat-group">
-        <h4>Managed membership</h4>
-        <dl class="cell-facts">
-          <div><dt>Cell-0 runtime</dt><dd>${formatCellMetric(stats?.raw.managed_cell0_runtime_ns, "duration")}</dd></div>
-          <div><dt>Cell-0 slices</dt><dd>${formatCellMetric(stats?.raw.managed_cell0_timeslices)}</dd></div>
-          <div><dt>Affected tasks</dt><dd>${formatCellMetric(stats?.raw.managed_affected_tasks)}</dd></div>
-        </dl>
-      </div>
-      <div class="cell-stat-group">
         <h4>Capacity exchange</h4>
         <dl class="cell-facts">
           <div><dt>Borrowed share</dt><dd>${formatCellMetric(stats?.borrowedPct, "percentage")}</dd></div>
@@ -6674,9 +6652,6 @@ function renderRawCellStats(stats, cellId) {
     ["group_runtime_ns", "Grouped runtime", "duration"],
     ["group_preferred_runtime_ns", "Grouped preferred LLC runtime", "duration"],
     ["group_fallback_runtime_ns", "Grouped fallback runtime", "duration"],
-    ["managed_cell0_runtime_ns", "Managed cell-0 runtime", "duration"],
-    ["managed_cell0_timeslices", "Managed cell-0 timeslices", "number"],
-    ["managed_affected_tasks", "Managed affected tasks", "number"],
     ["normal_enqueues", "Normal enqueues", "number"],
     ["affinity_enqueues", "Affinity enqueues", "number"],
     ["normal_dispatches", "Normal dispatches", "number"],

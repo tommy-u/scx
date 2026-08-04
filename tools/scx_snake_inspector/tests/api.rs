@@ -23,9 +23,7 @@ use scx_snake_inspector::host_context::{
     CommandRunner, HostContextService,
 };
 use scx_snake_inspector::launcher::SnakeLauncher;
-use scx_snake_inspector::model::{
-    CellMetricCounters, CpuPair, HostCpuTimeCounters, ManagedMembershipCounters,
-};
+use scx_snake_inspector::model::{CellMetricCounters, CpuPair, HostCpuTimeCounters};
 use scx_snake_inspector::policies::{InvalidPolicy, PolicyCatalog, PolicyChoice};
 use scx_snake_inspector::scope::TaskScope;
 use scx_snake_inspector::testing::{MatrixConfig, TestingController};
@@ -434,9 +432,6 @@ fn cell_metrics(runtime_ns: u64) -> CellMetricCounters {
         group_runtime_ns: Some(runtime_ns / 2),
         group_preferred_runtime_ns: Some(runtime_ns * 3 / 8),
         group_fallback_runtime_ns: Some(runtime_ns / 8),
-        managed_cell0_runtime_ns: Some(runtime_ns / 10),
-        managed_cell0_timeslices: Some(u64::from(active) * 3),
-        managed_affected_tasks: Some(u64::from(active) * 2),
         normal_enqueues: if active { 80 } else { 0 },
         affinity_enqueues: if active { 20 } else { 0 },
         normal_dispatches: if active { 50 } else { 0 },
@@ -763,9 +758,6 @@ fn cell_stats_hide_uninitialized_demand_ewma_and_derive_window_gauges() {
     assert_eq!(cell["ewma_utilization_pct"], Value::Null);
     assert_eq!(cell["borrowed_pct"], 25.0);
     assert_eq!(cell["lent_pct"], 12.5);
-    assert_eq!(cell["managed_cell0_runtime_ns"], 100_000_000);
-    assert_eq!(cell["managed_cell0_timeslices"], 3);
-    assert_eq!(cell["managed_affected_tasks"], 2);
 }
 
 #[test]
@@ -782,46 +774,6 @@ fn managed_rebalance_stats_accumulate_with_top_deltas_and_reset() {
     let reset = dashboard.snapshot(1_000).unwrap();
     assert_eq!(reset.managed_rebalance_count, 0);
     assert_eq!(reset.managed_last_rebalance_at_ms, 0);
-}
-
-#[test]
-fn managed_membership_stats_accumulate_with_top_deltas_and_reset() {
-    let dashboard = dashboard();
-    let first = ManagedMembershipCounters {
-        mapped_cell0_runtime_ns: 40,
-        mapped_cell0_timeslices: 4,
-        mapped_affected_tasks: 3,
-        mapped_uncorrected_exits: 2,
-        unresolved_cell0_runtime_ns: 20,
-        unresolved_cell0_timeslices: 2,
-        unresolved_affected_tasks: 1,
-        unresolved_exits: 1,
-    };
-    dashboard.ingest_top_metrics_with_managed(0, 7, &BTreeMap::from([(0, 0)]), None, 0, 0, &first);
-    dashboard.ingest_top_metrics_with_managed(
-        250,
-        7,
-        &BTreeMap::from([(0, 0)]),
-        None,
-        0,
-        0,
-        &first,
-    );
-
-    let snapshot = serde_json::to_value(dashboard.snapshot(1_000).unwrap()).unwrap();
-    assert_eq!(snapshot["managed_mapped_cell0_runtime_ns"], 80);
-    assert_eq!(snapshot["managed_mapped_cell0_timeslices"], 8);
-    assert_eq!(snapshot["managed_mapped_affected_tasks"], 6);
-    assert_eq!(snapshot["managed_mapped_uncorrected_exits"], 4);
-    assert_eq!(snapshot["managed_unresolved_cell0_runtime_ns"], 40);
-    assert_eq!(snapshot["managed_unresolved_cell0_timeslices"], 4);
-    assert_eq!(snapshot["managed_unresolved_affected_tasks"], 2);
-    assert_eq!(snapshot["managed_unresolved_exits"], 2);
-
-    dashboard.reset_top_metrics(300);
-    let reset = serde_json::to_value(dashboard.snapshot(1_000).unwrap()).unwrap();
-    assert_eq!(reset["managed_mapped_cell0_runtime_ns"], 0);
-    assert_eq!(reset["managed_unresolved_exits"], 0);
 }
 
 #[test]

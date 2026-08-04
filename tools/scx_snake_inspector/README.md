@@ -76,12 +76,6 @@ disabled, 500 us minimum, 4000 us maximum, and multiplier 2. Reapply intentional
 non-default BPF values after a restart, and update the policy file when a
 managed-cell tuning change should survive one.
 
-Managed-cell identity is measured in BPF. The Cells utilization summary splits
-cell-0 runtime into tasks with an already published child mapping and tasks
-under a child that topology reconciliation has not published yet, with
-timeslice, affected-task, and exit counts for both. Cell detail attributes the
-mapped category to the intended cell. Exit accounting keeps short-lived tasks
-visible even when userspace never observes their TID.
 **Reset all stats** atomically switches Snake to
 a cleared statistics bank at the same policy generation, rebases the
 inspector's rolling histories, and clears fine-grained capture history. It

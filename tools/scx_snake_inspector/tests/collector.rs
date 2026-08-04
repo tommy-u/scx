@@ -175,14 +175,6 @@ fn snake_top_stats_decode_cpu_and_optional_cell_metrics_together() {
         "policy_generation": 4,
         "managed_rebalance_count": 2,
         "managed_last_rebalance_at_ms": 1_700_000_000_123_u64,
-        "managed_mapped_cell0_runtime_ns": 40,
-        "managed_mapped_cell0_timeslices": 4,
-        "managed_mapped_affected_tasks": 3,
-        "managed_mapped_uncorrected_exits": 2,
-        "managed_unresolved_cell0_runtime_ns": 20,
-        "managed_unresolved_cell0_timeslices": 2,
-        "managed_unresolved_affected_tasks": 1,
-        "managed_unresolved_exits": 1,
         "select_calls": 99,
         "cpus": {
             "0": {"cpu": 0, "runtime_ns": 1250},
@@ -208,9 +200,6 @@ fn snake_top_stats_decode_cpu_and_optional_cell_metrics_together() {
                 "group_runtime_ns": 600,
                 "group_preferred_runtime_ns": 525,
                 "group_fallback_runtime_ns": 75,
-                "managed_cell0_runtime_ns": 40,
-                "managed_cell0_timeslices": 4,
-                "managed_affected_tasks": 3,
                 "normal_enqueues": 9,
                 "affinity_enqueues": 2,
                 "normal_dispatches": 8,
@@ -224,14 +213,6 @@ fn snake_top_stats_decode_cpu_and_optional_cell_metrics_together() {
     assert_eq!(decoded.policy_generation, 4);
     assert_eq!(decoded.managed_rebalance_count, 2);
     assert_eq!(decoded.managed_last_rebalance_at_ms, 1_700_000_000_123);
-    assert_eq!(decoded.managed_membership.mapped_cell0_runtime_ns, 40);
-    assert_eq!(decoded.managed_membership.mapped_cell0_timeslices, 4);
-    assert_eq!(decoded.managed_membership.mapped_affected_tasks, 3);
-    assert_eq!(decoded.managed_membership.mapped_uncorrected_exits, 2);
-    assert_eq!(decoded.managed_membership.unresolved_cell0_runtime_ns, 20);
-    assert_eq!(decoded.managed_membership.unresolved_cell0_timeslices, 2);
-    assert_eq!(decoded.managed_membership.unresolved_affected_tasks, 1);
-    assert_eq!(decoded.managed_membership.unresolved_exits, 1);
     assert_eq!(
         decoded.cpus,
         std::collections::BTreeMap::from([(0, 1250), (7, 8750)])
@@ -247,9 +228,6 @@ fn snake_top_stats_decode_cpu_and_optional_cell_metrics_together() {
     assert_eq!(cells[&3].group_runtime_ns, Some(600));
     assert_eq!(cells[&3].group_preferred_runtime_ns, Some(525));
     assert_eq!(cells[&3].group_fallback_runtime_ns, Some(75));
-    assert_eq!(cells[&3].managed_cell0_runtime_ns, Some(40));
-    assert_eq!(cells[&3].managed_cell0_timeslices, Some(4));
-    assert_eq!(cells[&3].managed_affected_tasks, Some(3));
     assert_eq!(cells[&3].runtime_ns, 1000);
     assert_eq!(
         cells[&3].runtime_ns_by_cpu,
@@ -263,7 +241,6 @@ fn snake_top_stats_decode_cpu_and_optional_cell_metrics_together() {
     .unwrap();
     assert_eq!(absent.managed_rebalance_count, 0);
     assert_eq!(absent.managed_last_rebalance_at_ms, 0);
-    assert_eq!(absent.managed_membership, Default::default());
     assert!(absent.cells.is_none());
     let empty = decode_top_stats(serde_json::json!({
         "policy_generation": 4,
@@ -304,9 +281,6 @@ fn snake_top_stats_distinguishes_older_cell_metrics_without_cpu_attribution() {
     assert_eq!(cell.group_runtime_ns, None);
     assert_eq!(cell.group_preferred_runtime_ns, None);
     assert_eq!(cell.group_fallback_runtime_ns, None);
-    assert_eq!(cell.managed_cell0_runtime_ns, None);
-    assert_eq!(cell.managed_cell0_timeslices, None);
-    assert_eq!(cell.managed_affected_tasks, None);
 }
 
 #[test]

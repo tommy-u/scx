@@ -821,9 +821,6 @@ const CELL_COUNTER_FIELDS = [
   "group_runtime_ns",
   "group_preferred_runtime_ns",
   "group_fallback_runtime_ns",
-  "managed_cell0_runtime_ns",
-  "managed_cell0_timeslices",
-  "managed_affected_tasks",
   "normal_enqueues",
   "affinity_enqueues",
   "normal_dispatches",
@@ -836,9 +833,6 @@ const OPTIONAL_CELL_COUNTER_FIELDS = new Set([
   "group_runtime_ns",
   "group_preferred_runtime_ns",
   "group_fallback_runtime_ns",
-  "managed_cell0_runtime_ns",
-  "managed_cell0_timeslices",
-  "managed_affected_tasks",
 ]);
 const cellMetricNumberFormat = new Intl.NumberFormat("en-US", {
   maximumFractionDigits: 1,
@@ -3024,40 +3018,6 @@ export function cellUtilizationModel({ snapshot, inspection, topology } = {}) {
       0,
       finiteValue(snapshot?.managed_last_rebalance_at_ms) ?? 0,
     ),
-    managedMembership: {
-      mappedCell0RuntimeNs: Math.max(
-        0,
-        finiteValue(snapshot?.managed_mapped_cell0_runtime_ns) ?? 0,
-      ),
-      mappedCell0Timeslices: Math.max(
-        0,
-        finiteValue(snapshot?.managed_mapped_cell0_timeslices) ?? 0,
-      ),
-      mappedAffectedTasks: Math.max(
-        0,
-        finiteValue(snapshot?.managed_mapped_affected_tasks) ?? 0,
-      ),
-      mappedUncorrectedExits: Math.max(
-        0,
-        finiteValue(snapshot?.managed_mapped_uncorrected_exits) ?? 0,
-      ),
-      unresolvedCell0RuntimeNs: Math.max(
-        0,
-        finiteValue(snapshot?.managed_unresolved_cell0_runtime_ns) ?? 0,
-      ),
-      unresolvedCell0Timeslices: Math.max(
-        0,
-        finiteValue(snapshot?.managed_unresolved_cell0_timeslices) ?? 0,
-      ),
-      unresolvedAffectedTasks: Math.max(
-        0,
-        finiteValue(snapshot?.managed_unresolved_affected_tasks) ?? 0,
-      ),
-      unresolvedExits: Math.max(
-        0,
-        finiteValue(snapshot?.managed_unresolved_exits) ?? 0,
-      ),
-    },
     cellStatus,
     cellStatusLabel: cellStatus === "ready"
       ? "Cell service ready"

@@ -784,10 +784,10 @@ test("project navigation is available in both desktop and mobile explorers", () 
 });
 
 test("project roadmap exposes the dated review scores without drifting from the report", () => {
-  const reviewDate = reviewIndex.match(/^Roadmap update: (.+)$/m)?.[1];
-  const baselineCommit = reviewIndex.match(/^Roadmap baseline: `([0-9a-f]+)`$/m)?.[1];
-  assert.ok(reviewDate, "roadmap update missing from report");
-  assert.ok(baselineCommit, "roadmap baseline missing from report");
+  const reviewDate = reviewIndex.match(/^Assessment date: (.+)$/m)?.[1];
+  const baselineCommit = reviewIndex.match(/^Current baseline: `([0-9a-f]+)`$/m)?.[1];
+  assert.ok(reviewDate, "assessment date missing from report");
+  assert.ok(baselineCommit, "current baseline missing from report");
   assert.match(page, /data-view="project\/roadmap"/);
   assert.match(page, new RegExp(`data-assessment-date="${reviewDate}"`));
   assert.match(page, new RegExp(`data-assessment-commit="${baselineCommit}"`));
@@ -797,19 +797,19 @@ test("project roadmap exposes the dated review scores without drifting from the 
   const scores = new Map([
     ["experimental-completeness", [90, "Snake experimental feature implementation", reviewIndex]],
     ["production-readiness", [45, "Snake production readiness", reviewIndex]],
-    ["mitosis-parity", [88, "Overall end-to-end Mitosis behavior parity", reviewIndex]],
+    ["mitosis-parity", [85, "Overall end-to-end Mitosis behavior parity", reviewIndex]],
     ["rollout-validation", [45, "Overall production validation readiness", validationReview]],
     ["policy-engine", [95, "Policy engine", featureReview]],
     ["placement", [92, "Placement", featureReview]],
-    ["observability", [95, "Observability", featureReview]],
+    ["observability", [94, "Observability", featureReview]],
     ["lifecycle", [92, "Lifecycle", featureReview]],
-    ["inspector", [92, "Inspector", featureReview]],
+    ["inspector", [90, "Inspector", featureReview]],
     ["validation", [87, "Validation/testing", featureReview]],
     ["queue-features", [90, "Queue features", featureReview]],
     ["topology", [84, "Topology", featureReview]],
     ["fairness", [74, "Fairness", featureReview]],
-    ["static-identity", [90, "Task identity/cgroups within declared scope", featureReview]],
-    ["dynamic-identity", [88, "Mitosis-style dynamic identity and lifecycle", featureReview]],
+    ["static-identity", [84, "Task identity/cgroups within declared scope", featureReview]],
+    ["dynamic-identity", [78, "Mitosis-style dynamic identity and lifecycle", featureReview]],
   ]);
 
   for (const [key, [value, reportLabel, source]] of scores) {
@@ -830,15 +830,15 @@ test("roadmap completion bars expose their numeric meaning to assistive technolo
   for (const [key, value] of [
     ["policy-engine", 95],
     ["placement", 92],
-    ["observability", 95],
+    ["observability", 94],
     ["lifecycle", 92],
-    ["inspector", 92],
+    ["inspector", 90],
     ["validation", 87],
     ["queue-features", 90],
     ["topology", 84],
     ["fairness", 74],
-    ["static-identity", 90],
-    ["dynamic-identity", 88],
+    ["static-identity", 84],
+    ["dynamic-identity", 78],
   ]) {
     assert.match(
       page,
@@ -851,9 +851,9 @@ test("roadmap completion bars expose their numeric meaning to assistive technolo
 test("Mitosis diagram percentages retain stable keys and report provenance", () => {
   for (const [key, value, label] of [
     ["mitosis-static-data-plane", 88, "Static scheduling data plane"],
-    ["mitosis-dynamic-control", 88, "Dynamic cell/resource control"],
-    ["mitosis-operations", 86, "Operations and diagnostics"],
-    ["mitosis-overall", 88, "Weighted end-to-end behavior"],
+    ["mitosis-dynamic-control", 82, "Dynamic cell/resource control"],
+    ["mitosis-operations", 82, "Operations and diagnostics"],
+    ["mitosis-overall", 85, "Weighted end-to-end behavior"],
   ]) {
     assert.match(
       page,
@@ -869,7 +869,7 @@ test("Mitosis diagram percentages retain stable keys and report provenance", () 
   const equivalent = page.match(
     /<table[^>]+data-diagram-equivalent="mitosis-capability-coverage"[\s\S]*?<\/table>/,
   )?.[0] || "";
-  for (const value of ["88%", "86%", "88% ±4"]) {
+  for (const value of ["88%", "82%", "85% ±5"]) {
     assert.match(equivalent, new RegExp(value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   }
 });
@@ -896,14 +896,14 @@ test("project roadmap leads with launch goals and keeps open work synchronized",
     );
   }
   for (const [feature, roadmapKey, priority] of [
-    ["eevdf-shares", "eevdf-shares", "P0"],
-    ["queued-cross-cell-progress", "queued-cross-cell-progress", "P0"],
-    ["hotplug-contract", "hotplug-contract", "P0"],
     ["observer-isolation", "observer-isolation", "P0"],
-    ["managed-topology-latency", "managed-topology-latency", "P1"],
+    ["queued-work-progress", "queued-cross-cell-progress", "P0"],
+    ["hotplug-contract", "hotplug-contract", "P0"],
+    ["eevdf-shares", "eevdf-shares", "P0"],
+    ["cgroup-identity", "identity-hardening", "P1"],
     ["scale-soak-rollback", "scale-soak-rollback", "P1"],
-    ["inspector-scaling", "inspector-scaling", "P1"],
     ["browser-vm-ci", "browser-vm-ci", "P1"],
+    ["inspector-scaling", "inspector-scaling", "P1"],
     ["typed-protocol", "typed-protocol", "P2"],
     ["numa-distance-order", "numa-distance-order", "P2"],
     ["pick-two", "pick-two", "P3"],
@@ -927,7 +927,7 @@ test("roadmap distinguishes landed work from missing performance evidence", () =
   const progress = page.match(
     /<section[^>]+id="roadmapProgress"[\s\S]*?<\/section>/,
   )?.[0] || "";
-  assert.match(progress, /BPF managed identity/);
+  assert.match(progress, /Managed lifecycle/);
   assert.match(progress, /cell-0 holdout/);
   assert.match(progress, /orphan draining, and sibling stealing/);
   assert.match(progress, /Pinned-latency and fairness evidence remains open/);
