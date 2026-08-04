@@ -54,6 +54,7 @@ import {
   topologyLifecycleModel,
   topologyLifecycleSignature,
   workloadAssignmentRequest,
+  workloadLlcGroupRequest,
 } from "../../src/web/inspection.js";
 
 test("managed identity lag separates conservative new tasks from move-in bounds", () => {
@@ -2505,6 +2506,14 @@ test("cell utilization conserves service through LLC and CPU rollups", () => {
       window_ms: 10_000,
       managed_rebalance_count: 3,
       managed_last_rebalance_at_ms: 1_700_000_000_123,
+      managed_mapped_cell0_runtime_ns: 12_000_000,
+      managed_mapped_cell0_timeslices: 8,
+      managed_mapped_affected_tasks: 3,
+      managed_mapped_uncorrected_exits: 1,
+      managed_unresolved_cell0_runtime_ns: 4_000_000,
+      managed_unresolved_cell0_timeslices: 2,
+      managed_unresolved_affected_tasks: 1,
+      managed_unresolved_exits: 1,
       cell_stats: {
         status: "ready",
         observed_ms: 1_000,
@@ -2587,6 +2596,16 @@ test("cell utilization conserves service through LLC and CPU rollups", () => {
   assert.equal(model.cellStatus, "ready");
   assert.equal(model.managedRebalanceCount, 3);
   assert.equal(model.managedLastRebalanceAtMs, 1_700_000_000_123);
+  assert.deepEqual(model.managedMembership, {
+    mappedCell0RuntimeNs: 12_000_000,
+    mappedCell0Timeslices: 8,
+    mappedAffectedTasks: 3,
+    mappedUncorrectedExits: 1,
+    unresolvedCell0RuntimeNs: 4_000_000,
+    unresolvedCell0Timeslices: 2,
+    unresolvedAffectedTasks: 1,
+    unresolvedExits: 1,
+  });
   assert.equal(model.cellAttributionReady, true);
   assert.equal(model.hostStatus, "ready");
   assert.equal(model.cells[0].label, "batch.slice");
@@ -3704,6 +3723,19 @@ test("workload assignment requests distinguish TID, TGID, and cgroup targets", (
   assert.throws(() => workloadAssignmentRequest("cgroup", "", "2", false));
 });
 
+test("workload LLC group requests require a nonzero integer group", () => {
+  assert.deepEqual(workloadLlcGroupRequest("tid", "41", "9001", false), {
+    target: { kind: "tid", tid: 41 },
+    group_id: "9001",
+  });
+  assert.deepEqual(workloadLlcGroupRequest("cgroup", "/work.slice", "", true), {
+    target: { kind: "cgroup", path: "/work.slice" },
+    group_id: null,
+  });
+  assert.throws(() => workloadLlcGroupRequest("tgid", "42", "0", false));
+  assert.throws(() => workloadLlcGroupRequest("tid", "41", "1.5", false));
+});
+
 test("rung hit and miss percentages use attempts as the denominator", () => {
   assert.deepEqual(
     rungPercentages({ attempts: 40, hits: 30, misses: 8, errors: 2 }),
@@ -4634,6 +4666,9 @@ const readyCellStatsFixture = {
       borrowed_runtime_ns: 14_750_000_000,
       lent_runtime_ns: 7_375_000_000,
       foreign_affinity_runtime_ns: 1_475_000_000,
+      managed_cell0_runtime_ns: 12_000_000,
+      managed_cell0_timeslices: 8,
+      managed_affected_tasks: 3,
       normal_enqueues: 900,
       affinity_enqueues: 100,
       normal_dispatches: 720,
@@ -4751,6 +4786,9 @@ test("cell statistics preserve cell zero, nullable ratios, and all raw counters"
   assert.equal(model.cells[0].utilizationPct, 75);
   assert.equal(model.cells[0].ewmaUtilizationPct, 62.5);
   assert.equal(model.cells[0].raw.foreign_affinity_runtime_ns, 1_475_000_000);
+  assert.equal(model.cells[0].raw.managed_cell0_runtime_ns, 12_000_000);
+  assert.equal(model.cells[0].raw.managed_cell0_timeslices, 8);
+  assert.equal(model.cells[0].raw.managed_affected_tasks, 3);
   assert.equal(model.cells[0].raw.clock_transitions, 16);
   assert.equal(model.cells[0].serviceCores, 1.5);
   assert.equal(model.cells[0].normalEnqueueRate, 30.5085);
@@ -4788,6 +4826,9 @@ test("cell statistics distinguish explicit availability and zero-activity states
       borrowed_runtime_ns: 0,
       lent_runtime_ns: 0,
       foreign_affinity_runtime_ns: 0,
+      managed_cell0_runtime_ns: 0,
+      managed_cell0_timeslices: 0,
+      managed_affected_tasks: 0,
       normal_enqueues: 0,
       affinity_enqueues: 0,
       normal_dispatches: 0,
@@ -4802,7 +4843,13 @@ test("cell statistics distinguish explicit availability and zero-activity states
     ...readyCellStatsFixture,
     observed_ms: 30_000,
     cells: readyCellStatsFixture.cells.map((cell) => {
-      const { foreign_affinity_runtime_ns: _unsupported, ...olderCell } = cell;
+      const {
+        foreign_affinity_runtime_ns: _unsupported,
+        managed_cell0_runtime_ns: _managedRuntime,
+        managed_cell0_timeslices: _managedTimeslices,
+        managed_affected_tasks: _managedTasks,
+        ...olderCell
+      } = cell;
       return {
         ...olderCell,
         runtime_ns: 0,
@@ -4818,6 +4865,7 @@ test("cell statistics distinguish explicit availability and zero-activity states
     }),
   });
   assert.equal(legacy.cells[0].raw.foreign_affinity_runtime_ns, null);
+  assert.equal(legacy.cells[0].raw.managed_cell0_runtime_ns, null);
   assert.equal(legacy.zeroActivity, true);
 });
 

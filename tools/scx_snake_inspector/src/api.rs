@@ -31,7 +31,7 @@ use crate::launcher::{LaunchFairness, LaunchOptions, LaunchRequest, SnakeLaunche
 use crate::policies::PolicyActivation;
 use crate::scope::{resolve_scope, ScopeRequest};
 use crate::testing::{TestRun, TestingController};
-use crate::workload::{WorkloadCellResponse, WorkloadTarget};
+use crate::workload::{WorkloadCellResponse, WorkloadLlcGroupResponse, WorkloadTarget};
 
 pub const CSRF_HEADER: &str = "x-snake-token";
 const INDEX_HTML: &str = include_str!("web/index.html");
@@ -166,6 +166,7 @@ pub fn router(context: ApiContext) -> Router {
         .route("/api/events", get(events))
         .route("/api/scope", post(set_scope))
         .route("/api/cells/assignment", post(set_workload_cell))
+        .route("/api/cells/llc-group", post(set_workload_llc_group))
         .layer(middleware::from_fn_with_state(
             context.clone(),
             require_allowed_host,
@@ -1292,6 +1293,62 @@ async fn set_workload_cell(
             .await
             .map_err(|_| ApiError::unavailable("workload assignment worker failed"))?
             .map_err(|_| ApiError::unavailable("workload assignment timed out"))?
+            .map_err(ApiError::bad_request)?;
+    Ok(Json(response))
+}
+
+#[derive(Deserialize)]
+struct WorkloadLlcGroupRequest {
+    target: WorkloadTarget,
+    group_id: Option<WorkloadLlcGroupId>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum WorkloadLlcGroupId {
+    Number(u64),
+    Text(String),
+}
+
+impl WorkloadLlcGroupId {
+    fn parse(self) -> Result<u64, ApiError> {
+        let value = match self {
+            Self::Number(value) => value,
+            Self::Text(value) => value
+                .parse::<u64>()
+                .map_err(|_| ApiError::bad_request("LLC group ID must be a 64-bit integer"))?,
+        };
+        if value == 0 {
+            return Err(ApiError::bad_request("LLC group ID must be nonzero"));
+        }
+        Ok(value)
+    }
+}
+
+async fn set_workload_llc_group(
+    State(context): State<ApiContext>,
+    headers: HeaderMap,
+    Json(request): Json<WorkloadLlcGroupRequest>,
+) -> Result<Json<WorkloadLlcGroupResponse>, ApiError> {
+    require_session_token(&headers, &context.token)?;
+    let group_id = request
+        .group_id
+        .map(WorkloadLlcGroupId::parse)
+        .transpose()?;
+    let (response_tx, response_rx) = std::sync::mpsc::sync_channel(1);
+    context
+        .commands
+        .send(CollectorCommand::SetWorkloadLlcGroup {
+            target: request.target,
+            group_id,
+            response: response_tx,
+        })
+        .map_err(|_| ApiError::unavailable("collector is not running"))?;
+    let response =
+        tokio::task::spawn_blocking(move || response_rx.recv_timeout(Duration::from_secs(20)))
+            .await
+            .map_err(|_| ApiError::unavailable("workload LLC group worker failed"))?
+            .map_err(|_| ApiError::unavailable("workload LLC group update timed out"))?
             .map_err(ApiError::bad_request)?;
     Ok(Json(response))
 }

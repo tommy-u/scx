@@ -20,7 +20,7 @@ The embedded interface is organized by purpose rather than a fixed view count:
   policies, previews launch impact, and controls start, stop, and restart.
 - **Inspect** contains **Policy ladders**, **Queue topology**, and **Cells & tasks**
   for installed BPF state, resolved routing, resource domains, task mappings,
-  and bounded workload-cell assignment.
+  bounded workload-cell assignment, and optional intra-cell LLC grouping.
 - **Project** contains **Operations**, a concise data-flow, operating-boundary,
   and troubleshooting guide, and **Roadmap**, a dated view of completion
   estimates, release blockers, Mitosis gaps, and implementation dependencies.
@@ -59,7 +59,11 @@ restart-required policy keeps that candidate and the current launch settings
 loaded there; the complete command remains visible before **Restart Snake** is
 pressed. Fairness, task membership, queue topology, cells, weights, CPU masks,
 and DSQ layout are attachment-time state and require a reload. Callback
-sampling, fine-grained timing, and workload cell assignments are dynamic.
+sampling, fine-grained timing, workload cell assignments, and per-thread LLC
+group annotations are dynamic. The Cells workspace can apply a nonzero group ID
+to one TID, every current thread in a TGID, or a cgroup subtree. Grouped runtime
+is split into preferred-LLC and fallback counters when the running Snake exports
+the grouping ABI.
 Managed reconciliation and demand-EWMA settings are also live when the active
 policy enables managed-cell resizing. The VTIME base slice and pinned-waiter
 slice-shrinking enable, minimum, maximum, and runtime multiplier are live BPF
@@ -72,6 +76,12 @@ disabled, 500 us minimum, 4000 us maximum, and multiplier 2. Reapply intentional
 non-default BPF values after a restart, and update the policy file when a
 managed-cell tuning change should survive one.
 
+Managed-cell identity is measured in BPF. The Cells utilization summary splits
+cell-0 runtime into tasks with an already published child mapping and tasks
+under a child that topology reconciliation has not published yet, with
+timeslice, affected-task, and exit counts for both. Cell detail attributes the
+mapped category to the intended cell. Exit accounting keeps short-lived tasks
+visible even when userspace never observes their TID.
 **Reset all stats** atomically switches Snake to
 a cleared statistics bank at the same policy generation, rebases the
 inspector's rolling histories, and clears fine-grained capture history. It

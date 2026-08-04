@@ -200,6 +200,12 @@ fn cell_metrics(id: u32, runtime_ns: u64, normal_dispatches: u64) -> CellMetricC
         borrowed_runtime_ns: runtime_ns / 4,
         lent_runtime_ns: runtime_ns / 8,
         foreign_affinity_runtime_ns: Some(runtime_ns / 16),
+        group_runtime_ns: Some(runtime_ns / 2),
+        group_preferred_runtime_ns: Some(runtime_ns * 7 / 16),
+        group_fallback_runtime_ns: Some(runtime_ns / 16),
+        managed_cell0_runtime_ns: Some(runtime_ns / 8),
+        managed_cell0_timeslices: Some(normal_dispatches / 2),
+        managed_affected_tasks: Some(normal_dispatches / 4),
         normal_enqueues: normal_dispatches + 2,
         affinity_enqueues: 1,
         normal_dispatches,
@@ -332,6 +338,9 @@ fn cell_metric_history_sums_top_deltas_inside_the_selected_window() {
     assert_eq!(full.observed_ms, 500);
     assert_eq!(full.cells[&2].runtime_ns, 150_000_000);
     assert_eq!(full.cells[&2].normal_dispatches, 10);
+    assert_eq!(full.cells[&2].managed_cell0_runtime_ns, Some(18_750_000));
+    assert_eq!(full.cells[&2].managed_cell0_timeslices, Some(5));
+    assert_eq!(full.cells[&2].managed_affected_tasks, Some(2));
 
     let recent = history.view(600, 300).unwrap().unwrap();
     assert_eq!(recent.observed_ms, 300);
@@ -378,6 +387,10 @@ fn cell_metric_history_keeps_latest_gauges_and_rebases_reused_slots() {
     let accumulated = history.view(500, 500).unwrap().unwrap();
     assert_eq!(accumulated.cells[&2].runtime_ns, 240);
     assert_eq!(accumulated.cells[&2].foreign_affinity_runtime_ns, Some(15));
+    assert_eq!(accumulated.cells[&2].group_runtime_ns, Some(120));
+    assert_eq!(accumulated.cells[&2].group_preferred_runtime_ns, Some(105));
+    assert_eq!(accumulated.cells[&2].group_fallback_runtime_ns, Some(15));
+    assert_eq!(accumulated.cells[&2].managed_cell0_runtime_ns, Some(30));
     assert_eq!(accumulated.cells[&2].ewma_utilization_pct, Some(55.0));
     assert_eq!(accumulated.cells[&2].demand_ewma_ready, Some(1));
 
@@ -390,6 +403,9 @@ fn cell_metric_history_keeps_latest_gauges_and_rebases_reused_slots() {
     assert_eq!(current.cells[&2].slot_epoch, Some(2));
     assert_eq!(current.cells[&2].runtime_ns, 32);
     assert_eq!(current.cells[&2].foreign_affinity_runtime_ns, Some(2));
+    assert_eq!(current.cells[&2].group_runtime_ns, Some(16));
+    assert_eq!(current.cells[&2].group_preferred_runtime_ns, Some(14));
+    assert_eq!(current.cells[&2].group_fallback_runtime_ns, Some(2));
     assert_eq!(current.cells[&2].ewma_utilization_pct, Some(12.0));
 }
 

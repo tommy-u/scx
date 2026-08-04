@@ -23,7 +23,9 @@ use scx_snake_inspector::host_context::{
     CommandRunner, HostContextService,
 };
 use scx_snake_inspector::launcher::SnakeLauncher;
-use scx_snake_inspector::model::{CellMetricCounters, CpuPair, HostCpuTimeCounters};
+use scx_snake_inspector::model::{
+    CellMetricCounters, CpuPair, HostCpuTimeCounters, ManagedMembershipCounters,
+};
 use scx_snake_inspector::policies::{InvalidPolicy, PolicyCatalog, PolicyChoice};
 use scx_snake_inspector::scope::TaskScope;
 use scx_snake_inspector::testing::{MatrixConfig, TestingController};
@@ -429,6 +431,12 @@ fn cell_metrics(runtime_ns: u64) -> CellMetricCounters {
         borrowed_runtime_ns: runtime_ns / 4,
         lent_runtime_ns: runtime_ns / 4,
         foreign_affinity_runtime_ns: Some(runtime_ns / 8),
+        group_runtime_ns: Some(runtime_ns / 2),
+        group_preferred_runtime_ns: Some(runtime_ns * 3 / 8),
+        group_fallback_runtime_ns: Some(runtime_ns / 8),
+        managed_cell0_runtime_ns: Some(runtime_ns / 10),
+        managed_cell0_timeslices: Some(u64::from(active) * 3),
+        managed_affected_tasks: Some(u64::from(active) * 2),
         normal_enqueues: if active { 80 } else { 0 },
         affinity_enqueues: if active { 20 } else { 0 },
         normal_dispatches: if active { 50 } else { 0 },
@@ -709,6 +717,9 @@ fn cell_stats_derive_window_metrics_from_top_deltas_and_queue_topology() {
     assert_eq!(cell["lent_pct"], 12.5);
     assert_eq!(cell["runtime_ns"], 1_000_000_000_u64);
     assert_eq!(cell["foreign_affinity_runtime_ns"], 125_000_000_u64);
+    assert_eq!(cell["group_runtime_ns"], 500_000_000_u64);
+    assert_eq!(cell["group_preferred_runtime_ns"], 375_000_000_u64);
+    assert_eq!(cell["group_fallback_runtime_ns"], 125_000_000_u64);
     assert_eq!(cell["service_cores"], 1.0);
     assert_eq!(cell["service_share_pct"], 100.0);
     assert_eq!(cell["primary_pct"], 75.0);
@@ -752,6 +763,9 @@ fn cell_stats_hide_uninitialized_demand_ewma_and_derive_window_gauges() {
     assert_eq!(cell["ewma_utilization_pct"], Value::Null);
     assert_eq!(cell["borrowed_pct"], 25.0);
     assert_eq!(cell["lent_pct"], 12.5);
+    assert_eq!(cell["managed_cell0_runtime_ns"], 100_000_000);
+    assert_eq!(cell["managed_cell0_timeslices"], 3);
+    assert_eq!(cell["managed_affected_tasks"], 2);
 }
 
 #[test]
@@ -768,6 +782,46 @@ fn managed_rebalance_stats_accumulate_with_top_deltas_and_reset() {
     let reset = dashboard.snapshot(1_000).unwrap();
     assert_eq!(reset.managed_rebalance_count, 0);
     assert_eq!(reset.managed_last_rebalance_at_ms, 0);
+}
+
+#[test]
+fn managed_membership_stats_accumulate_with_top_deltas_and_reset() {
+    let dashboard = dashboard();
+    let first = ManagedMembershipCounters {
+        mapped_cell0_runtime_ns: 40,
+        mapped_cell0_timeslices: 4,
+        mapped_affected_tasks: 3,
+        mapped_uncorrected_exits: 2,
+        unresolved_cell0_runtime_ns: 20,
+        unresolved_cell0_timeslices: 2,
+        unresolved_affected_tasks: 1,
+        unresolved_exits: 1,
+    };
+    dashboard.ingest_top_metrics_with_managed(0, 7, &BTreeMap::from([(0, 0)]), None, 0, 0, &first);
+    dashboard.ingest_top_metrics_with_managed(
+        250,
+        7,
+        &BTreeMap::from([(0, 0)]),
+        None,
+        0,
+        0,
+        &first,
+    );
+
+    let snapshot = serde_json::to_value(dashboard.snapshot(1_000).unwrap()).unwrap();
+    assert_eq!(snapshot["managed_mapped_cell0_runtime_ns"], 80);
+    assert_eq!(snapshot["managed_mapped_cell0_timeslices"], 8);
+    assert_eq!(snapshot["managed_mapped_affected_tasks"], 6);
+    assert_eq!(snapshot["managed_mapped_uncorrected_exits"], 4);
+    assert_eq!(snapshot["managed_unresolved_cell0_runtime_ns"], 40);
+    assert_eq!(snapshot["managed_unresolved_cell0_timeslices"], 4);
+    assert_eq!(snapshot["managed_unresolved_affected_tasks"], 2);
+    assert_eq!(snapshot["managed_unresolved_exits"], 2);
+
+    dashboard.reset_top_metrics(300);
+    let reset = serde_json::to_value(dashboard.snapshot(1_000).unwrap()).unwrap();
+    assert_eq!(reset["managed_mapped_cell0_runtime_ns"], 0);
+    assert_eq!(reset["managed_unresolved_exits"], 0);
 }
 
 #[test]
@@ -2196,6 +2250,72 @@ async fn workload_assignment_requires_token_and_sends_typed_target() {
     assert_eq!(response["target"], "TGID 42");
     assert_eq!(response["updated"], 2);
     assert_eq!(response["transient"], json!([44]));
+    responder.join().unwrap();
+}
+
+#[tokio::test]
+async fn workload_llc_group_requires_token_and_sends_typed_target() {
+    use scx_snake_inspector::workload::{WorkloadLlcGroupResponse, WorkloadTarget};
+
+    let (tx, rx) = mpsc::channel();
+    let root = tempfile::tempdir().unwrap();
+    let context = ApiContext::new(dashboard(), tx, "secret", root.path().to_path_buf());
+    let body = r#"{"target":{"kind":"tgid","tgid":42},"group_id":"9001"}"#;
+
+    let unauthorized = router(context.clone())
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/cells/llc-group")
+                .header("host", "127.0.0.1")
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+    let responder = std::thread::spawn(move || {
+        let CollectorCommand::SetWorkloadLlcGroup {
+            target,
+            group_id,
+            response,
+        } = rx.recv().unwrap()
+        else {
+            panic!("expected workload LLC group command");
+        };
+        assert_eq!(target, WorkloadTarget::Tgid { tgid: 42 });
+        assert_eq!(group_id, Some(9001));
+        response
+            .send(Ok(WorkloadLlcGroupResponse {
+                target: "TGID 42".into(),
+                group_id: Some("9001".into()),
+                matched: 3,
+                updated: 2,
+                transient: vec![44],
+                rehome_requested: 2,
+            }))
+            .unwrap();
+    });
+    let accepted = router(context)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/cells/llc-group")
+                .header("host", "127.0.0.1")
+                .header("content-type", "application/json")
+                .header(CSRF_HEADER, "secret")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(accepted.status(), StatusCode::OK);
+    let response: Value =
+        serde_json::from_slice(&accepted.into_body().collect().await.unwrap().to_bytes()).unwrap();
+    assert_eq!(response["group_id"], "9001");
+    assert_eq!(response["updated"], 2);
     responder.join().unwrap();
 }
 

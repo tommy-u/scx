@@ -24,10 +24,12 @@ use crate::policies::{
 };
 use crate::scheduler::{GateChange, SchedulerGate};
 use crate::scope::TaskScope;
-use crate::workload::{resolve_workload_target, WorkloadCellResponse, WorkloadTarget};
+use crate::workload::{
+    resolve_workload_target, WorkloadCellResponse, WorkloadLlcGroupResponse, WorkloadTarget,
+};
 use crate::{
     bpf_intf,
-    model::{CellMetricCounters, CpuPair, HostCpuTimeCounters},
+    model::{CellMetricCounters, CpuPair, HostCpuTimeCounters, ManagedMembershipCounters},
 };
 
 const DEFAULT_OPS_PATH: &str = "/sys/kernel/sched_ext/root/ops";
@@ -177,6 +179,8 @@ struct SnakeMetrics {
     managed_rebalance_count: u64,
     #[serde(default)]
     managed_last_rebalance_at_ms: u64,
+    #[serde(flatten)]
+    managed_membership: ManagedMembershipCounters,
     #[serde(default)]
     cpus: BTreeMap<u32, SnakeCpuMetrics>,
     cells: Option<BTreeMap<u32, CellMetricCounters>>,
@@ -187,6 +191,7 @@ pub struct SnakeTopStats {
     pub policy_generation: u64,
     pub managed_rebalance_count: u64,
     pub managed_last_rebalance_at_ms: u64,
+    pub managed_membership: ManagedMembershipCounters,
     pub cpus: BTreeMap<u32, u64>,
     pub cells: Option<BTreeMap<u32, CellMetricCounters>>,
 }
@@ -217,6 +222,7 @@ pub fn decode_top_stats(value: serde_json::Value) -> anyhow::Result<SnakeTopStat
         policy_generation: metrics.policy_generation,
         managed_rebalance_count: metrics.managed_rebalance_count,
         managed_last_rebalance_at_ms: metrics.managed_last_rebalance_at_ms,
+        managed_membership: metrics.managed_membership,
         cpus,
         cells: metrics.cells,
     })
@@ -400,6 +406,12 @@ pub enum CollectorCommand {
         cell_id: Option<u32>,
         response: std::sync::mpsc::SyncSender<std::result::Result<WorkloadCellResponse, String>>,
     },
+    SetWorkloadLlcGroup {
+        target: WorkloadTarget,
+        group_id: Option<u64>,
+        response:
+            std::sync::mpsc::SyncSender<std::result::Result<WorkloadLlcGroupResponse, String>>,
+    },
     ResetStats {
         response: std::sync::mpsc::SyncSender<std::result::Result<StatsResetResponse, String>>,
     },
@@ -442,6 +454,18 @@ impl PartialEq for CollectorCommand {
                     ..
                 },
             ) => left_target == right_target && left_cell == right_cell,
+            (
+                Self::SetWorkloadLlcGroup {
+                    target: left_target,
+                    group_id: left_group,
+                    ..
+                },
+                Self::SetWorkloadLlcGroup {
+                    target: right_target,
+                    group_id: right_group,
+                    ..
+                },
+            ) => left_target == right_target && left_group == right_group,
             (
                 Self::SetCallbackTimingSampleRate {
                     sample_rate: left, ..
@@ -631,6 +655,24 @@ pub fn run_collector(
                 next_inspection_at = Instant::now();
                 continue;
             }
+            Ok(CollectorCommand::SetWorkloadLlcGroup {
+                target,
+                group_id,
+                response,
+            }) => {
+                let result = set_workload_llc_group(
+                    &mut stats_client,
+                    &options.stats_path,
+                    &options.proc_root,
+                    &options.cgroup_root,
+                    &target,
+                    group_id,
+                )
+                .map_err(|error| format!("{error:#}"));
+                let _ = response.send(result);
+                next_inspection_at = Instant::now();
+                continue;
+            }
             Ok(CollectorCommand::SetCallbackTimingSampleRate {
                 sample_rate,
                 response,
@@ -776,13 +818,14 @@ pub fn run_collector(
                     if top_stats_connection.observe_success() {
                         dashboard.reset_top_metrics(now_ms);
                     }
-                    dashboard.ingest_top_metrics_with_rebalances(
+                    dashboard.ingest_top_metrics_with_managed(
                         now_ms,
                         metrics.policy_generation,
                         &metrics.cpus,
                         metrics.cells.as_ref(),
                         metrics.managed_rebalance_count,
                         metrics.managed_last_rebalance_at_ms,
+                        &metrics.managed_membership,
                     );
                     set_cpu_usage_error(&dashboard, &mut last_cpu_usage_error, None);
                 }
@@ -1118,6 +1161,7 @@ fn set_workload_cell(
     let mut updated = 0;
     let mut transient = Vec::new();
     let mut rehome_requested = 0;
+    let mut first_error = None;
     for tid in &tids {
         let mut args = vec![(
             "target".into(),
@@ -1140,18 +1184,95 @@ fn set_workload_cell(
                 updated += 1;
                 rehome_requested += usize::from(response.rehome_requested);
             }
-            Err(_) => transient.push(*tid),
+            Err(error) => {
+                first_error.get_or_insert_with(|| format!("{error:#}"));
+                transient.push(*tid);
+            }
         }
     }
     if updated == 0 && !transient.is_empty() {
         anyhow::bail!(
-            "none of the {} resolved threads could be updated",
-            tids.len()
+            "none of the {} resolved threads could be updated: {}",
+            tids.len(),
+            first_error
+                .as_deref()
+                .unwrap_or("scheduler rejected the update")
         );
     }
     Ok(WorkloadCellResponse {
         target: target.label(),
         cell_id,
+        matched: tids.len(),
+        updated,
+        transient,
+        rehome_requested,
+    })
+}
+
+fn set_workload_llc_group(
+    client: &mut Option<StatsClient>,
+    stats_path: &Path,
+    proc_root: &Path,
+    cgroup_root: &Path,
+    target: &WorkloadTarget,
+    group_id: Option<u64>,
+) -> Result<WorkloadLlcGroupResponse> {
+    if group_id == Some(0) {
+        anyhow::bail!("LLC group ID must be nonzero");
+    }
+    let tids = resolve_workload_target(target, proc_root, cgroup_root)?;
+    if client.is_none() {
+        *client = Some(
+            StatsClient::new()
+                .set_path(stats_path)
+                .connect(Some(STATS_TIMEOUT_MS))
+                .with_context(|| format!("connecting to {}", stats_path.display()))?,
+        );
+    }
+    let mut updated = 0;
+    let mut transient = Vec::new();
+    let mut rehome_requested = 0;
+    let mut first_error = None;
+    for tid in &tids {
+        let mut args = vec![(
+            "target".into(),
+            if group_id.is_some() {
+                "thread_llc_group_set".into()
+            } else {
+                "thread_llc_group_clear".into()
+            },
+        )];
+        args.push(("tid".into(), tid.to_string()));
+        if let Some(group_id) = group_id {
+            args.push(("group_id".into(), group_id.to_string()));
+        }
+        match client
+            .as_mut()
+            .context("Snake stats client is unavailable")?
+            .request::<ThreadCellResponse>("stats", args)
+        {
+            Ok(response) => {
+                updated += 1;
+                rehome_requested += usize::from(response.rehome_requested);
+            }
+            Err(error) => {
+                first_error.get_or_insert_with(|| format!("{error:#}"));
+                transient.push(*tid);
+            }
+        }
+    }
+    if updated == 0 && !transient.is_empty() {
+        anyhow::bail!(
+            "none of the {} resolved threads could be updated: {}",
+            tids.len(),
+            first_error
+                .as_deref()
+                .unwrap_or("scheduler rejected the update")
+        );
+    }
+    Ok(WorkloadLlcGroupResponse {
+        target: target.label(),
+        group_id: group_id.map(|group_id| group_id.to_string()),
         matched: tids.len(),
         updated,
         transient,

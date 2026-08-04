@@ -30,6 +30,16 @@ pub struct WorkloadCellResponse {
     pub rehome_requested: usize,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct WorkloadLlcGroupResponse {
+    pub target: String,
+    pub group_id: Option<String>,
+    pub matched: usize,
+    pub updated: usize,
+    pub transient: Vec<i32>,
+    pub rehome_requested: usize,
+}
+
 impl WorkloadTarget {
     pub fn label(&self) -> String {
         match self {

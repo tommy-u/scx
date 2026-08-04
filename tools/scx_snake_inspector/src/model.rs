@@ -72,6 +72,18 @@ pub struct CellMetricCounters {
     pub lent_runtime_ns: u64,
     #[serde(default)]
     pub foreign_affinity_runtime_ns: Option<u64>,
+    #[serde(default)]
+    pub group_runtime_ns: Option<u64>,
+    #[serde(default)]
+    pub group_preferred_runtime_ns: Option<u64>,
+    #[serde(default)]
+    pub group_fallback_runtime_ns: Option<u64>,
+    #[serde(default)]
+    pub managed_cell0_runtime_ns: Option<u64>,
+    #[serde(default)]
+    pub managed_cell0_timeslices: Option<u64>,
+    #[serde(default)]
+    pub managed_affected_tasks: Option<u64>,
     pub normal_enqueues: u64,
     pub affinity_enqueues: u64,
     pub normal_dispatches: u64,
@@ -93,6 +105,12 @@ impl CellMetricCounters {
             lent_pct: self.lent_pct,
             runtime_ns_by_cpu: self.runtime_ns_by_cpu.as_ref().map(|_| BTreeMap::new()),
             foreign_affinity_runtime_ns: self.foreign_affinity_runtime_ns.map(|_| 0),
+            group_runtime_ns: self.group_runtime_ns.map(|_| 0),
+            group_preferred_runtime_ns: self.group_preferred_runtime_ns.map(|_| 0),
+            group_fallback_runtime_ns: self.group_fallback_runtime_ns.map(|_| 0),
+            managed_cell0_runtime_ns: self.managed_cell0_runtime_ns.map(|_| 0),
+            managed_cell0_timeslices: self.managed_cell0_timeslices.map(|_| 0),
+            managed_affected_tasks: self.managed_affected_tasks.map(|_| 0),
             ..Self::default()
         }
     }
@@ -120,6 +138,25 @@ impl CellMetricCounters {
             (Some(total), Some(value)) => Some(total.saturating_add(value)),
             _ => None,
         };
+        self.group_runtime_ns = add_optional_counter(self.group_runtime_ns, other.group_runtime_ns);
+        self.group_preferred_runtime_ns = add_optional_counter(
+            self.group_preferred_runtime_ns,
+            other.group_preferred_runtime_ns,
+        );
+        self.group_fallback_runtime_ns = add_optional_counter(
+            self.group_fallback_runtime_ns,
+            other.group_fallback_runtime_ns,
+        );
+        self.managed_cell0_runtime_ns = add_optional_counter(
+            self.managed_cell0_runtime_ns,
+            other.managed_cell0_runtime_ns,
+        );
+        self.managed_cell0_timeslices = add_optional_counter(
+            self.managed_cell0_timeslices,
+            other.managed_cell0_timeslices,
+        );
+        self.managed_affected_tasks =
+            add_optional_counter(self.managed_affected_tasks, other.managed_affected_tasks);
         self.normal_enqueues = self.normal_enqueues.saturating_add(other.normal_enqueues);
         self.affinity_enqueues = self
             .affinity_enqueues
@@ -145,11 +182,71 @@ impl CellMetricCounters {
             && self.borrowed_runtime_ns == 0
             && self.lent_runtime_ns == 0
             && self.foreign_affinity_runtime_ns.unwrap_or(0) == 0
+            && self.group_runtime_ns.unwrap_or(0) == 0
+            && self.group_preferred_runtime_ns.unwrap_or(0) == 0
+            && self.group_fallback_runtime_ns.unwrap_or(0) == 0
+            && self.managed_cell0_runtime_ns.unwrap_or(0) == 0
+            && self.managed_cell0_timeslices.unwrap_or(0) == 0
+            && self.managed_affected_tasks.unwrap_or(0) == 0
             && self.normal_enqueues == 0
             && self.affinity_enqueues == 0
             && self.normal_dispatches == 0
             && self.affinity_dispatches == 0
             && self.clock_transitions == 0
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ManagedMembershipCounters {
+    #[serde(default, rename = "managed_mapped_cell0_runtime_ns")]
+    pub mapped_cell0_runtime_ns: u64,
+    #[serde(default, rename = "managed_mapped_cell0_timeslices")]
+    pub mapped_cell0_timeslices: u64,
+    #[serde(default, rename = "managed_mapped_affected_tasks")]
+    pub mapped_affected_tasks: u64,
+    #[serde(default, rename = "managed_mapped_uncorrected_exits")]
+    pub mapped_uncorrected_exits: u64,
+    #[serde(default, rename = "managed_unresolved_cell0_runtime_ns")]
+    pub unresolved_cell0_runtime_ns: u64,
+    #[serde(default, rename = "managed_unresolved_cell0_timeslices")]
+    pub unresolved_cell0_timeslices: u64,
+    #[serde(default, rename = "managed_unresolved_affected_tasks")]
+    pub unresolved_affected_tasks: u64,
+    #[serde(default, rename = "managed_unresolved_exits")]
+    pub unresolved_exits: u64,
+}
+
+impl ManagedMembershipCounters {
+    pub fn add_assign(&mut self, other: &Self) {
+        self.mapped_cell0_runtime_ns = self
+            .mapped_cell0_runtime_ns
+            .saturating_add(other.mapped_cell0_runtime_ns);
+        self.mapped_cell0_timeslices = self
+            .mapped_cell0_timeslices
+            .saturating_add(other.mapped_cell0_timeslices);
+        self.mapped_affected_tasks = self
+            .mapped_affected_tasks
+            .saturating_add(other.mapped_affected_tasks);
+        self.mapped_uncorrected_exits = self
+            .mapped_uncorrected_exits
+            .saturating_add(other.mapped_uncorrected_exits);
+        self.unresolved_cell0_runtime_ns = self
+            .unresolved_cell0_runtime_ns
+            .saturating_add(other.unresolved_cell0_runtime_ns);
+        self.unresolved_cell0_timeslices = self
+            .unresolved_cell0_timeslices
+            .saturating_add(other.unresolved_cell0_timeslices);
+        self.unresolved_affected_tasks = self
+            .unresolved_affected_tasks
+            .saturating_add(other.unresolved_affected_tasks);
+        self.unresolved_exits = self.unresolved_exits.saturating_add(other.unresolved_exits);
+    }
+}
+
+fn add_optional_counter(left: Option<u64>, right: Option<u64>) -> Option<u64> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.saturating_add(right)),
+        _ => None,
     }
 }
 

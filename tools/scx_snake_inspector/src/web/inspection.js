@@ -818,6 +818,12 @@ const CELL_COUNTER_FIELDS = [
   "borrowed_runtime_ns",
   "lent_runtime_ns",
   "foreign_affinity_runtime_ns",
+  "group_runtime_ns",
+  "group_preferred_runtime_ns",
+  "group_fallback_runtime_ns",
+  "managed_cell0_runtime_ns",
+  "managed_cell0_timeslices",
+  "managed_affected_tasks",
   "normal_enqueues",
   "affinity_enqueues",
   "normal_dispatches",
@@ -827,6 +833,12 @@ const CELL_COUNTER_FIELDS = [
 
 const OPTIONAL_CELL_COUNTER_FIELDS = new Set([
   "foreign_affinity_runtime_ns",
+  "group_runtime_ns",
+  "group_preferred_runtime_ns",
+  "group_fallback_runtime_ns",
+  "managed_cell0_runtime_ns",
+  "managed_cell0_timeslices",
+  "managed_affected_tasks",
 ]);
 const cellMetricNumberFormat = new Intl.NumberFormat("en-US", {
   maximumFractionDigits: 1,
@@ -3012,6 +3024,40 @@ export function cellUtilizationModel({ snapshot, inspection, topology } = {}) {
       0,
       finiteValue(snapshot?.managed_last_rebalance_at_ms) ?? 0,
     ),
+    managedMembership: {
+      mappedCell0RuntimeNs: Math.max(
+        0,
+        finiteValue(snapshot?.managed_mapped_cell0_runtime_ns) ?? 0,
+      ),
+      mappedCell0Timeslices: Math.max(
+        0,
+        finiteValue(snapshot?.managed_mapped_cell0_timeslices) ?? 0,
+      ),
+      mappedAffectedTasks: Math.max(
+        0,
+        finiteValue(snapshot?.managed_mapped_affected_tasks) ?? 0,
+      ),
+      mappedUncorrectedExits: Math.max(
+        0,
+        finiteValue(snapshot?.managed_mapped_uncorrected_exits) ?? 0,
+      ),
+      unresolvedCell0RuntimeNs: Math.max(
+        0,
+        finiteValue(snapshot?.managed_unresolved_cell0_runtime_ns) ?? 0,
+      ),
+      unresolvedCell0Timeslices: Math.max(
+        0,
+        finiteValue(snapshot?.managed_unresolved_cell0_timeslices) ?? 0,
+      ),
+      unresolvedAffectedTasks: Math.max(
+        0,
+        finiteValue(snapshot?.managed_unresolved_affected_tasks) ?? 0,
+      ),
+      unresolvedExits: Math.max(
+        0,
+        finiteValue(snapshot?.managed_unresolved_exits) ?? 0,
+      ),
+    },
     cellStatus,
     cellStatusLabel: cellStatus === "ready"
       ? "Cell service ready"
@@ -4629,23 +4675,26 @@ export function selectionRungHitFlow(rung, queues) {
     : "Hit → enqueue ladder";
 }
 
-export function workloadAssignmentRequest(kind, value, cellId, clear) {
+function workloadTargetRequest(kind, value) {
   const targetValue = String(value ?? "").trim();
-  let target;
   if (kind === "tid" || kind === "tgid") {
     const id = Number(targetValue);
     if (!Number.isSafeInteger(id) || id <= 0) {
       throw new Error(`${kind.toUpperCase()} must be a positive integer.`);
     }
-    target = { kind, [kind]: id };
-  } else if (kind === "cgroup") {
+    return { kind, [kind]: id };
+  }
+  if (kind === "cgroup") {
     if (!targetValue) {
       throw new Error("Cgroup path is required.");
     }
-    target = { kind, path: targetValue };
-  } else {
-    throw new Error("Unknown workload target type.");
+    return { kind, path: targetValue };
   }
+  throw new Error("Unknown workload target type.");
+}
+
+export function workloadAssignmentRequest(kind, value, cellId, clear) {
+  const target = workloadTargetRequest(kind, value);
 
   let parsedCell = null;
   if (!clear) {
@@ -4655,6 +4704,18 @@ export function workloadAssignmentRequest(kind, value, cellId, clear) {
     }
   }
   return { target, cell_id: parsedCell };
+}
+
+export function workloadLlcGroupRequest(kind, value, groupId, clear) {
+  const target = workloadTargetRequest(kind, value);
+  if (clear) {
+    return { target, group_id: null };
+  }
+  const text = String(groupId ?? "").trim();
+  if (!/^\d+$/.test(text) || BigInt(text) === 0n || BigInt(text) > 0xffffffffffffffffn) {
+    throw new Error("LLC group ID must be a nonzero 64-bit integer.");
+  }
+  return { target, group_id: text };
 }
 
 export function callbackSampleRateOptions() {

@@ -99,6 +99,7 @@ import {
   userspaceParameterRequest,
   vtimeDebugModel,
   workloadAssignmentRequest,
+  workloadLlcGroupRequest,
 } from "/assets/inspection.js";
 import {
   applyThemeToDocument,
@@ -197,6 +198,10 @@ const elements = {
   assignWorkloadCell: document.querySelector("#assignWorkloadCell"),
   clearWorkloadCell: document.querySelector("#clearWorkloadCell"),
   workloadAssignmentNotice: document.querySelector("#workloadAssignmentNotice"),
+  workloadLlcGroupId: document.querySelector("#workloadLlcGroupId"),
+  assignWorkloadLlcGroup: document.querySelector("#assignWorkloadLlcGroup"),
+  clearWorkloadLlcGroup: document.querySelector("#clearWorkloadLlcGroup"),
+  workloadLlcGroupNotice: document.querySelector("#workloadLlcGroupNotice"),
   liveStatus: document.querySelector("#liveStatus"),
   liveStatusText: document.querySelector("#liveStatusText"),
   legendHigh: document.querySelector("#legendHigh"),
@@ -821,6 +826,8 @@ function bindControls() {
   elements.workloadTargetKind.addEventListener("change", renderWorkloadTargetField);
   elements.assignWorkloadCell.addEventListener("click", () => setWorkloadCell(false));
   elements.clearWorkloadCell.addEventListener("click", () => setWorkloadCell(true));
+  elements.assignWorkloadLlcGroup.addEventListener("click", () => setWorkloadLlcGroup(false));
+  elements.clearWorkloadLlcGroup.addEventListener("click", () => setWorkloadLlcGroup(true));
   for (const control of [
     elements.schedulerExitDumpEnabled,
     elements.schedulerExitDumpLen,
@@ -6182,6 +6189,19 @@ function renderCellUtilization(model, force = false) {
     <div><dt>Managed rebalances</dt><dd>${formatCount(model.managedRebalanceCount)}</dd></div>
     <div><dt>Last managed rebalance</dt><dd>${escapeHtml(formatTimestamp(model.managedLastRebalanceAtMs))}</dd></div>`
     : "";
+  const membership = model.managedMembership;
+  const managedMembershipSummary = model.managedCells
+      || Object.values(membership).some((value) => value > 0)
+    ? `
+    <div><dt>Mapped cell-0 runtime</dt><dd>${formatCellMetric(membership.mappedCell0RuntimeNs, "duration")}</dd></div>
+    <div><dt>Mapped cell-0 slices</dt><dd>${formatCount(membership.mappedCell0Timeslices)}</dd></div>
+    <div><dt>Mapped affected tasks</dt><dd>${formatCount(membership.mappedAffectedTasks)}</dd></div>
+    <div><dt>Uncorrected exits</dt><dd>${formatCount(membership.mappedUncorrectedExits)}</dd></div>
+    <div><dt>Unresolved cell-0 runtime</dt><dd>${formatCellMetric(membership.unresolvedCell0RuntimeNs, "duration")}</dd></div>
+    <div><dt>Unresolved cell-0 slices</dt><dd>${formatCount(membership.unresolvedCell0Timeslices)}</dd></div>
+    <div><dt>Unresolved affected tasks</dt><dd>${formatCount(membership.unresolvedAffectedTasks)}</dd></div>
+    <div><dt>Unresolved exits</dt><dd>${formatCount(membership.unresolvedExits)}</dd></div>`
+    : "";
   elements.cellUtilizationSummary.innerHTML = `
     <div><dt>Cell service</dt><dd>${cellRuntimeNs === null ? "—" : `${formatUtilizationCores(utilizationCores(cellRuntimeNs, model.observedMs))} CPUs`}</dd></div>
     <div><dt>Snake capacity</dt><dd>${model.host.snakeOverlayReady ? `${formatUtilizationCores(utilizationCores(host.snakeCapacityNs ?? 0, hostObservedMs))} CPUs` : "—"}</dd></div>
@@ -6191,7 +6211,8 @@ function renderCellUtilization(model, force = false) {
     <div><dt>SoftIRQ</dt><dd>${formatUtilizationCores(utilizationCores(host.softirqNs ?? 0, hostObservedMs))} CPUs</dd></div>
     <div><dt>Accounting overage</dt><dd>${accountingOverageNs === null ? "—" : `${formatUtilizationCores(utilizationCores(accountingOverageNs, hostObservedMs))} CPUs`}</dd></div>
     <div><dt>Host window</dt><dd>${hostObservedMs > 0 ? escapeHtml(formatDuration(hostObservedMs)) : "—"}</dd></div>
-    ${managedRebalanceSummary}`;
+    ${managedRebalanceSummary}
+    ${managedMembershipSummary}`;
   replaceKeyedHtml(
     elements.cellUtilizationGrid,
     model.cellStatus === "ready"
@@ -6265,6 +6286,9 @@ function renderWorkloadCellOptions() {
   elements.workloadCellId.disabled = disabled;
   elements.assignWorkloadCell.disabled = disabled;
   elements.clearWorkloadCell.disabled = state.workloadAssignmentPending;
+  elements.workloadLlcGroupId.disabled = state.workloadAssignmentPending;
+  elements.assignWorkloadLlcGroup.disabled = state.workloadAssignmentPending;
+  elements.clearWorkloadLlcGroup.disabled = state.workloadAssignmentPending;
 }
 
 async function setWorkloadCell(clear, tidOverride = null) {
@@ -6314,6 +6338,61 @@ async function setWorkloadCell(clear, tidOverride = null) {
     await loadInspection();
   } catch (error) {
     showElementNotice(elements.workloadAssignmentNotice, error.message);
+  } finally {
+    state.workloadAssignmentPending = false;
+    renderWorkloadCellOptions();
+  }
+}
+
+async function setWorkloadLlcGroup(clear) {
+  if (state.workloadAssignmentPending) {
+    return;
+  }
+  const kind = document.querySelector('input[name="workloadTargetKind"]:checked')?.value;
+  let request;
+  try {
+    request = workloadLlcGroupRequest(
+      kind,
+      elements.workloadTargetValue.value,
+      elements.workloadLlcGroupId.value,
+      clear,
+    );
+  } catch (error) {
+    showElementNotice(elements.workloadLlcGroupNotice, error.message);
+    return;
+  }
+
+  state.workloadAssignmentPending = true;
+  renderWorkloadCellOptions();
+  showElementNotice(
+    elements.workloadLlcGroupNotice,
+    clear ? "Clearing LLC group…" : "Assigning LLC group…",
+    "info",
+  );
+  try {
+    const response = await fetch("/api/cells/llc-group", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-snake-token": token,
+      },
+      body: JSON.stringify(request),
+    });
+    const payload = await response.json();
+    if (!response.ok) {
+      throw new Error(payload.error || `LLC group update failed (${response.status})`);
+    }
+    const transient = payload.transient?.length
+      ? `; ${numberFormat.format(payload.transient.length)} exited during update`
+      : "";
+    showElementNotice(
+      elements.workloadLlcGroupNotice,
+      `${payload.target}: ${numberFormat.format(payload.updated)} of ${numberFormat.format(payload.matched)} threads updated${transient}.`,
+      "success",
+    );
+    await loadInspection();
+  } catch (error) {
+    showElementNotice(elements.workloadLlcGroupNotice, error.message);
   } finally {
     state.workloadAssignmentPending = false;
     renderWorkloadCellOptions();
@@ -6543,6 +6622,17 @@ function renderCellDetail(cell, queueFacts, statsModel) {
         <dl class="cell-facts">
           <div><dt>Primary runtime</dt><dd>${formatCellMetric(stats?.primaryPct, "percentage")}</dd></div>
           <div><dt>Owned utilization</dt><dd>${formatCellMetric(stats?.ownedUtilizationPct, "percentage")}</dd></div>
+          <div><dt>Grouped runtime</dt><dd>${formatCellMetric(stats?.raw.group_runtime_ns, "duration")}</dd></div>
+          <div><dt>Preferred LLC</dt><dd>${formatCellMetric(stats?.raw.group_preferred_runtime_ns, "duration")}</dd></div>
+          <div><dt>Group fallback</dt><dd>${formatCellMetric(stats?.raw.group_fallback_runtime_ns, "duration")}</dd></div>
+        </dl>
+      </div>
+      <div class="cell-stat-group">
+        <h4>Managed membership</h4>
+        <dl class="cell-facts">
+          <div><dt>Cell-0 runtime</dt><dd>${formatCellMetric(stats?.raw.managed_cell0_runtime_ns, "duration")}</dd></div>
+          <div><dt>Cell-0 slices</dt><dd>${formatCellMetric(stats?.raw.managed_cell0_timeslices)}</dd></div>
+          <div><dt>Affected tasks</dt><dd>${formatCellMetric(stats?.raw.managed_affected_tasks)}</dd></div>
         </dl>
       </div>
       <div class="cell-stat-group">
@@ -6581,6 +6671,12 @@ function renderRawCellStats(stats, cellId) {
     ["borrowed_runtime_ns", "Borrowed runtime", "duration"],
     ["lent_runtime_ns", "Lent runtime", "duration"],
     ["foreign_affinity_runtime_ns", "Foreign pinned runtime", "duration"],
+    ["group_runtime_ns", "Grouped runtime", "duration"],
+    ["group_preferred_runtime_ns", "Grouped preferred LLC runtime", "duration"],
+    ["group_fallback_runtime_ns", "Grouped fallback runtime", "duration"],
+    ["managed_cell0_runtime_ns", "Managed cell-0 runtime", "duration"],
+    ["managed_cell0_timeslices", "Managed cell-0 timeslices", "number"],
+    ["managed_affected_tasks", "Managed affected tasks", "number"],
     ["normal_enqueues", "Normal enqueues", "number"],
     ["affinity_enqueues", "Affinity enqueues", "number"],
     ["normal_dispatches", "Normal dispatches", "number"],
@@ -6613,6 +6709,7 @@ function renderTaskMapping(task, cellId) {
         <div><dt>Allowed CPUs</dt><dd>${escapeHtml(task.allowed_cpus || "unavailable")}</dd></div>
         <div><dt>Cgroup</dt><dd>${escapeHtml(task.cgroup || "unavailable")}</dd></div>
         <div><dt>Membership</dt><dd>${escapeHtml(task.membership || "unknown")} · ${escapeHtml(task.source || "unknown")}</dd></div>
+        <div><dt>LLC group</dt><dd>${task.llc_group_id == null ? "None" : `<code>${escapeHtml(String(task.llc_group_id))}</code> · generation ${formatCount(task.llc_group_generation || 0)}`}</dd></div>
         <div><dt>Placement</dt><dd>${task.needs_rehome ? "Rehome pending" : "Cell placement acknowledged"}</dd></div>
       </dl>
       <div class="task-mapping-actions">

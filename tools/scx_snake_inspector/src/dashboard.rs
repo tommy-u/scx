@@ -13,8 +13,9 @@ use tokio::sync::watch;
 use crate::model::{
     summarize_callback_timing, CallbackTimingCounters, CallbackTimingHistory,
     CallbackTimingSnapshot, CellMetricCounters, CellMetricHistory, CellMetricWindow, CpuPair,
-    CpuUsageHistory, HostCpuTimeCounters, HostCpuTimeHistory, HostCpuTimeWindow, RollingHistory,
-    WindowError, CALLBACK_NAMES, CALLBACK_TIMING_BUCKETS,
+    CpuUsageHistory, HostCpuTimeCounters, HostCpuTimeHistory, HostCpuTimeWindow,
+    ManagedMembershipCounters, RollingHistory, WindowError, CALLBACK_NAMES,
+    CALLBACK_TIMING_BUCKETS,
 };
 use crate::policies::PolicyCatalog;
 use crate::scope::TaskScope;
@@ -94,6 +95,12 @@ pub struct CellStatsRowView {
     pub borrowed_runtime_ns: u64,
     pub lent_runtime_ns: u64,
     pub foreign_affinity_runtime_ns: Option<u64>,
+    pub group_runtime_ns: Option<u64>,
+    pub group_preferred_runtime_ns: Option<u64>,
+    pub group_fallback_runtime_ns: Option<u64>,
+    pub managed_cell0_runtime_ns: Option<u64>,
+    pub managed_cell0_timeslices: Option<u64>,
+    pub managed_affected_tasks: Option<u64>,
     pub normal_enqueues: u64,
     pub affinity_enqueues: u64,
     pub normal_dispatches: u64,
@@ -320,6 +327,8 @@ pub struct SnapshotView {
     pub active_pairs: usize,
     pub managed_rebalance_count: u64,
     pub managed_last_rebalance_at_ms: u64,
+    #[serde(flatten)]
+    pub managed_membership: ManagedMembershipCounters,
     pub scheduler: SchedulerView,
     pub scope: TaskScope,
     pub collector_error: Option<String>,
@@ -350,6 +359,7 @@ struct LiveData {
     top_cells_present: Option<bool>,
     managed_rebalance_count: u64,
     managed_last_rebalance_at_ms: u64,
+    managed_membership: ManagedMembershipCounters,
     sequence: u64,
     scheduler: SchedulerView,
     scope: TaskScope,
@@ -396,6 +406,7 @@ impl Dashboard {
                 top_cells_present: None,
                 managed_rebalance_count: 0,
                 managed_last_rebalance_at_ms: 0,
+                managed_membership: ManagedMembershipCounters::default(),
                 sequence: 0,
                 scheduler: SchedulerView {
                     name: String::new(),
@@ -463,6 +474,7 @@ impl Dashboard {
             live.top_cells_present = None;
             live.managed_rebalance_count = 0;
             live.managed_last_rebalance_at_ms = 0;
+            live.managed_membership = ManagedMembershipCounters::default();
             live.sequence = live.sequence.wrapping_add(1);
             live.sequence
         };
@@ -484,6 +496,7 @@ impl Dashboard {
             live.top_cells_present = None;
             live.managed_rebalance_count = 0;
             live.managed_last_rebalance_at_ms = 0;
+            live.managed_membership = ManagedMembershipCounters::default();
             live.inspection = None;
             live.inspection_error = None;
             live.inspection_sequence = live.inspection_sequence.wrapping_add(1);
@@ -521,6 +534,7 @@ impl Dashboard {
             live.top_cells_present = None;
             live.managed_rebalance_count = 0;
             live.managed_last_rebalance_at_ms = 0;
+            live.managed_membership = ManagedMembershipCounters::default();
             live.sequence = live.sequence.wrapping_add(1);
             live.sequence
         };
@@ -587,6 +601,27 @@ impl Dashboard {
         managed_rebalance_count: u64,
         managed_last_rebalance_at_ms: u64,
     ) {
+        self.ingest_top_metrics_with_managed(
+            at_ms,
+            policy_generation,
+            runtime_ns,
+            cells,
+            managed_rebalance_count,
+            managed_last_rebalance_at_ms,
+            &ManagedMembershipCounters::default(),
+        );
+    }
+
+    pub fn ingest_top_metrics_with_managed(
+        &self,
+        at_ms: u64,
+        policy_generation: u64,
+        runtime_ns: &BTreeMap<u32, u64>,
+        cells: Option<&BTreeMap<u32, CellMetricCounters>>,
+        managed_rebalance_count: u64,
+        managed_last_rebalance_at_ms: u64,
+        managed_membership: &ManagedMembershipCounters,
+    ) {
         let sequence = {
             let mut live = self.live.write().expect("dashboard lock poisoned");
             let generation_changed = live
@@ -605,6 +640,7 @@ impl Dashboard {
                 .managed_rebalance_count
                 .saturating_add(managed_rebalance_count);
             live.managed_last_rebalance_at_ms = managed_last_rebalance_at_ms;
+            live.managed_membership.add_assign(managed_membership);
             if let Some(cells) = cells {
                 let scheduler_attach_seq = live.scheduler.enable_seq;
                 live.cell_history
@@ -982,6 +1018,7 @@ impl Dashboard {
             active_pairs: cells.len(),
             managed_rebalance_count: live.managed_rebalance_count,
             managed_last_rebalance_at_ms: live.managed_last_rebalance_at_ms,
+            managed_membership: live.managed_membership.clone(),
             scheduler: live.scheduler.clone(),
             scope: live.scope.clone(),
             collector_error: live.collector_error.clone(),
@@ -1227,6 +1264,12 @@ fn cell_stats_row(
         borrowed_runtime_ns: cell.borrowed_runtime_ns,
         lent_runtime_ns: cell.lent_runtime_ns,
         foreign_affinity_runtime_ns: cell.foreign_affinity_runtime_ns,
+        group_runtime_ns: cell.group_runtime_ns,
+        group_preferred_runtime_ns: cell.group_preferred_runtime_ns,
+        group_fallback_runtime_ns: cell.group_fallback_runtime_ns,
+        managed_cell0_runtime_ns: cell.managed_cell0_runtime_ns,
+        managed_cell0_timeslices: cell.managed_cell0_timeslices,
+        managed_affected_tasks: cell.managed_affected_tasks,
         normal_enqueues: cell.normal_enqueues,
         affinity_enqueues: cell.affinity_enqueues,
         normal_dispatches: cell.normal_dispatches,
