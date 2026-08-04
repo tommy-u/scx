@@ -2,11 +2,12 @@
 
 use serde::{Deserialize, Serialize};
 
-pub const DEFAULT_VTIME_SLICE_US: u64 = 5_000;
+pub const DEFAULT_VTIME_SLICE_US: u64 = 20_000;
 pub const MIN_VTIME_SLICE_US: u64 = 1_000;
 pub const DEFAULT_SLICE_SHRINK_MIN_US: u64 = 500;
 pub const DEFAULT_SLICE_SHRINK_MAX_US: u64 = 4_000;
 pub const DEFAULT_SLICE_SHRINK_MULTIPLIER: u32 = 2;
+pub const MIN_MEMBERSHIP_RECONCILE_MS: u64 = 50;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct ManagedCellResizingParameters {
@@ -69,8 +70,10 @@ pub struct SchedulerParameters {
 
 impl UserspaceParameters {
     pub fn validate(self) -> Result<Self, String> {
-        if self.managed_reconcile_ms < 50 {
-            return Err("managed_reconcile_ms must be at least 50".into());
+        if self.managed_reconcile_ms < MIN_MEMBERSHIP_RECONCILE_MS {
+            return Err(format!(
+                "managed_reconcile_ms must be at least {MIN_MEMBERSHIP_RECONCILE_MS}"
+            ));
         }
         if self.resizing.sample_ms == 0 {
             return Err("sample_ms must be positive".into());
@@ -218,6 +221,11 @@ mod tests {
         assert_eq!(parameters.vtime_slice_ns().unwrap(), 20_000_000);
         assert_eq!(parameters.slice_shrink_min_ns().unwrap(), 500_000);
         assert_eq!(parameters.slice_shrink_max_ns().unwrap(), 4_000_000);
+    }
+
+    #[test]
+    fn defaults_vtime_slice_to_twenty_milliseconds() {
+        assert_eq!(BpfSliceParameters::default().vtime_slice_us, 20_000);
     }
 
     #[test]

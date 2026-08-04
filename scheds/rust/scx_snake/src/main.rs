@@ -5454,6 +5454,7 @@ scope = "task_cell"
         let bpf_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bpf");
         let main = fs::read_to_string(bpf_dir.join("main.bpf.c")).unwrap();
         let vtime = fs::read_to_string(bpf_dir.join("fairness_vtime.h")).unwrap();
+        let queue_vtime = fs::read_to_string(bpf_dir.join("queue_vtime.h")).unwrap();
         let shrinking = fs::read_to_string(bpf_dir.join("slice_shrinking.h")).unwrap();
 
         assert!(main.contains("u64"));
@@ -5461,6 +5462,11 @@ scope = "task_cell"
         assert!(main.contains("slice_shrinking_enabled"));
         assert!(vtime.contains("READ_ONCE(vtime_slice_ns)"));
         assert!(!vtime.contains("(SNAKE_VTIME_SLICE_NS / SNAKE_BASE_WEIGHT)"));
+        assert_eq!(
+            queue_vtime.matches("fairness_vtime_base_slice()").count(),
+            3
+        );
+        assert!(!queue_vtime.contains("SNAKE_VTIME_SLICE_NS"));
         assert!(shrinking.contains("slice_shrink_limit("));
         assert!(shrinking.contains("avg_runtime_ns"));
         assert!(shrinking.contains("SNAKE_STAT_SLICE_SHRINK_MIN"));
@@ -5469,6 +5475,35 @@ scope = "task_cell"
         assert!(shrinking.contains("bpf_task_from_pid(current->pid)"));
         assert!(shrinking.contains("bpf_task_release(trusted)"));
         assert!(shrinking.contains("runtime->service_budget -= removed"));
+    }
+
+    #[test]
+    fn scheduler_constants_have_single_sources_of_truth() {
+        let src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+        let policy = fs::read_to_string(src.join("policy.rs")).unwrap();
+        let parameters = fs::read_to_string(src.join("parameters.rs")).unwrap();
+        let runtime = fs::read_to_string(src.join("runtime_policy.rs")).unwrap();
+
+        for generated in [
+            "bpf_intf::SNAKE_MAX_RUNGS",
+            "bpf_intf::SNAKE_MAX_GENERIC_RUNGS",
+            "bpf_intf::SNAKE_EXPANDED_MITOSIS_RUNGS",
+            "bpf_intf::SNAKE_MAX_MASK_TABLES",
+            "bpf_intf::SNAKE_MAX_CPUS",
+            "bpf_intf::SNAKE_MAX_QUEUE_CELLS",
+            "bpf_intf::SNAKE_MAX_QUEUE_RUNGS",
+            "bpf_intf::SNAKE_RUNG_F_INTERSECT_TASK_ALLOWED",
+            "bpf_intf::SNAKE_RUNG_F_PICK_IDLE_CORE",
+            "bpf_intf::SNAKE_RUNG_F_PICK_RANDOM",
+            "bpf_intf::SNAKE_QUEUE_RUNG_F_DIRECT_DISPATCH",
+        ] {
+            assert!(policy.contains(generated), "policy must derive {generated}");
+        }
+        assert!(!policy.contains("reconcile_ms < 50"));
+        assert!(!parameters.contains("managed_reconcile_ms < 50"));
+        assert!(policy.contains("MIN_MEMBERSHIP_RECONCILE_MS"));
+        assert!(parameters.contains("pub const MIN_MEMBERSHIP_RECONCILE_MS"));
+        assert!(runtime.contains("SNAKE_LADDER_SLOTS != 2"));
     }
 
     #[test]
@@ -6111,6 +6146,30 @@ scope = "task_cell"
         assert!(empty < steal);
         assert!(expanded.contains("queue_fairness_move("));
         assert!(expanded.contains("if (winner == &cell_candidate && cpu_candidate.valid)"));
+    }
+
+    #[test]
+    fn mitosis_dispatch_does_not_retain_prev_when_a_candidate_exists() {
+        let dispatch = fs::read_to_string(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bpf/queue_dispatch.h"),
+        )
+        .unwrap();
+        let legacy = dispatch
+            .split_once("queue_mitosis_ladder_dispatch(")
+            .and_then(|(_, body)| body.split_once("queue_mitosis_drain_orphan("))
+            .map(|(body, _)| body)
+            .expect("legacy Mitosis dispatch should have one definition");
+        let expanded = dispatch
+            .split_once("queue_mitosis_expanded_dispatch(")
+            .and_then(|(_, body)| body.split_once("struct snake_remote_scan_loop_ctx"))
+            .map(|(body, _)| body)
+            .expect("expanded Mitosis dispatch should have one definition");
+
+        for body in [legacy, expanded] {
+            assert!(!body.contains("queue_fairness_keep_running_min("));
+            assert!(body.contains("queue_fairness_move("));
+            assert!(body.contains("queue_fairness_replenish("));
+        }
     }
 
     #[test]

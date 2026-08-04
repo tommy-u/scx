@@ -49,7 +49,7 @@ for placement experiments and compatibility comparisons.
 VTIME uses one global custom DSQ for unrestricted tasks and one custom DSQ per
 CPU for affinity-restricted tasks. Every queue is ordered by task virtual
 runtime and shares the same global clock. Let `S` be the configurable VTIME base
-slice, which defaults to 5 ms and must be at least 1 ms. VTIME scales its
+slice, which defaults to 20 ms and must be at least 1 ms. VTIME scales its
 physical slice down for weights below the baseline of 100, with a 1 ms floor
 for scheduler-tick granularity, and caps it at `S` for larger weights:
 
@@ -57,8 +57,8 @@ for scheduler-tick granularity, and caps it at `S` for larger weights:
 physical_slice_ns = max(1 ms, S * min(task.weight, 100) / 100)
 ```
 
-With the default, weights 1 through 20 receive 1 ms, weight 50 receives 2.5 ms,
-and weight 100 or higher receives 5 ms. A weight below 20 advances farther in
+With the default, weights 1 through 5 receive 1 ms, weight 50 receives 10 ms,
+and weight 100 or higher receives 20 ms. A weight below 5 advances farther in
 virtual time per turn and is therefore chosen less frequently; over a complete
 virtual period, physical service remains proportional to task weight. Weights
 above 100 advance less per capped turn and are chosen more frequently.
@@ -220,9 +220,11 @@ clocks are independent. Snake preserves the task's lag relative to the old
 clock, clamps it to one VTIME slice, and applies that lag to the new clock:
 
 ```text
-lag = clamp(task.vruntime - old_cell_now, -5 ms, 5 ms)
+lag = clamp(task.vruntime - old_cell_now, -S, S)
 task.vruntime = new_cell_now + lag
 ```
+
+Here `S` is the configured VTIME base slice.
 
 When an affinity target changes to a CPU owned by another cell, Snake translates
 the affinity coordinate with the same bounded-lag rule.
@@ -233,6 +235,13 @@ The enqueue ladder chooses normal cell storage or an affinity-safe escape. A
 source-based dispatch ladder rotates classes without comparing their clocks;
 `min_vtime` instead compares normal and affinity heads after both are expressed
 in the CPU owner's cell clock, alternating exact ties per CPU.
+
+Generic VTIME dispatch may retain the current task when its projected vruntime
+precedes the selected queue head. The dedicated Mitosis dispatch form does not:
+when either the local cell queue or CPU affinity queue has a candidate, it moves
+the selected candidate to the CPU-local DSQ. It replenishes the current task
+only after local queues and sibling-LLC stealing are empty, matching Mitosis
+callback behavior and ensuring queued cell work receives the next turn.
 
 The `task_cell_borrowable` placement rung is the direct-dispatch exception. It
 may use an idle CPU owned by another cell, bypassing ordered comparison for one

@@ -6,17 +6,20 @@ use std::path::{Component, Path};
 
 use serde::Deserialize;
 
-pub const MAX_RUNGS: usize = 17;
-pub const MAX_GENERIC_RUNGS: usize = 9;
-const EXPANDED_MITOSIS_RUNGS: usize = 16;
-pub const MAX_MASK_TABLES: usize = 4;
-pub const MAX_CELL_IDS: u32 = 1024;
-pub const MAX_QUEUE_CELLS: usize = 256;
-pub const MAX_QUEUE_RUNGS: usize = 8;
-pub const RUNG_FLAG_INTERSECT_TASK_ALLOWED: u32 = 1;
-pub const RUNG_FLAG_PICK_IDLE_CORE: u32 = 1 << 1;
-pub const RUNG_FLAG_PICK_RANDOM: u32 = 1 << 2;
-pub const QUEUE_RUNG_FLAG_DIRECT_DISPATCH: u32 = 1;
+use crate::bpf_intf;
+use crate::parameters::MIN_MEMBERSHIP_RECONCILE_MS;
+
+pub const MAX_RUNGS: usize = bpf_intf::SNAKE_MAX_RUNGS as usize;
+pub const MAX_GENERIC_RUNGS: usize = bpf_intf::SNAKE_MAX_GENERIC_RUNGS as usize;
+const EXPANDED_MITOSIS_RUNGS: usize = bpf_intf::SNAKE_EXPANDED_MITOSIS_RUNGS as usize;
+pub const MAX_MASK_TABLES: usize = bpf_intf::SNAKE_MAX_MASK_TABLES as usize;
+pub const MAX_CELL_IDS: u32 = bpf_intf::SNAKE_MAX_CPUS;
+pub const MAX_QUEUE_CELLS: usize = bpf_intf::SNAKE_MAX_QUEUE_CELLS as usize;
+pub const MAX_QUEUE_RUNGS: usize = bpf_intf::SNAKE_MAX_QUEUE_RUNGS as usize;
+pub const RUNG_FLAG_INTERSECT_TASK_ALLOWED: u32 = bpf_intf::SNAKE_RUNG_F_INTERSECT_TASK_ALLOWED;
+pub const RUNG_FLAG_PICK_IDLE_CORE: u32 = bpf_intf::SNAKE_RUNG_F_PICK_IDLE_CORE;
+pub const RUNG_FLAG_PICK_RANDOM: u32 = bpf_intf::SNAKE_RUNG_F_PICK_RANDOM;
+pub const QUEUE_RUNG_FLAG_DIRECT_DISPATCH: u32 = bpf_intf::SNAKE_QUEUE_RUNG_F_DIRECT_DISPATCH;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u32)]
@@ -831,10 +834,10 @@ fn compile_managed_cells(
             MAX_QUEUE_CELLS - 1
         )));
     }
-    if managed.reconcile_ms < 50 {
-        return Err(PolicyError(
-            "managed cells reconcile_ms must be at least 50".into(),
-        ));
+    if managed.reconcile_ms < MIN_MEMBERSHIP_RECONCILE_MS {
+        return Err(PolicyError(format!(
+            "managed cells reconcile_ms must be at least {MIN_MEMBERSHIP_RECONCILE_MS}"
+        )));
     }
 
     let mut seen = BTreeSet::new();
@@ -958,10 +961,10 @@ fn compile_membership(
             "membership parent must be an absolute path".into(),
         ));
     }
-    if membership.reconcile_ms < 50 {
-        return Err(PolicyError(
-            "membership reconcile_ms must be at least 50".into(),
-        ));
+    if membership.reconcile_ms < MIN_MEMBERSHIP_RECONCILE_MS {
+        return Err(PolicyError(format!(
+            "membership reconcile_ms must be at least {MIN_MEMBERSHIP_RECONCILE_MS}"
+        )));
     }
 
     let mut assignments = BTreeMap::new();

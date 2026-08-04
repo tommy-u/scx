@@ -314,7 +314,7 @@ than a missing core Mitosis placement feature:
   topology at attachment; do not online or offline CPUs while Snake is attached.
 - Live parameter changes are process-local. On restart, managed reconciliation
   and EWMA settings reload from the selected TOML policy. The VTIME base slice
-  returns to 5000 us. The built-in `mitosis-sim` profile restores slice shrinking
+  returns to 20000 us. The built-in `mitosis-sim` profile restores slice shrinking
   enabled with a 500 us minimum, 4000 us maximum, and multiplier 2; custom policy
   files restore shrinking disabled. Put intended managed-cell values in the
   policy and reapply any non-default BPF slice settings after every restart.

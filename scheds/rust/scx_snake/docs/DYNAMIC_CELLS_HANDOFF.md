@@ -52,7 +52,7 @@ runtime counters -> EWMA demand -> proportional reallocation -> banked publish
   reloads them from `mitosis-sim.toml`; live Inspector changes are not written
   back to disk.
 - VTIME slice controls are process-local and not part of the TOML policy. Restart
-  restores a 5000 us base slice. The built-in `mitosis-sim` profile restores
+  restores a 20000 us base slice. The built-in `mitosis-sim` profile restores
   shrinking enabled with a 500 us minimum, 4000 us maximum, and multiplier 2;
   custom policy files restore shrinking disabled. Reapply intended non-default
   values after attach.

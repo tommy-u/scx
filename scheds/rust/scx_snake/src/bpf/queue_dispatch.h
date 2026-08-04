@@ -488,7 +488,7 @@ static __noinline s32 queue_mitosis_ladder_dispatch(
 	struct snake_queue_candidate cell_candidate = {}, cpu_candidate = {};
 	struct snake_queue_candidate *winner;
 	u32 winner_rung;
-	s32 keep, result = 0, ret;
+	s32 result = 0, ret;
 	u64 rung_started_at, stage_started_at;
 
 	if (!ctx || ctx->ladder->nr_dispatch_rungs != 3)
@@ -571,18 +571,6 @@ static __noinline s32 queue_mitosis_ladder_dispatch(
 	fine_timing_finish(fine, SNAKE_FINE_TIMING_DISPATCH_ARBITRATE,
 			   stage_started_at);
 	stat_inc(ctx, SNAKE_STAT_DISPATCH_RUNG_SELECTED_BASE + winner_rung);
-	stage_started_at = fine_timing_start(fine);
-	keep = queue_fairness_keep_running_min(ctx, cpuq, prev, winner->vtime);
-	fine_timing_finish(fine, SNAKE_FINE_TIMING_DISPATCH_KEEP_RUNNING,
-			   stage_started_at);
-	if (keep < 0) {
-		ret = keep;
-		goto consume_error;
-	}
-	if (keep) {
-		result = 1;
-		goto consume_out;
-	}
 	ret = queue_fairness_move(ctx, winner->dsq, cpu, winner->class, fine);
 	if (ret < 0)
 		goto consume_error;
@@ -734,7 +722,7 @@ static __noinline s32 queue_mitosis_expanded_dispatch(
 	struct snake_queue_candidate cell_candidate = {}, cpu_candidate = {};
 	struct snake_queue_candidate *winner;
 	u32 winner_rung;
-	s32 keep, result = 0, ret;
+	s32 result = 0, ret;
 	u64 rung_started_at, stage_started_at;
 
 	if (!ctx || ctx->ladder->nr_dispatch_rungs != 5)
@@ -846,18 +834,6 @@ static __noinline s32 queue_mitosis_expanded_dispatch(
 	fine_timing_finish(fine, SNAKE_FINE_TIMING_DISPATCH_ARBITRATE,
 			   stage_started_at);
 	stat_inc(ctx, SNAKE_STAT_DISPATCH_RUNG_SELECTED_BASE + winner_rung);
-	stage_started_at = fine_timing_start(fine);
-	keep = queue_fairness_keep_running_min(ctx, cpuq, prev, winner->vtime);
-	fine_timing_finish(fine, SNAKE_FINE_TIMING_DISPATCH_KEEP_RUNNING,
-			   stage_started_at);
-	if (keep < 0) {
-		ret = keep;
-		goto consume_error;
-	}
-	if (keep) {
-		result = 1;
-		goto consume_out;
-	}
 	ret = queue_fairness_move(ctx, winner->dsq, cpu, winner->class, fine);
 	if (ret < 0)
 		goto consume_error;
