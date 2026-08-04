@@ -317,7 +317,7 @@ queue_fairness_prepare_runnable_for_cell(
 		return NULL;
 	}
 	now	= queue_domain_now(domain, fine);
-	minimum = now - SNAKE_VTIME_SLICE_NS;
+	minimum = now - fairness_vtime_base_slice();
 	if (time_before(runtime->vruntime, minimum)) {
 		runtime->vruntime = minimum;
 		stat_inc(ctx, SNAKE_STAT_VTIME_CREDIT_CLAMPS);
@@ -429,7 +429,7 @@ queue_fairness_prepare_affinity(struct snake_ladder_ctx	  *ctx,
 	runtime->affinity_cell_external_id = external_id;
 	runtime->affinity_cell_epoch = slot_epoch;
 	runtime->affinity_topology_generation = header->topology_generation;
-	minimum = new_now - SNAKE_VTIME_SLICE_NS;
+	minimum = new_now - fairness_vtime_base_slice();
 	if (time_before(runtime->affinity_vruntime, minimum)) {
 		runtime->affinity_vruntime = minimum;
 		stat_inc(ctx, SNAKE_STAT_VTIME_CREDIT_CLAMPS);

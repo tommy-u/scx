@@ -43,7 +43,7 @@ fn model_run_start_cas(
     let mut observed = initial_observation;
 
     for &previous in cas_observations {
-        let adjusted = vtime_run_start(vruntime, observed);
+        let adjusted = vtime_run_start(vruntime, observed, VTIME_SLICE_NS);
         let desired = later_vtime_frontier(observed, adjusted);
 
         if previous == observed {
@@ -57,7 +57,7 @@ fn model_run_start_cas(
         observed = previous;
     }
 
-    let adjusted = vtime_run_start(vruntime, observed);
+    let adjusted = vtime_run_start(vruntime, observed, VTIME_SLICE_NS);
     let desired = later_vtime_frontier(observed, adjusted);
     if desired == observed {
         RunStartCasResult::Complete {
@@ -129,7 +129,7 @@ fn low_weight_vtime_quantum_stays_below_the_watchdog_budget() {
     const PEERS: u64 = CPUS * 10;
     const WATCHDOG_NS: u64 = 5_000_000_000;
 
-    let slice = vtime_slice_ns(1).unwrap();
+    let slice = vtime_slice_ns(1, VTIME_SLICE_NS).unwrap();
     let lead = scale_inverse_weight(slice, 1).unwrap();
     let catchup = (u128::from(PEERS) * u128::from(lead)).div_ceil(u128::from(CPUS));
 
@@ -140,8 +140,8 @@ fn low_weight_vtime_quantum_stays_below_the_watchdog_budget() {
 
 #[test]
 fn weight_scaled_vtime_quanta_preserve_service_ratio() {
-    let low_slice = vtime_slice_ns(1).unwrap();
-    let base_slice = vtime_slice_ns(BASE_WEIGHT).unwrap();
+    let low_slice = vtime_slice_ns(1, VTIME_SLICE_NS).unwrap();
+    let base_slice = vtime_slice_ns(BASE_WEIGHT, VTIME_SLICE_NS).unwrap();
 
     let low_charge = scale_inverse_weight(low_slice, 1).unwrap();
     let base_charge = scale_inverse_weight(base_slice, BASE_WEIGHT).unwrap();
@@ -149,14 +149,14 @@ fn weight_scaled_vtime_quanta_preserve_service_ratio() {
 
     assert_eq!(low_charge % base_charge, 0);
     assert_eq!(low_slice * BASE_WEIGHT, base_slice * base_quanta);
-    assert_eq!(vtime_slice_ns(10_000).unwrap(), base_slice);
-    assert_eq!(vtime_slice_ns(0).unwrap(), base_slice);
+    assert_eq!(vtime_slice_ns(10_000, VTIME_SLICE_NS).unwrap(), base_slice);
+    assert_eq!(vtime_slice_ns(0, VTIME_SLICE_NS).unwrap(), base_slice);
 }
 
 #[test]
 fn vtime_service_is_bounded_by_the_assigned_slice() {
-    let low_weight_slice = vtime_slice_ns(1).unwrap();
-    let base_weight_slice = vtime_slice_ns(BASE_WEIGHT).unwrap();
+    let low_weight_slice = vtime_slice_ns(1, VTIME_SLICE_NS).unwrap();
+    let base_weight_slice = vtime_slice_ns(BASE_WEIGHT, VTIME_SLICE_NS).unwrap();
 
     let overrun = vtime_service_ns(11_213_262, low_weight_slice, 0);
     assert_eq!(overrun, low_weight_slice);
@@ -171,7 +171,7 @@ fn vtime_service_is_bounded_by_the_assigned_slice() {
 
 #[test]
 fn retained_vtime_slices_extend_the_service_budget() {
-    let slice = vtime_slice_ns(BASE_WEIGHT).unwrap();
+    let slice = vtime_slice_ns(BASE_WEIGHT, VTIME_SLICE_NS).unwrap();
     let budget = replenish_vtime_budget(slice, 0, slice);
 
     assert_eq!(budget, 2 * slice);
@@ -182,7 +182,7 @@ fn retained_vtime_slices_extend_the_service_budget() {
 
 #[test]
 fn yield_projection_forfeits_the_remaining_vtime_budget() {
-    let slice = vtime_slice_ns(BASE_WEIGHT).unwrap();
+    let slice = vtime_slice_ns(BASE_WEIGHT, VTIME_SLICE_NS).unwrap();
     let candidate_vtime = 1_000_000;
     let projected = project_vtime(0, 1_000, slice, 0, BASE_WEIGHT).unwrap();
 
@@ -194,7 +194,7 @@ fn yield_projection_forfeits_the_remaining_vtime_budget() {
 fn queued_weight_change_preserves_the_slice_assignment_weight() {
     let assigned_weight = BASE_WEIGHT;
     let live_weight = 1;
-    let slice = vtime_slice_ns(assigned_weight).unwrap();
+    let slice = vtime_slice_ns(assigned_weight, VTIME_SLICE_NS).unwrap();
     let run_weight = vtime_run_weight(assigned_weight, live_weight);
 
     assert_eq!(run_weight, assigned_weight);
@@ -211,14 +211,14 @@ fn run_start_reclamps_vtime_after_a_long_queue_wait() {
     const CELL_FRONTIER: u64 = 22_424_010_766;
     const WATCHDOG_NS: u64 = 5_000_000_000;
 
-    let slice = vtime_slice_ns(BASE_WEIGHT).unwrap();
+    let slice = vtime_slice_ns(BASE_WEIGHT, VTIME_SLICE_NS).unwrap();
     let stale_projected = project_vtime(STALE_NORMAL, slice, slice, 0, BASE_WEIGHT).unwrap();
 
     assert_eq!(AFFINITY_HEAD - STALE_NORMAL, 8_824_936_009);
     assert!(AFFINITY_HEAD - STALE_NORMAL > WATCHDOG_NS);
     assert!(stale_projected < AFFINITY_HEAD);
 
-    let run_start = vtime_run_start(STALE_NORMAL, CELL_FRONTIER);
+    let run_start = vtime_run_start(STALE_NORMAL, CELL_FRONTIER, VTIME_SLICE_NS);
     assert_eq!(run_start, CELL_FRONTIER - VTIME_SLICE_NS);
     let reclamped_projected = project_vtime(run_start, slice, slice, 0, BASE_WEIGHT).unwrap();
     assert!(reclamped_projected > AFFINITY_HEAD);
@@ -230,9 +230,12 @@ fn failed_noop_cas_reclamps_against_the_returned_frontier() {
     let current_frontier = 200_000_000;
     let vruntime = stale_frontier;
 
-    assert_eq!(vtime_run_start(vruntime, stale_frontier), vruntime);
     assert_eq!(
-        vtime_run_start(vruntime, current_frontier),
+        vtime_run_start(vruntime, stale_frontier, VTIME_SLICE_NS),
+        vruntime
+    );
+    assert_eq!(
+        vtime_run_start(vruntime, current_frontier, VTIME_SLICE_NS),
         current_frontier - VTIME_SLICE_NS
     );
 }
@@ -324,16 +327,35 @@ fn vtime_sleeper_credit_is_bounded_to_one_slice() {
     let frontier = 100_000_000;
 
     assert_eq!(
-        clamp_vtime_credit(frontier - 2 * VTIME_SLICE_NS, frontier),
+        clamp_vtime_credit(frontier - 2 * VTIME_SLICE_NS, frontier, VTIME_SLICE_NS),
         frontier - VTIME_SLICE_NS
     );
     assert_eq!(
-        clamp_vtime_credit(frontier - VTIME_SLICE_NS / 2, frontier),
+        clamp_vtime_credit(frontier - VTIME_SLICE_NS / 2, frontier, VTIME_SLICE_NS,),
         frontier - VTIME_SLICE_NS / 2
     );
     assert_eq!(
-        clamp_vtime_credit(frontier + VTIME_SLICE_NS, frontier),
+        clamp_vtime_credit(frontier + VTIME_SLICE_NS, frontier, VTIME_SLICE_NS),
         frontier + VTIME_SLICE_NS
+    );
+}
+
+#[test]
+fn configured_vtime_slice_controls_the_sleeper_credit_window() {
+    const CONFIGURED_SLICE_NS: u64 = 20_000_000;
+    let frontier = 100_000_000;
+
+    assert_eq!(
+        clamp_vtime_credit(0, frontier, CONFIGURED_SLICE_NS),
+        frontier - CONFIGURED_SLICE_NS
+    );
+    assert_eq!(
+        vtime_run_start(0, frontier, CONFIGURED_SLICE_NS),
+        frontier - CONFIGURED_SLICE_NS
+    );
+    assert_eq!(
+        vtime_slice_ns(BASE_WEIGHT, CONFIGURED_SLICE_NS).unwrap(),
+        CONFIGURED_SLICE_NS
     );
 }
 

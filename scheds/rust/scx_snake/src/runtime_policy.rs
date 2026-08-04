@@ -183,6 +183,12 @@ where
 }
 
 pub fn inactive_slot(active: u32) -> Result<u32> {
+    if bpf_intf::SNAKE_LADDER_SLOTS != 2 {
+        bail!(
+            "runtime policy banking requires exactly two ladder slots, found {}",
+            bpf_intf::SNAKE_LADDER_SLOTS
+        );
+    }
     if active >= bpf_intf::SNAKE_LADDER_SLOTS {
         bail!("invalid active ladder slot {active}");
     }

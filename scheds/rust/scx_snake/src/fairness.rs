@@ -44,8 +44,8 @@ pub fn later_vtime_frontier(frontier: u64, candidate: u64) -> u64 {
     }
 }
 
-pub fn clamp_vtime_credit(vruntime: u64, frontier: u64) -> u64 {
-    let minimum = frontier.wrapping_sub(VTIME_SLICE_NS);
+pub fn clamp_vtime_credit(vruntime: u64, frontier: u64, slice_ns: u64) -> u64 {
+    let minimum = frontier.wrapping_sub(slice_ns);
 
     if vtime_before(vruntime, minimum) {
         minimum
@@ -54,8 +54,8 @@ pub fn clamp_vtime_credit(vruntime: u64, frontier: u64) -> u64 {
     }
 }
 
-pub fn vtime_run_start(vruntime: u64, frontier: u64) -> u64 {
-    clamp_vtime_credit(vruntime, frontier)
+pub fn vtime_run_start(vruntime: u64, frontier: u64, slice_ns: u64) -> u64 {
+    clamp_vtime_credit(vruntime, frontier, slice_ns)
 }
 
 pub fn translate_vruntime(vruntime: u64, old_frontier: u64, new_frontier: u64, limit: u64) -> u64 {
@@ -117,13 +117,13 @@ pub fn scale_inverse_weight(delta_ns: u64, weight: u64) -> Result<u64, &'static 
         .ok_or("weighted duration overflowed")
 }
 
-pub fn vtime_slice_ns(weight: u64) -> Result<u64, &'static str> {
+pub fn vtime_slice_ns(weight: u64, base_slice_ns: u64) -> Result<u64, &'static str> {
     let weight = if weight == 0 {
         BASE_WEIGHT
     } else {
         weight.min(BASE_WEIGHT)
     };
-    Ok((VTIME_SLICE_NS / BASE_WEIGHT * weight).max(VTIME_MIN_SLICE_NS))
+    Ok((base_slice_ns / BASE_WEIGHT * weight).max(VTIME_MIN_SLICE_NS))
 }
 
 pub fn vtime_service_ns(runtime_ns: u64, slice_ns: u64, remaining_ns: u64) -> u64 {
