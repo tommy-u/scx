@@ -4,14 +4,14 @@ const number = new Intl.NumberFormat("en-US", { maximumFractionDigits: 2 });
 const statsHistory = new MitosisCharts.History(300);
 const trackedCells = new Set();
 const chartColors = [
-  "#16795b",
-  "#2878a6",
-  "#b45c3d",
-  "#8b63a8",
-  "#9a711c",
-  "#3f6f2c",
-  "#bc476b",
-  "#4f647a",
+  "var(--series-green)",
+  "var(--series-blue)",
+  "var(--series-orange)",
+  "var(--series-purple)",
+  "var(--series-gold)",
+  "var(--series-olive)",
+  "var(--series-pink)",
+  "var(--series-slate)",
 ];
 
 function displayName(name) {
@@ -36,13 +36,105 @@ function renderGlobal(metrics) {
   const body = document.querySelector("#globalStatsBody");
   body.replaceChildren();
   Object.entries(metrics)
-    .filter(([name]) => name !== "cells")
+    .filter(([name]) => !["cells", "borrow_flows"].includes(name))
     .forEach(([name, value]) => {
       const row = document.createElement("tr");
       appendCell(row, "th", displayName(name), "row");
       appendCell(row, "td", displayValue(value));
       body.append(row);
     });
+}
+
+function cellLabel(cellId) {
+  return `Cell ${cellId}`;
+}
+
+function percentage(value) {
+  return Number.isFinite(value) ? `${number.format(value)}%` : "--";
+}
+
+function numericCellIds(flows, cells) {
+  const ids = new Set(Object.keys(cells ?? {}).map(Number));
+  flows.forEach((flow) => {
+    ids.add(Number(flow.borrower_cell));
+    ids.add(Number(flow.lender_cell));
+  });
+  return [...ids].filter(Number.isFinite).sort((left, right) => left - right);
+}
+
+function renderBorrowing(metrics) {
+  const supported = Object.hasOwn(metrics, "borrow_flows");
+  const flows = Object.values(metrics.borrow_flows ?? {}).filter(
+    (flow) => Number.isFinite(flow?.borrower_cell) && Number.isFinite(flow?.lender_cell),
+  );
+  const cellIds = numericCellIds(flows, metrics.cells);
+  const byDirection = new Map(
+    flows.map((flow) => [`${flow.borrower_cell}:${flow.lender_cell}`, flow]),
+  );
+  const maxCapacity = Math.max(
+    0,
+    ...flows.map((flow) => flow.lender_capacity_pct).filter(Number.isFinite),
+  );
+  const head = document.querySelector("#borrowMatrixHead");
+  const body = document.querySelector("#borrowMatrixBody");
+  head.replaceChildren();
+  body.replaceChildren();
+
+  const header = document.createElement("tr");
+  appendCell(header, "th", "Borrower ↓ / Lender →", "col");
+  cellIds.forEach((cellId) => appendCell(header, "th", cellLabel(cellId), "col"));
+  head.append(header);
+
+  cellIds.forEach((borrower) => {
+    const row = document.createElement("tr");
+    appendCell(row, "th", cellLabel(borrower), "row");
+    cellIds.forEach((lender) => {
+      const cell = document.createElement("td");
+      if (borrower === lender) {
+        cell.className = "borrow-cell-own";
+        cell.textContent = "Own";
+      } else {
+        const flow = byDirection.get(`${borrower}:${lender}`);
+        const capacity = flow?.lender_capacity_pct;
+        const level = maxCapacity > 0 && Number.isFinite(capacity)
+          ? Math.max(1, Math.ceil(5 * capacity / maxCapacity))
+          : 0;
+        cell.className = `borrow-cell borrow-level-${level}`;
+        cell.textContent = flow ? percentage(capacity) : "0%";
+        cell.title = flow
+          ? `${cellLabel(borrower)} used ${percentage(capacity)} of ${cellLabel(lender)} capacity`
+          : `No runtime borrowed by ${cellLabel(borrower)} from ${cellLabel(lender)}`;
+      }
+      row.append(cell);
+    });
+    body.append(row);
+  });
+
+  const edgeBody = document.querySelector("#borrowFlowsBody");
+  edgeBody.replaceChildren();
+  flows
+    .sort((left, right) => (right.runtime_ns ?? 0) - (left.runtime_ns ?? 0))
+    .forEach((flow) => {
+      const row = document.createElement("tr");
+      appendCell(row, "th", cellLabel(flow.borrower_cell), "row");
+      appendCell(row, "td", cellLabel(flow.lender_cell));
+      appendCell(row, "td", displayValue(flow.runtime_ns / 1e6));
+      appendCell(row, "td", percentage(flow.borrower_runtime_pct));
+      appendCell(row, "td", percentage(flow.lender_capacity_pct));
+      edgeBody.append(row);
+    });
+
+  if (flows.length === 0) {
+    const row = document.createElement("tr");
+    const cell = document.createElement("td");
+    cell.colSpan = 5;
+    cell.className = "borrowing-empty";
+    cell.textContent = supported
+      ? "No cross-cell borrowing in the latest interval"
+      : "Pairwise borrowing is unavailable from this scheduler version";
+    row.append(cell);
+    edgeBody.append(row);
+  }
 }
 
 function renderCells(cells) {
@@ -92,7 +184,10 @@ function renderCellHistory(cells) {
     });
   });
   statsHistory.push(Date.now(), sample);
+  drawCellHistory();
+}
 
+function drawCellHistory() {
   const cellsWithUtilization = [...trackedCells].filter(
     (cellId) => statsHistory.points(historyKey(cellId, "util")).length > 0,
   );
@@ -127,6 +222,7 @@ function renderCellHistory(cells) {
 
 function render(snapshot) {
   if (!snapshot.metrics) throw new Error(snapshot.error ?? "Stats unavailable");
+  renderBorrowing(snapshot.metrics);
   renderGlobal(snapshot.metrics);
   renderCells(snapshot.metrics.cells);
   renderCellHistory(snapshot.metrics.cells);
@@ -148,20 +244,12 @@ async function refresh() {
   }
 }
 
-window.addEventListener("mitosis:stats-reset", () => {
+globalThis.addEventListener?.("mitosis:stats-reset", () => {
   statsHistory.clear();
   trackedCells.clear();
-  MitosisCharts.drawLineChart(
-    document.querySelector("#cellUtilizationChart"),
-    [],
-    { unit: "%", minY: 0, maxY: 100 },
-  );
-  MitosisCharts.drawLineChart(
-    document.querySelector("#cellBalanceChart"),
-    [],
-    { unit: "%", minY: 0, maxY: 100 },
-  );
+  drawCellHistory();
 });
+document.addEventListener?.("mitosis-theme-change", drawCellHistory);
 
 refresh();
 setInterval(refresh, 2000);

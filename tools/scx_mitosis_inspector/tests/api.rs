@@ -350,6 +350,135 @@ async fn shared_chart_library_is_served() {
 }
 
 #[tokio::test]
+async fn dark_mode_controls_and_theme_script_are_shared() {
+    for path in ["/", "/system", "/stats"] {
+        let response = app()
+            .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let html = std::str::from_utf8(&body).unwrap();
+        assert!(
+            html.contains("data-theme-toggle"),
+            "missing theme toggle on {path}"
+        );
+        assert!(
+            html.contains("role=\"switch\""),
+            "theme control is not a switch on {path}"
+        );
+        assert!(
+            html.contains("/assets/theme.js"),
+            "missing theme script on {path}"
+        );
+        assert!(
+            html.find("/assets/theme.js").unwrap() < html.find("/assets/style.css").unwrap(),
+            "theme must initialize before the stylesheet on {path}",
+        );
+    }
+
+    let response = app()
+        .oneshot(
+            Request::builder()
+                .uri("/assets/theme.js")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let javascript = std::str::from_utf8(&body).unwrap();
+    assert!(javascript.contains("prefers-color-scheme: dark"));
+    assert!(javascript.contains("localStorage"));
+    assert!(javascript.contains("mitosis-theme-change"));
+}
+
+#[tokio::test]
+async fn scheduler_configuration_is_a_distinct_read_only_page() {
+    let page = app()
+        .oneshot(
+            Request::builder()
+                .uri("/config")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(page.status(), StatusCode::OK);
+    let body = page.into_body().collect().await.unwrap().to_bytes();
+    let html = std::str::from_utf8(&body).unwrap();
+    assert!(html.contains("aria-current=\"page\" href=\"/config\""));
+    assert!(html.contains("id=\"configurationRows\""));
+    assert!(html.contains("id=\"configurationSearch\""));
+    assert!(html.contains("name=\"configurationState\""));
+    assert!(html.contains("/assets/config.js"));
+    assert!(!html.contains("type=\"submit\""));
+
+    let api = app()
+        .oneshot(
+            Request::builder()
+                .uri("/api/config")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(api.status(), StatusCode::OK);
+    let body = api.into_body().collect().await.unwrap().to_bytes();
+    let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert!(value.get("available").is_some());
+    assert!(value.get("options").is_some());
+
+    let script = app()
+        .oneshot(
+            Request::builder()
+                .uri("/assets/config.js")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(script.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn appendix_is_a_dedicated_reference_page() {
+    let page = app()
+        .oneshot(
+            Request::builder()
+                .uri("/appendix")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(page.status(), StatusCode::OK);
+    let body = page.into_body().collect().await.unwrap().to_bytes();
+    let html = std::str::from_utf8(&body).unwrap();
+    assert!(html.contains("aria-current=\"page\" href=\"/appendix\""));
+    assert!(html.contains(">Reference</span>"));
+    assert!(html.contains("id=\"appendixViews\""));
+    assert!(html.contains("data-theme-toggle"));
+    assert!(html.contains("/assets/theme.js"));
+
+    for path in ["/", "/system", "/stats", "/config"] {
+        let response = app()
+            .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let html = std::str::from_utf8(&body).unwrap();
+        assert!(
+            html.contains("href=\"/appendix\">Appendix</a>"),
+            "missing appendix navigation on {path}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn callback_script_renders_system_and_mitosis_utilization() {
     let response = app()
         .oneshot(
@@ -391,6 +520,31 @@ async fn heatmap_styles_show_the_complete_vertical_canvas() {
     assert!(heatmap.contains("overflow-x: auto"));
     assert!(heatmap.contains("overflow-y: visible"));
     assert!(!heatmap.contains("max-height"));
+}
+
+#[tokio::test]
+async fn mobile_workspace_navigation_keeps_reference_links_visible() {
+    let response = app()
+        .oneshot(
+            Request::builder()
+                .uri("/assets/style.css")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let css = std::str::from_utf8(&body).unwrap();
+    let mobile = css.split("@media (max-width: 720px) {").nth(1).unwrap();
+    let navigation = mobile
+        .split(".workspace-navigation {")
+        .nth(1)
+        .and_then(|rules| rules.split('}').next())
+        .unwrap();
+    assert!(navigation.contains("flex-wrap: wrap"));
+    assert!(navigation.contains("overflow-x: visible"));
 }
 
 #[tokio::test]

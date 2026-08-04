@@ -170,25 +170,25 @@ function pushHistory(at, systemSnapshot, countersSnapshot) {
 
 function drawHistory() {
   drawLineChart(document.querySelector("#pressureHistory"), [
-    { label: "CPU", color: "#2f7d62", points: pressureHistory.points("cpu") },
-    { label: "Memory", color: "#b05b3b", points: pressureHistory.points("memory") },
-    { label: "I/O", color: "#3f6f9f", points: pressureHistory.points("io") },
+    { label: "CPU", color: "var(--series-green)", points: pressureHistory.points("cpu") },
+    { label: "Memory", color: "var(--series-orange)", points: pressureHistory.points("memory") },
+    { label: "I/O", color: "var(--series-blue)", points: pressureHistory.points("io") },
   ], { unit: "%", minY: 0 });
   drawLineChart(document.querySelector("#frequencyHistory"), [
-    { label: "Average", color: "#2f7d62", points: frequencyHistory.points("mhz") },
+    { label: "Average", color: "var(--series-green)", points: frequencyHistory.points("mhz") },
   ], { unit: "MHz", minY: 0 });
   drawLineChart(document.querySelector("#networkHistory"), [
-    { label: "RX", color: "#2f7d62", points: networkHistory.points("rx") },
-    { label: "TX", color: "#b05b3b", points: networkHistory.points("tx") },
+    { label: "RX", color: "var(--series-green)", points: networkHistory.points("rx") },
+    { label: "TX", color: "var(--series-orange)", points: networkHistory.points("tx") },
   ], { unit: "B/s", minY: 0 });
   drawLineChart(document.querySelector("#irqHistory"), [
-    { label: "IRQ", color: "#b05b3b", points: irqHistory.points("total") },
+    { label: "IRQ", color: "var(--series-orange)", points: irqHistory.points("total") },
   ], { unit: "%", minY: 0, maxY: 100 });
   drawLineChart(document.querySelector("#blockRateHistory"), [
-    { label: "Completions", color: "#3f6f9f", points: blockHistory.points("completions") },
+    { label: "Completions", color: "var(--series-blue)", points: blockHistory.points("completions") },
   ], { unit: "IOPS", minY: 0 });
   drawLineChart(document.querySelector("#blockThroughputHistory"), [
-    { label: "Completed", color: "#2f7d62", points: blockHistory.points("mib") },
+    { label: "Completed", color: "var(--series-green)", points: blockHistory.points("mib") },
   ], { unit: "MiB/s", minY: 0 });
 }
 
@@ -221,11 +221,12 @@ async function refresh() {
   }
 }
 
-window.addEventListener("mitosis:stats-reset", () => {
+globalThis.addEventListener?.("mitosis:stats-reset", () => {
   [pressureHistory, frequencyHistory, networkHistory, irqHistory, blockHistory]
     .forEach((history) => history.clear());
   drawHistory();
 });
+document.addEventListener?.("mitosis-theme-change", drawHistory);
 
 refresh();
 setInterval(refresh, 2000);

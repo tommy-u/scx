@@ -15,6 +15,7 @@ use scx_mitosis_inspector::api::{router, ApiContext};
 use scx_mitosis_inspector::collector::{self, CollectorConfig, Snapshot};
 use scx_mitosis_inspector::host_context::HostContextView;
 use scx_mitosis_inspector::migration_history::{parse_duration, MigrationHistory};
+use scx_mitosis_inspector::scheduler_config;
 use scx_mitosis_inspector::stats::{self, StatsSnapshot, DEFAULT_STATS_PATH};
 use scx_mitosis_inspector::system_stats::SystemStatsCollector;
 use scx_mitosis_inspector::{
@@ -182,7 +183,8 @@ async fn main() -> Result<()> {
         migration_history,
         migration_window_ms,
         reset_requested,
-    );
+    )
+    .with_scheduler_config(scheduler_config::discover());
     let server = axum::serve(listener, router(context)).with_graceful_shutdown(async {
         let _ = tokio::signal::ctrl_c().await;
     });

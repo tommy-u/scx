@@ -9,7 +9,8 @@ inspector=${MITOSIS_INSPECTOR_BIN:-${repo}/tools/scx_mitosis_inspector/target/re
 cell_parent_arg=/workload.slice/workload-tw.slice
 cell_parent=/sys/fs/cgroup${cell_parent_arg}
 cell_names=(inspector-a.service inspector-b.service)
-workers_per_cell=${MITOSIS_WORKERS_PER_CELL:-4}
+cpu_count=$(nproc)
+workers_per_cell=${MITOSIS_WORKERS_PER_CELL:-$((cpu_count / 4))}
 waker_interval=${MITOSIS_WAKER_INTERVAL_SECONDS:-0.02}
 scheduler_log=/tmp/scx-mitosis.log
 scheduler_pid=
@@ -19,10 +20,28 @@ waker_timer_fifo=/tmp/scx-mitosis-waker-timer-$$
 
 scheduler_args=(
     --exit-dump-len 1048576
-    --cell-parent-cgroup "${cell_parent_arg}"
-    --cell-exclude systemd-workaround.service
-    --cell0-min-cpus 4
 )
+if [[ ${MITOSIS_FULL_FEATURE_FLAGS:-0} == 1 ]]; then
+    scheduler_args+=(
+        --cpu-controller-disabled
+    )
+fi
+scheduler_args+=(
+    --cell-parent-cgroup "${cell_parent_arg}"
+)
+if [[ ${MITOSIS_FULL_FEATURE_FLAGS:-0} == 1 ]]; then
+    scheduler_args+=(
+        --dynamic-affinity-cpu-selection
+        --enable-borrowing
+        --enable-rebalancing
+        --enable-slice-shrinking
+    )
+fi
+scheduler_args+=(--cell-exclude systemd-workaround.service)
+if [[ ${MITOSIS_FULL_FEATURE_FLAGS:-0} == 1 ]]; then
+    scheduler_args+=(--enable-llc-awareness)
+fi
+scheduler_args+=(--cell0-min-cpus 4)
 
 cleanup() {
     local rc=$?
@@ -49,7 +68,7 @@ trap cleanup EXIT INT TERM
 [[ ${EUID} -eq 0 ]] || { echo "run-in-vm.sh must run as root" >&2; exit 1; }
 [[ -x ${scheduler} ]] || { echo "scheduler not executable: ${scheduler}" >&2; exit 1; }
 [[ -x ${inspector} ]] || { echo "inspector not executable: ${inspector}" >&2; exit 1; }
-[[ $(nproc) -eq 16 ]] || { echo "expected 16 CPUs, found $(nproc)" >&2; exit 1; }
+((cpu_count >= 16)) || { echo "expected at least 16 CPUs, found ${cpu_count}" >&2; exit 1; }
 [[ ${workers_per_cell} =~ ^[1-9][0-9]*$ ]] || { echo "MITOSIS_WORKERS_PER_CELL must be positive" >&2; exit 1; }
 command -v yes >/dev/null || { echo "yes is required for dummy workloads" >&2; exit 1; }
 
@@ -108,7 +127,7 @@ bash -c '
 ' _ "${cell_parent}/${cell_names[1]}" "${waker_fifo}" "${waker_timer_fifo}" "${waker_interval}" &
 workload_pids+=("$!")
 
-echo "scx_mitosis attached on $(nproc) CPUs with ${#cell_names[@]} workload cells"
+echo "scx_mitosis attached on ${cpu_count} CPUs with ${#cell_names[@]} workload cells"
 echo "dummy workloads: ${workers_per_cell} workers each in ${cell_names[*]}"
 echo "waker/wakee: one pipe handoff every ${waker_interval}s across ${cell_names[*]}"
 "${inspector}" --listen 0.0.0.0:44105

@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Mitosis appendix</title>
+    <script src="/assets/theme.js"></script>
+    <link rel="stylesheet" href="/assets/style.css">
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="topbar-product">
+        <div class="product-title">
+          <h1>Mitosis inspector</h1>
+          <p>Scheduler activity and runtime statistics</p>
+        </div>
+      </div>
+      <div class="topbar-actions">
+        <div class="reset-stats-control">
+          <button class="reset-all-stats" id="resetAllStats" type="button">Reset all stats</button>
+          <span id="resetStatsStatus" role="status" aria-live="polite"></span>
+        </div>
+        <div class="status live" role="status">
+          <span class="status-dot" aria-hidden="true"></span>
+          <span>Ready</span>
+        </div>
+      </div>
+    </header>
+
+    <div class="workspace-shell">
+      <aside class="workspace-sidebar">
+        <nav class="workspace-navigation" aria-label="Inspector workspaces">
+          <span class="navigation-group-label">Observe</span>
+          <a href="/">Callbacks</a>
+          <a href="/system">System</a>
+          <a href="/stats">Scheduler</a>
+          <a href="/config">Configuration</a>
+          <span class="navigation-group-label navigation-group-label-secondary">Reference</span>
+          <a class="active" aria-current="page" href="/appendix">Appendix</a>
+        </nav>
+        <label class="workspace-theme-control">
+          <span>Dark mode</span>
+          <input type="checkbox" role="switch" data-theme-toggle aria-label="Use dark mode">
+          <span class="theme-switch-track" aria-hidden="true"><span></span></span>
+        </label>
+      </aside>
+
+      <main id="app" tabindex="-1" aria-label="Mitosis inspector appendix">
+        <header class="view-heading">
+          <div>
+            <h2>Appendix</h2>
+            <p>Secondary diagnostics and reference data</p>
+          </div>
+        </header>
+
+        <section class="appendix-content" id="appendixViews" aria-label="Appendix views">
+          <p class="appendix-empty">No appendix views</p>
+        </section>
+      </main>
+    </div>
+    <script src="/assets/reset.js" defer></script>
+  </body>
+</html>
