@@ -121,7 +121,8 @@ static __always_inline bool rung_is_valid(const struct snake_rung *rung,
 		((rung->input == SNAKE_INPUT_QUEUE_CELL &&
 		  (rung->data == SNAKE_QUEUE_MASK_PRIMARY ||
 		   rung->data == SNAKE_QUEUE_MASK_BORROWABLE ||
-		   rung->data == SNAKE_QUEUE_MASK_LOCAL_LLC)) ||
+		   rung->data == SNAKE_QUEUE_MASK_LOCAL_LLC ||
+		   rung->data == SNAKE_QUEUE_MASK_GROUP_LLC)) ||
 		 (rung->input == SNAKE_INPUT_TASK_ALLOWED_RESTRICTED &&
 		  !rung->data)));
 }
@@ -131,6 +132,9 @@ queue_atomic_rung_is_valid(const struct snake_rung *rung)
 {
 	if (rung->reserved)
 		return false;
+	if (rung->opcode == SNAKE_OP_PICK_IDLE_PREFER_PREVIOUS)
+		return !rung->flags && rung->input == SNAKE_INPUT_QUEUE_CELL &&
+		       rung->data == SNAKE_QUEUE_MASK_GROUP_LLC;
 
 	if (rung->opcode == SNAKE_OP_CLAIM_IDLE) {
 		if (rung->flags != 0 &&
@@ -162,13 +166,23 @@ queue_atomic_rung_is_valid(const struct snake_rung *rung)
 		rung->flags == SNAKE_RUNG_F_PICK_IDLE_CORE);
 }
 
-static __always_inline bool
-expanded_mitosis_rung_matches(const struct snake_rung *rung, u32 index)
+static __always_inline bool expanded_mitosis_rung_matches(
+	const struct snake_rung *rung, u32 index, u32 nr_rungs)
 {
 	u32 action, expected_flags, expected_input, expected_opcode;
 	u64 expected_data;
 
-	if (index >= SNAKE_MAX_RUNGS)
+	if (nr_rungs == SNAKE_MAX_RUNGS) {
+		if (!index)
+			return rung->opcode == SNAKE_OP_PICK_IDLE_PREFER_PREVIOUS &&
+			       rung->input == SNAKE_INPUT_QUEUE_CELL &&
+			       !rung->flags && !rung->reserved &&
+			       rung->data == SNAKE_QUEUE_MASK_GROUP_LLC;
+		index--;
+	} else if (nr_rungs != SNAKE_EXPANDED_MITOSIS_RUNGS) {
+		return false;
+	}
+	if (index >= SNAKE_EXPANDED_MITOSIS_RUNGS)
 		return false;
 	action = index & 3;
 	expected_opcode = action == 0 || action == 2 ?
@@ -982,22 +996,53 @@ walk_expanded_mitosis_ladder(struct snake_ladder_ctx *ctx,
 			     struct snake_ladder_walk_args *walk_args)
 {
 	u64 select_started_at = walk_args->scope_started_at;
+	u64 group_started_at;
+	u32 base = 0;
+	u32 group_cell_index = SNAKE_QUEUE_CELL_NONE;
 	s32 result;
 
+	if (ctx->ladder->nr_rungs == SNAKE_MAX_RUNGS) {
+		stat_inc(ctx, SNAKE_STAT_RUNG_ATTEMPT_BASE);
+		group_started_at =
+			rung_timing_start(walk_args->callback_started_at);
+		result = queue_pick_task_cell_preferred_cpu(
+			ctx, p, SNAKE_QUEUE_MASK_GROUP_LLC,
+			walk_args->prev_cpu, &group_cell_index);
+		rung_timing_finish(ctx, SNAKE_RUNG_LADDER_IDLE, 0,
+				   group_started_at);
+		if (result < 0 && result != -ENOENT) {
+			stat_inc(ctx, SNAKE_STAT_RUNG_ERROR_BASE);
+			stat_inc(ctx, SNAKE_STAT_INVALID_ERRORS);
+			scx_bpf_error("snake grouping rung execution failed: %d",
+				      result);
+			goto out;
+		}
+		if (result >= 0 && result < nr_cpu_ids &&
+		    bpf_cpumask_test_cpu(result, p->cpus_ptr)) {
+			walk_args->enqueue_flags = 0;
+			walk_args->select_flags = 0;
+			walk_args->queue_cell_index = group_cell_index;
+			stat_inc(ctx, SNAKE_STAT_RUNG_HIT_BASE);
+			goto out;
+		}
+		stat_inc(ctx, SNAKE_STAT_RUNG_MISS_BASE);
+		result = -ENOENT;
+		base = 1;
+	}
 	result = walk_expanded_mitosis_cell_scope(
-		ctx, p, 0, SNAKE_QUEUE_MASK_LOCAL_LLC, walk_args);
+		ctx, p, base, SNAKE_QUEUE_MASK_LOCAL_LLC, walk_args);
 	if (result != -ENOENT)
 		goto out;
 	result = walk_expanded_mitosis_cell_scope(
-		ctx, p, 4, SNAKE_QUEUE_MASK_PRIMARY, walk_args);
+		ctx, p, base + 4, SNAKE_QUEUE_MASK_PRIMARY, walk_args);
 	if (result != -ENOENT)
 		goto out;
 	result = walk_expanded_mitosis_cell_scope(
-		ctx, p, 8, SNAKE_QUEUE_MASK_BORROWABLE, walk_args);
+		ctx, p, base + 8, SNAKE_QUEUE_MASK_BORROWABLE, walk_args);
 	if (result != -ENOENT)
 		goto out;
 	result = walk_expanded_mitosis_restricted_scope(
-		ctx, p, 12, walk_args);
+		ctx, p, base + 12, walk_args);
 out:
 	walk_args->scope_started_at = select_started_at;
 	return result;

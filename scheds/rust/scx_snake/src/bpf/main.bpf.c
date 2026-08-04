@@ -47,6 +47,7 @@ validate_compiled_ladder(const struct snake_compiled_ladder *ladder)
 	    (ladder->nr_rungs > SNAKE_MAX_GENERIC_RUNGS))
 		return -EINVAL;
 	if (ladder->nr_rungs > SNAKE_MAX_GENERIC_RUNGS &&
+	    ladder->nr_rungs != SNAKE_EXPANDED_MITOSIS_RUNGS &&
 	    ladder->nr_rungs != SNAKE_MAX_RUNGS)
 		return -EINVAL;
 	if (ladder->nr_mask_tables > SNAKE_MAX_MASK_TABLES)
@@ -66,7 +67,8 @@ validate_compiled_ladder(const struct snake_compiled_ladder *ladder)
 		rung = ladder->rungs[i];
 		if (ladder->nr_rungs > SNAKE_MAX_GENERIC_RUNGS) {
 			if (!queue_atomic_rung_is_valid(&rung) ||
-			    !expanded_mitosis_rung_matches(&rung, i))
+			    !expanded_mitosis_rung_matches(
+				    &rung, i, ladder->nr_rungs))
 				return -EINVAL;
 		} else if (!rung_is_valid(&rung, ladder->nr_mask_tables)) {
 			return -EINVAL;

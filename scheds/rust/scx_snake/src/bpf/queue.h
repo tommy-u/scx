@@ -132,6 +132,73 @@ static __always_inline s32 queue_task_cell_affinity_restricted(
 	       !bpf_cpumask_subset(borrowable, p->cpus_ptr);
 }
 
+static __always_inline u64 queue_group_hash_mix(u64 value)
+{
+	value ^= value >> 30;
+	value *= 0xbf58476d1ce4e5b9ULL;
+	value ^= value >> 27;
+	value *= 0x94d049bb133111ebULL;
+	return value ^ (value >> 31);
+}
+
+static __noinline s32 queue_task_group_normal_index(
+	const struct snake_ladder_ctx *ctx, struct task_struct *p,
+	u32 cell_index, u32 *indexp)
+{
+	struct snake_normal_queue_runtime *runtime;
+	struct snake_normal_queue *queue;
+	struct snake_queue_cell *cell;
+	struct snake_task_cell *annotation;
+	u64 group_id, key, score, best_score = 0;
+	u32 i, index, best_index = SNAKE_QUEUE_CELL_NONE;
+
+	if (!ctx || !p || !indexp)
+		return -EINVAL;
+	annotation = task_annotation(p);
+	if (!annotation)
+		return -ENOENT;
+	group_id = READ_ONCE(annotation->llc_group_id);
+	if (!group_id)
+		return -ENOENT;
+	cell = queue_cell(ctx, cell_index);
+	if (!cell || !READ_ONCE(cell->valid) ||
+	    !READ_ONCE(cell->nr_normal_queues) ||
+	    READ_ONCE(cell->nr_normal_queues) > SNAKE_MAX_CELL_LLCS)
+		return -EINVAL;
+	key = queue_group_hash_mix(group_id ^
+				   ((u64)READ_ONCE(cell->external_id) << 32) ^
+				   READ_ONCE(cell->slot_epoch));
+	bpf_for(i, 0, SNAKE_MAX_CELL_LLCS)
+	{
+		if (i >= READ_ONCE(cell->nr_normal_queues))
+			break;
+		index = READ_ONCE(cell->first_normal_queue) + i;
+		queue = queue_normal(ctx, index);
+		runtime = queue_normal_runtime(index);
+		if (!queue || READ_ONCE(queue->cell_index) != cell_index ||
+		    !runtime || !READ_ONCE(runtime->has_consumers))
+			continue;
+		score = queue_group_hash_mix(key ^ i);
+		if (best_index == SNAKE_QUEUE_CELL_NONE || score > best_score) {
+			best_score = score;
+			best_index = index;
+		}
+	}
+	if (best_index == SNAKE_QUEUE_CELL_NONE)
+		return -ENOENT;
+	*indexp = best_index;
+	return 0;
+}
+
+static __always_inline const struct cpumask *queue_task_group_consumers(
+	const struct snake_ladder_ctx *ctx, struct task_struct *p,
+	u32 cell_index, u32 *indexp)
+{
+	if (queue_task_group_normal_index(ctx, p, cell_index, indexp))
+		return NULL;
+	return queue_normal_consumers(ctx, *indexp);
+}
+
 static __always_inline s32 queue_pick_primary_cpu(const struct cpumask *primary,
 						  struct bpf_cpumask   *scratch,
 						  const struct task_struct *p,

@@ -6,8 +6,9 @@ use std::path::{Component, Path};
 
 use serde::Deserialize;
 
-pub const MAX_RUNGS: usize = 16;
+pub const MAX_RUNGS: usize = 17;
 pub const MAX_GENERIC_RUNGS: usize = 9;
+const EXPANDED_MITOSIS_RUNGS: usize = 16;
 pub const MAX_MASK_TABLES: usize = 4;
 pub const MAX_CELL_IDS: u32 = 1024;
 pub const MAX_QUEUE_CELLS: usize = 256;
@@ -46,6 +47,7 @@ pub enum QueueMaskKind {
     Primary = 1,
     Borrowable = 2,
     LocalLlc = 3,
+    GroupLlc = 4,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -138,6 +140,7 @@ pub enum QueueEnqueueTarget {
     Affinity = 2,
     Local = 3,
     Cpu = 4,
+    GroupLlc = 5,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -320,6 +323,7 @@ impl QueueEnqueueTarget {
             Self::Affinity => "affinity",
             Self::Local => "local",
             Self::Cpu => "cpu",
+            Self::GroupLlc => "group_llc",
         }
     }
 }
@@ -659,7 +663,7 @@ pub fn compile_policy(source: &str) -> Result<CompiledPolicy, PolicyError> {
     }
     if rungs.len() > MAX_GENERIC_RUNGS && !is_expanded_mitosis_ladder(&rungs) {
         return Err(PolicyError(format!(
-            "generic placement ladders are limited to {MAX_GENERIC_RUNGS} rungs; the only supported wide placement ladder is the {MAX_RUNGS}-rung expanded Mitosis queue-atomic template, so every rung must match that template"
+            "generic placement ladders are limited to {MAX_GENERIC_RUNGS} rungs; supported queue-atomic wide placement ladders are the {EXPANDED_MITOSIS_RUNGS}-rung expanded Mitosis template and its {MAX_RUNGS}-rung LLC-grouping form, where every rung must match the template"
         )));
     }
 
@@ -728,11 +732,59 @@ fn expanded_mitosis_rung(index: usize) -> Option<CompiledRung> {
 }
 
 fn is_expanded_mitosis_ladder(rungs: &[CompiledRung]) -> bool {
-    rungs.len() == MAX_RUNGS
-        && rungs
-            .iter()
-            .enumerate()
-            .all(|(index, rung)| expanded_mitosis_rung(index).as_ref() == Some(rung))
+    let offset = match rungs.len() {
+        EXPANDED_MITOSIS_RUNGS => 0,
+        MAX_RUNGS
+            if rungs.first()
+                == Some(&CompiledRung {
+                    opcode: Opcode::PickIdlePreferPrevious,
+                    input: InputSource::QueueCell,
+                    flags: 0,
+                    data: QueueMaskKind::GroupLlc as u64,
+                }) =>
+        {
+            1
+        }
+        _ => return false,
+    };
+    rungs[offset..]
+        .iter()
+        .enumerate()
+        .all(|(index, rung)| expanded_mitosis_rung(index).as_ref() == Some(rung))
+}
+
+pub fn enable_llc_grouping(policy: &mut CompiledPolicy) -> Result<(), PolicyError> {
+    if policy.rungs.len() != EXPANDED_MITOSIS_RUNGS || !is_expanded_mitosis_ladder(&policy.rungs) {
+        return Err(PolicyError(
+            "LLC grouping requires the expanded Mitosis placement ladder".into(),
+        ));
+    }
+    let queues = policy
+        .queues
+        .as_mut()
+        .ok_or_else(|| PolicyError("LLC grouping requires a cell_llc queue policy".into()))?;
+    if queues.layout != QueueLayout::CellLlc {
+        return Err(PolicyError(
+            "LLC grouping requires queue layout `cell_llc`".into(),
+        ));
+    }
+    policy.rungs.insert(
+        0,
+        CompiledRung {
+            opcode: Opcode::PickIdlePreferPrevious,
+            input: InputSource::QueueCell,
+            flags: 0,
+            data: QueueMaskKind::GroupLlc as u64,
+        },
+    );
+    queues.enqueue.insert(
+        1,
+        QueueEnqueueRung {
+            action: QueueEnqueueAction::TryInsert,
+            target: QueueEnqueueTarget::GroupLlc,
+        },
+    );
+    Ok(())
 }
 
 fn compile_managed_cells(
@@ -1161,9 +1213,12 @@ fn compile_mitosis_queue_enqueue(
         let target = match rung.target.as_str() {
             "cell" => QueueEnqueueTarget::Cell,
             "cpu" => QueueEnqueueTarget::Cpu,
+            "group_llc" if action == QueueEnqueueAction::TryInsert => {
+                QueueEnqueueTarget::GroupLlc
+            }
             target => {
                 return Err(PolicyError(format!(
-                    "unknown explicit cell enqueue target `{target}`; expected `cell` or `cpu`"
+                    "unknown explicit cell enqueue target `{target}`; expected `group_llc`, `cell`, or `cpu`"
                 )))
             }
         };
@@ -1184,9 +1239,24 @@ fn compile_mitosis_queue_enqueue(
             target: QueueEnqueueTarget::Cpu,
         },
     ];
-    if compiled != expected {
+    let grouping_expected = [
+        expected[0],
+        QueueEnqueueRung {
+            action: QueueEnqueueAction::TryInsert,
+            target: QueueEnqueueTarget::GroupLlc,
+        },
+        expected[1],
+        expected[2],
+    ];
+    let no_direct_grouping_expected = [grouping_expected[1], expected[1], expected[2]];
+    let no_direct_expected = [expected[1], expected[2]];
+    if compiled != expected
+        && compiled != grouping_expected
+        && compiled != no_direct_grouping_expected
+        && compiled != no_direct_expected
+    {
         return Err(PolicyError(
-            "explicit cell enqueue ladder must try direct cell placement, try the cell queue, then insert into a CPU queue"
+            "explicit cell enqueue ladder must optionally try direct cell placement and group_llc, then try the cell queue and insert into a CPU queue"
                 .into(),
         ));
     }
@@ -1799,6 +1869,7 @@ fn compile_rung(
             | "task_cell"
             | "task_cell_borrowable"
             | "task_cell_llc"
+            | "task_group_llc"
             | "task_allowed_restricted"
     ) && !partitions.contains_key(&rung.scope)
     {
@@ -1814,7 +1885,7 @@ fn compile_rung(
     }
     if matches!(
         rung.scope.as_str(),
-        "task_cell_borrowable" | "task_cell_llc" | "task_allowed_restricted"
+        "task_cell_borrowable" | "task_cell_llc" | "task_group_llc" | "task_allowed_restricted"
     ) && !queue_mode
     {
         return Err(PolicyError(format!(
@@ -1825,12 +1896,17 @@ fn compile_rung(
     if queue_layout == Some(QueueLayout::Llc)
         && matches!(
             rung.scope.as_str(),
-            "task_cell" | "task_cell_borrowable" | "task_cell_llc"
+            "task_cell" | "task_cell_borrowable" | "task_cell_llc" | "task_group_llc"
         )
     {
         return Err(PolicyError(
             "queue layout `llc` does not support task-cell scopes".into(),
         ));
+    }
+    if rung.scope == "task_group_llc" && queue_layout != Some(QueueLayout::CellLlc) {
+        return Err(PolicyError(format!(
+            "rung {index}: scope `task_group_llc` requires queue layout `cell_llc`"
+        )));
     }
 
     if rung.operation == "pick_idle_prefer_previous" {
@@ -1840,6 +1916,12 @@ fn compile_rung(
                 input: InputSource::QueueCell,
                 flags: 0,
                 data: QueueMaskKind::LocalLlc as u64,
+            }),
+            "task_group_llc" if queue_layout == Some(QueueLayout::CellLlc) => Ok(CompiledRung {
+                opcode: Opcode::PickIdlePreferPrevious,
+                input: InputSource::QueueCell,
+                flags: 0,
+                data: QueueMaskKind::GroupLlc as u64,
             }),
             "task_cell" if queue_mode && queue_layout != Some(QueueLayout::Llc) => {
                 Ok(CompiledRung {
@@ -1876,7 +1958,11 @@ fn compile_rung(
         && queue_layout != Some(QueueLayout::Llc)
         && matches!(
             rung.scope.as_str(),
-            "task_cell" | "task_cell_borrowable" | "task_cell_llc" | "task_allowed_restricted"
+            "task_cell"
+                | "task_cell_borrowable"
+                | "task_cell_llc"
+                | "task_group_llc"
+                | "task_allowed_restricted"
         )
     {
         let (input, data) = match rung.scope.as_str() {
@@ -1884,6 +1970,9 @@ fn compile_rung(
             "task_cell_borrowable" => (InputSource::QueueCell, QueueMaskKind::Borrowable as u64),
             "task_cell_llc" if queue_layout == Some(QueueLayout::CellLlc) => {
                 (InputSource::QueueCell, QueueMaskKind::LocalLlc as u64)
+            }
+            "task_group_llc" if queue_layout == Some(QueueLayout::CellLlc) => {
+                (InputSource::QueueCell, QueueMaskKind::GroupLlc as u64)
             }
             "task_allowed_restricted" => (InputSource::TaskAllowedRestricted, 0),
             _ => {
@@ -1925,7 +2014,7 @@ fn compile_rung(
     }
     if matches!(
         rung.scope.as_str(),
-        "task_cell_borrowable" | "task_cell_llc" | "task_allowed_restricted"
+        "task_cell_borrowable" | "task_cell_llc" | "task_group_llc" | "task_allowed_restricted"
     ) {
         return Err(PolicyError(format!(
             "rung {index}: operation `{}` is incompatible with scope `{}`",
@@ -2372,7 +2461,7 @@ scope = "{scope}"
             compile_policy(MITOSIS_SIM_POLICY).expect("Mitosis selection policy should compile");
 
         assert!(policy.mask_tables.is_empty());
-        assert_eq!(MAX_RUNGS, 16);
+        assert_eq!(MAX_RUNGS, 17);
         assert_eq!(policy.rungs.len(), 16);
 
         let scopes = [
@@ -2572,6 +2661,74 @@ scope = "task_cell"
         assert!(!queues.direct_dispatch);
         assert_eq!(queues.enqueue.len(), 2);
         assert_eq!(queues.dispatch.len(), 5);
+    }
+
+    #[test]
+    fn compiles_intra_cell_llc_grouping_rungs() {
+        let policy = compile_policy(
+            r#"
+fallback = "previous_cpu"
+
+[queues]
+layout = "cell_llc"
+enqueue = [
+  { action = "try_insert", target = "group_llc" },
+  { action = "try_insert", target = "cell" },
+  { action = "insert", target = "cpu" },
+]
+dispatch = [
+  { action = "drain", source = "cell_orphan" },
+  { action = "peek", source = "cell" },
+  { action = "peek", source = "cpu" },
+  { action = "consume", operation = "min_vtime", fallback = ["cpu"] },
+  { action = "steal", source = "cell_sibling" },
+]
+
+[[cell]]
+id = 7
+cpus = "0-3"
+
+[[rung]]
+operation = "pick_idle_prefer_previous"
+scope = "task_group_llc"
+
+[[rung]]
+operation = "pick_idle"
+scope = "task_cell"
+"#,
+        )
+        .expect("group-aware cell/LLC policy should compile");
+
+        assert_eq!(policy.rungs[0].input, InputSource::QueueCell);
+        assert_eq!(policy.rungs[0].data, QueueMaskKind::GroupLlc as u64);
+        assert_eq!(
+            policy.queues.as_ref().unwrap().enqueue[0].target,
+            QueueEnqueueTarget::GroupLlc
+        );
+    }
+
+    #[test]
+    fn rejects_llc_grouping_without_cell_llc_queues() {
+        let error = compile_policy(
+            r#"
+[queues]
+layout = "cell"
+enqueue = [{ target = "cell" }, { target = "affinity" }]
+dispatch = [{ source = "cell" }, { source = "affinity" }]
+
+[[cell]]
+id = 7
+cpus = "0-3"
+
+[[rung]]
+operation = "pick_idle_prefer_previous"
+scope = "task_group_llc"
+"#,
+        )
+        .expect_err("group LLC scope requires cell_llc queues");
+
+        assert!(error.to_string().contains("task_group_llc"));
+        assert!(error.to_string().contains("cell_llc"));
     }
 
     #[test]

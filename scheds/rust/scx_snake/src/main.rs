@@ -62,7 +62,9 @@ use stats::{
     CallbackTimingMetrics, CellMetrics, CpuMetrics, Metrics, QueueRungMetrics, RungMetrics,
     RungTimingMetrics,
 };
-use task_cells::{ThreadCellAssignment, ThreadCellResponse};
+use task_cells::{
+    ThreadCellAssignment, ThreadCellResponse, ThreadLlcGroupAssignment, ThreadLlcGroupResponse,
+};
 
 const SCHEDULER_NAME: &str = "scx_snake";
 const MITOSIS_SIM_POLICY: &str = include_str!("../examples/mitosis-sim.toml");
@@ -106,7 +108,7 @@ struct Opts {
         value_parser = parse_callback_timing_sample_rate,
         default_value_t = 64,
         value_name = "N",
-        conflicts_with_all = ["update_policy", "dump_compiled_policy", "validate_policy", "stats", "monitor", "help_stats", "set_thread_cell", "clear_thread_cell"]
+        conflicts_with_all = ["update_policy", "dump_compiled_policy", "validate_policy", "stats", "monitor", "help_stats", "set_thread_cell", "clear_thread_cell", "set_thread_llc_group", "clear_thread_llc_group"]
     )]
     callback_timing_sample_rate: u32,
 
@@ -126,7 +128,7 @@ struct Opts {
     #[arg(
         long,
         value_name = "PATH",
-        conflicts_with_all = ["policy", "dump_compiled_policy", "stats", "monitor", "help_stats", "set_thread_cell", "clear_thread_cell"]
+        conflicts_with_all = ["policy", "dump_compiled_policy", "stats", "monitor", "help_stats", "set_thread_cell", "clear_thread_cell", "set_thread_llc_group", "clear_thread_llc_group"]
     )]
     update_policy: Option<PathBuf>,
 
@@ -146,6 +148,23 @@ struct Opts {
         conflicts_with_all = ["policy", "update_policy", "dump_compiled_policy", "stats", "monitor", "help_stats", "set_thread_cell"]
     )]
     clear_thread_cell: Option<i32>,
+
+    /// Assign a live thread to an intra-cell LLC affinity group.
+    #[arg(
+        long,
+        value_name = "TID:GROUP",
+        conflicts_with_all = ["policy", "update_policy", "dump_compiled_policy", "stats", "monitor", "help_stats", "set_thread_cell", "clear_thread_cell", "clear_thread_llc_group"]
+    )]
+    set_thread_llc_group: Option<ThreadLlcGroupAssignment>,
+
+    /// Remove a live thread's intra-cell LLC affinity group.
+    #[arg(
+        long,
+        value_name = "TID",
+        value_parser = task_cells::parse_tid,
+        conflicts_with_all = ["policy", "update_policy", "dump_compiled_policy", "stats", "monitor", "help_stats", "set_thread_cell", "clear_thread_cell", "set_thread_llc_group"]
+    )]
+    clear_thread_llc_group: Option<i32>,
 
     /// Print the lowered mechanical ladder and exit without loading BPF.
     #[arg(long)]
@@ -195,6 +214,8 @@ enum RunMode {
     Update(PathBuf),
     SetThreadCell(ThreadCellAssignment),
     ClearThreadCell(i32),
+    SetThreadLlcGroup(ThreadLlcGroupAssignment),
+    ClearThreadLlcGroup(i32),
     Dump(PolicySelection),
     Validate(PolicySelection),
     Launch(PolicySelection),
@@ -204,24 +225,27 @@ enum RunMode {
 enum BuiltinProfile {
     #[value(name = "mitosis-sim")]
     MitosisSim,
+    #[value(name = "mitosis-sim-grouping")]
+    MitosisSimGrouping,
 }
 
 impl BuiltinProfile {
     fn source(self) -> &'static str {
         match self {
-            Self::MitosisSim => MITOSIS_SIM_POLICY,
+            Self::MitosisSim | Self::MitosisSimGrouping => MITOSIS_SIM_POLICY,
         }
     }
 
     fn label(self) -> &'static str {
         match self {
             Self::MitosisSim => "builtin:mitosis-sim",
+            Self::MitosisSimGrouping => "builtin:mitosis-sim-grouping",
         }
     }
 
     fn default_fairness(self) -> FairnessMode {
         match self {
-            Self::MitosisSim => FairnessMode::Vtime,
+            Self::MitosisSim | Self::MitosisSimGrouping => FairnessMode::Vtime,
         }
     }
 }
@@ -279,6 +303,8 @@ fn resolve_mode(opts: &Opts) -> Result<RunMode> {
         + usize::from(opts.update_policy.is_some())
         + usize::from(opts.set_thread_cell.is_some())
         + usize::from(opts.clear_thread_cell.is_some())
+        + usize::from(opts.set_thread_llc_group.is_some())
+        + usize::from(opts.clear_thread_llc_group.is_some())
         + usize::from(opts.dump_compiled_policy)
         + usize::from(opts.validate_policy);
     if special_modes > 1 {
@@ -303,6 +329,12 @@ fn resolve_mode(opts: &Opts) -> Result<RunMode> {
     if let Some(tid) = opts.clear_thread_cell {
         return Ok(RunMode::ClearThreadCell(tid));
     }
+    if let Some(assignment) = opts.set_thread_llc_group {
+        return Ok(RunMode::SetThreadLlcGroup(assignment));
+    }
+    if let Some(tid) = opts.clear_thread_llc_group {
+        return Ok(RunMode::ClearThreadLlcGroup(tid));
+    }
 
     let policy = opts
         .profile
@@ -310,7 +342,7 @@ fn resolve_mode(opts: &Opts) -> Result<RunMode> {
         .or_else(|| opts.policy.clone().map(PolicySelection::File))
         .ok_or_else(|| {
             anyhow!(
-                "--policy PATH or --profile mitosis-sim is required when launching, dumping, or validating a policy"
+                "--policy PATH or --profile mitosis-sim|mitosis-sim-grouping is required when launching, dumping, or validating a policy"
             )
         })?;
     if opts.dump_compiled_policy {
@@ -328,7 +360,10 @@ fn effective_fairness(opts: &Opts, policy: &PolicySelection) -> FairnessMode {
 
 fn initial_bpf_slice_parameters(policy: &PolicySelection) -> BpfSliceParameters {
     let mut parameters = BpfSliceParameters::default();
-    if matches!(policy, PolicySelection::Builtin(BuiltinProfile::MitosisSim)) {
+    if matches!(
+        policy,
+        PolicySelection::Builtin(BuiltinProfile::MitosisSim | BuiltinProfile::MitosisSimGrouping)
+    ) {
         parameters.slice_shrinking.enabled = true;
     }
     parameters
@@ -343,6 +378,13 @@ fn load_policy(selection: &PolicySelection) -> Result<(String, CompiledPolicy)> 
     };
     let mut compiled =
         policy::compile_policy(&source).with_context(|| format!("compiling policy {label}"))?;
+    if matches!(
+        selection,
+        PolicySelection::Builtin(BuiltinProfile::MitosisSimGrouping)
+    ) {
+        policy::enable_llc_grouping(&mut compiled)
+            .with_context(|| format!("enabling LLC grouping for policy {label}"))?;
+    }
     managed_cells::resolve_managed_cells(&mut compiled)
         .with_context(|| format!("resolving managed cells for policy {label}"))?;
     Ok((source, compiled))
@@ -397,6 +439,10 @@ fn encode_ladder(
                 (QueueEnqueueAction::TryInsert, QueueEnqueueTarget::Cell) => {
                     destination.opcode = bpf_intf::snake_enqueue_opcode_SNAKE_ENQUEUE_OP_CELL;
                     destination.input = bpf_intf::snake_queue_input_SNAKE_QUEUE_INPUT_CELL;
+                }
+                (QueueEnqueueAction::TryInsert, QueueEnqueueTarget::GroupLlc) => {
+                    destination.opcode = bpf_intf::snake_enqueue_opcode_SNAKE_ENQUEUE_OP_CELL;
+                    destination.input = bpf_intf::snake_queue_input_SNAKE_QUEUE_INPUT_GROUP_LLC;
                 }
                 (QueueEnqueueAction::Insert, QueueEnqueueTarget::Affinity) => {
                     destination.opcode = bpf_intf::snake_enqueue_opcode_SNAKE_ENQUEUE_OP_AFFINITY;
@@ -1594,6 +1640,7 @@ fn scope_label<'policy>(
                 Ok("task_cell_borrowable")
             }
             value if value == policy::QueueMaskKind::LocalLlc as u64 => Ok("task_cell_llc"),
+            value if value == policy::QueueMaskKind::GroupLlc as u64 => Ok("task_group_llc"),
             _ => bail!("queue-mask rung references unknown mask kind {}", rung.data),
         },
         (
@@ -1968,6 +2015,18 @@ fn aggregate_raw_cell_stats(
                     foreign_affinity_runtime_ns: value(
                         dense,
                         bpf_intf::snake_cell_stat_SNAKE_CELL_STAT_FOREIGN_AFFINITY_RUNTIME_NS,
+                    )?,
+                    group_runtime_ns: value(
+                        dense,
+                        bpf_intf::snake_cell_stat_SNAKE_CELL_STAT_GROUP_RUNTIME_NS,
+                    )?,
+                    group_preferred_runtime_ns: value(
+                        dense,
+                        bpf_intf::snake_cell_stat_SNAKE_CELL_STAT_GROUP_PREFERRED_RUNTIME_NS,
+                    )?,
+                    group_fallback_runtime_ns: value(
+                        dense,
+                        bpf_intf::snake_cell_stat_SNAKE_CELL_STAT_GROUP_FALLBACK_RUNTIME_NS,
                     )?,
                     normal_enqueues: value(
                         dense,
@@ -2737,6 +2796,41 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
         })
     }
 
+    fn set_thread_llc_group(
+        &mut self,
+        assignment: ThreadLlcGroupAssignment,
+    ) -> Result<ThreadLlcGroupResponse> {
+        let grouping_enabled = self.runtime.compiled.rungs.iter().any(|rung| {
+            rung.opcode == Opcode::PickIdleQueueMask
+                && rung.data == policy::QueueMaskKind::GroupLlc as u64
+        });
+        if !grouping_enabled {
+            bail!(
+                "active policy generation {} does not enable intra-cell LLC grouping",
+                self.runtime.generation
+            );
+        }
+        let rehome_requested =
+            task_cells::set_thread_llc_group(&self.skel.maps.task_cells, assignment)?;
+        self.inspector
+            .set_group_assignment(assignment.tid, assignment.group_id);
+        Ok(ThreadLlcGroupResponse {
+            tid: assignment.tid,
+            group_id: Some(assignment.group_id),
+            rehome_requested,
+        })
+    }
+
+    fn clear_thread_llc_group(&mut self, tid: i32) -> Result<ThreadLlcGroupResponse> {
+        let rehome_requested = task_cells::clear_thread_llc_group(&self.skel.maps.task_cells, tid)?;
+        self.inspector.clear_group_assignment(tid);
+        Ok(ThreadLlcGroupResponse {
+            tid,
+            group_id: None,
+            rehome_requested,
+        })
+    }
+
     fn publish_fine_timing_state(&mut self, state: &fine_timing::FineTimingState) -> Result<()> {
         let key = 0_u32;
         let config = state.bpf_config();
@@ -3172,9 +3266,18 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
 
     fn inspection(&mut self) -> Result<InspectionView> {
         let assignments = self.inspector.assignments().collect::<BTreeMap<_, _>>();
+        let group_assignments = self
+            .inspector
+            .group_assignments()
+            .collect::<BTreeMap<_, _>>();
+        let tracked_tids = assignments
+            .keys()
+            .chain(group_assignments.keys())
+            .copied()
+            .collect::<BTreeSet<_>>();
         let mut stale = Vec::new();
         let mut task_mappings = Vec::new();
-        for (&tid, _) in &assignments {
+        for &tid in &tracked_tids {
             match task_cells::inspect_thread_cell(&self.skel.maps.task_cells, tid)? {
                 Some(task) => task_mappings.push(inspection::TaskMappingInspectionView {
                     tid: task.tid,
@@ -3189,7 +3292,14 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
                     allowed_cpus: task.allowed_cpus,
                     cgroup: task.cgroup,
                     needs_rehome: task.needs_rehome,
-                    source: "manual".into(),
+                    llc_group_id: task.llc_group_id.map(|group_id| group_id.to_string()),
+                    llc_group_generation: task.llc_group_generation,
+                    source: if assignments.contains_key(&tid) {
+                        "manual"
+                    } else {
+                        "llc_group"
+                    }
+                    .into(),
                     membership: if task.cell_id == 0 { "no_cell" } else { "cell" }.into(),
                 }),
                 None => stale.push(tid),
@@ -3197,10 +3307,11 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
         }
         for tid in stale {
             self.inspector.clear_assignment(tid);
+            self.inspector.clear_group_assignment(tid);
         }
         if let Some(manager) = &self.membership {
             for (tid, _) in manager.assignments() {
-                if assignments.contains_key(&tid) {
+                if tracked_tids.contains(&tid) {
                     continue;
                 }
                 let Some(task) = task_cells::inspect_thread_cell(&self.skel.maps.task_cells, tid)?
@@ -3220,6 +3331,8 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
                     allowed_cpus: task.allowed_cpus,
                     cgroup: task.cgroup,
                     needs_rehome: task.needs_rehome,
+                    llc_group_id: task.llc_group_id.map(|group_id| group_id.to_string()),
+                    llc_group_generation: task.llc_group_generation,
                     source: "managed".into(),
                     membership: "cell".into(),
                 });
@@ -4028,6 +4141,18 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
                         .map_err(|error| format!("{error:#}"));
                     response_channel.send(SchedulerResponse::ThreadCell(response))?;
                 }
+                Ok(SchedulerRequest::SetThreadLlcGroup(assignment)) => {
+                    let response = self
+                        .set_thread_llc_group(assignment)
+                        .map_err(|error| format!("{error:#}"));
+                    response_channel.send(SchedulerResponse::ThreadLlcGroup(response))?;
+                }
+                Ok(SchedulerRequest::ClearThreadLlcGroup { tid }) => {
+                    let response = self
+                        .clear_thread_llc_group(tid)
+                        .map_err(|error| format!("{error:#}"));
+                    response_channel.send(SchedulerResponse::ThreadLlcGroup(response))?;
+                }
                 Ok(SchedulerRequest::SetFineTiming { callback, enabled }) => {
                     let response = self
                         .set_fine_timing(callback, enabled)
@@ -4192,6 +4317,16 @@ fn main() -> Result<()> {
             println!("{}", control::clear_running_thread_cell(tid)?);
             return Ok(());
         }
+        RunMode::SetThreadLlcGroup(assignment) => {
+            init_logging(opts.verbose)?;
+            println!("{}", control::set_running_thread_llc_group(assignment)?);
+            return Ok(());
+        }
+        RunMode::ClearThreadLlcGroup(tid) => {
+            init_logging(opts.verbose)?;
+            println!("{}", control::clear_running_thread_llc_group(tid)?);
+            return Ok(());
+        }
         RunMode::Dump(selection) => {
             let (_, policy) = load_policy(&selection)?;
             let mask_tables = resolve_mask_tables(&policy)?;
@@ -4205,7 +4340,12 @@ fn main() -> Result<()> {
             let report = match selection {
                 PolicySelection::File(path) => policy_validation::validate_policy_file(&path),
                 PolicySelection::Builtin(profile) => {
-                    policy_validation::validate_policy_source(profile.source())
+                    match load_policy(&PolicySelection::Builtin(profile)) {
+                        Ok((_, policy)) => policy_validation::ValidationReport::compiled(&policy),
+                        Err(error) => policy_validation::ValidationReport::configuration_failure(
+                            format!("{error:#}"),
+                        ),
+                    }
                 }
             };
             println!("{}", serde_json::to_string_pretty(&report)?);
@@ -5149,6 +5289,7 @@ scope = "task_cell"
             "u64 queue_timing_session_id",
             "u64 queue_timing_dsq_id",
             "u64 queue_timing_enqueued_at_ns",
+            "u64 llc_group_id",
             "s64 sleep_lag",
             "u32 active_weight",
             "u32 pending_weight",
@@ -5166,6 +5307,8 @@ scope = "task_cell"
             "u32 queue_timing_depth_after_insert",
             "u32 queue_timing_queue_class",
             "u32 queued_dsq_index",
+            "u32 llc_group_generation",
+            "u32 run_group_normal_queue",
             "u8 runtime_valid",
             "u8 initialized",
             "u8 runnable_accounted",
@@ -5179,6 +5322,8 @@ scope = "task_cell"
             "u8 direct_cell_valid",
             "u8 queued_dsq_class",
             "u8 queued_dsq_accounted",
+            "u8 run_grouped",
+            "u8 run_group_preferred",
         ];
 
         let bpf_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bpf");
@@ -5203,7 +5348,7 @@ scope = "task_cell"
         assert_eq!(declarations, EXPECTED_DECLARATIONS);
 
         type TaskRuntime = bpf_skel::types::snake_task_runtime;
-        assert_eq!(size_of::<TaskRuntime>(), 192);
+        assert_eq!(size_of::<TaskRuntime>(), 208);
         assert_eq!(std::mem::align_of::<TaskRuntime>(), 8);
         assert_eq!(offset_of!(TaskRuntime, queue_cpumask), 0);
         assert_eq!(offset_of!(TaskRuntime, started_exec_runtime), 8);
@@ -5218,39 +5363,44 @@ scope = "task_cell"
         assert_eq!(offset_of!(TaskRuntime, queue_timing_session_id), 80);
         assert_eq!(offset_of!(TaskRuntime, queue_timing_dsq_id), 88);
         assert_eq!(offset_of!(TaskRuntime, queue_timing_enqueued_at_ns), 96);
-        assert_eq!(offset_of!(TaskRuntime, sleep_lag), 104);
-        assert_eq!(offset_of!(TaskRuntime, active_weight), 112);
-        assert_eq!(offset_of!(TaskRuntime, pending_weight), 116);
-        assert_eq!(offset_of!(TaskRuntime, cell_index), 120);
-        assert_eq!(offset_of!(TaskRuntime, cell_external_id), 124);
-        assert_eq!(offset_of!(TaskRuntime, cell_epoch), 128);
-        assert_eq!(offset_of!(TaskRuntime, affinity_cell_index), 132);
-        assert_eq!(offset_of!(TaskRuntime, affinity_cell_external_id), 136);
-        assert_eq!(offset_of!(TaskRuntime, affinity_cell_epoch), 140);
-        assert_eq!(offset_of!(TaskRuntime, run_cell_index), 144);
-        assert_eq!(offset_of!(TaskRuntime, run_owner_cell_index), 148);
-        assert_eq!(offset_of!(TaskRuntime, selected_cpu), 152);
-        assert_eq!(offset_of!(TaskRuntime, direct_cell_index), 156);
-        assert_eq!(offset_of!(TaskRuntime, queue_timing_cell_index), 160);
+        assert_eq!(offset_of!(TaskRuntime, llc_group_id), 104);
+        assert_eq!(offset_of!(TaskRuntime, sleep_lag), 112);
+        assert_eq!(offset_of!(TaskRuntime, active_weight), 120);
+        assert_eq!(offset_of!(TaskRuntime, pending_weight), 124);
+        assert_eq!(offset_of!(TaskRuntime, cell_index), 128);
+        assert_eq!(offset_of!(TaskRuntime, cell_external_id), 132);
+        assert_eq!(offset_of!(TaskRuntime, cell_epoch), 136);
+        assert_eq!(offset_of!(TaskRuntime, affinity_cell_index), 140);
+        assert_eq!(offset_of!(TaskRuntime, affinity_cell_external_id), 144);
+        assert_eq!(offset_of!(TaskRuntime, affinity_cell_epoch), 148);
+        assert_eq!(offset_of!(TaskRuntime, run_cell_index), 152);
+        assert_eq!(offset_of!(TaskRuntime, run_owner_cell_index), 156);
+        assert_eq!(offset_of!(TaskRuntime, selected_cpu), 160);
+        assert_eq!(offset_of!(TaskRuntime, direct_cell_index), 164);
+        assert_eq!(offset_of!(TaskRuntime, queue_timing_cell_index), 168);
         assert_eq!(
             offset_of!(TaskRuntime, queue_timing_depth_after_insert),
-            164
+            172
         );
-        assert_eq!(offset_of!(TaskRuntime, queue_timing_queue_class), 168);
-        assert_eq!(offset_of!(TaskRuntime, queued_dsq_index), 172);
-        assert_eq!(offset_of!(TaskRuntime, runtime_valid), 176);
-        assert_eq!(offset_of!(TaskRuntime, initialized), 177);
-        assert_eq!(offset_of!(TaskRuntime, runnable_accounted), 178);
-        assert_eq!(offset_of!(TaskRuntime, has_sleep_lag), 179);
-        assert_eq!(offset_of!(TaskRuntime, run_direct), 180);
-        assert_eq!(offset_of!(TaskRuntime, cell_initialized), 181);
-        assert_eq!(offset_of!(TaskRuntime, affinity_initialized), 182);
-        assert_eq!(offset_of!(TaskRuntime, selected_cpu_valid), 183);
-        assert_eq!(offset_of!(TaskRuntime, queue_class), 184);
-        assert_eq!(offset_of!(TaskRuntime, run_queue_class), 185);
-        assert_eq!(offset_of!(TaskRuntime, direct_cell_valid), 186);
-        assert_eq!(offset_of!(TaskRuntime, queued_dsq_class), 187);
-        assert_eq!(offset_of!(TaskRuntime, queued_dsq_accounted), 188);
+        assert_eq!(offset_of!(TaskRuntime, queue_timing_queue_class), 176);
+        assert_eq!(offset_of!(TaskRuntime, queued_dsq_index), 180);
+        assert_eq!(offset_of!(TaskRuntime, llc_group_generation), 184);
+        assert_eq!(offset_of!(TaskRuntime, run_group_normal_queue), 188);
+        assert_eq!(offset_of!(TaskRuntime, runtime_valid), 192);
+        assert_eq!(offset_of!(TaskRuntime, initialized), 193);
+        assert_eq!(offset_of!(TaskRuntime, runnable_accounted), 194);
+        assert_eq!(offset_of!(TaskRuntime, has_sleep_lag), 195);
+        assert_eq!(offset_of!(TaskRuntime, run_direct), 196);
+        assert_eq!(offset_of!(TaskRuntime, cell_initialized), 197);
+        assert_eq!(offset_of!(TaskRuntime, affinity_initialized), 198);
+        assert_eq!(offset_of!(TaskRuntime, selected_cpu_valid), 199);
+        assert_eq!(offset_of!(TaskRuntime, queue_class), 200);
+        assert_eq!(offset_of!(TaskRuntime, run_queue_class), 201);
+        assert_eq!(offset_of!(TaskRuntime, direct_cell_valid), 202);
+        assert_eq!(offset_of!(TaskRuntime, queued_dsq_class), 203);
+        assert_eq!(offset_of!(TaskRuntime, queued_dsq_accounted), 204);
+        assert_eq!(offset_of!(TaskRuntime, run_grouped), 205);
+        assert_eq!(offset_of!(TaskRuntime, run_group_preferred), 206);
     }
 
     #[test]
@@ -6740,14 +6890,17 @@ scope = "task_cell"
         assert!(enqueue_walk.contains("execute_direct_enqueue_rung("));
         assert!(!enqueue_walk.contains("result = walk_policy_rung("));
         assert!(!atomic_walk.contains("bpf_loop("));
+        assert!(!normalized_atomic.contains("walk_policy_rung(ctx, p, 0, walk_args)"));
+        assert!(normalized_atomic.contains("queue_pick_task_cell_preferred_cpu("));
+        assert!(normalized_atomic.contains("SNAKE_QUEUE_MASK_GROUP_LLC"));
         for (base, kind) in [
-            (0, "SNAKE_QUEUE_MASK_LOCAL_LLC"),
-            (4, "SNAKE_QUEUE_MASK_PRIMARY"),
-            (8, "SNAKE_QUEUE_MASK_BORROWABLE"),
+            ("base", "SNAKE_QUEUE_MASK_LOCAL_LLC"),
+            ("base + 4", "SNAKE_QUEUE_MASK_PRIMARY"),
+            ("base + 8", "SNAKE_QUEUE_MASK_BORROWABLE"),
         ] {
             assert!(normalized_atomic.contains(&format!("ctx, p, {base}, {kind}, walk_args)")));
         }
-        assert!(normalized_atomic.contains("ctx, p, 12, walk_args)"));
+        assert!(normalized_atomic.contains("ctx, p, base + 12, walk_args)"));
         assert!(normalized_ladder.contains("expanded_mitosis_finish_stage("));
         assert!(
             normalized_ladder.contains("static __always_inline s32 expanded_mitosis_finish_stage(")
@@ -6757,7 +6910,6 @@ scope = "task_cell"
             "static __always_inline bool queue_atomic_rung_is_valid(const struct snake_rung *rung)"
         ));
         for obsolete in [
-            "SNAKE_EXPANDED_MITOSIS_",
             "walk_expanded_mitosis_rung(",
             "expanded_mitosis_spec(",
             "snake_expanded_mitosis_loop_ctx",
@@ -6775,7 +6927,8 @@ scope = "task_cell"
             .map(|(body, _)| body)
             .expect("ladder prepare validator should have one definition");
         assert!(prepare_validation.contains("queue_atomic_rung_is_valid(&rung)"));
-        assert!(prepare_validation.contains("expanded_mitosis_rung_matches(&rung, i)"));
+        assert!(prepare_validation.contains("expanded_mitosis_rung_matches("));
+        assert!(prepare_validation.contains("&rung, i, ladder->nr_rungs"));
         assert!(normalized_ladder
             .contains("queue_args.random = rung->flags & SNAKE_RUNG_F_PICK_RANDOM;"));
 
@@ -7830,14 +7983,14 @@ scope = "task_allowed"
         let policy = policy::compile_policy(policy_source()).expect("policy should compile");
         let encoded = encode_ladder(&policy, 42).expect("ladder should encode");
 
-        assert_eq!(bpf_intf::SNAKE_ABI_VERSION, 32);
-        assert_eq!(bpf_intf::SNAKE_MAX_RUNGS, 16);
-        assert_eq!(bpf_intf::snake_stat_SNAKE_STAT_VTIME_CLOCK_CAS_RETRIES, 215);
+        assert_eq!(bpf_intf::SNAKE_ABI_VERSION, 33);
+        assert_eq!(bpf_intf::SNAKE_MAX_RUNGS, 17);
+        assert_eq!(bpf_intf::snake_stat_SNAKE_STAT_VTIME_CLOCK_CAS_RETRIES, 219);
         assert_eq!(
             bpf_intf::snake_stat_SNAKE_STAT_VTIME_CLOCK_CAS_EXHAUSTIONS,
-            216
+            220
         );
-        assert_eq!(bpf_intf::snake_stat_SNAKE_NR_STATS, 217);
+        assert_eq!(bpf_intf::snake_stat_SNAKE_NR_STATS, 221);
         assert_eq!(size_of::<bpf_intf::snake_callback_timing>(), 520);
         assert_eq!(offset_of!(bpf_intf::snake_callback_timing, total_ns), 0);
         assert_eq!(offset_of!(bpf_intf::snake_callback_timing, buckets), 8);
@@ -7956,7 +8109,7 @@ scope = "task_allowed"
         assert_field_type::<bpf_intf::snake_queue_timing_event, u32>(|value| {
             &value.depth_after_dispatch
         });
-        assert_eq!(size_of::<bpf_intf::snake_compiled_ladder>(), 800);
+        assert_eq!(size_of::<bpf_intf::snake_compiled_ladder>(), 824);
         assert_eq!(offset_of!(bpf_intf::snake_compiled_ladder, generation), 0);
         assert_eq!(
             offset_of!(bpf_intf::snake_compiled_ladder, policy_abi_version),
@@ -7974,19 +8127,19 @@ scope = "task_allowed"
         assert_eq!(offset_of!(bpf_intf::snake_compiled_ladder, rungs), 24);
         assert_eq!(
             offset_of!(bpf_intf::snake_compiled_ladder, nr_enqueue_rungs),
-            408
+            432
         );
         assert_eq!(
             offset_of!(bpf_intf::snake_compiled_ladder, nr_dispatch_rungs),
-            412
+            436
         );
         assert_eq!(
             offset_of!(bpf_intf::snake_compiled_ladder, enqueue_rungs),
-            416
+            440
         );
         assert_eq!(
             offset_of!(bpf_intf::snake_compiled_ladder, dispatch_rungs),
-            608
+            632
         );
         assert_eq!(encoded.generation, 42);
         assert_eq!(encoded.policy_abi_version, bpf_intf::SNAKE_ABI_VERSION);
@@ -8116,7 +8269,7 @@ scope = "task_cell"
         .unwrap();
         let encoded = encode_ladder(&policy, 9).unwrap();
 
-        assert_eq!(bpf_intf::SNAKE_ABI_VERSION, 32);
+        assert_eq!(bpf_intf::SNAKE_ABI_VERSION, 33);
         assert_eq!(encoded.nr_enqueue_rungs, 3);
         assert_eq!(encoded.enqueue_rungs[0].opcode, 5);
         assert_eq!(encoded.enqueue_rungs[0].input, 4);
@@ -8170,7 +8323,7 @@ scope = "task_cell"
         .unwrap();
         let encoded = encode_ladder(&policy, 10).unwrap();
 
-        assert_eq!(bpf_intf::SNAKE_ABI_VERSION, 32);
+        assert_eq!(bpf_intf::SNAKE_ABI_VERSION, 33);
         assert_eq!(encoded.nr_dispatch_rungs, 5);
         assert_eq!(
             encoded
@@ -8750,13 +8903,18 @@ scope = "task_cell"
         );
         assert_eq!(encoded.flags, bpf_intf::SNAKE_RUNG_F_INTERSECT_TASK_ALLOWED);
         assert_eq!(encoded.data, 0);
-        assert_eq!(size_of::<bpf_intf::snake_task_cell>(), 24);
+        assert_eq!(size_of::<bpf_intf::snake_task_cell>(), 40);
         assert_eq!(offset_of!(bpf_intf::snake_task_cell, cell_id), 0);
         assert_eq!(offset_of!(bpf_intf::snake_task_cell, cell_epoch), 4);
         assert_eq!(offset_of!(bpf_intf::snake_task_cell, managed_cell_id), 12);
         assert_eq!(
             offset_of!(bpf_intf::snake_task_cell, managed_cell_epoch),
             16
+        );
+        assert_eq!(offset_of!(bpf_intf::snake_task_cell, llc_group_id), 24);
+        assert_eq!(
+            offset_of!(bpf_intf::snake_task_cell, llc_group_generation),
+            32
         );
         assert_eq!(policy::MAX_CELL_IDS, bpf_intf::SNAKE_MAX_CPUS);
     }
@@ -8865,7 +9023,7 @@ scope = "task_cell"
         let cpu_pick = include_str!("bpf/cpu_pick.h");
         let ladder = include_str!("bpf/ladder.h");
 
-        assert!(intf.contains("#define SNAKE_ABI_VERSION 32"));
+        assert!(intf.contains("#define SNAKE_ABI_VERSION 33"));
         assert!(intf.contains("#define SNAKE_MAX_QUEUE_CELLS 256"));
         assert!(intf.contains("#define SNAKE_MAX_NORMAL_QUEUES 8192"));
         assert!(intf.contains("SNAKE_OP_PICK_IDLE_PREFER_PREVIOUS = 8"));
@@ -9178,6 +9336,88 @@ scope = "task_cell_borrowable"
 
         assert!(policy.queues.is_some());
         assert!(!policy.rungs.is_empty());
+    }
+
+    #[test]
+    fn grouping_profile_is_derived_without_changing_mitosis_sim() {
+        let (_, base) = load_policy(&PolicySelection::Builtin(BuiltinProfile::MitosisSim))
+            .expect("base profile should compile");
+        let (_, grouping) = load_policy(&PolicySelection::Builtin(
+            BuiltinProfile::MitosisSimGrouping,
+        ))
+        .expect("grouping profile should compile");
+
+        assert_eq!(base.rungs.len(), 16);
+        assert_eq!(grouping.rungs.len(), 17);
+        assert_eq!(
+            scope_label(&grouping, &grouping.rungs[0]).unwrap(),
+            "task_group_llc"
+        );
+        assert_eq!(
+            grouping.queues.as_ref().unwrap().enqueue[1].target,
+            policy::QueueEnqueueTarget::GroupLlc
+        );
+        let encoded = encode_ladder(&grouping, 1).expect("grouping profile should encode");
+        assert_eq!(encoded.nr_rungs, 17);
+        assert_eq!(encoded.nr_enqueue_rungs, 4);
+        assert_eq!(
+            encoded.enqueue_rungs[1].input,
+            bpf_intf::snake_queue_input_SNAKE_QUEUE_INPUT_GROUP_LLC
+        );
+        assert_eq!(base.queues.as_ref().unwrap().enqueue.len(), 3);
+    }
+
+    #[test]
+    fn thread_llc_group_controls_parse_as_standalone_modes() {
+        let set = Opts::try_parse_from(["scx_snake", "--set-thread-llc-group", "4812:9001"])
+            .expect("group assignment should parse");
+        assert!(matches!(
+            resolve_mode(&set),
+            Ok(RunMode::SetThreadLlcGroup(ThreadLlcGroupAssignment {
+                tid: 4812,
+                group_id: 9001
+            }))
+        ));
+
+        let clear = Opts::try_parse_from(["scx_snake", "--clear-thread-llc-group", "4812"])
+            .expect("group clear should parse");
+        assert!(matches!(
+            resolve_mode(&clear),
+            Ok(RunMode::ClearThreadLlcGroup(4812))
+        ));
+    }
+
+    #[test]
+    fn bpf_llc_grouping_uses_task_annotations_and_rendezvous_routing() {
+        let bpf_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bpf");
+        let queue = fs::read_to_string(bpf_dir.join("queue.h")).unwrap();
+        let enqueue = fs::read_to_string(bpf_dir.join("queue_enqueue.h")).unwrap();
+        let fairness = fs::read_to_string(bpf_dir.join("queue_fairness.h")).unwrap();
+        let vtime = fs::read_to_string(bpf_dir.join("queue_vtime.h")).unwrap();
+        let intf = fs::read_to_string(bpf_dir.join("intf.h")).unwrap();
+
+        for needle in [
+            "u64 llc_group_id",
+            "u32 llc_group_generation",
+            "SNAKE_QUEUE_MASK_GROUP_LLC",
+            "SNAKE_QUEUE_INPUT_GROUP_LLC",
+        ] {
+            assert!(intf.contains(needle), "grouping ABI is missing {needle}");
+        }
+        for needle in [
+            "queue_group_hash_mix(",
+            "queue_task_group_normal_index(",
+            "SNAKE_MAX_CELL_LLCS",
+            "annotation->llc_group_id",
+        ] {
+            assert!(queue.contains(needle), "group routing is missing {needle}");
+        }
+        assert!(enqueue.contains("queue_cell_enqueue_group_ctx("));
+        assert!(enqueue.contains("SNAKE_QUEUE_INPUT_GROUP_LLC"));
+        assert!(fairness.contains("return kind == SNAKE_QUEUE_MASK_GROUP_LLC ? -ENOENT : -EINVAL;"));
+        assert!(vtime.contains("llc_group_generation"));
+        assert!(vtime.contains("SNAKE_CELL_STAT_GROUP_PREFERRED_RUNTIME_NS"));
+        assert!(vtime.contains("SNAKE_CELL_STAT_GROUP_FALLBACK_RUNTIME_NS"));
     }
 
     #[test]

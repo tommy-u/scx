@@ -17,7 +17,7 @@ use crate::parameters::{
     BpfSliceParameters, ManagedCellResizingParameters, SliceShrinkingParameters,
     UserspaceParameters,
 };
-use crate::task_cells::ThreadCellAssignment;
+use crate::task_cells::{ThreadCellAssignment, ThreadLlcGroupAssignment};
 
 #[stat_doc]
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize, Stats)]
@@ -232,6 +232,12 @@ pub struct CellMetrics {
     pub lent_runtime_ns: u64,
     #[stat(desc = "CPU-restricted affinity runtime from other cells on CPUs owned by this cell")]
     pub foreign_affinity_runtime_ns: u64,
+    #[stat(desc = "Runtime charged to threads with an LLC group annotation")]
+    pub group_runtime_ns: u64,
+    #[stat(desc = "Grouped runtime on the rendezvous-selected LLC")]
+    pub group_preferred_runtime_ns: u64,
+    #[stat(desc = "Grouped runtime outside the rendezvous-selected LLC")]
+    pub group_fallback_runtime_ns: u64,
     #[stat(desc = "Tasks inserted into normal cell queues")]
     pub normal_enqueues: u64,
     #[stat(desc = "Tasks inserted into affinity queues")]
@@ -282,6 +288,15 @@ impl CellMetrics {
             foreign_affinity_runtime_ns: self
                 .foreign_affinity_runtime_ns
                 .saturating_sub(previous.foreign_affinity_runtime_ns),
+            group_runtime_ns: self
+                .group_runtime_ns
+                .saturating_sub(previous.group_runtime_ns),
+            group_preferred_runtime_ns: self
+                .group_preferred_runtime_ns
+                .saturating_sub(previous.group_preferred_runtime_ns),
+            group_fallback_runtime_ns: self
+                .group_fallback_runtime_ns
+                .saturating_sub(previous.group_fallback_runtime_ns),
             normal_enqueues: self
                 .normal_enqueues
                 .saturating_sub(previous.normal_enqueues),
@@ -802,7 +817,7 @@ impl Metrics {
                 "demand gauges unavailable".to_owned()
             };
             output.push_str(&format!(
-                "    cell {}: primary CPUs {} | {} | runtime {} | primary {} | borrowed {} | lent {} | normal/affinity enqueues {}/{} | dispatches {}/{} | clock transitions {}\n",
+                "    cell {}: primary CPUs {} | {} | runtime {} | primary {} | borrowed {} | lent {} | grouped preferred/fallback {}/{} | normal/affinity enqueues {}/{} | dispatches {}/{} | clock transitions {}\n",
                 cell.id,
                 cell.primary_cpu_count,
                 demand,
@@ -810,6 +825,8 @@ impl Metrics {
                 cell.primary_runtime_ns,
                 cell.borrowed_runtime_ns,
                 cell.lent_runtime_ns,
+                cell.group_preferred_runtime_ns,
+                cell.group_fallback_runtime_ns,
                 cell.normal_enqueues,
                 cell.affinity_enqueues,
                 cell.normal_dispatches,
@@ -945,6 +962,34 @@ pub fn server_data() -> StatsServerData<SchedulerRequest, SchedulerResponse> {
                     let tid = parse_arg::<i32>(args, "tid", "thread_cell_clear")?;
                     req_ch.send(SchedulerRequest::ClearThreadCell { tid })?;
                     receive_thread_cell_response(res_ch.recv()?)
+                });
+            Ok(read)
+        });
+
+    let set_llc_group: Box<dyn StatsOpener<SchedulerRequest, SchedulerResponse>> =
+        Box::new(move |_| {
+            let read: Box<dyn StatsReader<SchedulerRequest, SchedulerResponse>> =
+                Box::new(move |args, (req_ch, res_ch)| {
+                    let tid = parse_arg::<i32>(args, "tid", "thread_llc_group_set")?;
+                    let group_id = parse_arg::<u64>(args, "group_id", "thread_llc_group_set")?;
+                    if group_id == 0 {
+                        bail!("thread_llc_group_set requires a nonzero group_id");
+                    }
+                    req_ch.send(SchedulerRequest::SetThreadLlcGroup(
+                        ThreadLlcGroupAssignment { tid, group_id },
+                    ))?;
+                    receive_thread_llc_group_response(res_ch.recv()?)
+                });
+            Ok(read)
+        });
+
+    let clear_llc_group: Box<dyn StatsOpener<SchedulerRequest, SchedulerResponse>> =
+        Box::new(move |_| {
+            let read: Box<dyn StatsReader<SchedulerRequest, SchedulerResponse>> =
+                Box::new(move |args, (req_ch, res_ch)| {
+                    let tid = parse_arg::<i32>(args, "tid", "thread_llc_group_clear")?;
+                    req_ch.send(SchedulerRequest::ClearThreadLlcGroup { tid })?;
+                    receive_thread_llc_group_response(res_ch.recv()?)
                 });
             Ok(read)
         });
@@ -1161,6 +1206,20 @@ pub fn server_data() -> StatsServerData<SchedulerRequest, SchedulerResponse> {
             },
         )
         .add_ops(
+            "thread_llc_group_set",
+            StatsOps {
+                open: set_llc_group,
+                close: None,
+            },
+        )
+        .add_ops(
+            "thread_llc_group_clear",
+            StatsOps {
+                open: clear_llc_group,
+                close: None,
+            },
+        )
+        .add_ops(
             "fine_timing_set",
             StatsOps {
                 open: set_fine_timing,
@@ -1222,6 +1281,14 @@ fn receive_thread_cell_response(response: SchedulerResponse) -> Result<serde_jso
         SchedulerResponse::ThreadCell(Ok(response)) => Ok(serde_json::to_value(response)?),
         SchedulerResponse::ThreadCell(Err(error)) => bail!(error),
         response => bail!("unexpected response to thread cell request: {response:?}"),
+    }
+}
+
+fn receive_thread_llc_group_response(response: SchedulerResponse) -> Result<serde_json::Value> {
+    match response {
+        SchedulerResponse::ThreadLlcGroup(Ok(response)) => Ok(serde_json::to_value(response)?),
+        SchedulerResponse::ThreadLlcGroup(Err(error)) => bail!(error),
+        response => bail!("unexpected response to thread LLC group request: {response:?}"),
     }
 }
 

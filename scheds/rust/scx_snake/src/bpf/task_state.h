@@ -19,6 +19,7 @@ struct snake_task_runtime {
 	u64			   queue_timing_session_id;
 	u64			   queue_timing_dsq_id;
 	u64			   queue_timing_enqueued_at_ns;
+	u64			   llc_group_id;
 	s64			   sleep_lag;
 	u32			   active_weight;
 	u32			   pending_weight;
@@ -36,6 +37,8 @@ struct snake_task_runtime {
 	u32			   queue_timing_depth_after_insert;
 	u32			   queue_timing_queue_class;
 	u32			   queued_dsq_index;
+	u32			   llc_group_generation;
+	u32			   run_group_normal_queue;
 	u8			   runtime_valid;
 	u8			   initialized;
 	u8			   runnable_accounted;
@@ -49,6 +52,8 @@ struct snake_task_runtime {
 	u8			   direct_cell_valid;
 	u8			   queued_dsq_class;
 	u8			   queued_dsq_accounted;
+	u8			   run_grouped;
+	u8			   run_group_preferred;
 };
 
 struct {

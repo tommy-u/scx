@@ -10,6 +10,32 @@ use crate::cell_allocation::{
 };
 use crate::policy::{CompiledPolicy, QueueLayout};
 
+#[cfg(test)]
+fn mix_group_hash(mut value: u64) -> u64 {
+    value ^= value >> 30;
+    value = value.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    value ^= value >> 27;
+    value = value.wrapping_mul(0x94d0_49bb_1331_11eb);
+    value ^ (value >> 31)
+}
+
+#[cfg(test)]
+pub fn select_llc_group_queue(
+    cell_id: u32,
+    cell_epoch: u32,
+    group_id: u64,
+    candidates: &[(u32, u32)],
+) -> Option<u32> {
+    if group_id == 0 {
+        return None;
+    }
+    let key = mix_group_hash(group_id ^ (u64::from(cell_id) << 32) ^ u64::from(cell_epoch));
+    candidates
+        .iter()
+        .max_by_key(|(_, offset)| mix_group_hash(key ^ u64::from(*offset)))
+        .map(|(queue, _)| *queue)
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct QueueCell {
     pub index: u32,
@@ -550,6 +576,34 @@ scope = "task_cell"
         changed_epoch.cells[1].slot_epoch += 1;
         assert!(same_host_queue_universe(&before, &changed_epoch));
         assert!(!preserves_resize_queue_identity(&before, &changed_epoch));
+    }
+
+    #[test]
+    fn llc_group_rendezvous_is_stable_and_minimizes_remapping() {
+        let candidates = [(10, 0), (11, 1), (12, 2), (13, 3)];
+        let selected = select_llc_group_queue(7, 3, 42, &candidates).unwrap();
+
+        assert_eq!(
+            select_llc_group_queue(7, 3, 42, &candidates),
+            Some(selected)
+        );
+        let without_unselected = candidates
+            .into_iter()
+            .filter(|(queue, _)| *queue == selected || *queue != 10)
+            .collect::<Vec<_>>();
+        if without_unselected.len() < candidates.len() {
+            assert_eq!(
+                select_llc_group_queue(7, 3, 42, &without_unselected),
+                Some(selected)
+            );
+        }
+        let selected_groups = (1..=32)
+            .filter_map(|group| select_llc_group_queue(7, 3, group, &candidates))
+            .collect::<BTreeSet<_>>();
+        assert!(
+            selected_groups.len() > 1,
+            "groups should spread across LLCs"
+        );
     }
 
     #[test]

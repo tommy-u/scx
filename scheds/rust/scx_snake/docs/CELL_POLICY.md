@@ -114,6 +114,9 @@ struct snake_task_cell {
     __u32 managed_cell_id;
     __u32 managed_cell_epoch;
     __u32 flags;
+    __u64 llc_group_id;
+    __u32 llc_group_generation;
+    __u32 reserved;
 };
 
 struct {
@@ -133,6 +136,12 @@ to match the resolved queue-cell descriptor. A mismatch is invalid and falls
 back to cell 0, preventing a stale task from entering a reused slot. In both
 modes, BPF intersects the chosen mask with live `p->cpus_ptr` before selecting
 an idle CPU.
+
+The optional LLC group fields are a separate per-thread policy layer used only
+by the `mitosis-sim-grouping` profile. Group ID zero means no group. Setting or
+clearing a group preserves both cell layers and advances the group generation;
+clearing the final cell layer preserves a live group annotation. New threads do
+not inherit a group ID.
 
 Missing placement-only annotations, missing definitions, no idle CPU, and empty
 intersections are normal rung misses, so later policy rungs remain
