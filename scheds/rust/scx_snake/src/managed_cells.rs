@@ -20,10 +20,9 @@ fn resolve_managed_cells_at(policy: &mut CompiledPolicy, cgroup_root: &Path) -> 
         return Ok(());
     };
     let parent = resolved_parent(cgroup_root, Path::new(&managed.parent));
-    if !fs::metadata(&parent)
-        .with_context(|| format!("reading managed cell parent {}", parent.display()))?
-        .is_dir()
-    {
+    let parent_metadata = fs::metadata(&parent)
+        .with_context(|| format!("reading managed cell parent {}", parent.display()))?;
+    if !parent_metadata.is_dir() {
         bail!(
             "managed cell parent {} is not a directory",
             parent.display()
@@ -36,6 +35,7 @@ fn resolve_managed_cells_at(policy: &mut CompiledPolicy, cgroup_root: &Path) -> 
         .map(String::as_str)
         .collect::<BTreeSet<_>>();
     let mut children = Vec::new();
+    let mut excluded_child_inodes = BTreeMap::new();
     for entry in fs::read_dir(&parent)
         .with_context(|| format!("enumerating managed cell parent {}", parent.display()))?
     {
@@ -53,11 +53,13 @@ fn resolve_managed_cells_at(policy: &mut CompiledPolicy, cgroup_root: &Path) -> 
                 name.to_string_lossy()
             )
         })?;
-        if !excluded.contains(name.as_str()) {
-            let inode = entry
-                .metadata()
-                .with_context(|| format!("reading metadata for {}", entry.path().display()))?
-                .ino();
+        let inode = entry
+            .metadata()
+            .with_context(|| format!("reading metadata for {}", entry.path().display()))?
+            .ino();
+        if excluded.contains(name.as_str()) {
+            excluded_child_inodes.insert(name, inode);
+        } else {
             children.push((name, entry.path(), inode));
         }
     }
@@ -152,9 +154,11 @@ fn resolve_managed_cells_at(policy: &mut CompiledPolicy, cgroup_root: &Path) -> 
     policy.cell_slot_epochs = epochs;
     policy.membership = Some(MembershipPolicy {
         parent,
+        parent_inode: Some(parent_metadata.ino()),
         reconcile_ms: managed.reconcile_ms,
         assignments,
         child_inodes: Some(child_inodes),
+        excluded_child_inodes,
     });
     Ok(())
 }
@@ -248,6 +252,7 @@ fn resolved_parent(cgroup_root: &Path, configured: &Path) -> PathBuf {
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
     use std::fs;
+    use std::os::unix::fs::MetadataExt;
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -333,6 +338,10 @@ scope = "task_cell"
         assert_eq!(membership.parent, parent.to_string_lossy());
         assert_eq!(membership.reconcile_ms, 250);
         assert_eq!(
+            membership.parent_inode,
+            Some(fs::metadata(&parent).unwrap().ino())
+        );
+        assert_eq!(
             membership
                 .child_inodes
                 .as_ref()
@@ -345,6 +354,14 @@ scope = "task_cell"
         assert_eq!(
             membership.assignments,
             BTreeMap::from([("alpha.service".into(), 1), ("zeta.service".into(), 2)])
+        );
+        assert_eq!(
+            membership
+                .excluded_child_inodes
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>(),
+            ["systemd-workaround.service"]
         );
         fs::remove_dir_all(root).unwrap();
     }

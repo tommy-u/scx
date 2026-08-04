@@ -238,6 +238,12 @@ pub struct CellMetrics {
     pub group_preferred_runtime_ns: u64,
     #[stat(desc = "Grouped runtime outside the rendezvous-selected LLC")]
     pub group_fallback_runtime_ns: u64,
+    #[stat(desc = "Runtime this cell's tasks received in cell zero before assignment")]
+    pub managed_cell0_runtime_ns: u64,
+    #[stat(desc = "Timeslices this cell's tasks received in cell zero before assignment")]
+    pub managed_cell0_timeslices: u64,
+    #[stat(desc = "Tasks assigned to this cell after receiving cell-zero runtime")]
+    pub managed_affected_tasks: u64,
     #[stat(desc = "Tasks inserted into normal cell queues")]
     pub normal_enqueues: u64,
     #[stat(desc = "Tasks inserted into affinity queues")]
@@ -297,6 +303,15 @@ impl CellMetrics {
             group_fallback_runtime_ns: self
                 .group_fallback_runtime_ns
                 .saturating_sub(previous.group_fallback_runtime_ns),
+            managed_cell0_runtime_ns: self
+                .managed_cell0_runtime_ns
+                .saturating_sub(previous.managed_cell0_runtime_ns),
+            managed_cell0_timeslices: self
+                .managed_cell0_timeslices
+                .saturating_sub(previous.managed_cell0_timeslices),
+            managed_affected_tasks: self
+                .managed_affected_tasks
+                .saturating_sub(previous.managed_affected_tasks),
             normal_enqueues: self
                 .normal_enqueues
                 .saturating_sub(previous.normal_enqueues),
@@ -361,6 +376,30 @@ pub struct Metrics {
     )]
     #[serde(default)]
     pub managed_identity_correction_latency_buckets: Vec<u64>,
+    #[stat(desc = "Runtime delivered in cell zero despite a known managed-cell mapping")]
+    #[serde(default)]
+    pub managed_mapped_cell0_runtime_ns: u64,
+    #[stat(desc = "Timeslices delivered in cell zero despite a known managed-cell mapping")]
+    #[serde(default)]
+    pub managed_mapped_cell0_timeslices: u64,
+    #[stat(desc = "Managed tasks with runtime in cell zero despite a known mapping")]
+    #[serde(default)]
+    pub managed_mapped_affected_tasks: u64,
+    #[stat(desc = "Mapped managed tasks destroyed before their cell-zero episode was corrected")]
+    #[serde(default)]
+    pub managed_mapped_uncorrected_exits: u64,
+    #[stat(desc = "Cell-zero runtime for tasks under an unpublished managed child")]
+    #[serde(default)]
+    pub managed_unresolved_cell0_runtime_ns: u64,
+    #[stat(desc = "Cell-zero timeslices for tasks under an unpublished managed child")]
+    #[serde(default)]
+    pub managed_unresolved_cell0_timeslices: u64,
+    #[stat(desc = "Tasks receiving cell-zero runtime under an unpublished managed child")]
+    #[serde(default)]
+    pub managed_unresolved_affected_tasks: u64,
+    #[stat(desc = "Tasks destroyed while their managed child remained unpublished")]
+    #[serde(default)]
+    pub managed_unresolved_exits: u64,
     #[stat(desc = "Active scheduler fairness discipline", _om_skip)]
     pub fairness_mode: String,
     #[stat(desc = "Number of select_cpu callback invocations")]
@@ -524,6 +563,30 @@ impl Metrics {
                 &self.managed_identity_correction_latency_buckets,
                 &previous.managed_identity_correction_latency_buckets,
             ),
+            managed_mapped_cell0_runtime_ns: self
+                .managed_mapped_cell0_runtime_ns
+                .saturating_sub(previous.managed_mapped_cell0_runtime_ns),
+            managed_mapped_cell0_timeslices: self
+                .managed_mapped_cell0_timeslices
+                .saturating_sub(previous.managed_mapped_cell0_timeslices),
+            managed_mapped_affected_tasks: self
+                .managed_mapped_affected_tasks
+                .saturating_sub(previous.managed_mapped_affected_tasks),
+            managed_mapped_uncorrected_exits: self
+                .managed_mapped_uncorrected_exits
+                .saturating_sub(previous.managed_mapped_uncorrected_exits),
+            managed_unresolved_cell0_runtime_ns: self
+                .managed_unresolved_cell0_runtime_ns
+                .saturating_sub(previous.managed_unresolved_cell0_runtime_ns),
+            managed_unresolved_cell0_timeslices: self
+                .managed_unresolved_cell0_timeslices
+                .saturating_sub(previous.managed_unresolved_cell0_timeslices),
+            managed_unresolved_affected_tasks: self
+                .managed_unresolved_affected_tasks
+                .saturating_sub(previous.managed_unresolved_affected_tasks),
+            managed_unresolved_exits: self
+                .managed_unresolved_exits
+                .saturating_sub(previous.managed_unresolved_exits),
             fairness_mode: self.fairness_mode.clone(),
             select_calls: self.select_calls.saturating_sub(previous.select_calls),
             dispatch_calls: self.dispatch_calls.saturating_sub(previous.dispatch_calls),
@@ -703,6 +766,8 @@ impl Metrics {
                 "  managed rebalances: {} | latest at ms: {}\n",
                 "  managed identity new-task candidates/affected: {}/{} | preassignment runtime ns: {} | timeslices: {}\n",
                 "  managed identity move-in candidates/affected: {}/{} | runtime upper bound ns: {} | correction latency total/max ns: {}/{}\n",
+                "  managed mapped cell0 runtime/timeslices/affected/uncorrected exits: {}/{}/{}/{}\n",
+                "  managed unresolved cell0 runtime/timeslices/affected/exits: {}/{}/{}/{}\n",
                 "  FIFO shared enqueues/dispatches: {}/{}\n",
                 "  select latency ns total: {} | average: {} | cumulative max: {}\n",
                 "  cell rehomes: {} | deferred rehomes: {} | queue preemptions/stale runs: {}/{} | borrow yields: {}\n",
@@ -739,6 +804,14 @@ impl Metrics {
             self.managed_identity_move_in_runtime_upper_bound_ns,
             self.managed_identity_correction_latency_ns_total,
             self.managed_identity_correction_latency_ns_max,
+            self.managed_mapped_cell0_runtime_ns,
+            self.managed_mapped_cell0_timeslices,
+            self.managed_mapped_affected_tasks,
+            self.managed_mapped_uncorrected_exits,
+            self.managed_unresolved_cell0_runtime_ns,
+            self.managed_unresolved_cell0_timeslices,
+            self.managed_unresolved_affected_tasks,
+            self.managed_unresolved_exits,
             self.fifo_shared_enqueues,
             self.fifo_shared_dispatches,
             self.select_latency_ns,
@@ -1699,6 +1772,30 @@ mod tests {
             delta.managed_identity_correction_latency_buckets,
             vec![1, 4, 1]
         );
+    }
+
+    #[test]
+    fn managed_bpf_identity_counters_delta_within_a_generation() {
+        let previous = Metrics {
+            policy_generation: 8,
+            managed_mapped_cell0_runtime_ns: 40,
+            managed_mapped_uncorrected_exits: 2,
+            managed_unresolved_cell0_runtime_ns: 10,
+            ..Default::default()
+        };
+        let current = Metrics {
+            policy_generation: 8,
+            managed_mapped_cell0_runtime_ns: 90,
+            managed_mapped_uncorrected_exits: 5,
+            managed_unresolved_cell0_runtime_ns: 25,
+            ..Default::default()
+        };
+
+        let delta = current.delta(&previous);
+
+        assert_eq!(delta.managed_mapped_cell0_runtime_ns, 50);
+        assert_eq!(delta.managed_mapped_uncorrected_exits, 3);
+        assert_eq!(delta.managed_unresolved_cell0_runtime_ns, 15);
     }
 
     #[test]

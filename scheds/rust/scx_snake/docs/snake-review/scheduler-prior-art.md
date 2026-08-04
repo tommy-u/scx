@@ -25,8 +25,8 @@ userspace discovers resources and computes a complete plan
 | Priority | Source pattern | Benefit to Snake | Complexity/dependency | Current verdict |
 | --- | --- | --- | --- | --- |
 | P1 | Mitosis direct-child discovery and inode reconciliation | Automatic cell lifecycle and safe path reuse | Managed-mode semantics | Implemented with polling; harden churn evidence |
-| P1 | Mitosis BPF cgroup identity/inheritance | Removes per-thread classification window | Cgroup storage and override precedence | Still missing; current userspace polling is eventual |
-| P1 | Mitosis lazy generation refresh | Refresh task state only after config/cgroup changes | Requires cgroup/resource generation | Adapted with bank/slot epochs; cgroup move refresh remains polling-based |
+| Done | Mitosis BPF cgroup identity/inheritance | Removes per-thread classification window | Cgroup storage and override precedence | Implemented with a banked cgroup directory and separate BPF task storage |
+| Done | Mitosis lazy generation refresh | Refresh task state only after config/cgroup changes | Requires cgroup/resource generation | Implemented using cached cgroup ID plus bank generation |
 | Done | Mitosis fixed DSQ envelope | Enables cell and CPU activation without DSQ creation | Attach cost and fixed limits | Implemented as a smaller fixed pool |
 | Done | Mitosis orphaned-shard drain and sibling recovery | Prevents stranded same-cell work after CPU reassignment | High concurrency risk | Implemented and covered by focused VM tests |
 | Done | Snake's staged publication | Preserves active generation on validation failure | Complete-bank reader/quiescence design | Extended to managed topology; retain |
@@ -57,10 +57,11 @@ individual inotify events
 ([cell_manager.rs](../../../scx_mitosis/src/cell_manager.rs#L918-L1045)).
 
 Snake imported path/inode-aware direct-child reconciliation, exclusions, stable
-numeric IDs, and slot epochs. It deliberately has not imported BPF cgroup identity:
-its recursive `cgroup.threads` scan writes per-thread storage and is therefore an
-eventual classifier. Closing or bounding that window is the remaining identity
-work.
+numeric IDs, and slot epochs. It now also publishes a banked cgroup-ID directory
+and resolves descendant membership in BPF, with manual annotation precedence.
+The remaining lifecycle window is a newly created or replaced child waiting for
+the next topology publication; mapped and unresolved cell-0 runtime counters
+measure both sides of that boundary.
 
 #### Stable queue envelope and drain concept
 
@@ -206,12 +207,13 @@ contribution is validation technique, not scheduling behavior.
 
 ```text
 managed_cells.rs     direct children, inode identity, excludes
-membership.rs        polling-based descendant task assignment
+membership.rs        static assignment compatibility and task observation
 demand.rs            elapsed-time samples, per-epoch EWMA, rebalance gating
 cell_allocation.rs   pure cpuset, holdout, and ownership planning
 queue_topology.rs    bounded DSQ descriptors and banked routes
 main.rs              transition coordination, staging, drain, and publication
 
+BPF membership path  ancestor resolution, generation refresh, exit accounting
 BPF queue path       orphan drain, sibling steal, clock/epoch validation
 slice_shrinking.h    optional waiter-aware current-runner shortening
 ```
@@ -220,14 +222,14 @@ Dependency order:
 
 ```mermaid
 flowchart LR
-    A[Polling identity: implemented] --> B[Fixed DSQ pool: implemented]
+    A[Banked BPF identity: implemented] --> B[Fixed DSQ pool: implemented]
     B --> C[Complete configuration banks: implemented]
     P[Cpuset and holdout: implemented] --> D[Live owner changes: implemented]
     C --> E[Drain and quiescence: implemented]
     E --> D
     D --> F[Demand rebalance: implemented]
     F --> G[Scale soak rollback evidence: open]
-    A --> H[Cgroup-native identity or bounded polling proof: open]
+    A --> H[Identity and topology churn evidence: open]
 ```
 
 The design remains intentionally asymmetric: Mitosis supplies the behavioral

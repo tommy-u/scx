@@ -162,7 +162,7 @@ impl fmt::Display for ThreadLlcGroupResponse {
     }
 }
 
-fn open_thread(tid: i32) -> Result<OwnedFd> {
+pub(crate) fn open_thread(tid: i32) -> Result<OwnedFd> {
     // PIDFD_THREAD is defined as O_EXCL in the Linux UAPI.
     let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, tid, libc::O_EXCL) };
     if fd < 0 {
@@ -435,22 +435,85 @@ fn lookup_task_cell(
     }
 }
 
-pub fn inspect_thread_cell(map: &impl MapCore, tid: i32) -> Result<Option<ThreadCellSnapshot>> {
+fn lookup_managed_task_cell(
+    map: &impl MapCore,
+    pidfd: &OwnedFd,
+    tid: i32,
+) -> Result<Option<bpf_intf::snake_managed_task_cell>> {
+    let Some(value) = map
+        .lookup(&pidfd.as_raw_fd().to_ne_bytes(), MapFlags::ANY)
+        .with_context(|| format!("reading BPF managed assignment for TID {tid}"))?
+    else {
+        return Ok(None);
+    };
+    if value.len() != std::mem::size_of::<bpf_intf::snake_managed_task_cell>() {
+        bail!(
+            "BPF managed assignment for TID {tid} has {} bytes, expected {}",
+            value.len(),
+            std::mem::size_of::<bpf_intf::snake_managed_task_cell>()
+        );
+    }
+    let mut decoded = std::mem::MaybeUninit::<bpf_intf::snake_managed_task_cell>::uninit();
+    // SAFETY: the length was checked and snake_managed_task_cell contains only integer fields.
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            value.as_ptr(),
+            decoded.as_mut_ptr().cast::<u8>(),
+            value.len(),
+        );
+        Ok(Some(decoded.assume_init()))
+    }
+}
+
+fn effective_inspection_cell(
+    annotation: Option<&bpf_intf::snake_task_cell>,
+    managed: Option<&bpf_intf::snake_managed_task_cell>,
+) -> (u32, u32, bool) {
+    let needs_rehome = annotation.is_some_and(|value| value.needs_rehome != 0)
+        || managed.is_some_and(|value| value.needs_rehome != 0);
+    if let Some(annotation) =
+        annotation.filter(|value| value.flags & bpf_intf::SNAKE_TASK_CELL_F_MANUAL != 0)
+    {
+        return (annotation.cell_id, annotation.cell_epoch, needs_rehome);
+    }
+    if let Some(managed) = managed.filter(|value| {
+        value.status == bpf_intf::snake_managed_cgroup_status_SNAKE_MANAGED_CGROUP_ASSIGNED
+    }) {
+        return (managed.cell_id, managed.cell_epoch, needs_rehome);
+    }
+    annotation.map_or((0, 0, needs_rehome), |annotation| {
+        (annotation.cell_id, annotation.cell_epoch, needs_rehome)
+    })
+}
+
+pub(crate) fn inspect_thread_cell_with_managed(
+    annotation_map: &impl MapCore,
+    managed_map: &impl MapCore,
+    tid: i32,
+) -> Result<Option<ThreadCellSnapshot>> {
     let pidfd = match open_thread(tid) {
         Ok(pidfd) => pidfd,
         Err(error) if task_is_gone(&error) => return Ok(None),
         Err(error) => return Err(error),
     };
-    let Some(value) = lookup_task_cell(map, &pidfd, tid)? else {
+    let annotation = lookup_task_cell(annotation_map, &pidfd, tid)?;
+    let managed = lookup_managed_task_cell(managed_map, &pidfd, tid)?;
+    if annotation.is_none() && managed.is_none() {
         return Ok(None);
-    };
+    }
+    let (cell_id, cell_epoch, needs_rehome) =
+        effective_inspection_cell(annotation.as_ref(), managed.as_ref());
     inspect_thread(
         tid,
-        value.cell_id,
-        value.cell_epoch,
-        value.needs_rehome != 0,
-        (value.llc_group_id != 0).then_some(value.llc_group_id),
-        value.llc_group_generation,
+        cell_id,
+        cell_epoch,
+        needs_rehome,
+        annotation
+            .as_ref()
+            .and_then(|value| (value.llc_group_id != 0).then_some(value.llc_group_id)),
+        annotation
+            .as_ref()
+            .map_or(0, |value| value.llc_group_generation),
     )
 }
 
@@ -659,6 +722,29 @@ mod tests {
         assert!(clear_manual_cell(&mut value));
         assert_eq!(value.cell_id, 3);
         assert_eq!(value.needs_rehome, 1);
+    }
+
+    #[test]
+    fn inspection_composes_manual_and_bpf_managed_membership() {
+        let mut annotation = empty_task_cell();
+        let managed = bpf_intf::snake_managed_task_cell {
+            cell_id: 7,
+            cell_epoch: 4,
+            status: bpf_intf::snake_managed_cgroup_status_SNAKE_MANAGED_CGROUP_ASSIGNED,
+            needs_rehome: 1,
+            ..unsafe { std::mem::zeroed() }
+        };
+
+        assert_eq!(
+            effective_inspection_cell(None, Some(&managed)),
+            (7, 4, true)
+        );
+
+        apply_manual_cell(&mut annotation, CellRef::static_cell(3));
+        assert_eq!(
+            effective_inspection_cell(Some(&annotation), Some(&managed)),
+            (3, 0, true)
+        );
     }
 
     #[test]

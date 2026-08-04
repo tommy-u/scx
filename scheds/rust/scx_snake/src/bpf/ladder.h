@@ -311,13 +311,9 @@ execute_rung_impl(const struct snake_ladder_ctx *ctx, struct task_struct *p,
 		return prev_cpu < 0 ? -ENOENT : prev_cpu;
 	case SNAKE_OP_PICK_RANDOM_IDLE:
 		if (rung->input == SNAKE_INPUT_TASK_CELL) {
-			struct snake_task_cell *cell;
 			u32			cell_id;
 			s32			exists, cpu;
 
-			cell = task_annotation(p);
-			if (!cell)
-				return -ENOENT;
 			exists = queue_task_cell_id(ctx, p, &cell_id);
 			if (exists)
 				return exists;
@@ -328,9 +324,9 @@ execute_rung_impl(const struct snake_ladder_ctx *ctx, struct task_struct *p,
 				ctx, p, rung->data, cell_id,
 				rung->flags & SNAKE_RUNG_F_PICK_IDLE_CORE);
 			if (cpu >= 0) {
-				if (READ_ONCE(cell->needs_rehome))
+				if (task_cell_rehome_pending(p))
 					stat_inc(ctx, SNAKE_STAT_CELL_REHOMES);
-				WRITE_ONCE(cell->needs_rehome, 0);
+				task_cell_clear_rehome(p);
 			}
 			return cpu;
 		}
@@ -352,13 +348,9 @@ execute_rung_impl(const struct snake_ladder_ctx *ctx, struct task_struct *p,
 					    rung->data, enqueue_flags);
 	case SNAKE_OP_PICK_IDLE_MASK_TABLE:
 		if (rung->input == SNAKE_INPUT_TASK_CELL) {
-			struct snake_task_cell *cell;
 			u32			cell_id;
 			s32			exists, cpu;
 
-			cell = task_annotation(p);
-			if (!cell)
-				return -ENOENT;
 			exists = queue_task_cell_id(ctx, p, &cell_id);
 			if (exists)
 				return exists;
@@ -369,9 +361,9 @@ execute_rung_impl(const struct snake_ladder_ctx *ctx, struct task_struct *p,
 				ctx, p, rung->data, cell_id,
 				rung->flags & SNAKE_RUNG_F_PICK_IDLE_CORE);
 			if (cpu >= 0) {
-				if (READ_ONCE(cell->needs_rehome))
+				if (task_cell_rehome_pending(p))
 					stat_inc(ctx, SNAKE_STAT_CELL_REHOMES);
-				WRITE_ONCE(cell->needs_rehome, 0);
+				task_cell_clear_rehome(p);
 			}
 			return cpu;
 		}
@@ -582,7 +574,6 @@ static __always_inline s32 try_enqueue_task_cell(
 	u64 slice, const struct snake_fine_timing_ctx *fine,
 	u64 callback_started_at)
 {
-	struct snake_task_cell		       *cell;
 	struct snake_task_cell_enqueue_loop_ctx loop_ctx = {
 		.ladder_ctx = *ctx,
 		.p	    = p,
@@ -595,10 +586,9 @@ static __always_inline s32 try_enqueue_task_cell(
 	bool rehome_pending;
 	long nr_loops;
 
-	cell = task_annotation(p);
-	if (!cell)
+	if (queue_task_membership_kind(ctx, p) == SNAKE_MEMBERSHIP_NO_CELL)
 		return 0;
-	rehome_pending = READ_ONCE(cell->needs_rehome);
+	rehome_pending = task_cell_rehome_pending(p);
 
 	nr_loops = bpf_loop(SNAKE_MAX_GENERIC_RUNGS,
 			    try_enqueue_task_cell_callback,

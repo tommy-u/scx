@@ -15,8 +15,9 @@ Cell annotations have two policy interpretations:
   remainder of that cell's claim.
 
 The annotation format and pidfd control path are identical in both modes.
-Cell queue mode may additionally populate the managed layer from a cgroup-v2
-policy described in
+Cell queue mode may additionally populate the managed layer from either a
+static userspace cgroup assignment or a BPF-resolved dynamic cgroup policy
+described in
 [`CGROUP_MEMBERSHIP_PROPOSAL.md`](CGROUP_MEMBERSHIP_PROPOSAL.md).
 This document is the control-path and annotation-lifecycle reference. See
 [`QUEUE_POLICY.md`](QUEUE_POLICY.md) for queue allocation and
@@ -102,9 +103,9 @@ write; scheduler BPF reads the resulting value later.
 
 ## BPF representation
 
-The presence of a task-storage entry is the validity marker, so the value does
-not need a separate validity field. It carries the requested cell ID and a
-rehome flag used to converge live updates:
+Manual and static-userspace annotations share one task-storage map. The
+presence of an entry is the validity marker, and flags distinguish the two
+layers:
 
 ```c
 struct snake_task_cell {
@@ -126,6 +127,35 @@ struct {
     __type(value, struct snake_task_cell);
 } task_cells SEC(".maps");
 ```
+
+Dynamic `[managed_cells]` membership uses separate BPF-owned task storage plus
+a banked cgroup directory. This separation makes the precedence rule explicit:
+manual annotation, then BPF-managed assignment, then the legacy static managed
+annotation. The BPF record caches cgroup ID and bank generation so unchanged
+tasks avoid repeating the ancestor walk:
+
+```c
+struct snake_managed_task_cell {
+    __u64 cgid;
+    __u64 generation;
+    __u64 cell0_runtime_ns;
+    __u64 cell0_timeslices;
+    __u32 cell_id;
+    __u32 cell_epoch;
+    __u32 status;
+    __u32 needs_rehome;
+    __u32 affected;
+    __u32 uncorrected;
+};
+```
+
+At task initialization and scheduling refresh points, BPF walks at most 64
+cgroup ancestors. An assigned direct child supplies `(cell_id, cell_epoch)`;
+an excluded child or the managed root resolves to `NoCell`; a descendant under
+the root with no published child mapping is marked unresolved and remains in
+cell 0. A cgroup move changes `cgid`, and a topology publication changes
+`generation`, so either invalidates the cached resolution without a userspace
+per-thread write.
 
 The cell rung receives `struct task_struct *p` and reads `task_cells` with
 `bpf_task_storage_get(&task_cells, p, NULL, 0)`. Placement-only mode uses
@@ -196,7 +226,9 @@ sudo scx_snake --clear-thread-cell 4812
 ```
 
 The interface updates one TID per request. New threads do not inherit this
-task-storage entry and therefore begin unannotated.
+task-storage entry and therefore begin without a manual/static annotation.
+Under `[managed_cells]`, they independently inherit their cgroup-derived cell
+through the BPF-owned layer.
 
 ## Placement-only policy shape
 

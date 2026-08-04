@@ -10,23 +10,25 @@ cpuset-aware allocation, cell-0 holdout, demand EWMA, ownership rebalancing,
 banked topology publication, orphan draining, sibling-LLC stealing, and optional
 pinned-waiter slice shrinking are implemented.
 
-The remaining differences are mostly semantic and operational: Snake derives task
-identity through userspace polling instead of BPF cgroup inheritance; queued work
-does not cross cell boundaries; CPU hotplug is unsupported; and scale, soak,
-failure, rollback, and browser evidence are incomplete.
+The remaining differences are mostly semantic and operational. Dynamic managed
+task identity now resolves from a banked cgroup directory in BPF, but creation
+and deletion of the direct-child cells themselves still waits for userspace
+topology reconciliation. Queued work does not cross cell boundaries; CPU
+hotplug is unsupported; and scale, soak, failure, rollback, and browser evidence
+are incomplete.
 
 | Dimension | Snake parity | Meaning |
 | --- | ---: | --- |
 | Static scheduling data plane | **88%** | Cell/LLC and affinity DSQs, VTIME, borrowing, draining, stealing, and slice control exist. |
-| Dynamic cell/resource control | **82%** | Lifecycle, holdout, EWMA, rebalancing, and banked owner changes exist; identity is polling-based and hotplug is absent. |
-| Operations and diagnostics | **82%** | Managed allocation/rebalance, physical-core placement, and host-tax views exist; scale and failure contracts remain incomplete. |
-| Weighted end-to-end behavior | **85% +/-5%** | The Mitosis simulation profile is runnable and dynamically managed, but not production-certified. |
+| Dynamic cell/resource control | **88%** | BPF identity, lifecycle, holdout, EWMA, rebalancing, and banked owner changes exist; topology events and hotplug still differ. |
+| Operations and diagnostics | **86%** | Managed identity exposure, allocation/rebalance, physical-core placement, and host-tax views exist; scale and failure contracts remain incomplete. |
+| Weighted end-to-end behavior | **88% +/-4%** | The Mitosis simulation profile is runnable and dynamically managed, but not production-certified. |
 
 Current dependency chain:
 
 ```text
-automatic direct-child cells                 IMPLEMENTED (userspace polling)
-  -> descendant task identity                IMPLEMENTED (eventual polling)
+automatic direct-child cells                 IMPLEMENTED (userspace topology polling)
+  -> descendant task identity                IMPLEMENTED (BPF ancestor resolution)
   -> cpuset allocation and cell-0 holdout    IMPLEMENTED
   -> complete banked topology publication    IMPLEMENTED
   -> elapsed-time demand EWMA                 IMPLEMENTED
@@ -40,7 +42,7 @@ automatic direct-child cells                 IMPLEMENTED (userspace polling)
 | Mitosis behavior | Snake status | Current difference or limit |
 | --- | --- | --- |
 | Direct-child cgroup becomes a cell | Present | Reconciliation polls rather than using inotify/BPF identity. |
-| Descendants inherit and live moves refresh | Partial | Recursive userspace reconciliation eventually updates per-thread task storage. |
+| Descendants inherit and live moves refresh | Present | BPF refreshes on cgroup ID or bank-generation change; manual annotations override it. |
 | Excluded children remain in cell 0 | Present | Exact exclusions are omitted from managed allocation. |
 | Cell create/delete and ID reuse | Present | Stable IDs and slot epochs prevent a stale task reference from entering a reused cell. |
 | Cpuset-aware resource claims | Present | Effective cpusets and optional local constraints feed deterministic allocation. |
@@ -59,7 +61,7 @@ automatic direct-child cells                 IMPLEMENTED (userspace polling)
 | Structural topology drain | Present | Creation, deletion, and epoch reuse close custom enqueue and drain the fixed pool before publication. |
 | Pinned-waiter slice shrinking | Present | Base slice, enable bit, min/max, and multiplier are live controls. |
 | Task rehome across clocks | Present | Identity/epoch checks and bounded-lag translation converge after unavoidable old-route races. |
-| Managed metrics and inspection | Present | Allocation, EWMA, ownership, rebalance, queue recovery, and transition state are visible. |
+| Managed metrics and inspection | Present | Exact mapped/unresolved cell-0 runtime, affected-task and exit counters complement allocation, rebalance, and queue state. |
 | Exit and task dumps | Present | Global dumps include publication, topology, cells, clocks, queue accounting, and CPU routes; task dumps include annotation, routing, fairness, and affinity state. |
 | Queued-wakeup optimization | Missing | Not needed for initial simulation parity; evaluate only with evidence. |
 
@@ -72,15 +74,15 @@ managed transition coordinator in
 [main.rs](../../src/main.rs). Queue semantics are documented
 in [QUEUE_POLICY.md](../QUEUE_POLICY.md).
 
-## How the 85% estimate is derived
+## How the 88% estimate is derived
 
 The aggregate is cross-checked with this 100-point behavior model. Points credit
 end-to-end behavior, not the existence of a related primitive.
 
 | Behavior | Weight | Snake points |
 | --- | ---: | ---: |
-| Automatic direct-child lifecycle | 8 | 8 |
-| Descendant membership and live moves | 7 | 5 |
+| Automatic direct-child lifecycle | 8 | 7 |
+| Descendant membership and live moves | 7 | 7 |
 | Stable IDs, exclusions, and cell 0 | 5 | 5 |
 | Cpuset allocation and holdout | 10 | 9 |
 | Demand controller | 8 | 7 |
@@ -92,12 +94,12 @@ end-to-end behavior, not the existence of a related primitive.
 | LLC locality, stealing, and orphan drain | 7 | 7 |
 | Pinned-task latency control | 5 | 4 |
 | Metrics and monitoring | 6 | 6 |
-| Exit and debug diagnostics | 4 | 2 |
+| Exit and debug diagnostics | 4 | 4 |
 | Scale and compatibility | 4 | 2 |
 | End-to-end acceptance evidence | 4 | 2 |
-| **Total** | **100** | **85** |
+| **Total** | **100** | **88** |
 
-The +/-5 range reflects unmeasured production-kernel behavior under identity
+The +/-4 range reflects unmeasured production-kernel behavior under identity
 churn, sustained rebalancing, queued overload, and large-host scale.
 
 ## Current managed-mode contract
@@ -127,9 +129,14 @@ Current semantics:
 - Each admitted non-excluded direct child has a stable numeric ID while its path
   identity remains stable. Slot reuse or same-name inode replacement increments
   the slot epoch.
-- Descendants stay in the direct child's cell. Reconciliation retains task pidfds
-  and writes `(cell_id, slot_epoch)` into task storage. New threads and cgroup
-  moves can temporarily retain an old or cell-0 identity until the next poll.
+- Descendants stay in the direct child's cell. Userspace publishes direct-child
+  cgroup IDs with `(cell_id, slot_epoch)` in the inactive configuration bank.
+  BPF resolves and caches the nearest assigned ancestor for new threads and
+  cgroup moves; a manual task annotation has precedence.
+- A task under a newly created child remains in cell 0 with `unresolved` status
+  until userspace publishes that child in the next topology generation. Exact
+  BPF counters split this window from mapped tasks that nevertheless received
+  cell-0 runtime and finalize short-lived episodes in `exit_task`.
 - A non-empty configured `cpuset.cpus` is a hard allocation constraint. The nearest
   usable `cpuset.cpus.effective` supplies the admitted CPU set. Invalid or empty
   inputs do not silently become unconstrained.
@@ -233,7 +240,7 @@ not been proven with a sparse 1,024-CPU pipeline or real-browser E2E CI.
 
 | Area | Current evidence | Remaining evidence |
 | --- | --- | --- |
-| Lifecycle | Managed workload, churn, deletion/reuse VM tests | High-rate fork/move polling windows and failure injection |
+| Lifecycle | Managed workload, churn, deletion/reuse VM tests | High-rate fork/move and new-child publication windows plus failure injection |
 | Cpuset and holdout | Pure allocator and managed resize tests | Production topology diversity and hotplug |
 | Publication | Reader lifetime, resize, reuse, and queued-affinity tests | Forced partial failures at every transition boundary |
 | Drain and steal | Dedicated Mitosis drain/steal and managed reuse scripts | Scheduled multi-kernel and sustained-load execution |

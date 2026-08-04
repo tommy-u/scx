@@ -76,9 +76,11 @@ pub struct CompiledPolicy {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MembershipPolicy {
     pub parent: String,
+    pub parent_inode: Option<u64>,
     pub reconcile_ms: u64,
     pub assignments: BTreeMap<String, u32>,
     pub child_inodes: Option<BTreeMap<String, u64>>,
+    pub excluded_child_inodes: BTreeMap<String, u64>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -992,9 +994,11 @@ fn compile_membership(
 
     Ok(Some(MembershipPolicy {
         parent: membership.parent.clone(),
+        parent_inode: None,
         reconcile_ms: membership.reconcile_ms,
         assignments,
         child_inodes: None,
+        excluded_child_inodes: BTreeMap::new(),
     }))
 }
 

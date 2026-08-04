@@ -134,20 +134,20 @@ Category estimate: **95% policy engine**, **84% topology support**.
 | Annotation cleanup on task exit | 95% | High | Scheduler restart intentionally drops all annotations |
 | Manual live rehome signal | 82% | Medium | Per-thread API and eventual queue convergence |
 | Explicit cgroup-tree membership mapping | 72% | High | Static assignment table |
-| Membership reconciliation | 84% | Medium | Recursive polling and per-thread writes |
-| Thread inheritance | 35% | High | Descendants are reconciled, but new threads have a polling window |
-| Automatic direct-child cell lifecycle | 90% | High | Polling rather than inotify/BPF-native identity |
+| Membership reconciliation | 92% | Medium | Topology changes still depend on userspace polling |
+| Thread inheritance | 92% | High | BPF ancestor resolution; unpublished new children remain unresolved |
+| Automatic direct-child cell lifecycle | 90% | High | Polling rather than an event-triggered topology refresh |
 | Epoch-safe managed slot reuse | 92% | High | Churn scale and failure-injection breadth remain limited |
-| BPF cgroup identity propagation | 5% | High | Absent |
+| BPF cgroup identity propagation | 92% | High | Bounded ancestor walk and lazy cgroup/generation refresh; production churn evidence remains |
 
 Snake's membership manager is at
 [membership.rs](../../src/membership.rs#L51-L149) and its tree
 scan at [membership.rs](../../src/membership.rs#L209-L275).
 
-Category estimate: **84% for Snake's declared membership scope** and **78% for
-Mitosis-style dynamic identity and lifecycle**. Stable IDs and epochs protect slot
-reuse, but polling-based per-thread storage is not equivalent to BPF cgroup-native
-inheritance.
+Category estimate: **90% for Snake's declared membership scope** and **88% for
+Mitosis-style dynamic identity and lifecycle**. Stable IDs and epochs protect
+slot reuse, while BPF task storage derives dynamic identity from the published
+cgroup directory. Direct-child topology publication remains polling-based.
 
 ## Observability
 
@@ -161,7 +161,7 @@ inheritance.
 | Policy/topology/task inspection payload | 90% | High | Scheduler-specific, loosely typed consumer boundary |
 | Per-DSQ operation timing | 88% | Medium | Detailed capture increases event volume |
 | Stats reset without policy reload | 90% | High | Reset semantics spread across several components |
-| Managed allocation and rebalance telemetry | 92% | High | No production SLO or anomaly thresholds |
+| Managed identity, allocation, and rebalance telemetry | 94% | High | Exact cell-0 exposure exists; no production SLO or anomaly thresholds |
 | Physical-core placement aggregation | 92% | High | Browser-side processing remains dense on large hosts |
 | Host-capacity and host-tax accounting | 90% | Medium | Sampling alignment and unclassified-time interpretation need scale evidence |
 | Inspector current baseline | 90% | Medium | Scaling, browser E2E, and protocol genericity |
@@ -194,7 +194,7 @@ production web application.
 | Policy catalog/live activation | 88% | Medium | Compatibility remains scheduler-specific |
 | Live scheduler parameter controls | 88% | Medium | VTIME slice and shrinking are live; topology and fairness still require restart |
 | Scheduler lifecycle | 92% | Medium | External attachment association is heuristic |
-| Cells and workload assignment | 88% | Medium | Userspace polling identity and serial per-TID RPCs |
+| Cells and workload assignment | 92% | Medium | Dynamic identity is BPF-derived; manual annotation still uses serial per-TID RPCs |
 | Overview, debugging, host context | 82% | Medium | Recent code, environment-specific dependencies |
 | Documentation | 82% | High | Review estimates and operational docs still require manual sync |
 | Test confidence | 88% | Medium | No real browser DOM smoke or scheduled multi-kernel VM gate |
@@ -238,17 +238,18 @@ latency, scale, soak, browser, canary, or rollback evidence.
 | Queue features | 90% |
 | Policy engine | 95% |
 | Topology | 84% |
-| Task identity/cgroups within declared scope | 84% |
-| Mitosis-style dynamic identity and lifecycle | 78% |
-| Managed resource control | 82% |
-| Observability | 94% |
+| Task identity/cgroups within declared scope | 90% |
+| Mitosis-style dynamic identity and lifecycle | 88% |
+| Managed resource control | 88% |
+| Observability | 95% |
 | Lifecycle | 92% |
 | Validation/testing | 87% |
-| Inspector | 90% |
+| Inspector | 92% |
 
 Taken together, Snake is approximately **90% complete as an experimental policy,
 managed-resource, and observability platform**. That number should not obscure the
 release blockers: known EEVDF incorrectness, no cross-cell queued-backlog service,
 no CPU-hotplug contract, observer failures that can unwind the scheduler loop, and
-polling-based identity windows. Missing scale, soak, rollback, and real-browser
+a topology-publication window for newly created managed children. Missing scale,
+soak, rollback, and real-browser
 evidence keep **production readiness near 45%**.

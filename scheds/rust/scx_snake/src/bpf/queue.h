@@ -20,16 +20,13 @@ queue_task_cell(const struct snake_ladder_ctx *ctx, struct task_struct *p,
 {
 	struct snake_queue_header *header = queue_config(ctx);
 	struct snake_queue_cell	  *cell;
-	struct snake_task_cell	  *annotation;
 	u32			  *encoded;
-	u32			   cell_id, index, key;
+	u32			   cell_id, cell_epoch, index, key;
 
 	if (!header || !header->nr_cells || !indexp)
 		return NULL;
-	annotation = task_annotation(p);
-	if (!annotation)
+	if (!task_effective_cell(p, &cell_id, &cell_epoch))
 		return NULL;
-	cell_id = READ_ONCE(annotation->cell_id);
 	if (cell_id >= SNAKE_MAX_CPUS)
 		return NULL;
 	key = queue_slot_index(ctx->slot, SNAKE_MAX_CPUS, cell_id);
@@ -42,7 +39,7 @@ queue_task_cell(const struct snake_ladder_ctx *ctx, struct task_struct *p,
 	cell = queue_cell(ctx, index);
 	if (!cell || !READ_ONCE(cell->valid) ||
 	    READ_ONCE(cell->external_id) != cell_id ||
-	    READ_ONCE(cell->slot_epoch) != READ_ONCE(annotation->cell_epoch))
+	    READ_ONCE(cell->slot_epoch) != cell_epoch)
 		return NULL;
 	*indexp = index;
 	return cell;
@@ -60,30 +57,24 @@ static __always_inline s32
 queue_task_cell_id(const struct snake_ladder_ctx *ctx, struct task_struct *p,
 		   u32 *cell_idp)
 {
-	struct snake_task_cell *annotation;
-	u32			index;
+	u32 cell_epoch, index;
 
 	if (!cell_idp)
 		return -EINVAL;
-	annotation = task_annotation(p);
-	if (!annotation)
+	if (!task_effective_cell(p, cell_idp, &cell_epoch))
 		return -ENOENT;
 	if (queue_cell_mode_enabled() && !queue_task_cell(ctx, p, &index))
 		return -ENOENT;
-	*cell_idp = READ_ONCE(annotation->cell_id);
 	return 0;
 }
 
 static __always_inline u32 queue_task_membership_kind(
 	const struct snake_ladder_ctx *ctx, struct task_struct *p)
 {
-	struct snake_task_cell *annotation;
-	u32			cell_id, index;
+	u32 cell_id, cell_epoch, index;
 
-	annotation = task_annotation(p);
-	if (!annotation)
+	if (!task_effective_cell(p, &cell_id, &cell_epoch))
 		return SNAKE_MEMBERSHIP_NO_CELL;
-	cell_id = READ_ONCE(annotation->cell_id);
 	if (!cell_id)
 		return SNAKE_MEMBERSHIP_NO_CELL;
 	if (!queue_task_cell(ctx, p, &index))

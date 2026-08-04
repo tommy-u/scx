@@ -265,6 +265,11 @@ pub struct MembershipManager {
     proc_root: PathBuf,
     clock_ticks_per_second: u64,
     previous_reconcile_at: Option<ReconcileTimestamp>,
+    bpf_assignments: bool,
+}
+
+fn membership_uses_bpf_assignments(policy: &MembershipPolicy) -> bool {
+    policy.parent_inode.is_some()
 }
 
 impl MembershipManager {
@@ -285,6 +290,7 @@ impl MembershipManager {
             proc_root: PathBuf::from("/proc"),
             clock_ticks_per_second: clock_ticks_per_second()?,
             previous_reconcile_at: None,
+            bpf_assignments: membership_uses_bpf_assignments(policy),
         };
         manager.replace_directory(CellDirectory::from_policy(policy, slot_epochs));
         Ok(manager)
@@ -323,6 +329,42 @@ impl MembershipManager {
             ..Default::default()
         };
         let mut applied = self.known.clone();
+
+        if self.bpf_assignments {
+            for tid in reconciliation_removals(&self.known, &desired) {
+                applied.remove(&tid);
+                self.pidfds.remove(&tid);
+                report.updated += 1;
+            }
+            for tid in reconciliation_updates(&self.known, &desired) {
+                let task = desired
+                    .get(&tid)
+                    .expect("reconciliation update must have a desired task");
+                match task_cells::open_thread(tid) {
+                    Ok(pidfd) => {
+                        self.pidfds.insert(tid, pidfd);
+                        applied.insert(tid, *task);
+                        report.updated += 1;
+                    }
+                    Err(error) if task_cells::task_is_gone(&error) => {
+                        applied.remove(&tid);
+                        self.pidfds.remove(&tid);
+                        report.transient += 1;
+                    }
+                    Err(error) => {
+                        applied.remove(&tid);
+                        self.pidfds.remove(&tid);
+                        report.transient += 1;
+                        warn!(
+                            "could not retain TID {tid} during membership observation: {error:#}"
+                        );
+                    }
+                }
+            }
+            self.known = applied;
+            self.previous_reconcile_at = Some(observed_at);
+            return Ok(report);
+        }
 
         for tid in reconciliation_removals(&self.known, &desired) {
             applied.remove(&tid);
@@ -915,6 +957,7 @@ mod tests {
             proc_root: PathBuf::from("/unused-proc"),
             clock_ticks_per_second: 100,
             previous_reconcile_at: Some(ReconcileTimestamp { boottime_ns: 1 }),
+            bpf_assignments: false,
         };
         let replacement = CellDirectory::new(BTreeMap::from([(
             "batch".into(),
@@ -935,9 +978,11 @@ mod tests {
     fn policy_directory_carries_managed_cell_slot_epochs() {
         let policy = MembershipPolicy {
             parent: "/unused".into(),
+            parent_inode: None,
             reconcile_ms: 1_000,
             assignments: BTreeMap::from([("batch".into(), 3), ("static".into(), 4)]),
             child_inodes: None,
+            excluded_child_inodes: BTreeMap::new(),
         };
 
         let directory = CellDirectory::from_policy(&policy, &BTreeMap::from([(3, 7)]));
@@ -949,6 +994,11 @@ mod tests {
                 slot_epoch: 7,
             }
         );
+
+        assert!(!membership_uses_bpf_assignments(&policy));
+        let mut managed = policy.clone();
+        managed.parent_inode = Some(99);
+        assert!(membership_uses_bpf_assignments(&managed));
         assert_eq!(directory.assignments["static"], CellRef::static_cell(4));
     }
 

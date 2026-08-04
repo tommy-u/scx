@@ -71,6 +71,13 @@ struct {
 	__type(value, struct snake_task_cell);
 } task_cells SEC(".maps");
 
+struct {
+	__uint(type, BPF_MAP_TYPE_TASK_STORAGE);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
+	__type(key, int);
+	__type(value, struct snake_managed_task_cell);
+} managed_task_cells SEC(".maps");
+
 static __always_inline struct snake_task_runtime *
 task_state_lookup(struct task_struct *p)
 {
@@ -93,6 +100,68 @@ static __always_inline struct snake_task_cell *
 task_annotation(struct task_struct *p)
 {
 	return bpf_task_storage_get(&task_cells, p, NULL, 0);
+}
+
+static __always_inline struct snake_managed_task_cell *
+managed_task_cell_lookup(struct task_struct *p)
+{
+	return bpf_task_storage_get(&managed_task_cells, p, NULL, 0);
+}
+
+static __always_inline struct snake_managed_task_cell *
+managed_task_cell_get_or_create(struct task_struct *p)
+{
+	return bpf_task_storage_get(&managed_task_cells, p, NULL,
+				    BPF_LOCAL_STORAGE_GET_F_CREATE);
+}
+
+static __always_inline bool task_effective_cell(struct task_struct *p,
+					 u32 *cell_idp, u32 *cell_epochp)
+{
+	struct snake_managed_task_cell *managed;
+	struct snake_task_cell *annotation;
+
+	annotation = task_annotation(p);
+	if (annotation &&
+	    (READ_ONCE(annotation->flags) & SNAKE_TASK_CELL_F_MANUAL)) {
+		*cell_idp = READ_ONCE(annotation->cell_id);
+		*cell_epochp = READ_ONCE(annotation->cell_epoch);
+		return true;
+	}
+	managed = managed_task_cell_lookup(p);
+	if (managed && READ_ONCE(managed->status) ==
+			       SNAKE_MANAGED_CGROUP_ASSIGNED) {
+		*cell_idp = READ_ONCE(managed->cell_id);
+		*cell_epochp = READ_ONCE(managed->cell_epoch);
+		return true;
+	}
+	if (annotation &&
+	    (READ_ONCE(annotation->flags) & SNAKE_TASK_CELL_F_MANAGED)) {
+		*cell_idp = READ_ONCE(annotation->cell_id);
+		*cell_epochp = READ_ONCE(annotation->cell_epoch);
+		return true;
+	}
+	return false;
+}
+
+static __always_inline bool task_cell_rehome_pending(struct task_struct *p)
+{
+	struct snake_managed_task_cell *managed = managed_task_cell_lookup(p);
+	struct snake_task_cell *annotation = task_annotation(p);
+
+	return (annotation && READ_ONCE(annotation->needs_rehome)) ||
+	       (managed && READ_ONCE(managed->needs_rehome));
+}
+
+static __always_inline void task_cell_clear_rehome(struct task_struct *p)
+{
+	struct snake_managed_task_cell *managed = managed_task_cell_lookup(p);
+	struct snake_task_cell *annotation = task_annotation(p);
+
+	if (annotation)
+		WRITE_ONCE(annotation->needs_rehome, 0);
+	if (managed)
+		WRITE_ONCE(managed->needs_rehome, 0);
 }
 
 static __always_inline int task_state_init_queue_mask(struct task_struct *p)

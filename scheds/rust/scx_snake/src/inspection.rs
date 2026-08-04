@@ -1838,9 +1838,11 @@ scope = "task_cell"
         });
         active.compiled.membership = Some(policy::MembershipPolicy {
             parent: "/workloads".into(),
+            parent_inode: None,
             reconcile_ms: 1_000,
             assignments: BTreeMap::from([("batch.slice".into(), 7)]),
             child_inodes: None,
+            excluded_child_inodes: BTreeMap::new(),
         });
         let topology = queue_topology::resolve_queue_topology(
             &active.compiled,

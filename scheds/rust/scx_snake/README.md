@@ -156,8 +156,8 @@ sudo ./target/release/scx_snake --clear-thread-cell 4812
 See [Task Cell Annotations](docs/CELL_POLICY.md) for the control and scheduling
 data flow.
 
-Cell queue policies may also derive assignments from cgroup-v2 child trees
-entirely in userspace:
+Cell queue policies may also define a static assignment table for cgroup-v2
+child trees. This compatibility path is reconciled per thread in userspace:
 
 ```toml
 [membership]
@@ -176,7 +176,16 @@ stale assignment cannot enter a reused managed cell. See
 [Userspace Cgroup Cell Membership](docs/CGROUP_MEMBERSHIP_PROPOSAL.md).
 
 Alternatively, `[managed_cells]` discovers every non-excluded direct child at
-attachment and on each reconciliation interval. The nearest available non-empty
+attachment and on each reconciliation interval. It publishes the parent,
+assigned child cgroup IDs, exclusions, cell IDs, and slot epochs into the same
+inactive bank as the queue topology. BPF resolves a task's nearest published
+ancestor in `init_task` and refreshes that identity when the task's cgroup or
+the bank generation changes. Manual thread assignments take precedence. New
+threads therefore inherit managed placement without waiting for a userspace
+thread scan; tasks under a newly created but not yet published child remain in
+cell 0 and are reported as unresolved until the next topology reconciliation.
+
+The nearest available non-empty
 `cpuset.cpus.effective`, inherited from an ancestor when necessary, records the
 CPUs available to the child. A non-empty configured `cpuset.cpus` is a hard cell
 constraint, while an empty or unavailable configured list creates an unpinned
@@ -402,6 +411,16 @@ transition state, slice parameters, cell masks and clocks, actual versus
 tracked queue depths, CPU routes, and per-task cell, queue, fairness, and
 affinity state. Empty inactive normal queues are omitted so the allowance is
 spent on actionable state.
+
+Managed profiles also export exact BPF runtime counters for the residual
+identity window. `managed_mapped_cell0_*` counts tasks that ran in cell 0 even
+though their child already had a published mapping;
+`managed_unresolved_cell0_*` counts tasks under the managed parent whose child
+was not yet published. Affected-task and exit counters include short-lived
+tasks because accounting occurs in `stopping` and `exit_task`, not during a
+later userspace scan. Per-cell mapped runtime, timeslices, and affected-task
+counters attribute the first category to its intended cell. The Inspector
+shows both categories in the Cells utilization view.
 
 To launch a custom policy file instead:
 
