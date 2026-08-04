@@ -195,7 +195,7 @@ struct cell_cpumask_data {
  * BPF program invocation:
  * - Cell-to-cgroup assignments (which cgroups own which cells)
  * - Cell cpumasks (which CPUs belong to each cell)
- * - Select CPU ladder (which candidate masks select_cpu tries first)
+ * - Select CPU ladder (which candidate masks idle-pick paths try first)
  */
 struct cell_config {
 	u32 num_cell_assignments;

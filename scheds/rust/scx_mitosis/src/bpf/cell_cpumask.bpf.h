@@ -48,11 +48,11 @@ struct cell_cpumask_pair {
  *
  * @primary describes CPUs owned by the cell.
  * @borrowable describes CPUs the cell may borrow from other cells.
- * @select_rungs describes the userspace-provided order for select_cpu idle
- * picking. Rungs are packed u32 values that reference existing mask sources and
- * carry the accounting and side-effect metadata to apply on a successful pick.
- * Disabled rungs are no-ops, and a zero-initialized rung count falls back to
- * the built-in select policy.
+ * @select_rungs describes the userspace-provided idle-pick order for
+ * select_cpu and all-cell enqueue paths. Rungs are packed u32 values that
+ * reference existing mask sources and carry the accounting and side-effect
+ * metadata to apply on a successful pick. Disabled rungs are no-ops, and a
+ * zero-initialized rung count falls back to the built-in idle-pick policy.
  */
 struct cell_cpumask_wrapper {
 	struct cell_cpumask_pair primary;

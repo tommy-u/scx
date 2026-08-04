@@ -682,9 +682,9 @@ static __always_inline void insert_select_rung_cpu(struct task_struct *p, s32 cp
 }
 
 /*
- * Apply a userspace-provided select_cpu ladder. This is only affinity-safe
- * on the all-cell path: update_task_cpumask() has already proved the cell
- * primary and borrowable masks are both subsets of p->cpus_ptr.
+ * Apply the userspace-provided idle-pick ladder. This is only affinity-safe on
+ * all-cell paths: update_task_cpumask() has already proved the cell primary and
+ * borrowable masks are both subsets of p->cpus_ptr.
  */
 static __always_inline s32 try_pick_idle_cpu_from_select_ladder(struct task_struct *p, s32 prev_cpu,
 								struct cpu_ctx *cctx,
@@ -968,7 +968,7 @@ static __always_inline void enqueue_cell_task(struct task_struct *p, u64 enq_fla
 		 */
 		if (!(cctx = lookup_cpu_ctx(-1)))
 			return;
-		cpu = try_pick_idle_cpu(p, task_cpu, cctx, tctx, true);
+		cpu = try_pick_idle_cpu_from_select_ladder(p, task_cpu, cctx, tctx, true);
 		if (cpu >= 0)
 			return;
 		if (cpu == -1)

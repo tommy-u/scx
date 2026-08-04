@@ -753,7 +753,7 @@ impl<'a> Scheduler<'a> {
             config.assignments[i].cell_id = *cell_id;
         }
 
-        // Set cell cpumasks, borrowable cpumasks, and select CPU ladder order
+        // Set cell cpumasks, borrowable cpumasks, and idle-pick ladder order
         let mut max_cell_id: u32 = 0;
         for a in cpu_assignments {
             if a.cell_id >= bpf_intf::consts_MAX_CELLS {
