@@ -71,8 +71,8 @@ pub enum SchedulerRequest {
 /// Typed responses routed back through the shared stats socket.
 #[derive(Debug)]
 pub enum SchedulerResponse {
-    Metrics(Metrics),
-    Inspection(InspectionView),
+    Metrics(std::result::Result<Metrics, String>),
+    Inspection(std::result::Result<InspectionView, String>),
     PolicyValidation(std::result::Result<PolicyValidationResponse, String>),
     ReplacePolicy(std::result::Result<PolicyUpdateResponse, String>),
     ThreadCell(std::result::Result<ThreadCellResponse, String>),
@@ -649,7 +649,7 @@ scope = "task_allowed"
                 panic!("expected an inspection request");
             };
             responses
-                .send(SchedulerResponse::Inspection(
+                .send(SchedulerResponse::Inspection(Ok(
                     crate::inspection::InspectionView {
                         schema_version: 1,
                         active_slot: 1,
@@ -671,7 +671,7 @@ scope = "task_allowed"
                         cells: Vec::new(),
                         task_mappings: Vec::new(),
                     },
-                ))
+                )))
                 .expect("response should send");
         });
 

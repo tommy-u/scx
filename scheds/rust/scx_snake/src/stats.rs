@@ -865,7 +865,8 @@ pub fn server_data() -> StatsServerData<SchedulerRequest, SchedulerResponse> {
         Box::new(move |(req_ch, res_ch)| {
             req_ch.send(SchedulerRequest::Metrics)?;
             let mut previous = match res_ch.recv()? {
-                SchedulerResponse::Metrics(metrics) => metrics,
+                SchedulerResponse::Metrics(Ok(metrics)) => metrics,
+                SchedulerResponse::Metrics(Err(error)) => bail!(error),
                 response => bail!("unexpected response to metrics request: {response:?}"),
             };
 
@@ -873,7 +874,8 @@ pub fn server_data() -> StatsServerData<SchedulerRequest, SchedulerResponse> {
                 Box::new(move |_args, (req_ch, res_ch)| {
                     req_ch.send(SchedulerRequest::Metrics)?;
                     let current = match res_ch.recv()? {
-                        SchedulerResponse::Metrics(metrics) => metrics,
+                        SchedulerResponse::Metrics(Ok(metrics)) => metrics,
+                        SchedulerResponse::Metrics(Err(error)) => bail!(error),
                         response => {
                             bail!("unexpected response to metrics request: {response:?}")
                         }
@@ -912,7 +914,10 @@ pub fn server_data() -> StatsServerData<SchedulerRequest, SchedulerResponse> {
             Box::new(move |_args, (req_ch, res_ch)| {
                 req_ch.send(SchedulerRequest::Inspect)?;
                 match res_ch.recv()? {
-                    SchedulerResponse::Inspection(snapshot) => Ok(serde_json::to_value(snapshot)?),
+                    SchedulerResponse::Inspection(Ok(snapshot)) => {
+                        Ok(serde_json::to_value(snapshot)?)
+                    }
+                    SchedulerResponse::Inspection(Err(error)) => bail!(error),
                     response => bail!("unexpected response to inspection request: {response:?}"),
                 }
             });

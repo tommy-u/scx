@@ -3278,8 +3278,8 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
         let mut stale = Vec::new();
         let mut task_mappings = Vec::new();
         for &tid in &tracked_tids {
-            match task_cells::inspect_thread_cell(&self.skel.maps.task_cells, tid)? {
-                Some(task) => task_mappings.push(inspection::TaskMappingInspectionView {
+            match task_cells::inspect_thread_cell(&self.skel.maps.task_cells, tid) {
+                Ok(Some(task)) => task_mappings.push(inspection::TaskMappingInspectionView {
                     tid: task.tid,
                     tgid: task.tgid,
                     name: task.name,
@@ -3302,7 +3302,8 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
                     .into(),
                     membership: if task.cell_id == 0 { "no_cell" } else { "cell" }.into(),
                 }),
-                None => stale.push(tid),
+                Ok(None) => stale.push(tid),
+                Err(error) => warn!("could not inspect TID {tid}: {error:#}"),
             }
         }
         for tid in stale {
@@ -3314,9 +3315,13 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
                 if tracked_tids.contains(&tid) {
                     continue;
                 }
-                let Some(task) = task_cells::inspect_thread_cell(&self.skel.maps.task_cells, tid)?
-                else {
-                    continue;
+                let task = match task_cells::inspect_thread_cell(&self.skel.maps.task_cells, tid) {
+                    Ok(Some(task)) => task,
+                    Ok(None) => continue,
+                    Err(error) => {
+                        warn!("could not inspect managed TID {tid}: {error:#}");
+                        continue;
+                    }
                 };
                 task_mappings.push(inspection::TaskMappingInspectionView {
                     tid: task.tid,
@@ -4112,10 +4117,12 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
             };
             match request_channel.recv_timeout(timeout) {
                 Ok(SchedulerRequest::Metrics) => {
-                    response_channel.send(SchedulerResponse::Metrics(self.metrics()?))?
+                    let response = self.metrics().map_err(|error| format!("{error:#}"));
+                    response_channel.send(SchedulerResponse::Metrics(response))?;
                 }
                 Ok(SchedulerRequest::Inspect) => {
-                    response_channel.send(SchedulerResponse::Inspection(self.inspection()?))?
+                    let response = self.inspection().map_err(|error| format!("{error:#}"));
+                    response_channel.send(SchedulerResponse::Inspection(response))?;
                 }
                 Ok(SchedulerRequest::ValidatePolicy { source }) => {
                     let response = self

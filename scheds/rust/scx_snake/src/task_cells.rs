@@ -462,13 +462,13 @@ pub(crate) fn inspect_thread(
     llc_group_id: Option<u64>,
     llc_group_generation: u32,
 ) -> Result<Option<ThreadCellSnapshot>> {
-    let status = match fs::read_to_string(format!("/proc/{tid}/status")) {
+    let status = match fs::read(format!("/proc/{tid}/status")) {
         Ok(status) => status,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error).with_context(|| format!("reading status for TID {tid}")),
     };
-    let status =
-        parse_task_status(&status).with_context(|| format!("parsing status for TID {tid}"))?;
+    let status = parse_task_status(&String::from_utf8_lossy(&status))
+        .with_context(|| format!("parsing status for TID {tid}"))?;
     let current_cpu = fs::read_to_string(format!("/proc/{tid}/stat"))
         .ok()
         .and_then(|stat| parse_task_cpu(&stat).ok());
