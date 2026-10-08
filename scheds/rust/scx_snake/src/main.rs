@@ -19,6 +19,7 @@ mod runtime_policy;
 mod stats;
 mod task_cells;
 
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Write;
@@ -2296,6 +2297,7 @@ struct Scheduler<'object, 'policy> {
     skel: BpfSkel<'object>,
     struct_ops: Option<libbpf_rs::Link>,
     timing_ring: libbpf_rs::RingBuffer<'static>,
+    timing_backlog: Cell<bool>,
     fine_timing_accumulator: Arc<Mutex<FineTimingAccumulator>>,
     rung_timing_accumulator: Arc<Mutex<RungTimingAccumulator>>,
     queue_timing_accumulator: Arc<Mutex<queue_timing::QueueTimingAccumulator>>,
@@ -2331,15 +2333,12 @@ fn fine_timing_available(
 
 impl<'object, 'policy> Scheduler<'object, 'policy> {
     fn drain_timing_events(&self) -> Result<()> {
-        loop {
-            let consumed = self.timing_ring.consume_raw_n(TIMING_DRAIN_BATCH);
-            if consumed < 0 {
-                bail!("draining timing events failed with errno {}", -consumed);
-            }
-            if consumed < TIMING_DRAIN_BATCH as i32 {
-                break;
-            }
+        let consumed = self.timing_ring.consume_raw_n(TIMING_DRAIN_BATCH);
+        if consumed < 0 {
+            bail!("draining timing events failed with errno {}", -consumed);
         }
+        self.timing_backlog
+            .set(consumed == TIMING_DRAIN_BATCH as i32);
         Ok(())
     }
 
@@ -2525,6 +2524,7 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
             skel,
             struct_ops,
             timing_ring,
+            timing_backlog: Cell::new(false),
             fine_timing_accumulator,
             rung_timing_accumulator,
             queue_timing_accumulator,
@@ -2867,7 +2867,9 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
         callback: fine_timing::FineTimingCallback,
         enabled: bool,
     ) -> Result<fine_timing::FineTimingControlResponse> {
-        self.drain_timing_events()?;
+        if enabled {
+            self.drain_timing_events()?;
+        }
         if enabled && self.callback_timing_sample_rate == 0 {
             bail!("fine timing requires callback timing sampling to be enabled");
         }
@@ -2903,6 +2905,7 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
         }
         self.publish_fine_timing_state(&next)?;
         if !enabled {
+            self.drain_timing_events()?;
             self.fine_timing_accumulator
                 .lock()
                 .map_err(|_| anyhow!("fine timing accumulator lock poisoned"))?
@@ -3039,13 +3042,13 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
         {
             return Ok(());
         }
-        self.drain_timing_events()?;
         let mut next = self.fine_timing_state.clone();
         let stopped_at_ms = unix_time_ms();
         for callback in fine_timing::FineTimingCallback::ALL {
             next.stop(callback, stopped_at_ms);
         }
         self.publish_fine_timing_state(&next)?;
+        self.drain_timing_events()?;
         let mut accumulator = self
             .fine_timing_accumulator
             .lock()
@@ -3180,8 +3183,8 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
         &mut self,
         enabled: bool,
     ) -> Result<queue_timing::QueueTimingControlResponse> {
-        self.drain_timing_events()?;
         if enabled {
+            self.drain_timing_events()?;
             queue_timing::validate_capture_start(self.callback_timing_sample_rate)
                 .map_err(anyhow::Error::msg)?;
         }
@@ -4126,7 +4129,9 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
             if let Some(demand_timeout) = self.time_until_demand_sample() {
                 timeout = timeout.min(demand_timeout);
             }
-            let timeout = if self.queue_timing_state.is_enabled()
+            let timeout = if self.timing_backlog.get() {
+                Duration::ZERO
+            } else if self.queue_timing_state.is_enabled()
                 || fine_timing::FineTimingCallback::ALL
                     .into_iter()
                     .any(|callback| self.fine_timing_state.is_enabled(callback))
