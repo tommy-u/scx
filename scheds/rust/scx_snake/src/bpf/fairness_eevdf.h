@@ -123,6 +123,7 @@ fairness_eevdf_enqueue(struct snake_ladder_ctx *ctx, struct task_struct *p,
 	struct snake_eevdf_domain *domain;
 	u64			   virtual_time, flags, slice;
 	dsq_id_t		   dsq;
+	s32			   target_cpu;
 
 	fairness_eevdf_runnable(ctx, p);
 	runtime = fairness_eevdf_prepare_task(ctx, p);
@@ -155,6 +156,11 @@ fairness_eevdf_enqueue(struct snake_ladder_ctx *ctx, struct task_struct *p,
 		stat_inc(ctx, SNAKE_STAT_EEVDF_FUTURE_ENQUEUES);
 	}
 	queue_timing_record_insert(ctx, p, dsq, SNAKE_QUEUE_CELL_NONE, fine);
+	target_cpu = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
+	if (target_cpu < 0)
+		target_cpu = scx_bpf_task_cpu(p);
+	if (target_cpu >= 0 && target_cpu < nr_cpu_ids)
+		scx_bpf_kick_cpu(target_cpu, SCX_KICK_IDLE);
 	return 0;
 }
 

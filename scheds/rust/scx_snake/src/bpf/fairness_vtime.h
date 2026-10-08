@@ -213,7 +213,12 @@ fairness_vtime_enqueue(struct snake_ladder_ctx *ctx, struct task_struct *p,
 	}
 	queue_timing_record_insert(ctx, p, dsq, SNAKE_QUEUE_CELL_NONE, fine);
 	stat_inc(ctx, SNAKE_STAT_VTIME_ENQUEUES);
-	if (target_cpu >= 0)
+	if (target_cpu < 0) {
+		target_cpu = scx_bpf_pick_idle_cpu(p->cpus_ptr, 0);
+		if (target_cpu < 0)
+			target_cpu = scx_bpf_task_cpu(p);
+	}
+	if (target_cpu >= 0 && target_cpu < nr_cpu_ids)
 		scx_bpf_kick_cpu(target_cpu, SCX_KICK_IDLE);
 	return 0;
 }
