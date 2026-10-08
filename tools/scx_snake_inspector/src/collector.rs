@@ -36,6 +36,7 @@ const DEFAULT_KALLSYMS_PATH: &str = "/proc/kallsyms";
 const DEFAULT_STATS_PATH: &str = "/var/run/scx/root/stats";
 const MAX_PAIR_MAP_ENTRIES: usize = 1_048_576;
 const STATS_TIMEOUT_MS: u64 = 1_000;
+const CONTROL_TIMEOUT_MS: u64 = 15_000;
 const INSPECTION_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const POLICY_SCAN_INTERVAL: Duration = Duration::from_secs(5);
 
@@ -548,7 +549,11 @@ pub fn run_collector(
 
     let mut last_scheduler_name = String::new();
     let mut last_health = (0_u64, 0_u64);
+    // Metrics reconnects establish a new counter baseline, so keep their stream
+    // independent of inspection failures and long-running control requests.
     let mut stats_client = None;
+    let mut inspection_client = None;
+    let mut control_client = None;
     let mut top_stats_connection = TopStatsConnectionState::default();
     let mut last_cpu_usage_error = None;
     let mut last_host_cpu_usage_error = None;
@@ -590,7 +595,7 @@ pub fn run_collector(
                 response,
             }) => {
                 let result = activate_policy(
-                    &mut stats_client,
+                    &mut control_client,
                     &options.stats_path,
                     &options.policy_dir,
                     &policy_id,
@@ -607,7 +612,7 @@ pub fn run_collector(
                 response,
             }) => {
                 let result =
-                    set_fine_timing(&mut stats_client, &options.stats_path, callback, enabled)
+                    set_fine_timing(&mut control_client, &options.stats_path, callback, enabled)
                         .map_err(|error| format!("{error:#}"));
                 let _ = response.send(result);
                 next_inspection_at = Instant::now();
@@ -619,7 +624,7 @@ pub fn run_collector(
                 response,
             }) => {
                 let result = set_workload_cell(
-                    &mut stats_client,
+                    &mut control_client,
                     &options.stats_path,
                     &options.proc_root,
                     &options.cgroup_root,
@@ -636,7 +641,7 @@ pub fn run_collector(
                 response,
             }) => {
                 let result = set_callback_timing_sample_rate(
-                    &mut stats_client,
+                    &mut control_client,
                     &options.stats_path,
                     sample_rate,
                 )
@@ -646,7 +651,7 @@ pub fn run_collector(
                 continue;
             }
             Ok(CollectorCommand::SetQueueTiming { enabled, response }) => {
-                let result = set_queue_timing(&mut stats_client, &options.stats_path, enabled)
+                let result = set_queue_timing(&mut control_client, &options.stats_path, enabled)
                     .map_err(|error| format!("{error:#}"));
                 let _ = response.send(result);
                 next_inspection_at = Instant::now();
@@ -657,7 +662,7 @@ pub fn run_collector(
                 response,
             }) => {
                 let result =
-                    set_userspace_parameters(&mut stats_client, &options.stats_path, &parameters)
+                    set_userspace_parameters(&mut control_client, &options.stats_path, &parameters)
                         .map_err(|error| format!("{error:#}"));
                 let _ = response.send(result);
                 next_inspection_at = Instant::now();
@@ -668,24 +673,25 @@ pub fn run_collector(
                 response,
             }) => {
                 let result =
-                    set_bpf_slice_parameters(&mut stats_client, &options.stats_path, &parameters)
+                    set_bpf_slice_parameters(&mut control_client, &options.stats_path, &parameters)
                         .map_err(|error| format!("{error:#}"));
                 let _ = response.send(result);
                 next_inspection_at = Instant::now();
                 continue;
             }
             Ok(CollectorCommand::ResetStats { response }) => {
-                let result = reset_scheduler_stats(&mut stats_client, &options.stats_path)
+                let result = reset_scheduler_stats(&mut control_client, &options.stats_path)
                     .map_err(|error| format!("{error:#}"));
                 let result = match result {
                     Ok(reset) => {
                         stats_client = None;
+                        inspection_client = None;
                         top_stats_connection.disconnect();
                         let now_ms = elapsed_ms(started);
                         match read_counts(&skel.maps.migration_counts) {
                             Ok(baseline) => {
                                 dashboard.reset_statistics(now_ms, &baseline);
-                                match read_inspection(&mut stats_client, &options.stats_path) {
+                                match read_inspection(&mut inspection_client, &options.stats_path) {
                                     Ok(snapshot) => {
                                         dashboard.set_inspection_at(now_ms, Some(snapshot), None);
                                         next_inspection_at =
@@ -734,6 +740,8 @@ pub fn run_collector(
                 let baseline = read_counts(&skel.maps.migration_counts)?;
                 dashboard.reset(now_ms, &baseline);
                 stats_client = None;
+                inspection_client = None;
+                control_client = None;
                 top_stats_connection.disconnect();
                 next_inspection_at = Instant::now();
                 next_policy_scan_at = Instant::now();
@@ -748,6 +756,8 @@ pub fn run_collector(
                 let baseline = read_counts(&skel.maps.migration_counts)?;
                 dashboard.reset(now_ms, &baseline);
                 stats_client = None;
+                inspection_client = None;
+                control_client = None;
                 top_stats_connection.disconnect();
                 last_policy_files = None;
                 dashboard.set_inspection(None, None);
@@ -810,7 +820,7 @@ pub fn run_collector(
                 }
             }
             if Instant::now() >= next_inspection_at {
-                match read_inspection(&mut stats_client, &options.stats_path) {
+                match read_inspection(&mut inspection_client, &options.stats_path) {
                     Ok(snapshot) => dashboard.set_inspection_at(now_ms, Some(snapshot), None),
                     Err(error) => dashboard.set_inspection_at(
                         now_ms,
@@ -822,7 +832,7 @@ pub fn run_collector(
             }
             if Instant::now() >= next_policy_scan_at {
                 match read_policy_catalog(
-                    &mut stats_client,
+                    &mut inspection_client,
                     &options.stats_path,
                     &options.policy_dir,
                     &mut last_policy_files,
@@ -857,29 +867,49 @@ fn read_policy_catalog(
     Ok(Some(catalog))
 }
 
+// A failed request may have a late reply or a partial frame on this stream.
+// Drop it without retrying: a mutation may already have been applied.
+fn request_stats<T>(
+    client: &mut Option<StatsClient>,
+    stats_path: &Path,
+    timeout_ms: u64,
+    args: Vec<(String, String)>,
+) -> Result<T>
+where
+    T: for<'de> Deserialize<'de>,
+{
+    if client.is_none() {
+        *client = Some(
+            StatsClient::new()
+                .set_path(stats_path)
+                .connect(Some(timeout_ms))
+                .with_context(|| format!("connecting to {}", stats_path.display()))?,
+        );
+    }
+    let result = client
+        .as_mut()
+        .context("Snake stats client is unavailable")?
+        .request("stats", args);
+    if result.is_err() {
+        *client = None;
+    }
+    result
+}
+
 fn validate_policy(
     client: &mut Option<StatsClient>,
     stats_path: &Path,
     source: &str,
 ) -> Result<PolicyValidation> {
-    if client.is_none() {
-        *client = Some(
-            StatsClient::new()
-                .set_path(stats_path)
-                .connect(Some(STATS_TIMEOUT_MS))
-                .with_context(|| format!("connecting to {}", stats_path.display()))?,
-        );
-    }
-    client
-        .as_mut()
-        .context("Snake stats client is unavailable")?
-        .request(
-            "stats",
-            vec![
-                ("target".into(), "policy_validate".into()),
-                ("source".into(), source.into()),
-            ],
-        )
+    request_stats(
+        client,
+        stats_path,
+        STATS_TIMEOUT_MS,
+        vec![
+            ("target".into(), "policy_validate".into()),
+            ("source".into(), source.into()),
+        ],
+    )
 }
 
 fn activate_policy(
@@ -889,24 +919,15 @@ fn activate_policy(
     policy_id: &str,
 ) -> Result<PolicyActivation> {
     let source = load_policy_source(policy_dir, policy_id)?;
-    if client.is_none() {
-        *client = Some(
-            StatsClient::new()
-                .set_path(stats_path)
-                .connect(Some(STATS_TIMEOUT_MS))
-                .with_context(|| format!("connecting to {}", stats_path.display()))?,
-        );
-    }
-    client
-        .as_mut()
-        .context("Snake stats client is unavailable")?
-        .request(
-            "stats",
-            vec![
-                ("target".into(), "policy_update".into()),
-                ("source".into(), source),
-            ],
-        )
+    request_stats(
+        client,
+        stats_path,
+        CONTROL_TIMEOUT_MS,
+        vec![
+            ("target".into(), "policy_update".into()),
+            ("source".into(), source),
+        ],
+    )
 }
 
 fn set_fine_timing(
@@ -915,25 +936,16 @@ fn set_fine_timing(
     callback: FineTimingCallback,
     enabled: bool,
 ) -> Result<FineTimingControlResponse> {
-    if client.is_none() {
-        *client = Some(
-            StatsClient::new()
-                .set_path(stats_path)
-                .connect(Some(STATS_TIMEOUT_MS))
-                .with_context(|| format!("connecting to {}", stats_path.display()))?,
-        );
-    }
-    client
-        .as_mut()
-        .context("Snake stats client is unavailable")?
-        .request(
-            "stats",
-            vec![
-                ("target".into(), "fine_timing_set".into()),
-                ("callback".into(), callback.as_str().into()),
-                ("enabled".into(), enabled.to_string()),
-            ],
-        )
+    request_stats(
+        client,
+        stats_path,
+        CONTROL_TIMEOUT_MS,
+        vec![
+            ("target".into(), "fine_timing_set".into()),
+            ("callback".into(), callback.as_str().into()),
+            ("enabled".into(), enabled.to_string()),
+        ],
+    )
 }
 
 fn set_callback_timing_sample_rate(
@@ -941,24 +953,15 @@ fn set_callback_timing_sample_rate(
     stats_path: &Path,
     sample_rate: u32,
 ) -> Result<CallbackTimingRateResponse> {
-    if client.is_none() {
-        *client = Some(
-            StatsClient::new()
-                .set_path(stats_path)
-                .connect(Some(STATS_TIMEOUT_MS))
-                .with_context(|| format!("connecting to {}", stats_path.display()))?,
-        );
-    }
-    client
-        .as_mut()
-        .context("Snake stats client is unavailable")?
-        .request(
-            "stats",
-            vec![
-                ("target".into(), "callback_timing_sample_rate_set".into()),
-                ("sample_rate".into(), sample_rate.to_string()),
-            ],
-        )
+    request_stats(
+        client,
+        stats_path,
+        CONTROL_TIMEOUT_MS,
+        vec![
+            ("target".into(), "callback_timing_sample_rate_set".into()),
+            ("sample_rate".into(), sample_rate.to_string()),
+        ],
+    )
 }
 
 fn set_queue_timing(
@@ -966,24 +969,15 @@ fn set_queue_timing(
     stats_path: &Path,
     enabled: bool,
 ) -> Result<QueueTimingControlResponse> {
-    if client.is_none() {
-        *client = Some(
-            StatsClient::new()
-                .set_path(stats_path)
-                .connect(Some(STATS_TIMEOUT_MS))
-                .with_context(|| format!("connecting to {}", stats_path.display()))?,
-        );
-    }
-    client
-        .as_mut()
-        .context("Snake stats client is unavailable")?
-        .request(
-            "stats",
-            vec![
-                ("target".into(), "queue_timing_set".into()),
-                ("enabled".into(), enabled.to_string()),
-            ],
-        )
+    request_stats(
+        client,
+        stats_path,
+        CONTROL_TIMEOUT_MS,
+        vec![
+            ("target".into(), "queue_timing_set".into()),
+            ("enabled".into(), enabled.to_string()),
+        ],
+    )
 }
 
 fn set_userspace_parameters(
@@ -991,43 +985,34 @@ fn set_userspace_parameters(
     stats_path: &Path,
     parameters: &UserspaceParameters,
 ) -> Result<UserspaceParameters> {
-    if client.is_none() {
-        *client = Some(
-            StatsClient::new()
-                .set_path(stats_path)
-                .connect(Some(STATS_TIMEOUT_MS))
-                .with_context(|| format!("connecting to {}", stats_path.display()))?,
-        );
-    }
-    client
-        .as_mut()
-        .context("Snake stats client is unavailable")?
-        .request(
-            "stats",
-            vec![
-                ("target".into(), "userspace_parameters_set".into()),
-                (
-                    "managed_reconcile_ms".into(),
-                    parameters.managed_reconcile_ms.to_string(),
-                ),
-                (
-                    "sample_ms".into(),
-                    parameters.resizing.sample_ms.to_string(),
-                ),
-                (
-                    "threshold_pct".into(),
-                    parameters.resizing.threshold_pct.to_string(),
-                ),
-                (
-                    "cooldown_ms".into(),
-                    parameters.resizing.cooldown_ms.to_string(),
-                ),
-                (
-                    "ewma_alpha".into(),
-                    parameters.resizing.ewma_alpha.to_string(),
-                ),
-            ],
-        )
+    request_stats(
+        client,
+        stats_path,
+        CONTROL_TIMEOUT_MS,
+        vec![
+            ("target".into(), "userspace_parameters_set".into()),
+            (
+                "managed_reconcile_ms".into(),
+                parameters.managed_reconcile_ms.to_string(),
+            ),
+            (
+                "sample_ms".into(),
+                parameters.resizing.sample_ms.to_string(),
+            ),
+            (
+                "threshold_pct".into(),
+                parameters.resizing.threshold_pct.to_string(),
+            ),
+            (
+                "cooldown_ms".into(),
+                parameters.resizing.cooldown_ms.to_string(),
+            ),
+            (
+                "ewma_alpha".into(),
+                parameters.resizing.ewma_alpha.to_string(),
+            ),
+        ],
+    )
 }
 
 pub fn bpf_slice_parameters_args(parameters: &BpfSliceParameters) -> Vec<(String, String)> {
@@ -1061,36 +1046,24 @@ fn set_bpf_slice_parameters(
     stats_path: &Path,
     parameters: &BpfSliceParameters,
 ) -> Result<BpfSliceParameters> {
-    if client.is_none() {
-        *client = Some(
-            StatsClient::new()
-                .set_path(stats_path)
-                .connect(Some(STATS_TIMEOUT_MS))
-                .with_context(|| format!("connecting to {}", stats_path.display()))?,
-        );
-    }
-    client
-        .as_mut()
-        .context("Snake stats client is unavailable")?
-        .request("stats", bpf_slice_parameters_args(parameters))
+    request_stats(
+        client,
+        stats_path,
+        CONTROL_TIMEOUT_MS,
+        bpf_slice_parameters_args(parameters),
+    )
 }
 
 fn reset_scheduler_stats(
     client: &mut Option<StatsClient>,
     stats_path: &Path,
 ) -> Result<StatsResetResponse> {
-    if client.is_none() {
-        *client = Some(
-            StatsClient::new()
-                .set_path(stats_path)
-                .connect(Some(STATS_TIMEOUT_MS))
-                .with_context(|| format!("connecting to {}", stats_path.display()))?,
-        );
-    }
-    client
-        .as_mut()
-        .context("Snake stats client is unavailable")?
-        .request("stats", vec![("target".into(), "stats_reset".into())])
+    request_stats(
+        client,
+        stats_path,
+        CONTROL_TIMEOUT_MS,
+        vec![("target".into(), "stats_reset".into())],
+    )
 }
 
 #[derive(Deserialize)]
@@ -1107,14 +1080,6 @@ fn set_workload_cell(
     cell_id: Option<u32>,
 ) -> Result<WorkloadCellResponse> {
     let tids = resolve_workload_target(target, proc_root, cgroup_root)?;
-    if client.is_none() {
-        *client = Some(
-            StatsClient::new()
-                .set_path(stats_path)
-                .connect(Some(STATS_TIMEOUT_MS))
-                .with_context(|| format!("connecting to {}", stats_path.display()))?,
-        );
-    }
     let mut updated = 0;
     let mut transient = Vec::new();
     let mut rehome_requested = 0;
@@ -1131,11 +1096,7 @@ fn set_workload_cell(
         if let Some(cell_id) = cell_id {
             args.push(("cell_id".into(), cell_id.to_string()));
         }
-        match client
-            .as_mut()
-            .context("Snake stats client is unavailable")?
-            .request::<ThreadCellResponse>("stats", args)
-        {
+        match request_stats::<ThreadCellResponse>(client, stats_path, CONTROL_TIMEOUT_MS, args) {
             Ok(response) => {
                 updated += 1;
                 rehome_requested += usize::from(response.rehome_requested);
@@ -1163,35 +1124,27 @@ fn read_inspection(
     client: &mut Option<StatsClient>,
     stats_path: &Path,
 ) -> Result<serde_json::Value> {
-    if client.is_none() {
-        *client = Some(
-            StatsClient::new()
-                .set_path(stats_path)
-                .connect(Some(STATS_TIMEOUT_MS))
-                .with_context(|| format!("connecting to {}", stats_path.display()))?,
-        );
+    let payload = request_stats::<serde_json::Value>(
+        client,
+        stats_path,
+        STATS_TIMEOUT_MS,
+        vec![("target".into(), "inspect".into())],
+    )?;
+    let result = decode_inspection_stats(payload);
+    if result.is_err() {
+        *client = None;
     }
-    let payload = client
-        .as_mut()
-        .context("Snake stats client is unavailable")?
-        .request::<serde_json::Value>("stats", vec![("target".into(), "inspect".into())])?;
-    decode_inspection_stats(payload)
+    result
 }
 
 fn read_top_stats(client: &mut Option<StatsClient>, stats_path: &Path) -> Result<SnakeTopStats> {
-    if client.is_none() {
-        *client = Some(
-            StatsClient::new()
-                .set_path(stats_path)
-                .connect(Some(STATS_TIMEOUT_MS))
-                .with_context(|| format!("connecting to {}", stats_path.display()))?,
-        );
+    let payload =
+        request_stats::<serde_json::Value>(client, stats_path, STATS_TIMEOUT_MS, Vec::new())?;
+    let result = decode_top_stats(payload);
+    if result.is_err() {
+        *client = None;
     }
-    let payload = client
-        .as_mut()
-        .context("Snake stats client is unavailable")?
-        .request::<serde_json::Value>("stats", Vec::new())?;
-    decode_top_stats(payload)
+    result
 }
 
 fn set_cpu_usage_error(
