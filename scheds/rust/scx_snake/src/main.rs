@@ -7843,7 +7843,7 @@ scope = "task_allowed"
                 .iter()
                 .map(|source| source.matches("queue_timing_record_insert(").count())
                 .sum::<usize>(),
-            11
+            12
         );
         assert_eq!(
             outside_owner
