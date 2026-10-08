@@ -3473,6 +3473,12 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
         let cooldown = Duration::from_millis(parameters.resizing.cooldown_ms);
         self.managed_reconcile_interval = Some(reconcile);
         self.next_managed_reconcile = Some(now + reconcile);
+        if let Some(membership) = &mut self.runtime.compiled.membership {
+            membership.reconcile_ms = parameters.managed_reconcile_ms;
+        }
+        if let Some(manager) = &mut self.membership {
+            manager.set_reconcile_interval(reconcile, now);
+        }
         self.demand_sample_interval = Some(sample);
         self.next_demand_sample = Some(now + sample);
         self.next_rebalance_allowed = Some(now + cooldown);

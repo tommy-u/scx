@@ -305,6 +305,11 @@ impl MembershipManager {
         self.previous_reconcile_at = None;
     }
 
+    pub(crate) fn set_reconcile_interval(&mut self, interval: Duration, now: Instant) {
+        self.interval = interval;
+        self.next_reconcile = now + interval;
+    }
+
     pub fn reconcile_if_due(&mut self, map: &impl MapCore) -> Result<Option<ReconcileReport>> {
         if Instant::now() < self.next_reconcile {
             return Ok(None);
