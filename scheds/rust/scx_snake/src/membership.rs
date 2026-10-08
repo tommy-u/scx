@@ -325,19 +325,21 @@ impl MembershipManager {
         let mut applied = self.known.clone();
 
         for tid in reconciliation_removals(&self.known, &desired) {
-            applied.remove(&tid);
             let pidfd = self
                 .pidfds
-                .remove(&tid)
+                .get(&tid)
                 .with_context(|| format!("managed TID {tid} has no retained pidfd"))?;
-            match task_cells::clear_managed_task_cell(map, tid, &pidfd) {
+            match task_cells::clear_managed_task_cell(map, tid, pidfd) {
                 Ok(()) => report.updated += 1,
                 Err(error) if task_cells::task_is_gone(&error) => report.transient += 1,
                 Err(error) => {
                     report.transient += 1;
                     warn!("could not clear managed membership for TID {tid}: {error:#}");
+                    continue;
                 }
             }
+            applied.remove(&tid);
+            self.pidfds.remove(&tid);
         }
 
         for tid in reconciliation_updates(&self.known, &desired) {
