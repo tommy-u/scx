@@ -46,9 +46,7 @@ use policy::{
     CompiledPolicy, CompiledRung, InputSource, Opcode, QueueDispatchAction, QueueDispatchOperation,
     QueueDispatchSource, QueueEnqueueAction, QueueEnqueueTarget,
 };
-use queue_topology::{
-    dump_queue_topology, resolve_host_queue_topology, resolve_host_queue_topology_with_demands,
-};
+use queue_topology::{dump_queue_topology, resolve_host_queue_topology};
 use runtime_policy::RuntimePolicy;
 use scx_snake::fairness::FairnessMode;
 use scx_stats::prelude::*;
@@ -3645,45 +3643,48 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
             }));
             tracker.projected_demand_weights(identities)
         });
-        let topology =
-            match resolve_host_queue_topology_with_demands(&candidate, projected_weights.as_ref())
-                .context("resolving live managed cell topology")
-            {
-                Ok(Some(topology)) => topology,
-                Ok(None) => {
-                    let error = anyhow!("managed cells resolved without a queue topology");
-                    let detail = format!("{error:#}");
-                    transition.fail_stage(
-                        "resolution",
-                        resolution_started.elapsed(),
-                        detail.clone(),
-                    );
-                    self.inspector.record_topology_transition(transition.finish(
-                        inspection::TopologyTransitionOutcome::Rejected,
-                        None,
-                        unix_time_ms(),
-                        transition_started.elapsed(),
-                        Some(detail),
-                    ));
-                    return Err(error);
+        let active_topology = self
+            .queue_topology
+            .as_ref()
+            .context("managed reconciliation has no active queue topology")?;
+        let topology = match queue_topology::resolve_live_managed_queue_topology(
+            &candidate,
+            projected_weights.as_ref(),
+            active_topology,
+        )
+        .context("resolving live managed cell topology")
+        {
+            Ok(Some(topology)) => topology,
+            Ok(None) => {
+                let error = anyhow!("managed cells resolved without a queue topology");
+                let detail = format!("{error:#}");
+                transition.fail_stage("resolution", resolution_started.elapsed(), detail.clone());
+                self.inspector.record_topology_transition(transition.finish(
+                    inspection::TopologyTransitionOutcome::Rejected,
+                    None,
+                    unix_time_ms(),
+                    transition_started.elapsed(),
+                    Some(detail),
+                ));
+                return Err(error);
+            }
+            Err(error) => {
+                let detail = format!("{error:#}");
+                transition.fail_stage("resolution", resolution_started.elapsed(), detail.clone());
+                self.inspector.record_topology_transition(transition.finish(
+                    inspection::TopologyTransitionOutcome::Rejected,
+                    None,
+                    unix_time_ms(),
+                    transition_started.elapsed(),
+                    Some(detail),
+                ));
+                if error.is::<queue_topology::ManagedTopologyRejection>() {
+                    warn!("managed-cell allocation rejected; preserving the active topology: {error:#}");
+                    return Ok(());
                 }
-                Err(error) => {
-                    let detail = format!("{error:#}");
-                    transition.fail_stage(
-                        "resolution",
-                        resolution_started.elapsed(),
-                        detail.clone(),
-                    );
-                    self.inspector.record_topology_transition(transition.finish(
-                        inspection::TopologyTransitionOutcome::Rejected,
-                        None,
-                        unix_time_ms(),
-                        transition_started.elapsed(),
-                        Some(detail),
-                    ));
-                    return Err(error);
-                }
-            };
+                return Err(error);
+            }
+        };
         let active_topology = self
             .queue_topology
             .as_ref()
@@ -3904,9 +3905,16 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
         );
         let resolution_started = Instant::now();
         let resolution = (|| {
-            let topology =
-                resolve_host_queue_topology_with_demands(&self.runtime.compiled, Some(weights))?
-                    .context("managed demand policy resolved without a queue topology")?;
+            let active_topology = self
+                .queue_topology
+                .as_ref()
+                .context("managed demand resize has no active queue topology")?;
+            let topology = queue_topology::resolve_live_managed_queue_topology(
+                &self.runtime.compiled,
+                Some(weights),
+                active_topology,
+            )?
+            .context("managed demand policy resolved without a queue topology")?;
             let tables = resolve_mask_tables(&self.runtime.compiled)
                 .context("resolving managed rebalance mask tables")?;
             Ok::<_, anyhow::Error>((topology, tables))
@@ -3923,6 +3931,12 @@ impl<'object, 'policy> Scheduler<'object, 'policy> {
                     transition_started.elapsed(),
                     Some(detail),
                 ));
+                if error.is::<queue_topology::ManagedTopologyRejection>() {
+                    warn!(
+                        "managed-cell resize rejected; preserving the active topology: {error:#}"
+                    );
+                    return Ok(false);
+                }
                 return Err(error);
             }
         };

@@ -29,8 +29,10 @@ runtime counters -> EWMA demand -> proportional reallocation -> banked publish
   that lost all consumers. It briefly closes custom enqueue and uses the global
   drain whenever an affinity DSQ on a CPU changing owner is non-empty,
   preventing that CPU's old-owner clock from starving pinned work. Legacy
-  policies also retain the global drain. Allocation or publication failure is
-  fatal, and borrowing masks are regenerated each time.
+  policies also retain the global drain. Inadmissible allocations preserve the
+  active topology and membership for the next reconciliation attempt. Unsupported
+  host topology changes and publication failures remain fatal. Borrowing masks
+  are regenerated each time.
 - Per-task custody markers balance normal and affinity depth at exact dispatch
   moves or external dequeue callbacks. Post-close enqueues route CPU-local
   without keeping a structural transition's inflight fence busy. Tasks already

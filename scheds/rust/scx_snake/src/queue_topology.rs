@@ -167,6 +167,34 @@ pub fn resolve_host_queue_topology_with_demands(
     policy: &CompiledPolicy,
     demand_weights: Option<&BTreeMap<u32, f64>>,
 ) -> Result<Option<QueueTopology>> {
+    resolve_host_queue_topology_inner(policy, demand_weights, None)
+}
+
+/// An allocation rejected before any active topology state was changed.
+#[derive(Debug)]
+pub struct ManagedTopologyRejection;
+
+impl std::fmt::Display for ManagedTopologyRejection {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("managed-cell allocation candidate is inadmissible")
+    }
+}
+
+impl std::error::Error for ManagedTopologyRejection {}
+
+pub fn resolve_live_managed_queue_topology(
+    policy: &CompiledPolicy,
+    demand_weights: Option<&BTreeMap<u32, f64>>,
+    active: &QueueTopology,
+) -> Result<Option<QueueTopology>> {
+    resolve_host_queue_topology_inner(policy, demand_weights, Some(active))
+}
+
+fn resolve_host_queue_topology_inner(
+    policy: &CompiledPolicy,
+    demand_weights: Option<&BTreeMap<u32, f64>>,
+    active: Option<&QueueTopology>,
+) -> Result<Option<QueueTopology>> {
     if policy.queues.is_none() {
         return Ok(None);
     }
@@ -186,6 +214,30 @@ pub fn resolve_host_queue_topology_with_demands(
             ))
         })
         .collect::<Result<BTreeMap<_, _>>>()?;
+    if let Some(active) = active {
+        let queues = policy.queues.as_ref().expect("checked above");
+        if active.layout != queues.layout
+            || !active
+                .cpu_queues
+                .iter()
+                .map(|(&cpu, queue)| (cpu, queue.llc_id))
+                .eq(cpu_to_llc.iter().map(|(&cpu, &llc)| (cpu, llc)))
+        {
+            bail!("host CPU/LLC topology changed during managed reconciliation; restart Snake");
+        }
+        if policy.managed_cells.is_none() || queues.layout == QueueLayout::Llc {
+            bail!("live managed topology requires managed cell queues");
+        }
+        let allocation =
+            resolve_managed_cell_allocation(policy, &available_cpus, &cpu_to_llc, demand_weights)
+                .map_err(|error| error.context(ManagedTopologyRejection))?;
+        return Ok(Some(compile_queue_topology(
+            queues.layout,
+            allocation,
+            &cpu_to_llc,
+            &policy.cell_slot_epochs,
+        )?));
+    }
     let Some(demand_weights) = demand_weights else {
         return resolve_queue_topology(policy, &available_cpus, &cpu_to_llc);
     };
