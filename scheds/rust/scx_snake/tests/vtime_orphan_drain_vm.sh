@@ -9,6 +9,7 @@ vng=${VNG:-vng}
 guest_cpus=12,sockets=2,cores=6,threads=1
 guest_memory=${SNAKE_TESTING_GUEST_MEMORY:-4G}
 dry_run=${SNAKE_TESTING_DRY_RUN:-0}
+test_verbose=${SNAKE_TEST_VERBOSE:-0}
 listen=${SNAKE_ORPHAN_DRAIN_LISTEN:-127.0.0.1:44111}
 
 fail() {
@@ -26,7 +27,13 @@ Host mode snapshots its inputs and launches one two-LLC virtme guest. Guest
 mode externally marks a populated cell/LLC queue as consumerless, proves that
 the sched_ext watchdog kicks Snake with its drain bit clear, then proves the
 same task finishes while Snake stays attached when the drain bit is present.
+Set SNAKE_TEST_VERBOSE=1 to capture libbpf and verifier diagnostics in the guest.
 EOF
+}
+
+kernel_log_has_unexpected_failure() {
+    grep -Eiv 'runnable task stall' "$1" | grep -Eiq \
+        'scx_bpf_error|sched_ext:.*(error|stall|watchdog)|RCU.*stall|soft lockup|hard LOCKUP|(^|[[:space:]])BUG:|Oops:|kernel panic'
 }
 
 inside_vm() {
@@ -53,6 +60,8 @@ run_host() {
     [[ -n ${guest_memory} ]] || fail "SNAKE_TESTING_GUEST_MEMORY must not be empty"
     [[ ${dry_run} == 0 || ${dry_run} == 1 ]] ||
         fail "SNAKE_TESTING_DRY_RUN must be 0 or 1"
+    [[ ${test_verbose} == 0 || ${test_verbose} == 1 ]] ||
+        fail "SNAKE_TEST_VERBOSE must be 0 or 1"
 
     run_dir=$(realpath -m "${run_dir}")
     input_dir=${run_dir}/inputs
@@ -61,6 +70,7 @@ run_host() {
     snapshot_inspector=${input_dir}/scx_snake_inspector
     guest_script=${run_dir}/guest.sh
     guest_command=(
+        env "SNAKE_TEST_VERBOSE=${test_verbose}"
         "${snapshot_script}" --guest "${run_dir}" "${snapshot_snake}"
         "${snapshot_inspector}" "${listen}"
     )
@@ -143,6 +153,10 @@ run_guest() {
     local -a online_cpu_ids=() alpha_cpus=() target_cpus=() survivor_cpus=()
     local -a worker_pids=()
     local -A cpu_llc=() gate_pid_by_cpu=()
+    local -a verbose_args=()
+    if [[ ${test_verbose} == 1 ]]; then
+        verbose_args=(--verbose)
+    fi
 
     stop_pid() {
         local pid=$1 signal=${2:-TERM} attempt
@@ -554,6 +568,7 @@ PY
         : >"${log}"
         : >"${result}"
         "${snake_bin}" --policy "${policy}" --fairness vtime --stats 0.05 \
+            "${verbose_args[@]}" \
             --stats-format json --exit-dump-len 1048576 >"${log}" 2>&1 &
         snake_pid=$!
         wait_for "Snake attachment" 300 0.02 scheduler_enabled ||
@@ -814,8 +829,7 @@ EOF
     stop_pid "${inspector_pid}" INT
     inspector_pid=
     dmesg | tail -n +$((dmesg_lines + 1)) >"${run_dir}/dmesg-new.txt"
-    if grep -Eiv 'runnable task stall' "${run_dir}/dmesg-new.txt" | grep -Eiq \
-        'scx_bpf_error|sched_ext:.*(error|stall|watchdog)|RCU.*stall|soft lockup|hard LOCKUP|BUG:|Oops:|kernel panic'; then
+    if kernel_log_has_unexpected_failure "${run_dir}/dmesg-new.txt"; then
         fail "kernel log contains a failure other than the expected no-drain stall"
     fi
     rmdir "${alpha}" "${beta}" "${parent}" || fail "cgroup fixture remained populated"

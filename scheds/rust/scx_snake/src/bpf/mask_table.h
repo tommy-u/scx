@@ -204,4 +204,19 @@ pick_random_idle_from_mask_table(const struct snake_ladder_ctx *ctx,
 	return claimed ? selected : -ENOENT;
 }
 
+/* Select uses real call boundaries; enqueue keeps these mechanisms inline. */
+static __noinline s32 pick_idle_from_mask_table_bounded(
+	const struct snake_ladder_ctx *ctx, const struct task_struct *p,
+	u32 table_id, s32 key, bool whole_core)
+{
+	return pick_idle_from_mask_table(ctx, p, table_id, key, whole_core);
+}
+
+static __noinline s32 pick_random_idle_from_mask_table_bounded(
+	const struct snake_ladder_ctx *ctx, const struct task_struct *p,
+	u32 table_id, s32 key, bool whole_core)
+{
+	return pick_random_idle_from_mask_table(ctx, p, table_id, key, whole_core);
+}
+
 #endif /* __SCX_SNAKE_MASK_TABLE_H */

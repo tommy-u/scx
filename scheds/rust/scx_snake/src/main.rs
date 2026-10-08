@@ -6941,9 +6941,34 @@ scope = "task_cell"
         }
         assert!(!walk_context.contains('*'));
         assert_eq!(walk_context.matches(';').count(), 9);
+        assert!(normalized_ladder.contains("return execute_rung_impl(ctx, p, rung, args, false);"));
+        assert!(normalized_ladder.contains("return execute_rung_impl(ctx, p, rung, args, true);"));
         assert!(normalized_ladder.contains(
-            "static __noinline s32 walk_policy_rung(struct snake_ladder_ctx *ctx, struct task_struct *p, u32 i, struct snake_ladder_walk_args *walk_args)"
+            "__noinline s32 walk_policy_rung(const struct snake_compiled_ladder *ladder, u32 slot, struct task_struct *p __arg_trusted, u32 i, struct snake_ladder_walk_args *walk_args)"
         ));
+        let rung_walk = ladder
+            .split_once("__noinline s32 walk_policy_rung(")
+            .and_then(|(_, body)| body.split_once("walk_generic_policy_ladder("))
+            .map(|(body, _)| body)
+            .unwrap();
+        assert!(!rung_walk.contains("acquire_active_ladder("));
+        assert_text_order(
+            rung_walk,
+            &[
+                "if (!ladder || !walk_args || slot >= SNAKE_LADDER_SLOTS ||",
+                "i >= SNAKE_MAX_GENERIC_RUNGS)",
+                ".slot = slot, .ladder = ladder",
+                "if (i >= ctx->ladder->nr_rungs)",
+                "rung = &ctx->ladder->rungs[i]",
+                "rung_is_valid(rung,",
+                "walk_args->enqueue_flags = 0",
+                "walk_args->select_flags = 0",
+                "walk_args->queue_cell_index = SNAKE_QUEUE_CELL_NONE",
+                ".enqueue_flags = &walk_args->enqueue_flags",
+                ".select_flags = &walk_args->select_flags",
+                ".queue_cell_index = &walk_args->queue_cell_index",
+            ],
+        );
         assert!(normalized_ladder.contains(
             "static __noinline s32 walk_generic_policy_ladder(struct snake_ladder_ctx *ctx, struct task_struct *p, struct snake_ladder_walk_args *walk_args)"
         ));
@@ -6973,7 +6998,9 @@ scope = "task_cell"
         for index in 0..policy::MAX_GENERIC_RUNGS {
             assert_eq!(
                 normalized_generic
-                    .matches(&format!("walk_policy_rung(ctx, p, {index}, walk_args)"))
+                    .matches(&format!(
+                        "walk_policy_rung(ctx->ladder, ctx->slot, p, {index}, walk_args)"
+                    ))
                     .count(),
                 1
             );
@@ -7705,6 +7732,7 @@ scope = "task_allowed"
 
         assert!(shared.contains("#include \"bpf_common.h\""));
         assert!(shared.contains("static __always_inline s32 cpu_pick_random_idle("));
+        assert!(shared.contains("static __noinline s32 cpu_pick_random_idle_bounded("));
         assert!(shared.contains("cpu_pick_random_idle("));
         assert!(shared.contains("bpf_for(cpu, 0, SNAKE_MAX_CPUS)"));
         assert!(shared.contains("bpf_cpumask_test_cpu(cpu, allowed)"));
@@ -7714,7 +7742,7 @@ scope = "task_allowed"
         assert_eq!(shared.matches("scx_bpf_put_idle_cpumask(idle)").count(), 2);
         assert!(ladder.contains("return cpu_pick_random_idle(p->cpus_ptr, whole_core);"));
         assert!(queue.contains("static __always_inline s32\nqueue_pick_random_idle_cpu("));
-        assert!(queue.contains("return cpu_pick_random_idle(candidates, whole_core);"));
+        assert!(queue.contains("return cpu_pick_random_idle_bounded(candidates, whole_core);"));
         let ladder_wrapper = ladder
             .split_once("pick_random_idle(")
             .and_then(|(_, body)| body.split_once("try_sync_wake_affine("))

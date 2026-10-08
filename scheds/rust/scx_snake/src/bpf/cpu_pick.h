@@ -36,6 +36,13 @@ static __always_inline s32 cpu_pick_random_idle(const struct cpumask *allowed,
 	return claimed ? selected : -ENOENT;
 }
 
+/* Select keeps the reservoir loop off the generic evaluator's stack. */
+static __noinline s32 cpu_pick_random_idle_bounded(const struct cpumask *allowed,
+						 bool whole_core)
+{
+	return cpu_pick_random_idle(allowed, whole_core);
+}
+
 static __always_inline s32
 cpu_pick_idle_prefer_previous(const struct cpumask *candidates, s32 prev_cpu)
 {

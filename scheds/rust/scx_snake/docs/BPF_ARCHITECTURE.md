@@ -59,8 +59,16 @@ belong to another layer.
 
 ## Verifier boundaries
 
-Generic placement uses nine fixed, bounds-checked interpreter calls. The
-16-stage expanded Mitosis policy instead uses attachment-selected `select_cpu`
+Generic placement uses nine fixed calls to a global, bounds-checked rung
+evaluator. The verifier checks the evaluator once, independently of each
+caller's opcode miss paths. It accepts a trusted task, the pinned ladder and
+slot, and a value-only walk context. The caller holds the slot's reader
+reference across the entire walk. This preserves one policy snapshot without
+passing nested stack pointers across the global boundary. Select uses separate
+mask-selection subprograms to bound the evaluator's stack; enqueue inlines
+those mechanisms to fit its callback stack. The boundary choice is a constant
+at each caller and is removed by the compiler.
+The 16-stage expanded Mitosis policy uses attachment-selected `select_cpu`
 and enqueue programs; the unused variants are not loaded. Its four scope
 helpers resolve LLC-local, primary, borrowable, or restricted candidates once
 and expose the four idle-core/CPU decisions as separate statistic and timing

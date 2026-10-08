@@ -10,7 +10,7 @@
 static __always_inline s32
 queue_pick_random_idle_cpu(const struct cpumask *candidates, bool whole_core)
 {
-	return cpu_pick_random_idle(candidates, whole_core);
+	return cpu_pick_random_idle_bounded(candidates, whole_core);
 }
 
 struct snake_queue_idle_args {
@@ -96,15 +96,16 @@ static __noinline s32 queue_pick_task_cell_cpu(
 	u32			   cell_index;
 	s32			   error = 0, selected;
 
-	runtime	   = task_state_lookup(p);
 	cell_index = queue_task_cell_index(ctx, p);
-	if (!runtime)
-		return -EINVAL;
 	source = queue_task_cell_idle_source(
 		ctx, p, cell_index, args->kind, args->prev_cpu,
 		args->local_llc_route_cpu, args->local_llc_cell_index, &error);
 	if (!source)
 		return error;
+	/* Avoid keeping task scratch live across the scope-resolution calls. */
+	runtime = task_state_lookup(p);
+	if (!runtime)
+		return -EINVAL;
 	scratch = runtime->queue_cpumask;
 	if (!scratch)
 		return -EINVAL;
