@@ -182,6 +182,13 @@ descriptor for every active cell/LLC pair, including temporarily consumerless
 pairs, but every shard for a cell uses that same cell clock. It does not create
 an independent fairness domain per LLC.
 
+Cell clock publication uses at most 16 compare-and-swap attempts. Each failed
+attempt increments `vtime_clock_cas_retries`; exhausting the budget increments
+`vtime_clock_cas_exhaustions` and skips that publication. Running still initializes
+the task's adjusted VTIME from a fresh clock snapshot and completes its normal
+runtime accounting. Transition direct dispatch also prepares against the cell
+clock and preserves the task's accumulated VTIME.
+
 Only CPUs owned by a cell consume its normal queues. A normal enqueue is safe
 only when the task may run on every CPU in the cell's primary mask. In
 `cell_llc` mode, a CPU first checks its local shard and may then dispatch the
@@ -484,6 +491,6 @@ per cell for both its normal work and affinity work targeting its CPUs; it has
 neither a global affinity clock nor per-CPU clocks. Cell CPU weights allocate
 primary CPUs but do not provide hierarchical group fairness. There are no
 per-NUMA clocks, live fairness-mode changes, queued-work borrowing, or
-cross-cell normal-queue stealing. The clocks use BPF spin locks, so scalability
-under large runnable sets remains an explicit experiment rather than a
-production claim.
+cross-cell normal-queue stealing. Cell clocks use bounded compare-and-swap
+updates; global VTIME and EEVDF use BPF spin locks. Scalability under large runnable sets remains
+an explicit experiment rather than a production claim.

@@ -16,10 +16,6 @@ enum RunStartCasResult {
         advanced: bool,
         exhausted: bool,
     },
-    RequiredAdvanceExhausted {
-        observed: u64,
-        desired: u64,
-    },
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -28,10 +24,6 @@ enum MaxCasResult {
         frontier: u64,
         advanced: bool,
         exhausted: bool,
-    },
-    RequiredAdvanceExhausted {
-        observed: u64,
-        candidate: u64,
     },
 }
 
@@ -58,16 +50,11 @@ fn model_run_start_cas(
     }
 
     let adjusted = vtime_run_start(vruntime, observed, VTIME_SLICE_NS);
-    let desired = later_vtime_frontier(observed, adjusted);
-    if desired == observed {
-        RunStartCasResult::Complete {
-            vruntime: adjusted,
-            frontier: observed,
-            advanced: false,
-            exhausted: true,
-        }
-    } else {
-        RunStartCasResult::RequiredAdvanceExhausted { observed, desired }
+    RunStartCasResult::Complete {
+        vruntime: adjusted,
+        frontier: observed,
+        advanced: false,
+        exhausted: true,
     }
 }
 
@@ -96,17 +83,10 @@ fn model_max_cas(
         observed = previous;
     }
 
-    if later_vtime_frontier(observed, candidate) == observed {
-        MaxCasResult::Complete {
-            frontier: observed,
-            advanced: false,
-            exhausted: true,
-        }
-    } else {
-        MaxCasResult::RequiredAdvanceExhausted {
-            observed,
-            candidate,
-        }
+    MaxCasResult::Complete {
+        frontier: observed,
+        advanced: false,
+        exhausted: true,
     }
 }
 
@@ -241,7 +221,7 @@ fn failed_noop_cas_reclamps_against_the_returned_frontier() {
 }
 
 #[test]
-fn lockless_run_start_model_revalidates_races_and_fails_closed_on_exhaustion() {
+fn lockless_run_start_model_revalidates_races_and_skips_publication_on_exhaustion() {
     let stale = 100_000_000;
     let current = 200_000_000;
     let ahead = 300_000_000;
@@ -275,16 +255,19 @@ fn lockless_run_start_model_revalidates_races_and_fails_closed_on_exhaustion() {
     );
     assert_eq!(
         model_run_start_cas(ahead, stale, &[current]),
-        RunStartCasResult::RequiredAdvanceExhausted {
-            observed: current,
-            desired: ahead,
+        RunStartCasResult::Complete {
+            vruntime: ahead,
+            frontier: current,
+            advanced: false,
+            exhausted: true,
         }
     );
     assert_eq!(
         model_max_cas(ahead, stale, &[current]),
-        MaxCasResult::RequiredAdvanceExhausted {
-            observed: current,
-            candidate: ahead,
+        MaxCasResult::Complete {
+            frontier: current,
+            advanced: false,
+            exhausted: true,
         }
     );
     assert_eq!(

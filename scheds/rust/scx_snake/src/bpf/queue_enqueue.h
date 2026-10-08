@@ -68,6 +68,32 @@ queue_global_enqueue_cpu(struct snake_ladder_ctx *ctx, struct task_struct *p,
 	return 0;
 }
 
+static __always_inline bool queue_fairness_transition_direct(
+	struct snake_ladder_ctx *ctx, struct task_struct *p, s32 cpu,
+	u64 enq_flags, const struct snake_fine_timing_ctx *fine)
+{
+	struct snake_task_runtime *runtime;
+	u32 cell_index = queue_task_cell_index(ctx, p);
+
+	runtime = queue_fairness_prepare_runnable_for_cell(ctx, p, cell_index,
+							 false, fine);
+	if (!runtime || cpu < 0 || cpu >= nr_cpu_ids ||
+	    !bpf_cpumask_test_cpu(cpu, p->cpus_ptr))
+		return false;
+	task_route_clear_selected_cpu(runtime);
+	runtime->queue_class = SNAKE_QUEUE_CLASS_NORMAL;
+	runtime->run_direct = 1;
+	runtime->direct_cell_index = cell_index;
+	runtime->direct_cell_valid = 1;
+	if (!dsq_insert_local_on(p, cpu,
+				 fairness_vtime_slice(runtime->active_weight),
+				 enq_flags, fine))
+		return false;
+	queue_timing_record_insert(ctx, p, dsq_local_on(cpu), cell_index, fine);
+	queue_fairness_adopt_llc_group(p, runtime);
+	return true;
+}
+
 static __always_inline int queue_fairness_direct_insert(
 	struct snake_ladder_ctx *ctx, struct task_struct *p, s32 cpu,
 	u32 cell_index, u32 queue_class, u32 mask_kind,

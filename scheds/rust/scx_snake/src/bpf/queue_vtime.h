@@ -64,7 +64,7 @@ queue_domain_run_start(const struct snake_ladder_ctx *ctx,
 {
 	u64  adjusted, desired, observed, previous, started_at;
 	u32  stage;
-	int  attempt, ret = 0;
+	int  attempt;
 	bool advanced = false;
 
 	if (!domain || !adjusted_vruntime)
@@ -87,16 +87,14 @@ queue_domain_run_start(const struct snake_ladder_ctx *ctx,
 		observed = previous;
 	}
 	stat_inc(ctx, SNAKE_STAT_VTIME_CLOCK_CAS_EXHAUSTIONS);
-	adjusted = fairness_vtime_run_start(vruntime, observed);
-	if (time_before(observed, adjusted))
-		ret = -EAGAIN;
-	else
-		*adjusted_vruntime = adjusted;
+	/* Keep task accounting valid even if this shared publication is skipped. */
+	observed = READ_ONCE(domain->vtime_now);
+	*adjusted_vruntime = fairness_vtime_run_start(vruntime, observed);
 out:
 	stage = advanced ? SNAKE_FINE_TIMING_RUNNING_CELL_CLOCK_RUN_START_ADVANCE :
 			   SNAKE_FINE_TIMING_RUNNING_CELL_CLOCK_RUN_START_NOOP;
 	fine_timing_finish(fine, stage, started_at);
-	return ret;
+	return 0;
 }
 
 static __always_inline int
@@ -106,7 +104,7 @@ queue_domain_advance(const struct snake_ladder_ctx *ctx,
 {
 	u64  observed, previous, started_at;
 	u32  stage;
-	int  attempt, ret = 0;
+	int  attempt;
 	bool advanced = false;
 
 	if (!domain)
@@ -126,13 +124,12 @@ queue_domain_advance(const struct snake_ladder_ctx *ctx,
 		observed = previous;
 	}
 	stat_inc(ctx, SNAKE_STAT_VTIME_CLOCK_CAS_EXHAUSTIONS);
-	if (time_before(observed, candidate))
-		ret = -EAGAIN;
+	/* Another running task can publish the frontier on a later callback. */
 out:
 	stage = advanced ? SNAKE_FINE_TIMING_RUNNING_AFFINITY_CLOCK_ADVANCE :
 			   SNAKE_FINE_TIMING_RUNNING_AFFINITY_CLOCK_NOOP;
 	fine_timing_finish(fine, stage, started_at);
-	return ret;
+	return 0;
 }
 
 static __always_inline u64 queue_translate_vruntime(u64 vruntime, u64 old_now,

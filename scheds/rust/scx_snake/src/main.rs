@@ -6088,7 +6088,10 @@ scope = "task_cell"
         assert!(clock_wrappers.contains("fairness_vtime_run_start(vruntime, observed)"));
         assert!(clock_wrappers.contains("SNAKE_STAT_VTIME_CLOCK_CAS_RETRIES"));
         assert!(clock_wrappers.contains("SNAKE_STAT_VTIME_CLOCK_CAS_EXHAUSTIONS"));
-        assert!(normalized_clock_wrappers.contains("ret = -EAGAIN"));
+        assert!(!normalized_clock_wrappers.contains("-EAGAIN"));
+        assert!(normalized_clock_wrappers.contains(
+            "observed = READ_ONCE(domain->vtime_now); *adjusted_vruntime = fairness_vtime_run_start(vruntime, observed);"
+        ));
         assert!(running.contains("if (ret)"));
         assert!(!clock_wrappers.contains("bpf_spin_lock"));
     }
@@ -7053,6 +7056,9 @@ scope = "task_cell"
         assert!(normalized_ladder.contains("u64 select_flags;"));
         assert!(normalized_main.contains("walk_args.enqueue_flags"));
         assert!(normalized_main.contains("walk_args.select_flags"));
+        assert!(normalized_main.contains(
+            "queue_fairness_transition_direct( &ladder_ctx, p, cpu, walk_args.enqueue_flags, &fine_timing)"
+        ));
         assert!(normalized_main.contains(
             "ret = dsq_insert_local_on( p, cpu, fairness_dispatch_slice(&ladder_ctx, p, true), walk_args.enqueue_flags, &fine_timing);"
         ));

@@ -411,9 +411,14 @@ static __noinline s32 snake_select_cpu_impl(struct task_struct *p,
 		}
 		fine_stage_started_at =
 			fine_timing_select_start(callback_started_at);
-		ret = dsq_insert_local_on(
-			p, cpu, fairness_dispatch_slice(&ladder_ctx, p, true),
-			walk_args.enqueue_flags, &fine_timing);
+		if (queue_cell_mode_enabled())
+			ret = queue_fairness_transition_direct(
+				&ladder_ctx, p, cpu, walk_args.enqueue_flags,
+				&fine_timing);
+		else
+			ret = dsq_insert_local_on(
+				p, cpu, fairness_dispatch_slice(&ladder_ctx, p, true),
+				walk_args.enqueue_flags, &fine_timing);
 		fine_timing_finish_select(
 			SNAKE_FINE_TIMING_SELECT_DIRECT_INSERT,
 			fine_stage_started_at);
