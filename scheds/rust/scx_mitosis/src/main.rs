@@ -310,8 +310,10 @@ struct Scheduler<'a> {
     smoothed_util: [f64; MAX_CELLS],
     /// Last time rebalancing was performed
     last_rebalance: Instant,
-    /// Number of rebalancing events
+    /// Number of rebalancing events since startup
     rebalance_count: u64,
+    /// Rebalance count at the last metrics collection
+    prev_rebalance_count: u64,
     /// Epoll instance for waiting on multiple fds (inotify, stats wakeup)
     epoll: Epoll,
     /// EventFd to wake up main loop when stats are requested
@@ -511,6 +513,7 @@ impl<'a> Scheduler<'a> {
             smoothed_util: [0.0; MAX_CELLS],
             last_rebalance: Instant::now(),
             rebalance_count: 0,
+            prev_rebalance_count: 0,
             epoll,
             stats_waker,
         })
@@ -810,7 +813,6 @@ impl<'a> Scheduler<'a> {
 
         self.last_rebalance = Instant::now();
         self.rebalance_count += 1;
-        self.metrics.rebalance_count = self.rebalance_count;
 
         info!(
             "Rebalanced CPUs (spread={:.1}%, count={}): {}",
@@ -1307,6 +1309,9 @@ impl<'a> Scheduler<'a> {
         let cell_stats_delta = self
             .calculate_cell_stat_delta(&cpu_ctxs)
             .context("calculating cell stat deltas")?;
+
+        self.metrics.rebalance_count = self.rebalance_count - self.prev_rebalance_count;
+        self.prev_rebalance_count = self.rebalance_count;
 
         self.log_all_queue_stats(&cell_stats_delta)
             .context("logging queue stats")?;

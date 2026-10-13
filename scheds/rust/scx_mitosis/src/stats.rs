@@ -129,7 +129,7 @@ pub struct Metrics {
     pub demand_borrow_pct: f64,
     #[stat(desc = "Lent CPU time %")]
     pub lent_pct: f64,
-    #[stat(desc = "Number of rebalancing events")]
+    #[stat(desc = "Number of rebalancing events in the collection interval")]
     pub rebalance_count: u64,
     #[stat(
         desc = "1 if the cell-0 holdout has taken a CPU already claimed by a workload cell, else 0"
