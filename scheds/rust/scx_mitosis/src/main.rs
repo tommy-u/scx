@@ -8,11 +8,13 @@ mod bpf_skel;
 pub use bpf_skel::*;
 pub mod bpf_intf;
 mod cell_manager;
+mod demand;
 mod stats;
 mod topology;
 mod undefok_flags;
 
 use cell_manager::{CellManager, CpuAssignment, CpuRecipient};
+use demand::DemandSampler;
 
 use std::cmp::max;
 use std::collections::{HashMap, HashSet};
@@ -283,10 +285,7 @@ struct Scheduler<'a> {
     // These are the per-cell cstats.
     // Note these are accumulated across all CPUs.
     prev_cell_stats: [[u64; NR_CSTATS]; MAX_CELLS],
-    // read_cpu_ctxs() returns all possible CPUs in CPU-ID order.
-    prev_cpu_running_ns: Vec<[u64; MAX_CELLS]>,
-    /// When the demand metrics were last sampled, the base of the next deltas
-    demand_sampled_at: Option<Instant>,
+    demand_sampler: DemandSampler,
     metrics: Metrics,
     stats_server: Option<StatsServer<(), Metrics>>,
     last_configuration_seq: Option<u32>,
@@ -492,8 +491,7 @@ impl<'a> Scheduler<'a> {
             monitor_interval: Duration::from_secs(opts.monitor_interval_s),
             cells: HashMap::new(),
             prev_cell_stats: [[0; NR_CSTATS]; MAX_CELLS],
-            prev_cpu_running_ns: Vec::new(),
-            demand_sampled_at: None,
+            demand_sampler: DemandSampler::default(),
             metrics: Metrics::default(),
             stats_server: Some(stats_server),
             last_configuration_seq: None,
@@ -1339,65 +1337,13 @@ impl<'a> Scheduler<'a> {
         cpu_ctxs: &[bpf_intf::cpu_ctx],
         sampled_at: Instant,
     ) -> Result<()> {
-        // Deltas over the time that really passed: an iteration can take well
-        // over the nominal interval and events wake the loop early. Let half
-        // an interval build up before sampling again. sampled_at is taken right
-        // before the counters are read.
-        let half_interval = self.monitor_interval / 2;
-        let interval_ns = match self.demand_sampled_at {
-            Some(prev) if sampled_at.duration_since(prev) < half_interval => return Ok(()),
-            Some(prev) => Some(sampled_at.duration_since(prev).as_nanos() as u64),
-            None => None,
-        };
-
-        // Validate the whole snapshot before advancing any baselines.
-        for (cpu, cpu_ctx) in cpu_ctxs.iter().enumerate() {
-            if cpu_ctx.cell as usize >= MAX_CELLS {
-                bail!(
-                    "CPU {} has invalid cell assignment {} (MAX_CELLS={})",
-                    cpu,
-                    cpu_ctx.cell,
-                    MAX_CELLS
-                );
-            }
-        }
-
-        // Per-cell interval runtime, derived from stable per-CPU counters.
-        let mut total_running_ns = [0u64; MAX_CELLS];
-        let mut on_own_ns = [0u64; MAX_CELLS];
-        let mut lent_ns = [0u64; MAX_CELLS];
-
-        for (cpu, cpu_ctx) in cpu_ctxs.iter().enumerate() {
-            let owner = cpu_ctx.cell as usize;
-            // A CPU without a baseline only seeds its counters.
-            let prev = self
-                .prev_cpu_running_ns
-                .get(cpu)
-                .unwrap_or(&cpu_ctx.running_ns);
-            for cell in 0..MAX_CELLS {
-                // Subtract before grouping by owner so reassignment cannot
-                // import runtime accumulated under a previous owner. Charge
-                // the whole interval to the owner in this snapshot.
-                let ns = cpu_ctx.running_ns[cell].saturating_sub(prev[cell]);
-                total_running_ns[cell] += ns;
-                if owner == cell {
-                    on_own_ns[cell] += ns;
-                } else {
-                    lent_ns[owner] += ns;
-                }
-            }
-        }
-
-        // Preserve every task-cell slot, including cells currently inactive.
-        self.prev_cpu_running_ns.clear();
-        self.prev_cpu_running_ns
-            .extend(cpu_ctxs.iter().map(|cpu_ctx| cpu_ctx.running_ns));
-        self.demand_sampled_at = Some(sampled_at);
-
-        // The first call only seeds the counters and timestamp.
-        let Some(interval_ns) = interval_ns else {
+        let Some(sample) =
+            self.demand_sampler
+                .sample(cpu_ctxs, sampled_at, self.monitor_interval)?
+        else {
             return Ok(());
         };
+        let interval_ns = sample.interval_ns;
 
         let mut global_running_delta = 0u64;
         let mut global_borrowed_delta = 0u64;
@@ -1405,9 +1351,9 @@ impl<'a> Scheduler<'a> {
         let mut global_capacity = 0u64;
 
         for cell in 0..MAX_CELLS {
-            let delta_running = total_running_ns[cell];
-            let delta_on_own = on_own_ns[cell];
-            let delta_lent = lent_ns[cell];
+            let delta_running = sample.running_ns[cell];
+            let delta_on_own = sample.on_own_ns[cell];
+            let delta_lent = sample.lent_ns[cell];
 
             // Borrowed = ran somewhere other than own CPUs
             let delta_borrowed = delta_running.saturating_sub(delta_on_own);
