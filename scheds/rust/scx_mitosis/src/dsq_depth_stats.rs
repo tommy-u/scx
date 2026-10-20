@@ -124,7 +124,7 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
-    const EMPTY: Snapshot = [[0; 16]; 4];
+    const EMPTY: Snapshot = [[0; BUCKETS]; SHARDS];
 
     fn observations(bucket: usize, count: u64) -> Snapshot {
         let mut snapshot = EMPTY;
@@ -139,6 +139,16 @@ mod tests {
             shard[1] = 25;
         }
         assert_eq!(summarize_delta(&EMPTY, &current), 1);
+    }
+
+    #[test]
+    fn pools_p99_tail_from_maximum_supported_llc_slot() {
+        let mut current = observations(1, 98);
+        let last_llc = current
+            .get_mut(15)
+            .expect("supported LLC slot 15 must have a histogram shard");
+        last_llc[3] = 2;
+        assert_eq!(summarize_delta(&EMPTY, &current), 7);
     }
 
     #[test]

@@ -182,16 +182,30 @@ struct {
 	__type(key, u32);
 	__type(value, struct cell_dsq_depth_hist);
 	__uint(max_entries, MAX_CELLS);
+	/* Page-align the values so shard alignment also holds in the map. */
+	__uint(map_flags, BPF_F_MMAPABLE);
 } shared_dsq_depth_hists SEC(".maps");
 
 static inline void record_shared_dsq_depth(u32 cell_id, u64 dsq_id)
 {
 	struct cell_dsq_depth_hist *hist;
+	u32 cpu = bpf_get_smp_processor_id();
+	u32 *writer_llc;
 	u32 shard, bucket;
 	u64 *counter;
-	s32 depth = scx_bpf_dsq_nr_queued(dsq_id);
+	s32 depth;
 
 	/* Optional observations may be lost without affecting placement. */
+	if (cpu >= nr_possible_cpus || cpu >= MAX_CPUS)
+		return;
+	writer_llc = MEMBER_VPTR(cpu_to_llc, [cpu]);
+	if (!writer_llc)
+		return;
+	shard = *writer_llc;
+	if (shard >= nr_llc || shard >= DSQ_DEPTH_SHARDS)
+		return;
+
+	depth = scx_bpf_dsq_nr_queued(dsq_id);
 	if (depth < 0)
 		return;
 	hist = bpf_map_lookup_elem(&shared_dsq_depth_hists, &cell_id);
@@ -201,7 +215,6 @@ static inline void record_shared_dsq_depth(u32 cell_id, u64 dsq_id)
 	bucket = depth ? log2_u32((u32)depth) + 1 : 0;
 	if (bucket >= DSQ_DEPTH_BUCKETS)
 		bucket = DSQ_DEPTH_BUCKETS - 1;
-	shard = bpf_get_smp_processor_id() % DSQ_DEPTH_SHARDS;
 	counter = MEMBER_VPTR(*hist, .shards[shard].buckets[bucket]);
 	if (counter)
 		__sync_fetch_and_add(counter, 1);

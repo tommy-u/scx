@@ -37,10 +37,19 @@ metrics schema). It defaults to disabled, which reports zero.
 
 Each observation is the queue depth immediately before an enqueue into a
 shared cell or subcell DSQ. Direct local inserts and CPU-pinned DSQs are
-excluded. Observations from all of a cell's subcells, LLC queues and CPU
+excluded. Observations from all of a cell's subcells, LLC queues and writer
 shards are pooled. The percentile is weighted by enqueues, so queues with
 more enqueues contribute more observations; it is not a time average or
 the maximum of the queues' percentiles.
+
+The executing CPU's physical LLC selects the writer shard. `--virt-llc`
+selects virtual LLC domains instead, including in flat mode. Writer domains
+are independent of the shared DSQ layout and `--enable-llc-awareness`.
+CPUs in the same domain share atomic cumulative counters. All 16 supported
+domains have reserved shards for every cell: 512 KiB of raw counters across
+256 cells, also the x86 map value storage. Cacheline padding can increase
+map value storage on other architectures. The ARRAY map uses
+`BPF_F_MMAPABLE` to page-align its values and preserve shard alignment.
 
 Userspace publishes the nearest-rank P99 from each completed, approximately
 60-second window, measured with monotonic time. Requests between completed
