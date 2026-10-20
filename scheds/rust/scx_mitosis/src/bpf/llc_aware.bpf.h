@@ -425,9 +425,9 @@ static inline s32 try_draining_work(u32 cell_id, u32 subcell_id, s32 local_llc, 
 		 * placement on its next select_cpu() or enqueue(). While stale, the
 		 * head task may be affinity-ineligible for this CPU.
 		 *
-		 * The failed local move and the iterator remain racy: another CPU can
-		 * consume the head task between them. Do not update task scheduling
-		 * state until the remote move succeeds.
+		 * The iterator can lose the task to normal or core scheduling. Publish
+		 * rescue intent before moving, but let task-rq callbacks update placement.
+		 * They distinguish a completed move from failed intent by its changed key.
 		 */
 		if (unlikely(!consumed && READ_ONCE(candidate_llc_state->nr_queued))) {
 			struct task_struct *p;
@@ -437,13 +437,13 @@ static inline s32 try_draining_work(u32 cell_id, u32 subcell_id, s32 local_llc, 
 				struct cpu_ctx *target_cctx;
 				dsq_id_t cpu_dsq;
 				u64 basis_vtime;
+				u64 rescue_token, old_vtime;
+				int rescue;
 				u32 cpu;
 
 				tctx = lookup_task_ctx(p);
-				if (!tctx) {
-					scx_bpf_error("lookup_task_ctx() failed in try_draining_work()");
-					break;
-				}
+				if (!tctx)
+					return -EINVAL;
 
 				cpu = bpf_cpumask_any_distribute(p->cpus_ptr);
 				if (cpu >= nr_possible_cpus || cpu >= MAX_CPUS)
@@ -451,26 +451,30 @@ static inline s32 try_draining_work(u32 cell_id, u32 subcell_id, s32 local_llc, 
 
 				target_cctx = lookup_cpu_ctx(cpu);
 				if (!target_cctx)
-					break;
+					return -EINVAL;
 
 				cpu_dsq = get_cpu_dsq_id(cpu);
 				if (dsq_is_invalid(cpu_dsq))
-					break;
+					return -EINVAL;
 
+				rescue = begin_task_rescue(p, tctx, candidate_dsq, &rescue_token, &old_vtime);
+				if (rescue < 0)
+					return rescue;
+				if (!rescue)
+					break;
 				basis_vtime = READ_ONCE(target_cctx->vtime_now);
+				/* The completion key must differ even when the clocks coincide. */
+				if (basis_vtime == old_vtime)
+					basis_vtime++;
 				scx_bpf_dsq_move_set_vtime(BPF_FOR_EACH_ITER, basis_vtime);
 				consumed = scx_bpf_dsq_move_vtime(BPF_FOR_EACH_ITER, p, cpu_dsq.raw, 0);
-				if (consumed) {
-					tctx->basis_vtime = basis_vtime;
-					tctx->dsq = cpu_dsq;
-					/*
-					 * Obviate any LLC updates during running(),
-					 * next subcell refresh on enqueue() will recompute
-					 * these based on the current subcell state.
-					 */
-					tctx->all_cell_cpus_allowed = false;
-					invalidate_task_llc(tctx);
+				if (!consumed) {
+					u64 next =
+						(rescue_token & ~TASK_RESCUE_PHASE_MASK) + TASK_RESCUE_GENERATION_STEP;
 
+					/* A task callback or newer publisher may already own the state. */
+					__sync_val_compare_and_swap(&tctx->rescue_seq, rescue_token, next);
+				} else {
 					continue_dispatch = true;
 					/*
 					 * cstats are per-CPU and non-atomic. Account on the

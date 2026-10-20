@@ -66,12 +66,16 @@ enum subcell_match_kind {
 };
 
 struct cpu_ctx {
-	/* When the per-CPU DSQ went from empty to non-empty; 0 while empty. */
+	/* Start of the current CPU-queue wait; cleared after observing it empty. */
 	u64 pinned_waiting_since;
 	u64 cstats[MAX_CELLS][NR_CSTATS];
 	u64 cell_cycles[MAX_CELLS];
 	u64 running_ns[MAX_CELLS];
 	u64 vtime_now;
+	/* CPU-native time minus the current shared domain time. */
+	u64 vtime_bias;
+	/* Packed final owner plus one. Only local rq callbacks consume it. */
+	u64 pending_vtime_owner;
 	u32 cell;
 	u32 subcell;
 	u32 llc;

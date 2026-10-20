@@ -96,6 +96,16 @@ static inline struct subcell_llc *lookup_subcell_llc(struct subcell *subcell, u3
 	return subcell_llc;
 }
 
+enum task_rescue_phase {
+	TASK_RESCUE_NONE = 0,
+	TASK_RESCUE_PREPARE = 1,
+	TASK_RESCUE_READY = 2,
+	TASK_RESCUE_CANCELED = 3,
+};
+
+#define TASK_RESCUE_PHASE_MASK 3ULL
+#define TASK_RESCUE_GENERATION_STEP 4ULL
+
 /*
  * task_ctx is the per-task information kept by scx_mitosis
  */
@@ -135,14 +145,18 @@ struct task_ctx {
 	 * subcell or a cpu.
 	 */
 	dsq_id_t dsq;
+	/* Low two bits are the rescue phase; the remaining bits are its epoch. */
+	u64 rescue_seq;
+	/* The publisher owns this payload until READY or cancellation acknowledgment. */
+	u64 rescue_vtime;
 	/* latest configuration that was applied for this task */
 	/* (to know if it has to be re-applied) */
 	u32 configuration_seq;
 	/* Is this task allowed on all cores of its cell? */
 	bool all_cell_cpus_allowed;
 	/* Set when a task is dispatched outside its assigned subcell.
-	 * Consumed and cleared in mitosis_stopping to avoid advancing the CPU
-	 * or subcell vtime with this task's borrowed execution.
+	 * Prevents borrowed execution from advancing CPU or subcell vtime.
+	 * Cleared in mitosis_stopping when the placement ends.
 	 */
 	bool borrowed;
 	/* Last known cgroup ID for detecting cgroup moves. */
@@ -157,6 +171,8 @@ struct task_ctx {
 
 static inline struct task_ctx *lookup_task_ctx(struct task_struct *p);
 static inline struct cpu_ctx *lookup_cpu_ctx(int cpu);
+static inline int begin_task_rescue(struct task_struct *p, struct task_ctx *tctx, dsq_id_t source_dsq, u64 *token,
+				    u64 *old_vtime);
 
 extern const volatile bool use_lockless_peek;
 
