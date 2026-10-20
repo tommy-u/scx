@@ -45,6 +45,34 @@ const volatile u64 slice_ns;
 #define VTIME_DEBT_CAP_SLICES 16
 /* Longest the per-CPU DSQ may go unserved while non-empty, in slices. */
 #define PINNED_MAX_WAIT_SLICES 8
+
+/* Keep virtual clock updates bounded without overwriting a newer value. */
+static __always_inline bool advance_vtime(u64 *clock, u64 candidate)
+{
+	u64 old = READ_ONCE(*clock), seen;
+	u32 i;
+
+	/* Complete uncontended updates before starting the retry iterator. */
+	if (!time_before(old, candidate))
+		return true;
+	seen = __sync_val_compare_and_swap(clock, old, candidate);
+	if (seen == old)
+		return true;
+	old = seen;
+
+	bpf_for(i, 1, 32)
+	{
+		if (!time_before(old, candidate))
+			return true;
+		seen = __sync_val_compare_and_swap(clock, old, candidate);
+		if (seen == old)
+			return true;
+		old = seen;
+	}
+
+	return !time_before(old, candidate);
+}
+
 const volatile u64 root_cgid = 1;
 const volatile bool exiting_task_workaround_enabled = true;
 const volatile bool reject_multicpu_pinning = false;
@@ -1479,8 +1507,7 @@ void BPF_STRUCT_OPS(mitosis_stopping, struct task_struct *p, bool runnable)
 	 * local charge rather than risk charging an unexpected subcell.
 	 */
 	if (!tctx->borrowed && tctx->vtime_charge_subcell == packed_subcell) {
-		if (time_before(READ_ONCE(cctx->vtime_now), p->scx.dsq_vtime))
-			WRITE_ONCE(cctx->vtime_now, p->scx.dsq_vtime);
+		advance_vtime(&cctx->vtime_now, p->scx.dsq_vtime);
 	}
 
 	/*
@@ -2151,14 +2178,14 @@ int apply_configured_cell_cpumask(u32 cell_id, struct cell_config *config)
 		if (!cctx)
 			return -ENOENT;
 		/*
-		 * If the CPU is changing subcells, advance the new subcell's vtime to
-		 * at least match this CPU's per-CPU vtime. Otherwise the per-CPU
-		 * DSQ and subcell DSQ are in different vtimes and dispatch
-		 * will starve the per-CPU DSQ tasks.
+		 * A CPU DSQ survives reassignment and competes with the new subcell's
+		 * shared DSQ. Bring both clocks forward to comparable baselines before
+		 * publishing the new owner.
 		 */
 		if (cctx->cell != cell_id || cctx->subcell != 0) {
 			struct subcell_llc *llc_state;
 			u32 llc_idx;
+			u64 cpu_vtime;
 
 			subcell = lookup_subcell(cell_id, 0);
 			if (!subcell)
@@ -2167,8 +2194,13 @@ int apply_configured_cell_cpumask(u32 cell_id, struct cell_config *config)
 			llc_state = lookup_subcell_llc(subcell, llc_idx);
 			if (!llc_state)
 				return -EINVAL;
-			if (time_before(READ_ONCE(llc_state->vtime_now), cctx->vtime_now))
-				WRITE_ONCE(llc_state->vtime_now, cctx->vtime_now);
+			cpu_vtime = READ_ONCE(cctx->vtime_now);
+			if (time_before(READ_ONCE(llc_state->vtime_now), cpu_vtime))
+				WRITE_ONCE(llc_state->vtime_now, cpu_vtime);
+			if (!advance_vtime(&cctx->vtime_now, READ_ONCE(llc_state->vtime_now))) {
+				scx_bpf_error("Failed to align CPU %u virtual clock for cell %u", cpu, cell_id);
+				return -EAGAIN;
+			}
 		}
 		cctx->cell = cell_id;
 		cctx->subcell = 0;
@@ -2290,14 +2322,21 @@ int apply_configured_cell_subcells(u32 cell_id, struct cell_config *config)
 			if (cctx->cell != cell_id || cctx->subcell != subcell_id) {
 				struct subcell_llc *llc_state;
 				u32 llc_idx;
+				u64 cpu_vtime;
 
 				llc_idx = enable_llc_awareness && llc_is_valid(cctx->llc) ? cctx->llc :
 											    FAKE_FLAT_SUBCELL_LLC;
 				llc_state = lookup_subcell_llc(subcell, llc_idx);
 				if (!llc_state)
 					return -EINVAL;
-				if (time_before(READ_ONCE(llc_state->vtime_now), cctx->vtime_now))
-					WRITE_ONCE(llc_state->vtime_now, cctx->vtime_now);
+				cpu_vtime = READ_ONCE(cctx->vtime_now);
+				if (time_before(READ_ONCE(llc_state->vtime_now), cpu_vtime))
+					WRITE_ONCE(llc_state->vtime_now, cpu_vtime);
+				if (!advance_vtime(&cctx->vtime_now, READ_ONCE(llc_state->vtime_now))) {
+					scx_bpf_error("Failed to align CPU %u virtual clock for cell %u subcell %u",
+						      cpu, cell_id, subcell_id);
+					return -EAGAIN;
+				}
 			}
 
 			cctx->cell = cell_id;
