@@ -1478,6 +1478,11 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 			return;
 
 		if (READ_ONCE(subcell->llcs_to_drain)) {
+			/* Orphan work must also honor the CPU queue's wait bound. */
+			if (pinned_dsq_overdue(cctx) && scx_bpf_dsq_move_to_local(cpu_dsq.raw, 0)) {
+				WRITE_ONCE(cctx->pinned_waiting_since, scx_bpf_now());
+				return;
+			}
 			s32 ret = try_draining_work(cell, subcell_id, llc, cctx);
 
 			if (!ret) {
