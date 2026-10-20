@@ -902,16 +902,16 @@ static __always_inline s32 enqueue_pinned_cpu(struct task_struct *p, struct task
 	return cpu;
 }
 
-static __always_inline u64 cap_vtime_debt(u64 vtime, u64 basis_vtime)
+static __always_inline u64 cap_vtime_debt(u64 vtime, u64 basis_vtime, u32 weight)
 {
 	/*
-	 * A task can legitimately owe at most one weighted slice over the clock
-	 * it competes against; anything beyond that is an accounting gap (a
-	 * clock that did not follow the task) and would only starve the task.
-	 * Cap the debt instead of carrying or aborting on it.
+	 * Borrowed execution can leave valid debt ahead of the home clock.
+	 * Express the limit in the same weighted units as the runtime charge.
 	 */
-	if (time_after(vtime, basis_vtime + VTIME_DEBT_CAP_SLICES * slice_ns))
-		vtime = basis_vtime + VTIME_DEBT_CAP_SLICES * slice_ns;
+	u64 max_debt = VTIME_DEBT_CAP_SLICES * slice_ns * 100 / weight;
+
+	if (time_after(vtime, basis_vtime + max_debt))
+		vtime = basis_vtime + max_debt;
 	return vtime;
 }
 
@@ -924,9 +924,14 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 	u64 vtime;
 	s32 cpu = -1;
 	u64 basis_vtime;
+	u32 weight = p->scx.weight;
 
 	if (!(tctx = lookup_task_ctx(p)) || !(cctx = lookup_cpu_ctx(-1)))
 		return;
+	if (!weight) {
+		scx_bpf_error("Task %d has zero weight", p->pid);
+		return;
+	}
 
 	if (maybe_refresh_cell(p, tctx) < 0)
 		return;
@@ -1038,7 +1043,7 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 	vtime = p->scx.dsq_vtime;
 	tctx->basis_vtime = basis_vtime;
 
-	vtime = cap_vtime_debt(vtime, basis_vtime);
+	vtime = cap_vtime_debt(vtime, basis_vtime, weight);
 	/*
 	 * Limit the amount of budget that an idling task can accumulate
 	 * to one slice.
