@@ -613,10 +613,15 @@ static inline int set_task_llc(struct task_struct *p, struct task_ctx *tctx, u32
 static inline int update_task_llc_assignment(struct task_struct *p, struct task_ctx *tctx, s32 preferred_cpu)
 {
 	s32 new_llc = choose_task_llc(tctx, preferred_cpu);
+	dsq_id_t new_dsq;
+
 	if (!llc_is_valid(new_llc))
 		return -EINVAL;
 
-	return set_task_llc(p, tctx, (u32)new_llc, true);
+	new_dsq = get_subcell_llc_dsq_id(tctx->cell, tctx->subcell, (u32)new_llc);
+	if (dsq_is_invalid(new_dsq))
+		return -EINVAL;
+	return set_task_llc(p, tctx, (u32)new_llc, new_dsq.raw != tctx->dsq.raw || !tctx->all_cell_cpus_allowed);
 }
 
 static inline int maybe_update_task_llc(struct task_struct *p, struct task_ctx *tctx, s32 preferred_cpu)
