@@ -9,12 +9,14 @@ pub use bpf_skel::*;
 pub mod bpf_intf;
 mod cell_manager;
 mod config;
+mod dsq_depth_stats;
 mod stats;
 mod topology;
 mod undefok_flags;
 
 use cell_manager::{CellManager, CpuAssignment, CpuRecipient};
 use config::{ConfiguredCells, SubcellMatch};
+use dsq_depth_stats::{DsqDepthStats, Snapshot};
 
 use std::cmp::max;
 use std::collections::{HashMap, HashSet};
@@ -161,6 +163,10 @@ struct Opts {
     /// to use LLC-aware scheduling. Required for --virt-llc to affect DSQ creation.
     #[clap(long, action = clap::ArgAction::SetTrue)]
     enable_llc_awareness: bool,
+
+    /// Report shared DSQ enqueue depth P99 over completed 60-second windows.
+    #[clap(long, action = clap::ArgAction::SetTrue)]
+    enable_dsq_depth_stats: bool,
 
     /// Deprecated, noop. LLC-aware mode always scans sibling LLC DSQs.
     #[clap(long, action = clap::ArgAction::SetTrue)]
@@ -331,6 +337,7 @@ struct Scheduler<'a> {
     prev_subcell_queued_ns: [[u64; MAX_SUBCELLS_PER_CELL]; MAX_CELLS],
     prev_subcell_demand_sum: [[u64; MAX_SUBCELLS_PER_CELL]; MAX_CELLS],
     metrics: Metrics,
+    dsq_depth_stats: Option<DsqDepthStats>,
     stats_server: Option<StatsServer<(), Metrics>>,
     last_configuration_seq: Option<u32>,
     /// Last observed cpuset_seq for cpuset change detection
@@ -467,6 +474,7 @@ impl<'a> Scheduler<'a> {
         rodata.slice_ns = scx_enums.SCX_SLICE_DFL;
         rodata.exiting_task_workaround_enabled = opts.exiting_task_workaround;
         rodata.dynamic_affinity_cpu_selection = opts.dynamic_affinity_cpu_selection;
+        rodata.enable_dsq_depth_stats = opts.enable_dsq_depth_stats;
 
         // Slice shrinking configuration
         if opts.slice_shrink_min_us >= opts.slice_shrink_max_us {
@@ -587,6 +595,7 @@ impl<'a> Scheduler<'a> {
             prev_subcell_queued_ns: [[0; MAX_SUBCELLS_PER_CELL]; MAX_CELLS],
             prev_subcell_demand_sum: [[0; MAX_SUBCELLS_PER_CELL]; MAX_CELLS],
             metrics: Metrics::default(),
+            dsq_depth_stats: opts.enable_dsq_depth_stats.then(DsqDepthStats::default),
             stats_server: Some(stats_server),
             last_configuration_seq: None,
             last_cpuset_seq: 0,
@@ -1318,6 +1327,14 @@ impl<'a> Scheduler<'a> {
             );
         }
 
+        if let Some(stats) = &mut self.dsq_depth_stats {
+            stats
+                .reconcile(cell_assignments, Instant::now(), |cell_id| {
+                    read_dsq_depth_snapshot(&self.skel, cell_id)
+                })
+                .context("reconciling shared DSQ depth windows")?;
+        }
+
         Ok(())
     }
 
@@ -1627,6 +1644,13 @@ impl<'a> Scheduler<'a> {
     fn collect_metrics(&mut self) -> Result<()> {
         // the demand deltas are measured up to here, see collect_demand_metrics()
         let sampled_at = Instant::now();
+        if let Some(stats) = &mut self.dsq_depth_stats {
+            stats
+                .collect(sampled_at, |cell_id| {
+                    read_dsq_depth_snapshot(&self.skel, cell_id)
+                })
+                .context("collecting shared DSQ depth windows")?;
+        }
         let cpu_ctxs = read_cpu_ctxs(&self.skel).context("reading per-CPU contexts for metrics")?;
 
         let cell_stats_delta = self
@@ -1662,6 +1686,10 @@ impl<'a> Scheduler<'a> {
                 .and_modify(|cell_metrics| {
                     cell_metrics.num_cpus = cell.cpus.weight() as u32;
                     cell_metrics.cgroup_path = cgroup_path;
+                    cell_metrics.shared_dsq_enqueue_depth_p99 = self
+                        .dsq_depth_stats
+                        .as_ref()
+                        .map_or(0, |stats| stats.summary(*cell_id));
                     for subcell in &cell.subcells {
                         cell_metrics
                             .subcells
@@ -2124,7 +2152,12 @@ impl<'a> Scheduler<'a> {
                 .cloned()
                 .unwrap_or_else(Cpumask::new);
             self.cells.entry(*cell_idx).or_insert_with(Cell::new).cpus = cpus;
-            self.metrics.cells.insert(*cell_idx, CellMetrics::default());
+            let mut metrics = CellMetrics::default();
+            metrics.shared_dsq_enqueue_depth_p99 = self
+                .dsq_depth_stats
+                .as_ref()
+                .map_or(0, |stats| stats.summary(*cell_idx));
+            self.metrics.cells.insert(*cell_idx, metrics);
         }
 
         // Remove cells that no longer have CPUs assigned
@@ -2343,6 +2376,27 @@ fn read_bpf_cell(skel: &BpfSkel, cell_id: u32) -> Result<bpf_intf::cell> {
     }
 
     Ok(unsafe { std::ptr::read_unaligned(raw.as_ptr() as *const bpf_intf::cell) })
+}
+
+fn read_dsq_depth_snapshot(skel: &BpfSkel, cell_id: u32) -> Result<Snapshot> {
+    let raw = skel
+        .maps
+        .shared_dsq_depth_hists
+        .lookup(&cell_id.to_ne_bytes(), libbpf_rs::MapFlags::ANY)
+        .with_context(|| format!("Failed to lookup shared DSQ depth for cell {}", cell_id))?
+        .ok_or_else(|| anyhow::anyhow!("Cell {} missing from shared DSQ depth map", cell_id))?;
+    if raw.len() != std::mem::size_of::<bpf_intf::cell_dsq_depth_hist>() {
+        bail!(
+            "Unexpected shared DSQ depth value size for cell {}: {} != {}",
+            cell_id,
+            raw.len(),
+            std::mem::size_of::<bpf_intf::cell_dsq_depth_hist>()
+        );
+    }
+    // Map lookup bytes need not have the C value type's alignment.
+    let hist =
+        unsafe { std::ptr::read_unaligned(raw.as_ptr() as *const bpf_intf::cell_dsq_depth_hist) };
+    Ok(hist.shards.map(|shard| shard.buckets))
 }
 
 fn read_cpu_ctxs(skel: &BpfSkel) -> Result<Vec<bpf_intf::cpu_ctx>> {
@@ -2577,6 +2631,21 @@ mod tests {
     #[test]
     fn allows_version_without_cell_parent_cgroup() {
         assert!(Opts::try_parse_from(["scx_mitosis", "--version"]).is_ok());
+    }
+
+    #[test]
+    fn accepts_dsq_depth_stats_opt_in() {
+        let opts = Opts::try_parse_from([
+            "scx_mitosis",
+            "--cell-parent-cgroup",
+            "/workloads",
+            "--enable-dsq-depth-stats",
+        ])
+        .unwrap();
+        assert!(opts.enable_dsq_depth_stats);
+        let default =
+            Opts::try_parse_from(["scx_mitosis", "--cell-parent-cgroup", "/workloads"]).unwrap();
+        assert!(!default.enable_dsq_depth_stats);
     }
 
     #[test]

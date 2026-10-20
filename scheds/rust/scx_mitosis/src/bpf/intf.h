@@ -18,6 +18,8 @@ enum consts {
 	MAX_CPUS = 1 << MAX_CPUS_SHIFT,
 	MAX_CPUS_U8 = MAX_CPUS / 8,
 	MAX_CELLS = 256,
+	DSQ_DEPTH_SHARDS = 4,
+	DSQ_DEPTH_BUCKETS = 16,
 	MAX_SUBCELLS_PER_CELL = 8,
 	MAX_COMM = 16,
 	MAX_SUBCELL_MATCH_ORS = 4,
@@ -121,6 +123,20 @@ struct subcell_account {
 	 */
 	u64 demand_sum;
 };
+
+/* Cumulative enqueue observations. Consumers use wrapping deltas. */
+struct dsq_depth_shard {
+	u64 buckets[DSQ_DEPTH_BUCKETS];
+} __attribute__((aligned(SCX_CACHELINE_SIZE)));
+
+struct cell_dsq_depth_hist {
+	struct dsq_depth_shard shards[DSQ_DEPTH_SHARDS];
+};
+
+/* Shard alignment may add architecture-specific padding to map values. */
+_Static_assert(sizeof(((struct dsq_depth_shard *)0)->buckets) * DSQ_DEPTH_SHARDS * MAX_CELLS ==
+		       128 * 1024,
+	       "shared DSQ depth counters must stay bounded at 128 KiB");
 
 /* Serialized subcell config shared between userspace and BPF. */
 struct subcell_config {

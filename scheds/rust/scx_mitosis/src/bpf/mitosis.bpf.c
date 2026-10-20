@@ -51,6 +51,7 @@ const volatile bool reject_multicpu_pinning = false;
 const volatile bool enable_borrowing = false;
 const volatile bool use_lockless_peek = false;
 const volatile bool dynamic_affinity_cpu_selection = false;
+const volatile bool enable_dsq_depth_stats = false;
 
 /*
  * Global arrays for LLC topology, populated by userspace before load.
@@ -175,6 +176,36 @@ struct {
 	__type(value, struct subcell_account);
 	__uint(max_entries, MAX_CELLS * MAX_SUBCELLS_PER_CELL);
 } subcell_accounts SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__type(key, u32);
+	__type(value, struct cell_dsq_depth_hist);
+	__uint(max_entries, MAX_CELLS);
+} shared_dsq_depth_hists SEC(".maps");
+
+static inline void record_shared_dsq_depth(u32 cell_id, u64 dsq_id)
+{
+	struct cell_dsq_depth_hist *hist;
+	u32 shard, bucket;
+	u64 *counter;
+	s32 depth = scx_bpf_dsq_nr_queued(dsq_id);
+
+	/* Optional observations may be lost without affecting placement. */
+	if (depth < 0)
+		return;
+	hist = bpf_map_lookup_elem(&shared_dsq_depth_hists, &cell_id);
+	if (!hist)
+		return;
+
+	bucket = depth ? log2_u32((u32)depth) + 1 : 0;
+	if (bucket >= DSQ_DEPTH_BUCKETS)
+		bucket = DSQ_DEPTH_BUCKETS - 1;
+	shard = bpf_get_smp_processor_id() % DSQ_DEPTH_SHARDS;
+	counter = MEMBER_VPTR(*hist, .shards[shard].buckets[bucket]);
+	if (counter)
+		__sync_fetch_and_add(counter, 1);
+}
 
 static inline struct cpu_ctx *lookup_cpu_ctx(int cpu)
 {
@@ -1018,6 +1049,8 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 	if (time_before(vtime, basis_vtime - slice_ns))
 		vtime = basis_vtime - slice_ns;
 
+	if (enable_dsq_depth_stats && tctx->all_cell_cpus_allowed)
+		record_shared_dsq_depth(tctx->cell, tctx->dsq.raw);
 	scx_bpf_dsq_insert_vtime(p, tctx->dsq.raw, slice_ns, vtime, enq_flags);
 	if (!tctx->all_cell_cpus_allowed && !READ_ONCE(cctx->pinned_waiting_since))
 		WRITE_ONCE(cctx->pinned_waiting_since, scx_bpf_now());
