@@ -1247,8 +1247,8 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 		vtime = basis_vtime - slice_ns;
 
 	scx_bpf_dsq_insert_vtime(p, tctx->dsq.raw, slice_ns, vtime, enq_flags);
-	if (!tctx->all_cell_cpus_allowed && !READ_ONCE(cctx->pinned_waiting_since))
-		WRITE_ONCE(cctx->pinned_waiting_since, scx_bpf_now());
+	if (!tctx->all_cell_cpus_allowed)
+		__sync_val_compare_and_swap(&cctx->pinned_waiting_since, 0, bpf_ktime_get_ns());
 
 	/*
 	 * Account after insertion: subcell reconfiguration can orphan the selected
@@ -1274,11 +1274,27 @@ void BPF_STRUCT_OPS(mitosis_enqueue, struct task_struct *p, u64 enq_flags)
 		scx_bpf_kick_cpu(cpu, SCX_KICK_IDLE);
 }
 
+static __always_inline int clear_pinned_wait(struct cpu_ctx *cctx, u64 cpu_dsq)
+{
+	s32 nr_queued;
+
+	WRITE_ONCE(cctx->pinned_waiting_since, 0);
+	/* A remote enqueue may have started its timer after the empty peek. */
+	nr_queued = scx_bpf_dsq_nr_queued(cpu_dsq);
+	if (nr_queued < 0) {
+		scx_bpf_error("Failed to recheck CPU DSQ %llx: %d", cpu_dsq, nr_queued);
+		return nr_queued;
+	}
+	if (nr_queued > 0)
+		__sync_val_compare_and_swap(&cctx->pinned_waiting_since, 0, bpf_ktime_get_ns());
+	return 0;
+}
+
 static __always_inline bool pinned_dsq_overdue(struct cpu_ctx *cctx)
 {
 	u64 since = READ_ONCE(cctx->pinned_waiting_since);
 
-	return since && time_delta(scx_bpf_now(), since) > PINNED_MAX_WAIT_SLICES * slice_ns;
+	return since && time_delta(bpf_ktime_get_ns(), since) > PINNED_MAX_WAIT_SLICES * slice_ns;
 }
 
 /* Time constant of the per-task demand estimate. */
@@ -1478,9 +1494,11 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 			return;
 
 		if (READ_ONCE(subcell->llcs_to_drain)) {
+			if (!READ_ONCE(cctx->pinned_waiting_since) && dsq_peek(cpu_dsq.raw))
+				__sync_val_compare_and_swap(&cctx->pinned_waiting_since, 0, bpf_ktime_get_ns());
 			/* Orphan work must also honor the CPU queue's wait bound. */
 			if (pinned_dsq_overdue(cctx) && scx_bpf_dsq_move_to_local(cpu_dsq.raw, 0)) {
-				WRITE_ONCE(cctx->pinned_waiting_since, scx_bpf_now());
+				WRITE_ONCE(cctx->pinned_waiting_since, bpf_ktime_get_ns());
 				return;
 			}
 			s32 ret = try_draining_work(cell, subcell_id, llc, cctx);
@@ -1509,6 +1527,9 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 	 */
 	p = dsq_peek(cpu_dsq.raw);
 	if (p) {
+		/* Direct enqueue can publish after an empty peek cleared its timer. */
+		if (!READ_ONCE(cctx->pinned_waiting_since))
+			__sync_val_compare_and_swap(&cctx->pinned_waiting_since, 0, bpf_ktime_get_ns());
 		bool overdue = pinned_dsq_overdue(cctx);
 
 		if (!found || overdue || time_before(p->scx.dsq_vtime - cctx->vtime_bias, min_vtime)) {
@@ -1517,7 +1538,8 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 			found = true;
 		}
 	} else {
-		WRITE_ONCE(cctx->pinned_waiting_since, 0);
+		if (clear_pinned_wait(cctx, cpu_dsq.raw))
+			return;
 	}
 
 	/*
@@ -1568,8 +1590,12 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 				}
 				if (advance_task_vtime(tctx, cctx, projected))
 					return;
-				if (pinned_prev)
-					WRITE_ONCE(cctx->pinned_waiting_since, nr_queued > 0 ? scx_bpf_now() : 0);
+				if (pinned_prev) {
+					if (nr_queued > 0)
+						WRITE_ONCE(cctx->pinned_waiting_since, bpf_ktime_get_ns());
+					else if (clear_pinned_wait(cctx, cpu_dsq.raw))
+						return;
+				}
 				/* Retained slices do not receive running/stopping callbacks. */
 				if (account_task_running(cpu, cctx, tctx, scx_clock_task(cpu), false) < 0)
 					return;
@@ -1605,7 +1631,7 @@ void BPF_STRUCT_OPS(mitosis_dispatch, s32 cpu, struct task_struct *prev)
 	 * the next dispatch's peek clears it.
 	 */
 	if (min_vtime_dsq.raw == cpu_dsq.raw) {
-		WRITE_ONCE(cctx->pinned_waiting_since, scx_bpf_now());
+		WRITE_ONCE(cctx->pinned_waiting_since, bpf_ktime_get_ns());
 	} else if (enable_llc_awareness) {
 		struct subcell *subcell = lookup_subcell(cell, subcell_id);
 

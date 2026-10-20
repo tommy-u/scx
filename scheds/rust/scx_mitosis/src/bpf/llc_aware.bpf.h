@@ -475,6 +475,8 @@ static inline s32 try_draining_work(u32 cell_id, u32 subcell_id, s32 local_llc, 
 					/* A task callback or newer publisher may already own the state. */
 					__sync_val_compare_and_swap(&tctx->rescue_seq, rescue_token, next);
 				} else {
+					__sync_val_compare_and_swap(&target_cctx->pinned_waiting_since, 0,
+								    bpf_ktime_get_ns());
 					continue_dispatch = true;
 					/*
 					 * cstats are per-CPU and non-atomic. Account on the
