@@ -1,24 +1,15 @@
-const status = document.querySelector("#status");
-const statusText = document.querySelector("#statusText");
-const number = new Intl.NumberFormat("en-US", { maximumFractionDigits: 2 });
-const { History, drawLineChart } = MitosisCharts;
-const historyPoints = 10 * 60 / 2;
-const pressureHistory = new History(historyPoints);
-const frequencyHistory = new History(historyPoints);
-const networkHistory = new History(historyPoints);
-const irqHistory = new History(historyPoints);
-const blockHistory = new History(historyPoints);
-
-function row(values) {
-  const tr = document.createElement("tr");
-  values.forEach((value, index) => {
-    const cell = document.createElement(index === 0 ? "th" : "td");
-    if (index === 0) cell.scope = "row";
-    cell.textContent = value;
-    tr.append(cell);
-  });
-  return tr;
-}
+const {
+  number, rate, compact, chartColors, tableRow, timingValue, timelineSource, chartRange,
+  chartSignature, renderPageStatus, renderKeyValues, drawSelectedLatencyHistogram,
+  drawLatencyHistogram, bindSectionNavigation,
+} = MitosisSections;
+const timeline = MitosisTimeline;
+const softirqRows = document.querySelector("#softirqRows");
+const hardirqRows = document.querySelector("#hardirqRows");
+const blockIoRows = document.querySelector("#blockIoRows");
+const softirqLatencyMetric = document.querySelector("#softirqLatencyMetric");
+const hardirqLatencyMetric = document.querySelector("#hardirqLatencyMetric");
+let latestProbes = null;
 
 function bytes(value) {
   if (value == null) return "--";
@@ -29,20 +20,7 @@ function bytes(value) {
     scaled /= 1024;
     unit += 1;
   }
-  return `${number.format(scaled)} ${units[unit]}`;
-}
-
-function renderKeyValues(target, source, formatters = {}) {
-  if (!source.available || !source.value) {
-    target.replaceChildren(row(["Unavailable", source.error || "No data"]));
-    return;
-  }
-  target.replaceChildren(...Object.entries(source.value)
-    .filter(([, value]) => typeof value !== "object")
-    .map(([key, value]) => row([
-      key.replaceAll("_", " "),
-      formatters[key] ? formatters[key](value) : value == null ? "--" : number.format(value),
-    ])));
+  return `${compact.format(scaled)} ${units[unit]}`;
 }
 
 function renderPressure(pressure) {
@@ -50,19 +28,19 @@ function renderPressure(pressure) {
   for (const resource of ["cpu", "memory", "io"]) {
     const source = pressure[resource];
     if (!source.available || !source.value) {
-      rows.push(row([resource, "unavailable", "--", "--", "--", "--"]));
+      rows.push(tableRow([resource, "unavailable", "--", "--", "--", "--"]));
       continue;
     }
     for (const scope of ["some", "full"]) {
       const value = source.value[scope];
       if (!value) continue;
-      rows.push(row([
+      rows.push(tableRow([
         resource,
         scope,
-        number.format(value.avg10),
-        number.format(value.avg60),
-        number.format(value.avg300),
-        number.format(value.total_us),
+        compact.format(value.avg10),
+        compact.format(value.avg60),
+        compact.format(value.avg300),
+        compact.format(value.total_us),
       ]));
     }
   }
@@ -72,15 +50,10 @@ function renderPressure(pressure) {
 function render(snapshot) {
   document.querySelector("#interval").textContent = snapshot.interval_ms == null
     ? "warming up"
-    : `${number.format(snapshot.interval_ms)} ms`;
-  document.querySelector("#refreshed").textContent = new Date().toLocaleTimeString();
-  const pct = (value) => value == null ? "--" : `${number.format(value)}%`;
+    : `${compact.format(snapshot.interval_ms)} ms`;
+  const pct = (value) => value == null ? "--" : `${compact.format(value)}%`;
   renderKeyValues(document.querySelector("#systemCpuRows"), snapshot.cpu, {
     busy_pct: pct, user_pct: pct, system_pct: pct, iowait_pct: pct, steal_pct: pct,
-  });
-  renderKeyValues(document.querySelector("#schedExtRows"), snapshot.sched_ext, {
-    state: (value) => value,
-    switch_all: (value) => value ? "yes" : "no",
   });
   renderPressure(snapshot.pressure);
   renderKeyValues(document.querySelector("#memoryRows"), snapshot.memory, {
@@ -96,137 +69,168 @@ function render(snapshot) {
     swap_used_bytes: bytes,
   });
 
-  const frequencyRows = snapshot.frequencies.value?.cpus?.map((cpu) => row([
-    number.format(cpu.cpu),
-    cpu.current_khz == null ? "--" : number.format(cpu.current_khz),
-    cpu.error || "available",
-  ])) || [row(["Unavailable", "--", snapshot.frequencies.error || "No data"])];
-  document.querySelector("#frequencyRows").replaceChildren(...frequencyRows);
-
-  const networkRows = snapshot.network.value?.interfaces?.map((item) => row([
+  const networkRows = snapshot.network.value?.interfaces?.map((item) => tableRow([
     item.interface,
-    item.rx_bytes_per_second == null ? "--" : number.format(item.rx_bytes_per_second),
-    item.tx_bytes_per_second == null ? "--" : number.format(item.tx_bytes_per_second),
-    number.format(item.rx_errors_total),
-    number.format(item.tx_errors_total),
-    number.format(item.rx_dropped_total + item.tx_dropped_total),
-  ])) || [row(["Unavailable", "--", "--", "--", "--", snapshot.network.error || "No data"])];
+    item.rx_bytes_per_second == null ? "--" : compact.format(item.rx_bytes_per_second),
+    item.tx_bytes_per_second == null ? "--" : compact.format(item.tx_bytes_per_second),
+    compact.format(item.rx_errors_total),
+    compact.format(item.tx_errors_total),
+    compact.format(item.rx_dropped_total + item.tx_dropped_total),
+  ])) || [tableRow(["Unavailable", "--", "--", "--", "--", snapshot.network.error || "No data"])];
   document.querySelector("#networkRows").replaceChildren(...networkRows);
-
 }
 
-function finite(value) {
-  return Number.isFinite(value) ? value : Number.NaN;
+function renderSoftirqs(rows) {
+  softirqRows.replaceChildren(...rows.map((row) => tableRow([
+    `${row.vector} ${row.name}`,
+    number.format(row.count),
+    rate.format(row.rate_per_second),
+    number.format(row.samples),
+    timingValue(row.mean_ns),
+    timingValue(row.p50_ns),
+    timingValue(row.p95_ns),
+    timingValue(row.p99_ns),
+  ])));
 }
 
-function pressureAvg10(snapshot, resource) {
-  const source = snapshot.pressure?.[resource];
-  return finite(source?.available ? source.value?.some?.avg10 : null);
+function renderHardirqs(metrics) {
+  const losses = metrics.metrics_map_full + metrics.starts_map_full + metrics.unmatched_exits;
+  document.querySelector("#hardirqStatus").textContent = metrics.available
+    ? `Exact probes active - ${number.format(losses)} correlation losses`
+    : "Hard IRQ tracepoints unavailable";
+  const busiest = [...metrics.rows].sort((left, right) =>
+    right.rate_per_second - left.rate_per_second || right.count - left.count || left.irq - right.irq)
+    .slice(0, 10);
+  document.querySelector("#hardirqTableSummary").textContent =
+    `Showing ${busiest.length} busiest IRQs by current rate · ${number.format(metrics.rows.length)} observed`;
+  hardirqRows.replaceChildren(...busiest.map((row) => tableRow([
+    number.format(row.irq),
+    row.name || "--",
+    rate.format(row.rate_per_second),
+    timingValue(row.p95_ns),
+    timingValue(row.p99_ns),
+  ])));
 }
 
-function sumRates(items, key) {
-  const values = (items || []).map((item) => item[key]).filter(Number.isFinite);
-  return values.length ? values.reduce((sum, value) => sum + value, 0) : Number.NaN;
+function renderBlockIo(metrics) {
+  document.querySelector("#blockIoStatus").textContent = metrics.available
+    ? "Exact request probes active"
+    : "Block request tracepoints unavailable";
+  const value = (entry) => entry == null ? "--" : number.format(entry);
+  blockIoRows.replaceChildren(...[
+    ["Issue events", value(metrics.issue_events)],
+    ["Issue events / second", rate.format(metrics.issue_rate_per_second)],
+    ["Completion events", value(metrics.completion_events)],
+    ["Completion events / second", rate.format(metrics.completion_rate_per_second)],
+    ["Completed requests", value(metrics.completed_requests)],
+    ["Error events", value(metrics.error_events)],
+    ["Issued bytes", value(metrics.issued_bytes)],
+    ["Completed bytes", value(metrics.completed_bytes)],
+    ["Completed bytes / second", rate.format(metrics.completed_bytes_per_second)],
+    ["Unmatched completions", value(metrics.unmatched_completions)],
+    ["Tracking failures", value(metrics.tracking_failures)],
+    ["Latency samples", value(metrics.latency_samples)],
+    ["Latency mean (ns)", value(metrics.latency_mean_ns)],
+    ["Latency p50 approx. (ns)", value(metrics.latency_p50_ns)],
+    ["Latency p95 approx. (ns)", value(metrics.latency_p95_ns)],
+    ["Latency p99 approx. (ns)", value(metrics.latency_p99_ns)],
+  ].map(tableRow));
 }
 
-function average(items, key) {
-  const values = (items || []).map((item) => item[key]).filter(Number.isFinite);
-  return values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : Number.NaN;
+function renderProbeCharts(snapshot) {
+  drawSelectedLatencyHistogram("softirqLatencyChart", softirqLatencyMetric,
+    snapshot.softirqs, "vector", (row) => `${row.vector} ${row.name}`, "timing_buckets");
+  drawSelectedLatencyHistogram("hardirqLatencyChart", hardirqLatencyMetric,
+    snapshot.hardirqs.rows, "irq", (row) => `${row.irq} ${row.name || "unknown"}`, "timing_buckets");
+  drawLatencyHistogram("blockIoLatencyChart", snapshot.block_io.latency_buckets);
 }
 
-function pushHistory(at, systemSnapshot, countersSnapshot) {
-  if (systemSnapshot) {
-    pressureHistory.push(at, {
-      cpu: pressureAvg10(systemSnapshot, "cpu"),
-      memory: pressureAvg10(systemSnapshot, "memory"),
-      io: pressureAvg10(systemSnapshot, "io"),
-    });
-    const averageKhz = systemSnapshot.frequencies?.available
-      ? systemSnapshot.frequencies.value?.average_khz
-      : null;
-    frequencyHistory.push(at, {
-      mhz: Number.isFinite(averageKhz) ? averageKhz / 1000 : Number.NaN,
-    });
-    const interfaces = systemSnapshot.network?.available
-      ? systemSnapshot.network.value?.interfaces
-      : [];
-    networkHistory.push(at, {
-      rx: sumRates(interfaces, "rx_bytes_per_second"),
-      tx: sumRates(interfaces, "tx_bytes_per_second"),
-    });
-  }
+function renderProbes(snapshot) {
+  latestProbes = snapshot;
+  renderSoftirqs(snapshot.softirqs);
+  renderHardirqs(snapshot.hardirqs);
+  renderBlockIo(snapshot.block_io);
+  renderProbeCharts(snapshot);
+}
 
-  if (countersSnapshot) {
-    irqHistory.push(at, {
-      total: average(countersSnapshot.interrupt_cpu, "total_utilization_pct"),
-    });
-    const block = countersSnapshot.block_io;
-    blockHistory.push(at, {
-      completions: finite(block?.available ? block.completion_rate_per_second : null),
-      mib: finite(block?.available ? block.completed_bytes_per_second / (1024 * 1024) : null),
-    });
-  }
+function clearProbes() {
+  latestProbes = null;
+  [softirqRows, hardirqRows, blockIoRows].forEach((target) => target.replaceChildren());
+  document.querySelector("#hardirqTableSummary").textContent = "--";
+  ["#blockIoStatus", "#hardirqStatus"]
+    .forEach((selector) => { document.querySelector(selector).textContent = "Unavailable at selected time"; });
+  renderProbeCharts({ softirqs: [], hardirqs: { rows: [] }, block_io: { latency_buckets: [] } });
 }
 
 function drawHistory() {
-  drawLineChart(document.querySelector("#pressureHistory"), [
-    { label: "CPU", color: "var(--series-green)", points: pressureHistory.points("cpu") },
-    { label: "Memory", color: "var(--series-orange)", points: pressureHistory.points("memory") },
-    { label: "I/O", color: "var(--series-blue)", points: pressureHistory.points("io") },
-  ], { unit: "%", minY: 0 });
-  drawLineChart(document.querySelector("#frequencyHistory"), [
-    { label: "Average", color: "var(--series-green)", points: frequencyHistory.points("mhz") },
-  ], { unit: "MHz", minY: 0 });
-  drawLineChart(document.querySelector("#networkHistory"), [
-    { label: "RX", color: "var(--series-green)", points: networkHistory.points("rx") },
-    { label: "TX", color: "var(--series-orange)", points: networkHistory.points("tx") },
-  ], { unit: "B/s", minY: 0 });
-  drawLineChart(document.querySelector("#irqHistory"), [
-    { label: "IRQ", color: "var(--series-orange)", points: irqHistory.points("total") },
-  ], { unit: "%", minY: 0, maxY: 100 });
-  drawLineChart(document.querySelector("#blockRateHistory"), [
-    { label: "Completions", color: "var(--series-blue)", points: blockHistory.points("completions") },
-  ], { unit: "IOPS", minY: 0 });
-  drawLineChart(document.querySelector("#blockThroughputHistory"), [
-    { label: "Completed", color: "var(--series-green)", points: blockHistory.points("mib") },
-  ], { unit: "MiB/s", minY: 0 });
+  const range = chartRange(timeline.getState());
+  const points = (key) => timeline.points(key);
+  const line = MitosisCharts.drawLineChart;
+  line(document.querySelector("#cpuHistoryChart"), [
+    { label: "SCX est.", color: chartColors.green, points: points("callbacks.task_cpu") },
+    { label: "IRQ", color: chartColors.red, points: points("callbacks.irq_cpu") },
+    { label: "RT/DL/steal", color: chartColors.orange, points: points("callbacks.other_cpu") },
+  ], { ...range, unit: "%", minY: 0, maxY: 100, maxGapMs: 3000 });
+  line(document.querySelector("#frequencyHistory"), [
+    { label: "Average", color: chartColors.green, points: points("system.mhz") },
+  ], { ...range, unit: "MHz", minY: 0, maxGapMs: 3000 });
+  line(document.querySelector("#irqHistory"), [
+    { label: "IRQ", color: chartColors.orange, points: points("system.total") },
+  ], { ...range, unit: "%", minY: 0, maxY: 100, maxGapMs: 3000 });
+  line(document.querySelector("#blockRateHistory"), [
+    { label: "Completions", color: chartColors.blue, points: points("system.completions") },
+  ], { ...range, unit: "IOPS", minY: 0, maxGapMs: 3000 });
+  line(document.querySelector("#blockThroughputHistory"), [
+    { label: "Completed", color: chartColors.green, points: points("system.mib") },
+  ], { ...range, unit: "MiB/s", minY: 0, maxGapMs: 3000 });
+  line(document.querySelector("#pressureHistory"), [
+    { label: "CPU", color: chartColors.green, points: points("system.cpu") },
+    { label: "Memory", color: chartColors.orange, points: points("system.memory") },
+    { label: "I/O", color: chartColors.blue, points: points("system.io") },
+  ], { ...range, unit: "%", minY: 0, maxGapMs: 3000 });
+  line(document.querySelector("#networkHistory"), [
+    { label: "RX", color: chartColors.green, points: points("system.rx") },
+    { label: "TX", color: chartColors.orange, points: points("system.tx") },
+  ], { ...range, unit: "B/s", minY: 0, maxGapMs: 3000 });
 }
 
-async function fetchJson(url) {
-  const response = await fetch(url, { cache: "no-store" });
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
-  return response.json();
-}
-
-async function refresh() {
-  const [systemResult, countersResult] = await Promise.allSettled([
-    fetchJson("/api/system"),
-    fetchJson("/api/counters"),
-  ]);
-  const systemSnapshot = systemResult.status === "fulfilled" ? systemResult.value : null;
-  const countersSnapshot = countersResult.status === "fulfilled" ? countersResult.value : null;
-
-  if (systemSnapshot) render(systemSnapshot);
-  pushHistory(Date.now(), systemSnapshot, countersSnapshot);
-  drawHistory();
-
-  if (!systemSnapshot && !countersSnapshot) {
-    status.classList.remove("live");
-    statusText.textContent = "Disconnected";
-  } else {
-    status.classList.add("live");
-    if (!systemSnapshot) statusText.textContent = "Probes live; system unavailable";
-    else if (!countersSnapshot) statusText.textContent = "System live; probes unavailable";
-    else statusText.textContent = "Live";
+let renderedView;
+let renderedHost;
+let renderedProbes;
+let renderedChart;
+function renderTimeline(state) {
+  const host = timelineSource(state, "system");
+  const probes = timelineSource(state, "counters");
+  const viewChanged = state.view !== renderedView;
+  if (viewChanged || host.snapshot !== renderedHost) {
+    const unavailable = () => ({ available: false, value: null,
+      error: host.health.detail || "No retained system sample" });
+    render(host.snapshot || { interval_ms: null, cpu: unavailable(),
+      pressure: { cpu: unavailable(), memory: unavailable(), io: unavailable() },
+      memory: unavailable(), network: unavailable() });
   }
+  if (viewChanged || probes.snapshot !== renderedProbes) {
+    if (probes.snapshot) renderProbes(probes.snapshot);
+    else clearProbes();
+  }
+  const signature = chartSignature(state);
+  if (signature !== renderedChart) drawHistory();
+  renderedView = state.view;
+  renderedHost = host.snapshot;
+  renderedProbes = probes.snapshot;
+  renderedChart = signature;
+  renderPageStatus(state, [["System", host], ["Probes", probes]], { liveWhen: "any" });
 }
 
-globalThis.addEventListener?.("mitosis:stats-reset", () => {
-  [pressureHistory, frequencyHistory, networkHistory, irqHistory, blockHistory]
-    .forEach((history) => history.clear());
+function redraw() {
   drawHistory();
-});
-document.addEventListener?.("mitosis-theme-change", drawHistory);
+  if (latestProbes) renderProbeCharts(latestProbes);
+}
 
-refresh();
-setInterval(refresh, 2000);
+[softirqLatencyMetric, hardirqLatencyMetric].forEach((picker) => picker.addEventListener("change", () => {
+  if (latestProbes) renderProbeCharts(latestProbes);
+}));
+window.addEventListener("resize", redraw);
+document.addEventListener?.("mitosis-theme-change", redraw);
+bindSectionNavigation();
+timeline.subscribe(renderTimeline);

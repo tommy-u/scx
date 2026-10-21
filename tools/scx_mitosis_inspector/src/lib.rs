@@ -9,12 +9,23 @@ pub mod bpf_skel {
 pub mod api;
 pub mod bpf_program_stats;
 pub mod collector;
+pub mod cpu_allocation;
+pub mod explore;
+pub mod explore_bpf_skel;
+pub mod explore_host;
+pub mod explore_model;
+pub mod explore_perf;
+pub mod explore_probes;
 pub mod host_context;
+pub mod lifecycle;
 pub mod migration_history;
 pub mod model;
 pub mod probe_manifest;
+pub mod replay;
+pub mod replay_migrations;
 pub mod scheduler_config;
 pub mod stats;
+pub mod stats_history;
 pub mod system_stats;
 pub mod topology;
 

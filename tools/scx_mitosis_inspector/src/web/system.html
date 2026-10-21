@@ -3,9 +3,10 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>System stats</title>
+    <title>System · Mitosis inspector</title>
     <script src="/assets/theme.js"></script>
     <link rel="stylesheet" href="/assets/style.css">
+    <link rel="stylesheet" href="/assets/explore.css">
   </head>
   <body>
     <header class="topbar">
@@ -27,16 +28,49 @@
       </div>
     </header>
 
+    <section class="timeline-bar" id="timelineBar" aria-label="Inspector time">
+      <div class="timeline-transport">
+        <button class="timeline-button timeline-live" id="timelineLive" type="button" aria-pressed="true">Live</button>
+        <button class="timeline-button" id="timelinePrevious" type="button" aria-label="Previous recorded sample" title="Previous recorded sample">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M10 3 5 8l5 5"/></svg>
+        </button>
+        <div class="timeline-track">
+          <label class="timeline-visually-hidden" for="timelineRange">Inspection time</label>
+          <input class="timeline-range" id="timelineRange" type="range" min="0" max="1" step="1" value="0" disabled aria-describedby="timelineKeyboard">
+          <div class="timeline-endpoints"><time id="timelineOldest">Waiting for history</time><time id="timelineLatest">Present</time></div>
+        </div>
+        <button class="timeline-button" id="timelineNext" type="button" aria-label="Next recorded sample" title="Next recorded sample">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m6 3 5 5-5 5"/></svg>
+        </button>
+      </div>
+      <div class="timeline-clocks">
+        <div class="timeline-clock"><span class="timeline-clock-label">Viewing</span><time id="timelineSelected">--</time></div>
+        <div class="timeline-clock"><span class="timeline-clock-label">Now · host time</span><time id="timelineNow">--</time></div>
+      </div>
+      <p class="timeline-status" id="timelineStatus" role="status" aria-live="polite">Loading recorded history</p>
+      <p class="timeline-visually-hidden" id="timelineKeyboard">Left and right arrows move one recorded sample. Home selects the oldest sample. End returns to Live. Page Up and Page Down move thirty seconds.</p>
+    </section>
+
     <div class="workspace-shell">
       <aside class="workspace-sidebar">
-        <nav class="workspace-navigation" aria-label="Inspector workspaces">
-          <span class="navigation-group-label">Observe</span>
-          <a href="/">Callbacks</a>
-          <a class="active" aria-current="page" href="/system">System</a>
-          <a href="/stats">Scheduler</a>
-          <a href="/config">Configuration</a>
-          <span class="navigation-group-label navigation-group-label-secondary">Reference</span>
-          <a href="/appendix">Appendix</a>
+        <nav class="workspace-navigation" aria-label="Inspector workspaces"><!-- workspace-navigation --></nav>
+        <nav class="section-navigation" id="sectionNavigation" aria-label="System page sections">
+          <span class="navigation-group-label">On this page</span>
+          <a href="#overview">Overview</a>
+          <a href="#system-cpu">CPU</a>
+          <a href="#interrupts">Interrupts</a>
+          <a href="#softirq-activity">Softirqs</a>
+          <a href="#hardirq-activity">Hard IRQs</a>
+          <a href="#exploreIpis">IPIs</a>
+          <a href="#block-io">Block I/O</a>
+          <a href="#memory">Memory</a>
+          <a href="#systemMemoryHistory">Memory traffic</a>
+          <a href="#explorePerf">Hardware counters</a>
+          <a href="#exploreBandwidth">Monitoring domains</a>
+          <a href="#exploreIdle">Idle states</a>
+          <a href="#exploreHardware">Thermal &amp; power</a>
+          <a href="#pressure">Pressure</a>
+          <a href="#network">Network</a>
         </nav>
         <label class="workspace-theme-control">
           <span>Dark mode</span>
@@ -46,66 +80,248 @@
       </aside>
 
       <main id="app" tabindex="-1" aria-label="Host system statistics">
-        <header class="view-heading">
+        <header class="view-heading" id="overview">
           <div>
-            <h2>System stats</h2>
-            <p>Host-wide kernel and hardware counters</p>
+            <h2>System</h2>
+            <p>Host CPU, interrupts, I/O, memory, power and pressure outside the scheduler</p>
           </div>
         </header>
 
         <section class="summary" aria-label="System summary" data-feedback-key="System:Summary">
           <dl>
-            <div><dt>Source</dt><dd>procfs and sysfs</dd></div>
+            <div><dt>Source</dt><dd>procfs, sysfs and kernel tracepoints</dd></div>
             <div><dt>Interval</dt><dd id="interval">--</dd></div>
             <div><dt>Last refresh</dt><dd id="refreshed">--</dd></div>
+            <div class="source-status"><dt>Sources</dt><dd id="sourceStatus" role="status">Waiting for samples</dd></div>
           </dl>
         </section>
 
-        <section class="table-section" id="resourceHistory" aria-labelledby="resourceHistoryHeading" data-feedback-key="System:Resource-history">
+        <section class="table-section" id="system-cpu" aria-labelledby="systemCpuHeading" data-feedback-key="System:CPU">
           <div class="section-heading">
-            <h2 id="resourceHistoryHeading">Resource history</h2>
-            <p>Rolling 10-minute host view</p>
+            <h2 id="systemCpuHeading">CPU</h2>
+            <p>Utilization split, average frequency and host CPU accounting</p>
           </div>
           <div class="chart-grid">
             <figure class="chart-panel">
-              <figcaption>Pressure avg10</figcaption>
-              <canvas class="chart-canvas" id="pressureHistory" role="img" aria-label="CPU, memory, and I/O pressure over 10 minutes"></canvas>
+              <figcaption>CPU utilization</figcaption>
+              <canvas class="chart-canvas" id="cpuHistoryChart" role="img" aria-label="Average CPU utilization split into SCX estimate, IRQ, and RT, deadline and steal time"></canvas>
             </figure>
             <figure class="chart-panel">
               <figcaption>Average CPU frequency</figcaption>
-              <canvas class="chart-canvas" id="frequencyHistory" role="img" aria-label="Average CPU frequency over 10 minutes"></canvas>
-            </figure>
-            <figure class="chart-panel">
-              <figcaption>Network throughput</figcaption>
-              <canvas class="chart-canvas" id="networkHistory" role="img" aria-label="Network receive and transmit throughput over 10 minutes"></canvas>
-            </figure>
-            <figure class="chart-panel">
-              <figcaption>IRQ CPU utilization</figcaption>
-              <canvas class="chart-canvas" id="irqHistory" role="img" aria-label="Average IRQ CPU utilization over 10 minutes"></canvas>
-            </figure>
-            <figure class="chart-panel">
-              <figcaption>Block completions</figcaption>
-              <canvas class="chart-canvas" id="blockRateHistory" role="img" aria-label="Block I/O completion rate over 10 minutes"></canvas>
-            </figure>
-            <figure class="chart-panel">
-              <figcaption>Block throughput</figcaption>
-              <canvas class="chart-canvas" id="blockThroughputHistory" role="img" aria-label="Block I/O completion throughput over 10 minutes"></canvas>
+              <canvas class="chart-canvas" id="frequencyHistory" role="img" aria-label="Average CPU frequency"></canvas>
             </figure>
           </div>
-        </section>
-
-        <section class="table-section" aria-labelledby="systemCpuHeading" data-feedback-key="System:CPU">
-          <h2 id="systemCpuHeading">CPU</h2>
           <div class="table-scroll"><table><tbody id="systemCpuRows"></tbody></table></div>
         </section>
 
-        <section class="table-section" aria-labelledby="schedExtHeading" data-feedback-key="System:sched-ext-health">
-          <h2 id="schedExtHeading">sched_ext health</h2>
-          <div class="table-scroll"><table><tbody id="schedExtRows"></tbody></table></div>
+        <section class="table-section" id="interrupts" aria-labelledby="interruptsHeading" data-feedback-key="System:Interrupts">
+          <div class="section-heading">
+            <h2 id="interruptsHeading">Interrupts</h2>
+            <p>Average CPU time spent in hard and soft interrupt context</p>
+          </div>
+          <figure class="chart-panel">
+            <figcaption>IRQ CPU utilization</figcaption>
+            <canvas class="chart-canvas" id="irqHistory" role="img" aria-label="Average IRQ CPU utilization"></canvas>
+          </figure>
         </section>
 
-        <section class="table-section" aria-labelledby="pressureHeading" data-feedback-key="System:Pressure">
-          <h2 id="pressureHeading">Pressure</h2>
+        <section class="table-section" id="softirq-activity" aria-labelledby="softirqHeading" data-feedback-key="System:Softirqs">
+          <div class="table-section-heading">
+            <h2 id="softirqHeading">Softirq activity</h2>
+            <div class="chart-heading-controls">
+              <span id="softirqLatencyMetricLabel">Vectors</span>
+              <details class="metric-picker" id="softirqLatencyMetric">
+                <summary id="softirqLatencyMetricSummary" aria-labelledby="softirqLatencyMetricLabel softirqLatencyMetricSummary">Choose metrics</summary>
+                <fieldset aria-label="Softirq vectors to compare"></fieldset>
+              </details>
+              <p>Exact entry and duration counters</p>
+            </div>
+          </div>
+          <canvas class="chart-canvas chart-canvas-wide" id="softirqLatencyChart" width="1100" height="240"></canvas>
+          <ul class="histogram-legend" id="softirqLatencyChartLegend" aria-label="Selected softirq vectors"></ul>
+          <div class="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">Vector</th>
+                  <th scope="col">Total</th>
+                  <th scope="col">Rate / second</th>
+                  <th scope="col">Samples</th>
+                  <th scope="col">Mean (ns)</th>
+                  <th scope="col">p50 approx. (ns)</th>
+                  <th scope="col">p95 approx. (ns)</th>
+                  <th scope="col">p99 approx. (ns)</th>
+                </tr>
+              </thead>
+              <tbody id="softirqRows"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="table-section" id="hardirq-activity" aria-labelledby="hardirqHeading" data-feedback-key="System:Hard-IRQs">
+          <div class="table-section-heading">
+            <h2 id="hardirqHeading">Hard IRQ activity</h2>
+            <div class="chart-heading-controls">
+              <span id="hardirqLatencyMetricLabel">IRQs</span>
+              <details class="metric-picker" id="hardirqLatencyMetric">
+                <summary id="hardirqLatencyMetricSummary" aria-labelledby="hardirqLatencyMetricLabel hardirqLatencyMetricSummary">Choose metrics</summary>
+                <fieldset aria-label="Hard IRQs to compare"></fieldset>
+              </details>
+              <p id="hardirqStatus">Checking kernel IRQ tracepoints</p>
+            </div>
+          </div>
+          <canvas class="chart-canvas chart-canvas-wide" id="hardirqLatencyChart" width="1100" height="240"></canvas>
+          <ul class="histogram-legend" id="hardirqLatencyChartLegend" aria-label="Selected hard IRQs"></ul>
+          <p class="table-summary" id="hardirqTableSummary"></p>
+          <div class="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">IRQ</th>
+                  <th scope="col">Device / action</th>
+                  <th scope="col">Rate / second</th>
+                  <th scope="col">p95 approx. (ns)</th>
+                  <th scope="col">p99 approx. (ns)</th>
+                </tr>
+              </thead>
+              <tbody id="hardirqRows"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="table-section explore-section" id="exploreIpis" aria-labelledby="exploreIpisHeading" data-feedback-key="System:IPIs">
+          <details id="exploreIpisDetails" open>
+            <summary class="explore-section-heading"><div><h2 id="exploreIpisHeading">IPIs</h2><p>Identify CPUs sending cross-CPU notifications</p></div><span class="explore-source-badge" id="exploreIpisStatus">Waiting</span></summary>
+            <div class="explore-section-body">
+              <p class="explore-quality" id="exploreIpisQuality"></p><dl class="explore-facts" id="exploreIpisFacts"></dl>
+              <div class="explore-table-scroll"><table class="explore-table"><thead><tr id="exploreIpisHead"></tr></thead><tbody id="exploreIpisRows"></tbody></table></div>
+              <div class="explore-table-footer"><span id="exploreIpisCount"></span><div><button id="exploreIpisPrevious" type="button" aria-label="Previous IPI rows">Previous</button><button id="exploreIpisNext" type="button" aria-label="Next IPI rows">Next</button></div></div>
+              <figure class="explore-history" id="exploreIpiHistoryPanel"><figcaption>Interval IPI send rate <span>/s</span></figcaption><canvas id="exploreIpiHistory" class="chart-canvas" role="img" aria-label="Interprocessor interrupt send rate history"></canvas></figure>
+            </div>
+          </details>
+        </section>
+
+        <section class="table-section" id="block-io" aria-labelledby="blockIoHeading" data-feedback-key="System:Block-IO">
+          <div class="table-section-heading">
+            <div>
+              <h2 id="blockIoHeading">Block I/O</h2>
+              <p>Request completion rate, throughput and completion latency</p>
+            </div>
+            <p id="blockIoStatus">Checking kernel block tracepoints</p>
+          </div>
+          <div class="chart-grid">
+            <figure class="chart-panel">
+              <figcaption>Block completions</figcaption>
+              <canvas class="chart-canvas" id="blockRateHistory" role="img" aria-label="Block I/O completion rate"></canvas>
+            </figure>
+            <figure class="chart-panel">
+              <figcaption>Block throughput</figcaption>
+              <canvas class="chart-canvas" id="blockThroughputHistory" role="img" aria-label="Block I/O completion throughput"></canvas>
+            </figure>
+          </div>
+          <h3 class="table-subheading">Completion latency</h3>
+          <canvas class="chart-canvas chart-canvas-wide" id="blockIoLatencyChart" width="1100" height="240"></canvas>
+          <div class="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">Metric</th>
+                  <th scope="col">Value</th>
+                </tr>
+              </thead>
+              <tbody id="blockIoRows"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="table-section" id="memory" aria-labelledby="memoryHeading" data-feedback-key="System:Memory">
+          <h2 id="memoryHeading">Memory</h2>
+          <div class="table-scroll"><table><tbody id="memoryRows"></tbody></table></div>
+        </section>
+
+        <section class="table-section system-memory-history" id="systemMemoryHistory" aria-labelledby="systemMemoryHistoryHeading" data-feedback-key="System:Memory-traffic-and-cache">
+          <div class="section-heading">
+            <h2 id="systemMemoryHistoryHeading">Memory traffic and cache</h2>
+            <p>Total and per-LLC history at the selected time</p>
+          </div>
+          <p class="memory-metric-note">MBM measures monitored traffic in GB/s. Cache accesses and misses are hardware events on CPUs grouped by LLC; miss percentage uses paired miss/access counters. Physical DRAM channel capacity is outside this measurement.</p>
+          <p class="memory-source-note" id="memoryBandwidthSource" role="status">Waiting for monitored traffic samples</p>
+          <p class="memory-source-note" id="memoryCacheSource" role="status">Waiting for CPU cache counter samples</p>
+          <div class="memory-controls">
+            <div class="memory-selection-actions"><span>Per-LLC graphs</span><button id="memoryLlcAll" type="button">All</button><button id="memoryLlcNone" type="button">None</button></div>
+            <label class="memory-traffic-mode" for="memoryBandwidthLlcMode">Per-LLC traffic<select id="memoryBandwidthLlcMode"><option value="total">Total monitored</option><option value="local">Local monitored</option></select></label>
+          </div>
+          <fieldset class="memory-llc-selection" id="memoryLlcSelection" aria-describedby="memoryLlcSelectionStatus"><legend class="timeline-visually-hidden">Choose LLCs for memory overlays</legend></fieldset>
+          <p class="memory-selection-status" id="memoryLlcSelectionStatus">Waiting for recorded LLCs</p>
+          <div class="chart-grid memory-chart-grid">
+            <figure class="chart-panel"><figcaption><span>All monitored memory traffic · GB/s</span><span class="memory-current" id="memoryBandwidthTotalValue">--</span></figcaption><canvas class="chart-canvas" id="memoryBandwidthTotalHistory" role="img" aria-label="Total and local monitored memory traffic in gigabytes per second"></canvas><div class="memory-legend" id="memoryBandwidthTotalHistoryLegend"></div></figure>
+            <figure class="chart-panel"><figcaption><span id="memoryBandwidthLlcCaption">Per LLC · total monitored traffic</span><span class="memory-unit">GB/s</span></figcaption><canvas class="chart-canvas" id="memoryBandwidthLlcHistory" role="img" aria-label="Monitored memory traffic per last level cache in gigabytes per second"></canvas><div class="memory-legend" id="memoryBandwidthLlcHistoryLegend"></div></figure>
+            <figure class="chart-panel"><figcaption><span>All measured CPU cache accesses</span><span class="memory-current" id="memoryCacheAccessTotalValue">--</span></figcaption><canvas class="chart-canvas" id="memoryCacheAccessTotalHistory" role="img" aria-label="Total measured CPU cache access events in millions of events per second"></canvas><div class="memory-legend" id="memoryCacheAccessTotalHistoryLegend"></div></figure>
+            <figure class="chart-panel"><figcaption><span>Cache accesses by CPU LLC</span><span class="memory-unit">M events/s</span></figcaption><canvas class="chart-canvas" id="memoryCacheAccessLlcHistory" role="img" aria-label="Measured CPU cache access events per last level cache in millions of events per second"></canvas><div class="memory-legend" id="memoryCacheAccessLlcHistoryLegend"></div></figure>
+            <figure class="chart-panel"><figcaption><span>All measured CPU cache misses</span><span class="memory-current" id="memoryCacheMissTotalValue">--</span></figcaption><canvas class="chart-canvas" id="memoryCacheMissTotalHistory" role="img" aria-label="Total measured CPU cache miss events in millions of events per second"></canvas><div class="memory-legend" id="memoryCacheMissTotalHistoryLegend"></div></figure>
+            <figure class="chart-panel"><figcaption><span>Cache misses by CPU LLC</span><span class="memory-unit">M events/s</span></figcaption><canvas class="chart-canvas" id="memoryCacheMissLlcHistory" role="img" aria-label="Measured CPU cache miss events per last level cache in millions of events per second"></canvas><div class="memory-legend" id="memoryCacheMissLlcHistoryLegend"></div></figure>
+            <figure class="chart-panel"><figcaption><span>All paired cache miss / access ratio</span><span class="memory-current" id="memoryCacheMissPercentTotalValue">--</span></figcaption><canvas class="chart-canvas" id="memoryCacheMissPercentTotalHistory" role="img" aria-label="Weighted measured cache miss percentage across CPUs with paired counters"></canvas><div class="memory-legend" id="memoryCacheMissPercentTotalHistoryLegend"></div></figure>
+            <figure class="chart-panel"><figcaption><span>Paired miss / access ratio by CPU LLC</span><span class="memory-unit">%</span></figcaption><canvas class="chart-canvas" id="memoryCacheMissPercentLlcHistory" role="img" aria-label="Weighted measured cache miss percentage per last level cache"></canvas><div class="memory-legend" id="memoryCacheMissPercentLlcHistoryLegend"></div></figure>
+          </div>
+        </section>
+
+        <section class="table-section explore-section" id="explorePerf" aria-labelledby="explorePerfHeading" data-feedback-key="System:Hardware-counters">
+          <details id="explorePerfDetails" open>
+            <summary class="explore-section-heading"><div><h2 id="explorePerfHeading">Hardware counters</h2><p>Compare useful work, cache misses and stalled cycles on each CPU</p></div><span class="explore-source-badge" id="explorePerfStatus">Waiting</span></summary>
+            <div class="explore-section-body">
+              <p class="explore-quality" id="explorePerfQuality"></p><dl class="explore-facts" id="explorePerfFacts"></dl>
+              <figure class="explore-history" id="explorePerfHistoryPanel"><figcaption>Instructions per cycle <span>IPC</span></figcaption><canvas id="explorePerfHistory" class="chart-canvas" role="img" aria-label="Instructions per cycle history"></canvas></figure>
+              <div class="explore-table-scroll"><table class="explore-table"><thead><tr id="explorePerfHead"></tr></thead><tbody id="explorePerfRows"></tbody></table></div>
+              <div class="explore-table-footer"><span id="explorePerfCount"></span><div><button id="explorePerfPrevious" type="button" aria-label="Previous hardware counter rows">Previous</button><button id="explorePerfNext" type="button" aria-label="Next hardware counter rows">Next</button></div></div>
+            </div>
+          </details>
+        </section>
+
+        <section class="table-section explore-section" id="exploreBandwidth" aria-labelledby="exploreBandwidthHeading" data-feedback-key="System:Memory-monitoring-domains">
+          <details id="exploreBandwidthDetails" open>
+            <summary class="explore-section-heading"><div><h2 id="exploreBandwidthHeading">Memory monitoring domains</h2><p>Memory traffic and LLC occupancy for each resctrl monitoring domain</p></div><span class="explore-source-badge" id="exploreBandwidthStatus">Waiting</span></summary>
+            <div class="explore-section-body">
+              <p class="explore-quality" id="exploreBandwidthQuality"></p><dl class="explore-facts" id="exploreBandwidthFacts"></dl>
+              <figure class="explore-history" id="exploreOccupancyHistoryPanel"><figcaption>LLC occupancy <span>MiB</span></figcaption><canvas id="exploreOccupancyHistory" class="chart-canvas" role="img" aria-label="Last level cache occupancy history"></canvas></figure>
+              <div class="explore-table-scroll"><table class="explore-table"><thead><tr id="exploreBandwidthHead"></tr></thead><tbody id="exploreBandwidthRows"></tbody></table></div>
+              <div class="explore-table-footer"><span id="exploreBandwidthCount"></span><div><button id="exploreBandwidthPrevious" type="button" aria-label="Previous memory monitoring rows">Previous</button><button id="exploreBandwidthNext" type="button" aria-label="Next memory monitoring rows">Next</button></div></div>
+            </div>
+          </details>
+        </section>
+
+        <section class="table-section explore-section" id="exploreIdle" aria-labelledby="exploreIdleHeading" data-feedback-key="System:Idle-states">
+          <details id="exploreIdleDetails" open>
+            <summary class="explore-section-heading"><div><h2 id="exploreIdleHeading">Idle states</h2><p>Compare idle residency with the cost of leaving each state</p></div><span class="explore-source-badge" id="exploreIdleStatus">Waiting</span></summary>
+            <div class="explore-section-body">
+              <p class="explore-quality" id="exploreIdleQuality"></p><dl class="explore-facts" id="exploreIdleFacts"></dl>
+              <div class="explore-table-toolbar"><label for="exploreIdleSearch">Find CPU or state</label><input id="exploreIdleSearch" type="search" placeholder="CPU, state, LLC or NUMA" autocomplete="off"></div>
+              <div class="explore-table-scroll"><table class="explore-table"><thead><tr id="exploreIdleHead"></tr></thead><tbody id="exploreIdleRows"></tbody></table></div>
+              <div class="explore-table-footer"><span id="exploreIdleCount"></span><div><button id="exploreIdlePrevious" type="button" aria-label="Previous idle state rows">Previous</button><button id="exploreIdleNext" type="button" aria-label="Next idle state rows">Next</button></div></div>
+              <figure class="explore-history" id="exploreIdleHistoryPanel"><figcaption>Idle residency across measured CPUs <span>% of elapsed time</span></figcaption><canvas id="exploreIdleHistory" class="chart-canvas" role="img" aria-label="CPU idle residency history"></canvas></figure>
+            </div>
+          </details>
+        </section>
+
+        <section class="table-section explore-section" id="exploreHardware" aria-labelledby="exploreHardwareHeading" data-feedback-key="System:Thermal-and-power">
+          <details id="exploreHardwareDetails" open>
+            <summary class="explore-section-heading"><div><h2 id="exploreHardwareHeading">Thermal pressure &amp; power</h2><p>Check hardware capacity loss, temperature and package power together</p></div><span class="explore-source-badge" id="exploreHardwareStatus">Waiting</span></summary>
+            <div class="explore-section-body explore-hardware-groups">
+              <section aria-labelledby="explorePressureHeading"><div class="explore-subheading"><h3 id="explorePressureHeading">Thermal pressure</h3><span id="explorePressureStatus" class="explore-source-badge">Waiting</span></div><p class="explore-quality" id="explorePressureQuality"></p><dl class="explore-facts" id="explorePressureFacts"></dl><div class="explore-diagnostic-split"><div><div class="explore-table-scroll"><table class="explore-table"><thead><tr id="explorePressureHead"></tr></thead><tbody id="explorePressureRows"></tbody></table></div><div class="explore-table-footer"><span id="explorePressureCount"></span><div><button id="explorePressurePrevious" type="button" aria-label="Previous thermal pressure rows">Previous</button><button id="explorePressureNext" type="button" aria-label="Next thermal pressure rows">Next</button></div></div></div><figure class="explore-history" id="explorePressureHistoryPanel"><figcaption>Maximum capacity loss <span>%</span></figcaption><canvas id="explorePressureHistory" class="chart-canvas" role="img" aria-label="Maximum thermal pressure capacity loss history"></canvas></figure></div></section>
+              <section aria-labelledby="exploreThermalHeading"><div class="explore-subheading"><h3 id="exploreThermalHeading">Temperature</h3><span id="exploreThermalStatus" class="explore-source-badge">Waiting</span></div><p class="explore-quality" id="exploreThermalQuality"></p><dl class="explore-facts" id="exploreThermalFacts"></dl><div class="explore-diagnostic-split"><div><div class="explore-table-scroll"><table class="explore-table"><thead><tr id="exploreThermalHead"></tr></thead><tbody id="exploreThermalRows"></tbody></table></div><div class="explore-table-footer"><span id="exploreThermalCount"></span><div><button id="exploreThermalPrevious" type="button" aria-label="Previous thermal sensor rows">Previous</button><button id="exploreThermalNext" type="button" aria-label="Next thermal sensor rows">Next</button></div></div></div><figure class="explore-history" id="exploreThermalHistoryPanel"><figcaption>Highest sensor temperature <span>°C</span></figcaption><canvas id="exploreThermalHistory" class="chart-canvas" role="img" aria-label="Maximum sensor temperature history"></canvas></figure></div></section>
+              <section aria-labelledby="explorePowerHeading"><div class="explore-subheading"><h3 id="explorePowerHeading">Package power</h3><span id="explorePowerStatus" class="explore-source-badge">Waiting</span></div><p class="explore-quality" id="explorePowerQuality"></p><dl class="explore-facts" id="explorePowerFacts"></dl><div class="explore-diagnostic-split"><div><div class="explore-table-scroll"><table class="explore-table"><thead><tr id="explorePowerHead"></tr></thead><tbody id="explorePowerRows"></tbody></table></div><div class="explore-table-footer"><span id="explorePowerCount"></span><div><button id="explorePowerPrevious" type="button" aria-label="Previous package power rows">Previous</button><button id="explorePowerNext" type="button" aria-label="Next package power rows">Next</button></div></div></div><figure class="explore-history" id="explorePowerHistoryPanel"><figcaption>Package power <span>W</span></figcaption><canvas id="explorePowerHistory" class="chart-canvas" role="img" aria-label="Package power consumption history"></canvas></figure></div></section>
+            </div>
+          </details>
+        </section>
+
+        <section class="table-section" id="pressure" aria-labelledby="pressureHeading" data-feedback-key="System:Pressure">
+          <div class="section-heading">
+            <h2 id="pressureHeading">Pressure</h2>
+            <p>Pressure stall information for CPU, memory and I/O</p>
+          </div>
+          <figure class="chart-panel">
+            <figcaption>Pressure avg10</figcaption>
+            <canvas class="chart-canvas" id="pressureHistory" role="img" aria-label="CPU, memory, and I/O pressure"></canvas>
+          </figure>
           <div class="table-scroll">
             <table>
               <thead><tr><th scope="col">Resource</th><th scope="col">Scope</th><th scope="col">avg10</th><th scope="col">avg60</th><th scope="col">avg300</th><th scope="col">Total (us)</th></tr></thead>
@@ -114,23 +330,15 @@
           </div>
         </section>
 
-        <section class="table-section" aria-labelledby="memoryHeading" data-feedback-key="System:Memory">
-          <h2 id="memoryHeading">Memory</h2>
-          <div class="table-scroll"><table><tbody id="memoryRows"></tbody></table></div>
-        </section>
-
-        <section class="table-section" aria-labelledby="frequencyHeading" data-feedback-key="System:CPU-frequency">
-          <h2 id="frequencyHeading">CPU frequency</h2>
-          <div class="table-scroll">
-            <table>
-              <thead><tr><th scope="col">CPU</th><th scope="col">Current (kHz)</th><th scope="col">Status</th></tr></thead>
-              <tbody id="frequencyRows"></tbody>
-            </table>
+        <section class="table-section" id="network" aria-labelledby="networkHeading" data-feedback-key="System:Network">
+          <div class="section-heading">
+            <h2 id="networkHeading">Network</h2>
+            <p>Interface throughput, errors and drops</p>
           </div>
-        </section>
-
-        <section class="table-section" aria-labelledby="networkHeading" data-feedback-key="System:Network">
-          <h2 id="networkHeading">Network</h2>
+          <figure class="chart-panel">
+            <figcaption>Network throughput</figcaption>
+            <canvas class="chart-canvas" id="networkHistory" role="img" aria-label="Network receive and transmit throughput"></canvas>
+          </figure>
           <div class="table-scroll">
             <table>
               <thead><tr><th scope="col">Interface</th><th scope="col">RX bytes/s</th><th scope="col">TX bytes/s</th><th scope="col">RX errors</th><th scope="col">TX errors</th><th scope="col">Drops</th></tr></thead>
@@ -140,9 +348,14 @@
         </section>
       </main>
     </div>
+    <script src="/assets/polling.js" defer></script>
+    <script src="/assets/timeline.js" defer></script>
     <script src="/assets/charts.js" defer></script>
+    <script src="/assets/sections.js" defer></script>
     <script src="/assets/feedback.js" defer></script>
     <script src="/assets/reset.js" defer></script>
     <script src="/assets/system.js" defer></script>
+    <script src="/assets/memory_charts.js" defer></script>
+    <script src="/assets/explore.js" defer></script>
   </body>
 </html>

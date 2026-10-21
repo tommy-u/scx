@@ -57,15 +57,25 @@
       }
     }
 
-    points(key) {
+    points(key, options) {
       const points = [];
+      const preserveGaps = options && options.preserveGaps === true;
       for (const sample of this.samples) {
         const value = sample.values[key];
         if (typeof value === "number" && Number.isFinite(value)) {
           points.push({ x: sample.x, y: value });
+        } else if (preserveGaps) {
+          points.push({ x: sample.x, y: null });
         }
       }
       return points;
+    }
+
+    expireBefore(cutoffTimestampMs) {
+      if (!Number.isFinite(cutoffTimestampMs)) {
+        return;
+      }
+      this.samples = this.samples.filter((sample) => sample.x >= cutoffTimestampMs);
     }
 
     clear() {
@@ -149,31 +159,41 @@
     }
     const { context, width, height } = surface;
     const config = options || {};
+    const maxGapMs = Number.isFinite(config.maxGapMs) && config.maxGapMs >= 0
+      ? config.maxGapMs : Infinity;
+    const visibleMinX = Number.isFinite(config.minX) ? config.minX : -Infinity;
+    const visibleMaxX = Number.isFinite(config.maxX) ? config.maxX : Infinity;
+    const visible = (point) => point && Number.isFinite(point.x)
+      && point.x >= visibleMinX && point.x <= visibleMaxX;
     const safeSeries = Array.isArray(series) ? series : [];
-    const allPoints = [];
+    let xMin = Infinity;
+    let xMax = -Infinity;
+    let observedYMin = 0;
+    let observedYMax = -Infinity;
     for (const item of safeSeries) {
       if (!item || !Array.isArray(item.points)) {
         continue;
       }
       for (const point of item.points) {
-        if (point && Number.isFinite(point.x) && Number.isFinite(point.y)) {
-          allPoints.push(point);
+        if (visible(point) && Number.isFinite(point.y)) {
+          xMin = Math.min(xMin, point.x);
+          xMax = Math.max(xMax, point.x);
+          observedYMin = Math.min(observedYMin, point.y);
+          observedYMax = Math.max(observedYMax, point.y);
         }
       }
     }
-    if (!allPoints.length) {
+    if (!Number.isFinite(xMin)) {
       drawEmpty(context, width, height);
       return;
     }
+    if (Number.isFinite(config.minX)) xMin = config.minX;
+    if (Number.isFinite(config.maxX)) xMax = config.maxX;
 
-    const xValues = allPoints.map((point) => point.x);
-    const yValues = allPoints.map((point) => point.y);
-    let xMin = Math.min(...xValues);
-    let xMax = Math.max(...xValues);
     let yMin = Number.isFinite(config.minY)
       ? config.minY
-      : Math.min(0, ...yValues);
-    let yMax = Number.isFinite(config.maxY) ? config.maxY : Math.max(...yValues);
+      : observedYMin;
+    let yMax = Number.isFinite(config.maxY) ? config.maxY : observedYMax;
     if (xMin === xMax) {
       xMin -= 1;
       xMax += 1;
@@ -185,7 +205,14 @@
       [yMin, yMax] = [yMax, yMin];
     }
 
-    const margin = { top: 30, right: 12, bottom: 22, left: 54 };
+    const axisLabelWidth = Math.max(...Array.from({ length: 5 }, (_, index) =>
+      context.measureText(formatValue(yMax - index / 4 * (yMax - yMin), config.unit)).width));
+    const margin = {
+      top: config.showLegend === false ? 12 : 30,
+      right: 12,
+      bottom: 22,
+      left: Math.max(54, Math.ceil(axisLabelWidth) + 15),
+    };
     const plotWidth = Math.max(1, width - margin.left - margin.right);
     const plotHeight = Math.max(1, height - margin.top - margin.bottom);
     const mapX = (value) =>
@@ -195,7 +222,9 @@
 
     drawYAxis(context, margin, width, plotHeight, yMin, yMax, config.unit);
     drawTimeAxis(context, margin, width, height, xMin, xMax);
-    drawLegend(context, safeSeries, margin.left, 12, width - margin.left - 8);
+    if (config.showLegend !== false) {
+      drawLegend(context, safeSeries, margin.left, 12, width - margin.left - 8);
+    }
 
     for (const item of safeSeries) {
       if (!item || !Array.isArray(item.points)) {
@@ -203,24 +232,27 @@
       }
       context.strokeStyle = seriesColor(item.color);
       context.lineWidth = 1.5;
+      context.setLineDash(Array.isArray(item.dash) ? item.dash : []);
       context.beginPath();
       let drawing = false;
+      let previousX;
       for (const point of item.points) {
-        if (!point || !Number.isFinite(point.x) || !Number.isFinite(point.y)) {
+        if (!visible(point) || !Number.isFinite(point.y)) {
           drawing = false;
           continue;
         }
-        if (drawing) {
+        if (drawing && !point.breakBefore && point.x - previousX <= maxGapMs) {
           context.lineTo(mapX(point.x), mapY(point.y));
         } else {
           context.moveTo(mapX(point.x), mapY(point.y));
           drawing = true;
         }
+        previousX = point.x;
       }
       context.stroke();
       context.fillStyle = seriesColor(item.color);
       for (const point of item.points) {
-        if (!point || !Number.isFinite(point.x) || !Number.isFinite(point.y)) {
+        if (!visible(point) || !Number.isFinite(point.y)) {
           continue;
         }
         context.beginPath();
@@ -228,10 +260,13 @@
         context.fill();
       }
     }
+    context.setLineDash([]);
   }
 
   function drawTimeAxis(context, margin, width, height, min, max) {
-    const label = (value) => new Date(value).toISOString().slice(11, 19);
+    const label = (value) => new Date(value).toLocaleTimeString("en-US", {
+      hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23",
+    });
     context.fillStyle = themeColor("axis");
     context.textAlign = "left";
     context.fillText(label(min), margin.left, height - 9);
@@ -363,6 +398,65 @@
     });
   }
 
+  function drawHistogramSeries(canvas, series, options) {
+    const surface = prepareCanvas(canvas);
+    if (!surface) return;
+    const { context, width, height } = surface;
+    const config = options || {};
+    const safeSeries = (Array.isArray(series) ? series : [])
+      .filter((item) => item && Array.isArray(item.buckets));
+    const bucketCount = Math.max(0, ...safeSeries.map((item) => item.buckets.length));
+    const maxValue = safeSeries.reduce((maximum, item) => item.buckets.reduce(
+      (current, bucket) => Number.isFinite(bucket?.value) ? Math.max(current, bucket.value) : current,
+      maximum,
+    ), 0);
+    if (!bucketCount || !maxValue) {
+      drawEmpty(context, width, height);
+      return;
+    }
+
+    const margin = { top: config.showLegend === false ? 12 : 30, right: 12, bottom: 30, left: 48 };
+    const plotWidth = Math.max(1, width - margin.left - margin.right);
+    const plotHeight = Math.max(1, height - margin.top - margin.bottom);
+    drawYAxis(context, margin, width, plotHeight, 0, maxValue, config.unit);
+    if (config.showLegend !== false) {
+      drawLegend(context, safeSeries, margin.left, 12, width - margin.left - 8);
+    }
+    const slotWidth = plotWidth / bucketCount;
+    const barWidth = Math.max(1, slotWidth - Math.min(5, slotWidth * 0.2));
+    const labelStride = Math.max(1, Math.ceil(bucketCount / Math.max(1, Math.floor(plotWidth / 64))));
+
+    safeSeries.forEach((item, seriesIndex) => {
+      context.fillStyle = seriesColor(item.color);
+      context.strokeStyle = seriesColor(item.color);
+      context.lineWidth = 1.5;
+      context.setLineDash([[], [5, 3], [2, 2]][seriesIndex % 3]);
+      for (let index = 0; index < bucketCount; index += 1) {
+        const value = item.buckets[index]?.value;
+        const barHeight = (Math.max(0, Number.isFinite(value) ? value : 0) / maxValue) * plotHeight;
+        const x = margin.left + index * slotWidth + (slotWidth - barWidth) / 2;
+        const y = margin.top + plotHeight - barHeight;
+        context.globalAlpha = safeSeries.length > 1 ? 0.18 : 0.65;
+        context.fillRect(x, y, barWidth, barHeight);
+        context.globalAlpha = 1;
+        context.strokeRect(x, y, barWidth, barHeight);
+      }
+    });
+    context.setLineDash([]);
+    context.lineWidth = 1;
+    context.fillStyle = themeColor("axis");
+    context.textAlign = "center";
+    for (let index = 0; index < bucketCount; index += 1) {
+      if (index % labelStride !== 0 && index !== bucketCount - 1) continue;
+      const bucket = safeSeries.find((item) => item.buckets[index])?.buckets[index];
+      context.fillText(
+        truncate(context, String(bucket?.label || ""), slotWidth * labelStride - 4),
+        margin.left + (index + 0.5) * slotWidth,
+        height - 12,
+      );
+    }
+  }
+
   function truncate(context, text, maxWidth) {
     if (maxWidth <= 0 || context.measureText(text).width <= maxWidth) {
       return text;
@@ -374,5 +468,5 @@
     return `${shortened}...`;
   }
 
-  return { History, drawLineChart, drawBarChart, drawHistogram };
+  return { History, drawLineChart, drawBarChart, drawHistogram, drawHistogramSeries };
 });

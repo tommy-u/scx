@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Mitosis inspector AI guide</title>
+    <script src="/assets/theme.js"></script>
+    <link rel="stylesheet" href="/assets/style.css">
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="topbar-product">
+        <div class="product-title">
+          <h1>Mitosis inspector</h1>
+          <p>Scheduler activity and runtime statistics</p>
+        </div>
+      </div>
+      <div class="topbar-actions">
+        <div class="reset-stats-control">
+          <button class="reset-all-stats" id="resetAllStats" type="button">Reset all stats</button>
+          <span id="resetStatsStatus" role="status" aria-live="polite"></span>
+        </div>
+        <div class="status live" role="status">
+          <span class="status-dot" aria-hidden="true"></span>
+          <span>Reference</span>
+        </div>
+      </div>
+    </header>
+
+    <section class="timeline-bar" id="timelineBar" aria-label="Inspector time">
+      <div class="timeline-transport">
+        <button class="timeline-button timeline-live" id="timelineLive" type="button" aria-pressed="true">Live</button>
+        <button class="timeline-button" id="timelinePrevious" type="button" aria-label="Previous recorded sample" title="Previous recorded sample">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M10 3 5 8l5 5"/></svg>
+        </button>
+        <div class="timeline-track">
+          <label class="timeline-visually-hidden" for="timelineRange">Inspection time</label>
+          <input class="timeline-range" id="timelineRange" type="range" min="0" max="1" step="1" value="0" disabled aria-describedby="timelineKeyboard">
+          <div class="timeline-endpoints"><time id="timelineOldest">Waiting for history</time><time id="timelineLatest">Present</time></div>
+        </div>
+        <button class="timeline-button" id="timelineNext" type="button" aria-label="Next recorded sample" title="Next recorded sample">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m6 3 5 5-5 5"/></svg>
+        </button>
+      </div>
+      <div class="timeline-clocks">
+        <div class="timeline-clock"><span class="timeline-clock-label">Viewing</span><time id="timelineSelected">--</time></div>
+        <div class="timeline-clock"><span class="timeline-clock-label">Now · host time</span><time id="timelineNow">--</time></div>
+      </div>
+      <p class="timeline-status" id="timelineStatus" role="status" aria-live="polite">Loading recorded history</p>
+      <p class="timeline-visually-hidden" id="timelineKeyboard">Left and right arrows move one recorded sample. Home selects the oldest sample. End returns to Live. Page Up and Page Down move thirty seconds.</p>
+    </section>
+
+    <div class="workspace-shell">
+      <aside class="workspace-sidebar">
+        <nav class="workspace-navigation" aria-label="Inspector workspaces"><!-- workspace-navigation --></nav>
+        <label class="workspace-theme-control">
+          <span>Dark mode</span>
+          <input type="checkbox" role="switch" data-theme-toggle aria-label="Use dark mode">
+          <span class="theme-switch-track" aria-hidden="true"><span></span></span>
+        </label>
+      </aside>
+
+      <main id="app" tabindex="-1" aria-label="Mitosis inspector AI guide">
+        <header class="view-heading">
+          <div>
+            <h2>AI guide</h2>
+            <p>Inspector APIs, metric definitions, and collection details</p>
+          </div>
+        </header>
+        <section class="guide-reference" aria-label="Inspector reference">
+          <p class="table-summary">This reference describes the inspector. The selected time is preserved when you return to a data view.</p>
+          <p class="table-summary"><a href="/ai-guide">Open the machine-readable guide</a></p>
+          <pre><code>{{AI_GUIDE_CONTENT}}</code></pre>
+        </section>
+      </main>
+    </div>
+    <script src="/assets/polling.js" defer></script>
+    <script src="/assets/timeline.js" defer></script>
+    <script src="/assets/reset.js" defer></script>
+  </body>
+</html>

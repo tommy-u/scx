@@ -31,9 +31,11 @@
     "boundary-llc": "#98a8b5",
     "boundary-core": "#536471",
     "band-boundary": "#6f7f8b",
+    "band-unknown": "#5b6470",
     selection: "#00d6a3",
   };
   const number = new Intl.NumberFormat("en-US");
+  const bandwidthNumber = new Intl.NumberFormat("en-US", { maximumSignificantDigits: 4 });
   let renderer = null;
 
   function themeColor(name) {
@@ -253,6 +255,45 @@
     });
   }
 
+  function buildBandwidthUsage(llcUsage, snapshot) {
+    const source = snapshot?.memory_bandwidth;
+    const at = source?.meta?.captured_at_unix_ms;
+    const validCapture = Number.isSafeInteger(at) && at >= 0 && at <= 8.64e15;
+    const bound = snapshot?.memory_bandwidth_view_at_unix_ms;
+    let error = snapshot?.memory_bandwidth_source_error
+      || (!source ? "Memory bandwidth source unavailable" : null);
+    if (!error && source.available !== true) error = source.error || source.meta?.error || "Source unavailable";
+    if (!error && !source.partial) error = source.error || source.meta?.error || null;
+    if (!error && (!Number.isSafeInteger(source.meta?.epoch) || source.meta.epoch < 0
+        || !Number.isSafeInteger(source.meta?.sample_seq) || source.meta.sample_seq <= 0)) error = "Recorded sample metadata unavailable";
+    if (!error && !validCapture) error = "Capture time unavailable";
+    if (!error && Number.isFinite(bound) && at > bound) error = "No bandwidth captured at or before the selected time";
+    const rows = new Map();
+    const duplicates = new Set();
+    for (const row of Array.isArray(source?.rows) ? source.rows : []) {
+      if (!Number.isSafeInteger(row?.llc) || row.llc < 0) continue;
+      if (rows.has(row.llc)) duplicates.add(row.llc);
+      else rows.set(row.llc, row);
+    }
+    const groups = llcUsage.groups.map(group => {
+      const row = rows.get(group.llc);
+      let status = error || (duplicates.has(group.llc) ? "Ambiguous duplicate LLC rows" : null)
+        || (!row ? "No measured row for this LLC" : null);
+      if (!status && row.topology_available === false) status = "LLC topology unavailable";
+      if (!status && row.total_status !== "measured") status = row.total_status || "Not measured";
+      if (!status && row.total_error) status = row.total_error;
+      if (!status && (!Number.isFinite(row.mbm_total_bps) || row.mbm_total_bps < 0)) status = "Invalid bandwidth rate";
+      return { ...group, row, rateGbps: status ? null : row.mbm_total_bps / 1e9,
+        status: status || "measured" };
+    });
+    return { groups, spans: llcUsage.spans, error,
+      capturedAtUnixMs: validCapture ? at : null,
+      partial: Boolean(source?.partial),
+      scope: source?.summary?.scope_note || source?.scope || "Monitoring scope unavailable",
+      maxGbps: groups.reduce((max, group) => Math.max(max, group.rateGbps ?? 0), 0),
+      hasMeasured: groups.some(group => group.rateGbps !== null) };
+  }
+
   function migrationLocality(topology, from, to) {
     const cpus = new Map(topology.cpus.map((cpu) => [cpu.cpu, cpu]));
     const source = cpus.get(from);
@@ -326,9 +367,13 @@
     const coreTop = usageTop + usageHeight + 4;
     const llcHeight = Math.max(16, Math.min(24, cellSize * 2.5));
     const llcTop = coreTop + coreHeight + 4;
-    const margins = { left: 64, top: llcTop + llcHeight + 10, right: 18 };
+    const bandwidthHeight = llcHeight;
+    const bandwidthTop = llcTop + llcHeight + 4;
+    const margins = { left: 64, top: bandwidthTop + bandwidthHeight + 10, right: 18 };
     const matrixSize = count * cellSize;
     return {
+      bandwidthHeight,
+      bandwidthTop,
       cellSize,
       coreHeight,
       coreTop,
@@ -522,6 +567,49 @@
     drawBandLabel(context, isCore ? "Core util" : "LLC util", geometry.margins.left - 7, top + height / 2);
   }
 
+  function drawBandwidthUsage(context, usage, geometry, scale) {
+    const { bandwidthTop: top, bandwidthHeight: height, cellSize, margins, matrixSize } = geometry;
+    context.fillStyle = themeColor("band-unknown");
+    context.fillRect(margins.left, top, matrixSize, height);
+    context.save();
+    context.beginPath();
+    context.rect(margins.left, top, matrixSize, height);
+    context.clip();
+    context.strokeStyle = themeColor("boundary-package");
+    context.lineWidth = 1;
+    context.globalAlpha = 0.45;
+    context.beginPath();
+    for (let x = margins.left - height; x < margins.left + matrixSize; x += 6) {
+      context.moveTo(x, top + height);
+      context.lineTo(x + height, top);
+    }
+    context.stroke();
+    context.restore();
+    for (const span of usage.spans) {
+      const group = usage.groups[span.groupIndex];
+      const left = margins.left + span.start * cellSize;
+      const width = (span.end - span.start) * cellSize;
+      const intensity = group.rateGbps === null ? null : normalizeCount(group.rateGbps, usage.maxGbps, scale);
+      if (intensity !== null) {
+        context.fillStyle = infernoColor(intensity);
+        context.fillRect(left, top, Math.ceil(width), height);
+      }
+      context.strokeStyle = themeColor("boundary-node");
+      context.lineWidth = 2;
+      context.strokeRect(left, top, Math.ceil(width), height);
+      context.font = "600 9px ui-sans-serif, system-ui, sans-serif";
+      context.textAlign = "center";
+      context.textBaseline = "middle";
+      context.fillStyle = intensity !== null && intensity > 0.72 ? "#11161c" : "#ffffff";
+      const value = group.rateGbps === null ? null : bandwidthNumber.format(group.rateGbps);
+      const labels = value === null ? ["Unknown", "—"]
+        : [`LLC ${group.llc} · ${value} GB/s`, `${value} GB/s`, value];
+      const label = labels.find(candidate => context.measureText(candidate).width <= width - 6);
+      if (label) context.fillText(label, left + width / 2, top + height / 2);
+    }
+    drawBandLabel(context, "Mem. BW", margins.left - 7, top + height / 2);
+  }
+
   function drawLlcAnnotations(context, matrix, geometry) {
     const groups = topologyGroups(matrix.topology, matrix.order, "llc")
       .filter((group) => group.value != null);
@@ -661,6 +749,7 @@
     const usage = buildCpuUsage(matrix.topology, taskRuntime, matrix.order);
     const coreUsage = buildCoreUsage(usage);
     const llcUsage = buildLlcUsage(usage);
+    const bandwidthUsage = buildBandwidthUsage(llcUsage, renderer.snapshot);
     const viewportWidth = Math.max(320, renderer.viewport?.clientWidth || 800);
     const geometry = heatmapLayout(matrix.order.length, viewportWidth, renderer.zoom);
     const pixelRatio = Math.min(2, root.devicePixelRatio || 1);
@@ -669,8 +758,10 @@
 
     renderer.canvas.style.width = `${geometry.width}px`;
     renderer.canvas.style.height = `${geometry.height}px`;
-    renderer.canvas.width = Math.ceil(geometry.width * pixelRatio);
-    renderer.canvas.height = Math.ceil(geometry.height * pixelRatio);
+    const pixelWidth = Math.ceil(geometry.width * pixelRatio);
+    const pixelHeight = Math.ceil(geometry.height * pixelRatio);
+    if (renderer.canvas.width !== pixelWidth) renderer.canvas.width = pixelWidth;
+    if (renderer.canvas.height !== pixelHeight) renderer.canvas.height = pixelHeight;
     context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0);
     context.fillStyle = themeColor("canvas");
     context.fillRect(0, 0, geometry.width, geometry.height);
@@ -699,16 +790,17 @@
     drawCpuUsage(context, usage, geometry, renderer.scale);
     drawGroupedUsage(context, coreUsage, geometry, "core", renderer.scale);
     drawGroupedUsage(context, llcUsage, geometry, "llc", renderer.scale);
+    drawBandwidthUsage(context, bandwidthUsage, geometry, renderer.scale);
     drawLlcAnnotations(context, matrix, geometry);
     renderer.geometry = {
-      ...geometry, capacityLoss, coreUsage, interruptUsage, llcUsage, matrix, usage,
+      ...geometry, bandwidthUsage, capacityLoss, coreUsage, interruptUsage, llcUsage, matrix, usage,
     };
     renderer.legendLow.textContent = number.format(matrix.minPositive);
     renderer.legendHigh.textContent = number.format(matrix.max);
     renderPairInspection(matrix);
     renderer.canvas.setAttribute(
       "aria-label",
-      `CPU migration heatmap with ${number.format(matrix.total)} transitions, IRQ utilization, non-SCX capacity loss, task utilization, whole-core utilization, and LLC utilization across ${size} CPUs`,
+      `CPU migration heatmap with ${number.format(matrix.total)} transitions, IRQ utilization, non-SCX capacity loss, task utilization, whole-core utilization, LLC utilization, and memory bandwidth across ${size} CPUs`,
     );
   }
 
@@ -754,6 +846,28 @@
     const column = Math.floor((canvasX - geometry.margins.left) / geometry.cellSize);
     const row = Math.floor((canvasY - geometry.margins.top) / geometry.cellSize);
     const size = geometry.matrix.order.length;
+    if (column >= 0 && column < size
+        && canvasY >= geometry.bandwidthTop
+        && canvasY < geometry.bandwidthTop + geometry.bandwidthHeight) {
+      const usage = geometry.bandwidthUsage;
+      const span = usage.spans.find(candidate => column >= candidate.start && column < candidate.end);
+      const group = span && usage.groups[span.groupIndex];
+      const captured = new Date(usage.capturedAtUnixMs ?? NaN);
+      const measured = group?.row?.total_measured_contributions;
+      const expected = group?.row?.total_expected_contributions;
+      renderer.tooltip.textContent = [
+        `LLC ${group?.llc ?? "unknown"} memory bandwidth`,
+        `Monitored total: ${group?.rateGbps == null ? "Unknown" : `${bandwidthNumber.format(group.rateGbps)} GB/s`}`,
+        `Captured: ${Number.isFinite(captured.getTime()) ? captured.toISOString() : "unknown time"}`,
+        `Status: ${group?.status || usage.error || "LLC topology unavailable"}${usage.partial ? " (partial monitoring source)" : ""}`,
+        `Coverage: ${Number.isSafeInteger(measured) && measured >= 0 ? measured : "?"}/${Number.isSafeInteger(expected) && expected >= 0 ? expected : "?"} exposed parent-domain files`,
+        `Scope: ${usage.scope}`,
+        usage.hasMeasured ? `Color maximum: ${bandwidthNumber.format(usage.maxGbps)} GB/s, highest measured LLC in this sample (${renderer.scale} scale)`
+          : "Color scale: no measured LLCs at this time",
+      ].join("\n");
+      positionTooltip(event);
+      return;
+    }
     if (column >= 0 && column < size
         && canvasY >= geometry.irqTop
         && canvasY < geometry.irqTop + geometry.irqHeight) {

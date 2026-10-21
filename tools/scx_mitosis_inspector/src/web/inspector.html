@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Inspector · Mitosis inspector</title>
+    <script src="/assets/theme.js"></script>
+    <link rel="stylesheet" href="/assets/style.css">
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="topbar-product">
+        <div class="product-title">
+          <h1>Mitosis inspector</h1>
+          <p>Scheduler activity and runtime statistics</p>
+        </div>
+      </div>
+      <div class="topbar-actions">
+        <div class="reset-stats-control">
+          <button class="reset-all-stats" id="resetAllStats" type="button">Reset all stats</button>
+          <span id="resetStatsStatus" role="status" aria-live="polite"></span>
+        </div>
+        <div class="status" id="status" role="status" aria-live="polite">
+          <span class="status-dot" aria-hidden="true"></span>
+          <span id="statusText">Connecting</span>
+        </div>
+      </div>
+    </header>
+
+    <section class="timeline-bar" id="timelineBar" aria-label="Inspector time">
+      <div class="timeline-transport">
+        <button class="timeline-button timeline-live" id="timelineLive" type="button" aria-pressed="true">Live</button>
+        <button class="timeline-button" id="timelinePrevious" type="button" aria-label="Previous recorded sample" title="Previous recorded sample">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M10 3 5 8l5 5"/></svg>
+        </button>
+        <div class="timeline-track">
+          <label class="timeline-visually-hidden" for="timelineRange">Inspection time</label>
+          <input class="timeline-range" id="timelineRange" type="range" min="0" max="1" step="1" value="0" disabled aria-describedby="timelineKeyboard">
+          <div class="timeline-endpoints"><time id="timelineOldest">Waiting for history</time><time id="timelineLatest">Present</time></div>
+        </div>
+        <button class="timeline-button" id="timelineNext" type="button" aria-label="Next recorded sample" title="Next recorded sample">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m6 3 5 5-5 5"/></svg>
+        </button>
+      </div>
+      <div class="timeline-clocks">
+        <div class="timeline-clock"><span class="timeline-clock-label">Viewing</span><time id="timelineSelected">--</time></div>
+        <div class="timeline-clock"><span class="timeline-clock-label">Now · host time</span><time id="timelineNow">--</time></div>
+      </div>
+      <p class="timeline-status" id="timelineStatus" role="status" aria-live="polite">Loading recorded history</p>
+      <p class="timeline-visually-hidden" id="timelineKeyboard">Left and right arrows move one recorded sample. Home selects the oldest sample. End returns to Live. Page Up and Page Down move thirty seconds.</p>
+    </section>
+
+    <div class="workspace-shell">
+      <aside class="workspace-sidebar">
+        <nav class="workspace-navigation" aria-label="Inspector workspaces"><!-- workspace-navigation --></nav>
+        <nav class="section-navigation" id="sectionNavigation" aria-label="Inspector page sections">
+          <span class="navigation-group-label">On this page</span>
+          <a href="#overview">Overview</a>
+          <a href="#sources">Sources</a>
+          <a href="#probe-manifest">Probe status</a>
+          <a href="#inspector-overhead">Inspector overhead</a>
+        </nav>
+        <label class="workspace-theme-control">
+          <span>Dark mode</span>
+          <input type="checkbox" role="switch" data-theme-toggle aria-label="Use dark mode">
+          <span class="theme-switch-track" aria-hidden="true"><span></span></span>
+        </label>
+      </aside>
+
+      <main id="app" tabindex="-1" aria-label="Inspector health and overhead">
+        <header class="view-heading" id="overview">
+          <div>
+            <h2>Inspector</h2>
+            <p>Collection health, probe coverage and the inspector's own cost</p>
+          </div>
+          <div class="view-actions">
+            <button class="snapshot-download-button" id="downloadSnapshot" type="button">
+              Download snapshot
+            </button>
+            <span class="snapshot-download-status" id="snapshotDownloadStatus" role="status" aria-live="polite"></span>
+          </div>
+        </header>
+
+        <section class="summary" aria-label="Host environment" data-feedback-key="Inspector:Environment">
+          <dl>
+            <div><dt>Host</dt><dd id="hostname">--</dd></div>
+            <div><dt>Kernel</dt><dd id="kernelRelease">--</dd></div>
+            <div><dt>CPUs</dt><dd id="cpuCount">--</dd></div>
+            <div><dt>Scheduler</dt><dd id="scheduler">scx_mitosis</dd></div>
+            <div><dt>System CPU utilization</dt><dd id="systemCpuUtilization">--</dd></div>
+            <div><dt>Mitosis utilization</dt><dd id="mitosisCpuUtilization">--</dd></div>
+            <div><dt>Inspector uptime</dt><dd id="uptime">0s</dd></div>
+            <div><dt>Last refresh</dt><dd id="refreshed">--</dd></div>
+            <div class="source-status"><dt>Sources</dt><dd id="sourceStatus" role="status">Waiting for samples</dd></div>
+          </dl>
+        </section>
+
+        <section class="table-section" id="sources" aria-labelledby="sourcesHeading" data-feedback-key="Inspector:Sources">
+          <div class="table-section-heading">
+            <h2 id="sourcesHeading">Sources</h2>
+            <p>Freshness and errors for each collected source at the selected time</p>
+          </div>
+          <div class="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">Source</th>
+                  <th scope="col">Status</th>
+                  <th scope="col">Captured</th>
+                  <th scope="col">Detail</th>
+                </tr>
+              </thead>
+              <tbody id="sourceRows"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="table-section" id="probe-manifest" aria-labelledby="probeManifestHeading" data-feedback-key="Inspector:Probe-status">
+          <div class="table-section-heading">
+            <h2 id="probeManifestHeading">Probe status</h2>
+            <p>Loaded measurement groups and collection mode</p>
+          </div>
+          <div class="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">Probe group</th>
+                  <th scope="col">Status</th>
+                  <th scope="col">Mode</th>
+                  <th scope="col">Scope</th>
+                </tr>
+              </thead>
+              <tbody id="probeManifestRows"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="table-section" id="inspector-overhead" aria-labelledby="inspectorOverheadHeading" data-feedback-key="Inspector:Overhead">
+          <div class="table-section-heading">
+            <h2 id="inspectorOverheadHeading">Inspector BPF overhead</h2>
+            <p id="inspectorOverheadStatus">Checking kernel runtime counters</p>
+          </div>
+          <canvas class="chart-canvas chart-canvas-wide" id="overheadHistoryChart" width="1100" height="220"></canvas>
+          <section class="summary compact-summary" aria-label="Inspector overhead summary">
+            <dl>
+              <div><dt>One-CPU equivalent</dt><dd id="inspectorCpuEquivalent">--</dd></div>
+              <div><dt>Host capacity</dt><dd id="inspectorHostCapacity">--</dd></div>
+            </dl>
+          </section>
+          <div class="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">Program</th>
+                  <th scope="col">ID</th>
+                  <th scope="col">Runs</th>
+                  <th scope="col">Runtime (ns)</th>
+                  <th scope="col">Average (ns)</th>
+                </tr>
+              </thead>
+              <tbody id="inspectorBpfProgramRows"></tbody>
+            </table>
+          </div>
+        </section>
+      </main>
+    </div>
+    <script src="/assets/polling.js" defer></script>
+    <script src="/assets/timeline.js" defer></script>
+    <script src="/assets/charts.js" defer></script>
+    <script src="/assets/sections.js" defer></script>
+    <script src="/assets/feedback.js" defer></script>
+    <script src="/assets/reset.js" defer></script>
+    <script src="/assets/inspector.js" defer></script>
+  </body>
+</html>

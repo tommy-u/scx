@@ -57,7 +57,7 @@ impl Default for SchedulerConfigSnapshot {
     fn default() -> Self {
         Self {
             available: false,
-            error: Some("running scx_mitosis process not found".into()),
+            error: Some("waiting for Mitosis scheduler discovery".into()),
             pid: None,
             executable: None,
             version: None,
@@ -305,7 +305,10 @@ fn run_metadata(executable: &Path, argument: &str) -> Result<String, String> {
 
 pub fn discover() -> SchedulerConfigSnapshot {
     let Some((pid, proc_executable, command_line)) = scheduler_process() else {
-        return SchedulerConfigSnapshot::default();
+        return SchedulerConfigSnapshot {
+            error: Some("running scx_mitosis process not found".into()),
+            ..SchedulerConfigSnapshot::default()
+        };
     };
     let executable = fs::read_link(&proc_executable)
         .unwrap_or_else(|_| proc_executable.clone())

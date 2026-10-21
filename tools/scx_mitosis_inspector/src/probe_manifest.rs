@@ -28,10 +28,11 @@ pub fn build_probe_manifest(inputs: ProbeManifestInputs) -> Vec<ProbeManifestRow
             "Mitosis callbacks",
         ),
         sampled_row(
-            "Scheduler timing and CPU runtime",
+            "Scheduler timing",
             inputs.event_timing_sample_rate,
             "Whole host",
         ),
+        row("CPU runtime", "active", "Exact", "Whole host"),
         row("CPU migrations", "active", "Exact", "Whole host"),
         requested_row(
             "DSQ performance",
@@ -139,10 +140,43 @@ mod tests {
             runtime_accounting_enabled: false,
         });
 
-        assert_eq!(rows[1].mode, "Sampled 1/1024");
-        assert_eq!(rows[2].status, "disabled");
-        assert_eq!(rows[4].status, "unavailable");
-        assert_eq!(rows[5].status, "disabled");
-        assert_eq!(rows[8].status, "unavailable");
+        let group = |name| rows.iter().find(|row| row.group == name).unwrap();
+        assert_eq!(group("Callback latency").mode, "Sampled 1/1024");
+        assert_eq!(group("DSQ performance").status, "unavailable");
+        assert_eq!(group("Scheduler activity").status, "disabled");
+        assert_eq!(group("Block I/O").status, "unavailable");
+    }
+
+    #[test]
+    fn cpu_runtime_stays_exact_when_scheduler_latency_sampling_is_disabled() {
+        for (rate, timing_status, timing_mode) in
+            [(0, "disabled", "Off"), (64, "active", "Sampled 1/64")]
+        {
+            let rows = build_probe_manifest(ProbeManifestInputs {
+                callback_timing_sample_rate: 0,
+                event_timing_sample_rate: rate,
+                dsq_enabled: false,
+                dsq_available: false,
+                scheduler_events_enabled: false,
+                irqs_enabled: false,
+                hardirq_available: false,
+                block_io_enabled: false,
+                block_io_available: false,
+                runtime_accounting_enabled: false,
+            });
+            let describe = |group| {
+                rows.iter()
+                    .find(|row| row.group == group)
+                    .map(|row| (row.status, row.mode.as_str(), row.scope))
+            };
+            assert_eq!(
+                describe("CPU runtime"),
+                Some(("active", "Exact", "Whole host"))
+            );
+            assert_eq!(
+                describe("Scheduler timing"),
+                Some((timing_status, timing_mode, "Whole host"))
+            );
+        }
     }
 }

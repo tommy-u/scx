@@ -9,19 +9,28 @@ use std::mem::MaybeUninit;
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc::Sender, Arc, RwLock};
-use std::thread;
+use std::sync::{
+    mpsc::{Receiver, RecvTimeoutError},
+    Arc, RwLock,
+};
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use libbpf_rs::query::ProgInfoIter;
-use libbpf_rs::skel::{OpenSkel, Skel, SkelBuilder};
-use libbpf_rs::{Link, MapCore, MapFlags, MapType, OpenObject, Program, ProgramType};
+use libbpf_rs::skel::{OpenSkel, SkelBuilder};
+use libbpf_rs::{Link, MapCore, MapFlags, OpenObject, Program, ProgramType};
 use serde::Serialize;
+use tokio::sync::oneshot;
 
 use crate::bpf_program_stats::{query_bpf_program_stats, BpfProgramStatsRow};
 use crate::bpf_skel::{BpfSkel, BpfSkelBuilder};
+use crate::lifecycle::{
+    read_scheduler_identity, unix_ms, CollectorStatus, ObserverContext, RetryBackoff, SampleMeta,
+    SchedulerIdentity, SharedObserverContext,
+};
+use crate::migration_history::MigrationHistory;
 use crate::probe_manifest::{build_probe_manifest, ProbeManifestInputs};
+use crate::scheduler_config::SchedulerConfigSnapshot;
 use crate::{
     build_callback_timing_rows, build_counters, build_cpu_capacity_loss_rows,
     build_cpu_runtime_rows, build_scheduler_event_rows, build_timing_metric_row,
@@ -50,6 +59,47 @@ pub struct CollectorConfig {
     pub enable_block_io: bool,
 }
 
+pub enum CollectorCommand {
+    Reset(ResetRequest),
+    Shutdown,
+}
+
+pub struct ResetRequest {
+    pub expected_epoch: u64,
+    pub deadline: Instant,
+    pub reply: oneshot::Sender<std::result::Result<ResetReceipt, String>>,
+}
+
+impl ResetRequest {
+    fn check_deadline(&self, now: Instant) -> std::result::Result<(), String> {
+        if self.reply.is_closed() {
+            return Err("reset request cancelled".into());
+        }
+        if now >= self.deadline {
+            return Err("reset request expired".into());
+        }
+        Ok(())
+    }
+
+    fn validate(&self, context: &ObserverContext, now: Instant) -> std::result::Result<(), String> {
+        self.check_deadline(now)?;
+        if self.expected_epoch != context.epoch {
+            return Err("reset epoch changed; refresh before retrying".into());
+        }
+        if context.status != CollectorStatus::Active {
+            return Err("inspector is not actively attached".into());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ResetReceipt {
+    pub epoch: u64,
+    pub sample_seq: u64,
+    pub reset_at_unix_ms: u64,
+}
+
 struct TargetProgram {
     id: u32,
     fd: OwnedFd,
@@ -61,7 +111,7 @@ struct SoftirqMetrics {
     timing: CallbackTimingCounters,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 struct SoftirqMetricsSnapshot {
     rows: Vec<SoftirqMetrics>,
     cpu_elapsed_ns: Vec<u64>,
@@ -98,6 +148,11 @@ struct HardirqMetrics {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct Snapshot {
+    pub meta: SampleMeta,
+    pub collector: ObserverContext,
+    pub migration_map_capacity: u32,
+    pub migration_map_failures: u64,
+    pub migration_quality: &'static str,
     pub scheduler: &'static str,
     pub target_program_ids: [u32; 5],
     pub uptime_seconds: u64,
@@ -120,6 +175,168 @@ pub struct Snapshot {
     pub interrupt_cpu: Vec<InterruptCpuRow>,
     pub hardirqs: HardirqMetricsView,
     pub probe_manifest: Vec<ProbeManifestRow>,
+}
+
+impl Snapshot {
+    /// Clone replay/compact API fields without allocating the lifetime migration map.
+    pub fn compact_clone_without_migrations(&self) -> Self {
+        Self {
+            meta: self.meta.clone(),
+            collector: self.collector.clone(),
+            migration_map_capacity: self.migration_map_capacity,
+            migration_map_failures: self.migration_map_failures,
+            migration_quality: self.migration_quality,
+            scheduler: self.scheduler,
+            target_program_ids: self.target_program_ids,
+            uptime_seconds: self.uptime_seconds,
+            counters: self.counters.clone(),
+            callback_timing_sample_rate: self.callback_timing_sample_rate,
+            event_timing_sample_rate: self.event_timing_sample_rate,
+            callback_timings: self.callback_timings.clone(),
+            scheduler_timings: self.scheduler_timings.clone(),
+            migrations: Vec::new(),
+            cpu_runtime: self.cpu_runtime.clone(),
+            cpu_capacity_loss: self.cpu_capacity_loss.clone(),
+            bpf_program_stats: self.bpf_program_stats.clone(),
+            inspector_bpf_program_stats: self.inspector_bpf_program_stats.clone(),
+            inspector_bpf_cpu_equivalent_pct: self.inspector_bpf_cpu_equivalent_pct,
+            inspector_bpf_host_capacity_pct: self.inspector_bpf_host_capacity_pct,
+            dsq_metrics: self.dsq_metrics.clone(),
+            scheduler_events: self.scheduler_events.clone(),
+            softirqs: self.softirqs.clone(),
+            block_io: self.block_io.clone(),
+            interrupt_cpu: self.interrupt_cpu.clone(),
+            hardirqs: self.hardirqs.clone(),
+            probe_manifest: self.probe_manifest.clone(),
+        }
+    }
+
+    pub fn empty(config: CollectorConfig) -> Self {
+        Self {
+            meta: SampleMeta::default(),
+            collector: ObserverContext::default(),
+            migration_map_capacity: 0,
+            migration_map_failures: 0,
+            migration_quality: "unavailable",
+            scheduler: "scx_mitosis",
+            target_program_ids: [0; 5],
+            uptime_seconds: 0,
+            counters: Vec::new(),
+            callback_timing_sample_rate: config.callback_timing_sample_rate,
+            event_timing_sample_rate: config.event_timing_sample_rate,
+            callback_timings: Vec::new(),
+            scheduler_timings: Vec::new(),
+            migrations: Vec::new(),
+            cpu_runtime: Vec::new(),
+            cpu_capacity_loss: Vec::new(),
+            bpf_program_stats: Vec::new(),
+            inspector_bpf_program_stats: Vec::new(),
+            inspector_bpf_cpu_equivalent_pct: None,
+            inspector_bpf_host_capacity_pct: None,
+            dsq_metrics: DsqMetricsView::default(),
+            scheduler_events: Vec::new(),
+            softirqs: Vec::new(),
+            block_io: BlockIoMetricsView::default(),
+            interrupt_cpu: Vec::new(),
+            hardirqs: HardirqMetricsView::default(),
+            probe_manifest: Vec::new(),
+        }
+    }
+}
+
+fn migration_map_capacity(possible_cpus: usize) -> u32 {
+    possible_cpus
+        .saturating_mul(possible_cpus)
+        .clamp(1, 1_048_576) as u32
+}
+
+fn publish_context(
+    state: &Arc<RwLock<Snapshot>>,
+    history: &Arc<RwLock<MigrationHistory>>,
+    observer: &SharedObserverContext,
+    context: ObserverContext,
+    config: CollectorConfig,
+) {
+    // Every collector writer uses this order. API readers take one lock at a time.
+    let mut snapshot = state.write().expect("snapshot lock poisoned");
+    let mut history = history.write().expect("migration history lock poisoned");
+    let mut observer = observer.write().expect("observer lock poisoned");
+    let last_success = snapshot.meta.last_success_at_unix_ms;
+    *snapshot = Snapshot::empty(config);
+    snapshot.meta.epoch = context.epoch;
+    snapshot.meta.last_success_at_unix_ms = last_success;
+    snapshot.meta.error = context.error.clone();
+    snapshot.collector = context.clone();
+    history.set_context(snapshot.meta.clone(), context.clone(), 0, 0);
+    *observer = context;
+}
+
+fn publish_sample(
+    state: &Arc<RwLock<Snapshot>>,
+    history: &Arc<RwLock<MigrationHistory>>,
+    observer: &SharedObserverContext,
+    snapshot: Snapshot,
+    at_ms: u64,
+) -> Result<()> {
+    publish_sample_inner(state, history, observer, snapshot, at_ms, None)
+}
+
+fn publish_sample_inner(
+    state: &Arc<RwLock<Snapshot>>,
+    history: &Arc<RwLock<MigrationHistory>>,
+    observer: &SharedObserverContext,
+    snapshot: Snapshot,
+    at_ms: u64,
+    pending_reset: Option<&mut Option<PendingReset>>,
+) -> Result<()> {
+    let mut current = state.write().expect("snapshot lock poisoned");
+    let mut history = history.write().expect("migration history lock poisoned");
+    let mut observer = observer.write().expect("observer lock poisoned");
+    if observer.epoch != snapshot.meta.epoch {
+        bail!("collector epoch changed before publishing sample");
+    }
+    if let Some(Some(pending)) = pending_reset.as_ref() {
+        // Check after taking the publication locks: a delayed lock acquisition
+        // must never commit a reset whose HTTP deadline has already elapsed.
+        pending
+            .request
+            .check_deadline(Instant::now())
+            .map_err(anyhow::Error::msg)?;
+        if pending.request.expected_epoch.checked_add(1) != Some(snapshot.meta.epoch)
+            || context_identity(&snapshot.collector).as_ref() != Some(&pending.identity)
+        {
+            bail!("reset epoch or scheduler changed before publication");
+        }
+        if snapshot.meta.sample_seq == 0 || snapshot.collector.status != CollectorStatus::Active {
+            bail!("reset baseline has no active sample");
+        }
+        snapshot
+            .meta
+            .captured_at_unix_ms
+            .context("reset baseline has no capture time")?;
+    }
+    history.set_context(
+        snapshot.meta.clone(),
+        snapshot.collector.clone(),
+        snapshot.migration_map_capacity,
+        snapshot.migration_map_failures,
+    );
+    history.ingest(at_ms, &snapshot.migrations);
+    *observer = snapshot.collector.clone();
+    *current = snapshot;
+    if let Some(pending_reset) = pending_reset {
+        if let Some(pending) = pending_reset.take() {
+            let _ = pending.request.reply.send(Ok(ResetReceipt {
+                epoch: current.meta.epoch,
+                sample_seq: current.meta.sample_seq,
+                reset_at_unix_ms: current
+                    .meta
+                    .captured_at_unix_ms
+                    .expect("validated reset capture time"),
+            }));
+        }
+    }
+    Ok(())
 }
 
 fn probe_manifest(
@@ -229,6 +446,7 @@ fn attach_programs(
         skel.progs.observe_running.attach_trace()?,
         skel.progs.observe_stopping.attach_trace()?,
         skel.progs.on_sched_migrate_task.attach()?,
+        skel.progs.on_sched_switch.attach()?,
     ];
     if config.enable_scheduler_events {
         links.extend([
@@ -259,7 +477,6 @@ fn attach_programs(
         links.extend([
             skel.progs.on_sched_wakeup.attach()?,
             skel.progs.on_sched_wakeup_new.attach()?,
-            skel.progs.on_sched_switch.attach()?,
         ]);
     }
     let dsq_available = config.enable_dsq && attach_dsq_programs(skel, &mut links);
@@ -275,6 +492,46 @@ fn tracepoint_available(group: &str, event: &str) -> bool {
     ]
     .into_iter()
     .any(|root| Path::new(root).join(group).join(event).exists())
+}
+
+fn configure_optional_probes(
+    open_skel: &mut crate::bpf_skel::OpenBpfSkel<'_>,
+    config: CollectorConfig,
+) -> Result<(bool, bool)> {
+    let block_io_supported = configure_block_io_programs(open_skel, config.enable_block_io);
+    let hardirq_supported = configure_hardirq_programs(open_skel, config.enable_irqs);
+    for mut program in open_skel.open_object_mut().progs_mut() {
+        let name = program.name().to_string_lossy();
+        let disabled = (!config.enable_dsq && name.starts_with("dsqo_"))
+            || (!config.enable_scheduler_events && name.starts_with("scheduler_event_"))
+            || (!config.enable_irqs && name.starts_with("sirqo_"))
+            || (!hardirq_supported && name.starts_with("hirqo_"))
+            || (!block_io_supported && name.starts_with("block_io_observer_"))
+            || (config.callback_timing_sample_rate == 0
+                && name.starts_with("observe_")
+                && name.ends_with("_exit"))
+            || (config.event_timing_sample_rate == 0
+                && matches!(name.as_ref(), "on_sched_wakeup" | "on_sched_wakeup_new"));
+        if disabled {
+            program.set_autoload(false);
+        }
+    }
+    for mut map in open_skel.open_object_mut().maps_mut() {
+        let name = map.name().to_string_lossy();
+        let disabled = (!config.enable_dsq && name.starts_with("dsq_"))
+            || (!config.enable_scheduler_events && name.starts_with("scheduler_event_"))
+            || (!config.enable_irqs && name.starts_with("softirq_"))
+            || (!hardirq_supported && name.starts_with("hardirq_"))
+            || (!block_io_supported && name.starts_with("block_io_"))
+            || (config.callback_timing_sample_rate == 0 && name == "callback_timings");
+        if disabled {
+            map.set_autocreate(false)
+                .with_context(|| format!("disabling optional map {:?}", map.name()))?;
+        }
+    }
+    // Callback entries use timing_starts even at rate zero. The mandatory
+    // sched_switch runtime probe also references the task timing maps.
+    Ok((block_io_supported, hardirq_supported))
 }
 
 fn configure_block_io_programs(
@@ -426,7 +683,10 @@ fn read_counts(skel: &BpfSkel<'_>) -> Result<[u64; 5]> {
         .map_err(|_| anyhow::anyhow!("expected five callback counts"))
 }
 
-fn read_scheduler_events(skel: &BpfSkel<'_>) -> Result<[u64; 9]> {
+fn read_scheduler_events(skel: &BpfSkel<'_>, enabled: bool) -> Result<[u64; 9]> {
+    if !enabled {
+        return Ok([0; 9]);
+    }
     const U64_BYTES: usize = std::mem::size_of::<u64>();
     let key = 0_u32.to_ne_bytes();
     let values = skel
@@ -449,7 +709,10 @@ fn read_scheduler_events(skel: &BpfSkel<'_>) -> Result<[u64; 9]> {
     Ok(totals)
 }
 
-fn read_softirq_metrics(skel: &BpfSkel<'_>) -> Result<SoftirqMetricsSnapshot> {
+fn read_softirq_metrics(skel: &BpfSkel<'_>, enabled: bool) -> Result<SoftirqMetricsSnapshot> {
+    if !enabled {
+        return Ok(SoftirqMetricsSnapshot::default());
+    }
     const U64_BYTES: usize = std::mem::size_of::<u64>();
     const FIELD_COUNT: usize = 2 + CALLBACK_TIMING_BUCKETS;
 
@@ -883,7 +1146,10 @@ fn build_interrupt_cpu_rows(
         .collect()
 }
 
-fn read_callback_timings(skel: &BpfSkel<'_>) -> Result<Vec<CallbackTimingCounters>> {
+fn read_callback_timings(skel: &BpfSkel<'_>, enabled: bool) -> Result<Vec<CallbackTimingCounters>> {
+    if !enabled {
+        return Ok(Vec::new());
+    }
     (0..CALLBACK_NAMES.len())
         .map(|index| {
             let key = (index as u32).to_ne_bytes();
@@ -975,6 +1241,24 @@ fn read_migrations(skel: &BpfSkel<'_>) -> Result<Vec<MigrationRow>> {
     Ok(rows)
 }
 
+fn sum_percpu_u64(values: &[Vec<u8>]) -> Result<u64> {
+    values.iter().try_fold(0_u64, |total, value| {
+        if value.len() < 8 {
+            bail!("short per-CPU migration failure counter");
+        }
+        Ok(total.saturating_add(u64::from_ne_bytes(value[..8].try_into()?)))
+    })
+}
+
+fn read_migration_failures(skel: &BpfSkel<'_>) -> Result<u64> {
+    let values = skel
+        .maps
+        .migration_failures
+        .lookup_percpu(&0_u32.to_ne_bytes(), MapFlags::ANY)?
+        .context("migration failure counter missing")?;
+    sum_percpu_u64(&values)
+}
+
 fn read_cpu_runtime(skel: &BpfSkel<'_>) -> Result<CpuRuntimeSnapshot> {
     let key = 0_u32.to_ne_bytes();
     let values = skel
@@ -1044,44 +1328,6 @@ fn read_cpu_runtime(skel: &BpfSkel<'_>) -> Result<CpuRuntimeSnapshot> {
         })
 }
 
-fn reset_inspector_maps(skel: &mut BpfSkel<'_>) -> Result<()> {
-    let cpu_count = libbpf_rs::num_possible_cpus().context("counting possible CPUs")?;
-    for map in skel.object_mut().maps_mut() {
-        let name = map.name().to_string_lossy();
-        if [".rodata", ".data", ".bss", ".kconfig"]
-            .iter()
-            .any(|suffix| name.contains(suffix))
-        {
-            continue;
-        }
-        let keys = map.keys().collect::<Vec<_>>();
-        match map.map_type() {
-            MapType::Array => {
-                let zero = vec![0; map.value_size() as usize];
-                for key in keys {
-                    map.update(&key, &zero, MapFlags::ANY)
-                        .with_context(|| format!("resetting {name}"))?;
-                }
-            }
-            MapType::PercpuArray => {
-                let zeros = vec![vec![0; map.value_size() as usize]; cpu_count];
-                for key in keys {
-                    map.update_percpu(&key, &zeros, MapFlags::ANY)
-                        .with_context(|| format!("resetting {name}"))?;
-                }
-            }
-            MapType::Hash | MapType::PercpuHash | MapType::LruHash | MapType::LruPercpuHash => {
-                for key in keys {
-                    map.delete(&key)
-                        .with_context(|| format!("resetting {name}"))?;
-                }
-            }
-            _ => {}
-        }
-    }
-    Ok(())
-}
-
 fn monotonic_time_ns() -> Result<u64> {
     let mut time = MaybeUninit::<libc::timespec>::uninit();
     if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, time.as_mut_ptr()) } != 0 {
@@ -1100,6 +1346,12 @@ fn read_dsq_metrics(skel: &BpfSkel<'_>, available: bool) -> Result<DsqMetricsVie
     const FIELD_COUNT: usize = 3 + CALLBACK_TIMING_BUCKETS + 4;
     const U64_BYTES: usize = std::mem::size_of::<u64>();
 
+    if !available {
+        return Ok(DsqMetricsView {
+            residence_buckets: vec![0; CALLBACK_TIMING_BUCKETS],
+            ..DsqMetricsView::default()
+        });
+    }
     let key = 0_u32.to_ne_bytes();
     let values = skel
         .maps
@@ -1155,22 +1407,304 @@ fn read_dsq_metrics(skel: &BpfSkel<'_>, available: bool) -> Result<DsqMetricsVie
     })
 }
 
+enum SessionExit {
+    IdentityChanged,
+    Reset(ResetRequest),
+    Shutdown,
+}
+
+struct PendingReset {
+    request: ResetRequest,
+    identity: SchedulerIdentity,
+}
+
+fn fail_reset(pending: &mut Option<PendingReset>, message: &str) {
+    if let Some(pending) = pending.take() {
+        let _ = pending.request.reply.send(Err(message.to_string()));
+    }
+}
+
+fn context_identity(context: &ObserverContext) -> Option<SchedulerIdentity> {
+    Some(SchedulerIdentity {
+        name: context.scheduler_name.clone()?,
+        enable_seq: context.scheduler_enable_seq?,
+    })
+}
+
+fn set_identity(context: &mut ObserverContext, identity: Option<&SchedulerIdentity>) {
+    context.scheduler_name = identity.map(|identity| identity.name.clone());
+    context.scheduler_enable_seq = identity.map(|identity| identity.enable_seq);
+}
+
+fn advance_epoch(context: &mut ObserverContext) -> Result<()> {
+    context.epoch = context
+        .epoch
+        .checked_add(1)
+        .context("collector epoch exhausted")?;
+    Ok(())
+}
+
+fn wait_inactive(
+    commands: &Receiver<CollectorCommand>,
+    shutdown: &AtomicBool,
+    context: &ObserverContext,
+    duration: Duration,
+    expected: Option<&SchedulerIdentity>,
+) -> bool {
+    let deadline = Instant::now() + duration;
+    loop {
+        if shutdown.load(Ordering::Relaxed) {
+            return true;
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return false;
+        }
+        match commands.recv_timeout(remaining.min(Duration::from_secs(1))) {
+            Ok(CollectorCommand::Shutdown) | Err(RecvTimeoutError::Disconnected) => return true,
+            Ok(CollectorCommand::Reset(request)) => {
+                let message = request
+                    .validate(context, Instant::now())
+                    .err()
+                    .unwrap_or_else(|| "collector attachment is unavailable".into());
+                let _ = request.reply.send(Err(message));
+            }
+            Err(RecvTimeoutError::Timeout) => {}
+        }
+        if let Ok(identity) = read_scheduler_identity() {
+            if identity.as_ref() != expected {
+                return false;
+            }
+        }
+    }
+}
+
 pub fn run(
     state: Arc<RwLock<Snapshot>>,
-    migration_history: Arc<RwLock<crate::migration_history::MigrationHistory>>,
+    migration_history: Arc<RwLock<MigrationHistory>>,
+    observer: SharedObserverContext,
+    scheduler_config: Arc<RwLock<SchedulerConfigSnapshot>>,
     shutdown: Arc<AtomicBool>,
-    reset_requested: Arc<AtomicBool>,
-    ready: Sender<Result<()>>,
+    commands: Receiver<CollectorCommand>,
     config: CollectorConfig,
 ) -> Result<()> {
-    let targets = match find_targets() {
-        Ok(targets) => targets,
-        Err(error) => {
-            let message = format!("{error:#}");
-            let _ = ready.send(Err(anyhow::anyhow!(message.clone())));
-            bail!(message);
+    let mut context = observer.read().expect("observer lock poisoned").clone();
+    let mut pending_reset = None;
+    let mut backoff = RetryBackoff::default();
+
+    while !shutdown.load(Ordering::Relaxed) {
+        let identity = match read_scheduler_identity() {
+            Ok(Some(identity)) => identity,
+            Ok(None) => {
+                fail_reset(&mut pending_reset, "scheduler changed while resetting");
+                if context.status != CollectorStatus::Waiting
+                    || context_identity(&context).is_some()
+                {
+                    advance_epoch(&mut context)?;
+                    context.status = CollectorStatus::Waiting;
+                    context.error = None;
+                    set_identity(&mut context, None);
+                    *scheduler_config
+                        .write()
+                        .expect("scheduler config lock poisoned") =
+                        SchedulerConfigSnapshot::default();
+                    publish_context(
+                        &state,
+                        &migration_history,
+                        &observer,
+                        context.clone(),
+                        config,
+                    );
+                }
+                backoff.reset();
+                if wait_inactive(&commands, &shutdown, &context, Duration::from_secs(1), None) {
+                    break;
+                }
+                continue;
+            }
+            Err(error) => {
+                fail_reset(
+                    &mut pending_reset,
+                    &format!("scheduler identity read failed: {error:#}"),
+                );
+                if state
+                    .read()
+                    .expect("snapshot lock poisoned")
+                    .meta
+                    .captured_at_unix_ms
+                    .is_some()
+                {
+                    advance_epoch(&mut context)?;
+                }
+                context.status = CollectorStatus::Error;
+                context.error = Some(format!("scheduler identity read failed: {error:#}"));
+                *scheduler_config
+                    .write()
+                    .expect("scheduler config lock poisoned") = SchedulerConfigSnapshot::default();
+                publish_context(
+                    &state,
+                    &migration_history,
+                    &observer,
+                    context.clone(),
+                    config,
+                );
+                if wait_inactive(
+                    &commands,
+                    &shutdown,
+                    &context,
+                    backoff.next_delay(),
+                    context_identity(&context).as_ref(),
+                ) {
+                    break;
+                }
+                continue;
+            }
+        };
+        if context_identity(&context).as_ref() != Some(&identity) {
+            fail_reset(&mut pending_reset, "scheduler changed while resetting");
+            advance_epoch(&mut context)?;
+            set_identity(&mut context, Some(&identity));
+            backoff.reset();
         }
-    };
+        context.status = if pending_reset.is_some() {
+            CollectorStatus::Resetting
+        } else {
+            CollectorStatus::Attaching
+        };
+        context.error = None;
+        publish_context(
+            &state,
+            &migration_history,
+            &observer,
+            context.clone(),
+            config,
+        );
+
+        // All skeletons, target FDs and links live on this stack. Returning drops
+        // every probe/map before the next scheduler generation or reset is loaded.
+        match run_attachment_session(
+            &state,
+            &migration_history,
+            &observer,
+            &scheduler_config,
+            &shutdown,
+            &commands,
+            &identity,
+            &context,
+            &mut pending_reset,
+            &mut backoff,
+            config,
+        ) {
+            Ok(SessionExit::Shutdown) => break,
+            Ok(SessionExit::IdentityChanged) => {
+                fail_reset(&mut pending_reset, "scheduler changed while resetting");
+                advance_epoch(&mut context)?;
+                set_identity(&mut context, None);
+                context.status = CollectorStatus::Waiting;
+                context.error = None;
+                *scheduler_config
+                    .write()
+                    .expect("scheduler config lock poisoned") = SchedulerConfigSnapshot::default();
+                publish_context(
+                    &state,
+                    &migration_history,
+                    &observer,
+                    context.clone(),
+                    config,
+                );
+                backoff.reset();
+            }
+            Ok(SessionExit::Reset(request)) => {
+                // The session's links/maps were dropped before advertising reset.
+                advance_epoch(&mut context)?;
+                context.status = CollectorStatus::Resetting;
+                context.error = None;
+                *scheduler_config
+                    .write()
+                    .expect("scheduler config lock poisoned") = SchedulerConfigSnapshot::default();
+                publish_context(
+                    &state,
+                    &migration_history,
+                    &observer,
+                    context.clone(),
+                    config,
+                );
+                pending_reset = Some(PendingReset { request, identity });
+                backoff.reset();
+            }
+            Err(error) => {
+                let message = format!("collector attachment failed: {error:#}");
+                fail_reset(&mut pending_reset, &message);
+                if state
+                    .read()
+                    .expect("snapshot lock poisoned")
+                    .meta
+                    .captured_at_unix_ms
+                    .is_some()
+                {
+                    advance_epoch(&mut context)?;
+                }
+                context.status = CollectorStatus::Error;
+                context.error = Some(message.clone());
+                *scheduler_config
+                    .write()
+                    .expect("scheduler config lock poisoned") = SchedulerConfigSnapshot::default();
+                publish_context(
+                    &state,
+                    &migration_history,
+                    &observer,
+                    context.clone(),
+                    config,
+                );
+                eprintln!("{message}");
+                if wait_inactive(
+                    &commands,
+                    &shutdown,
+                    &context,
+                    backoff.next_delay(),
+                    Some(&identity),
+                ) {
+                    break;
+                }
+            }
+        }
+    }
+    fail_reset(&mut pending_reset, "inspector shutting down");
+    while let Ok(command) = commands.try_recv() {
+        if let CollectorCommand::Reset(request) = command {
+            let _ = request.reply.send(Err("inspector shutting down".into()));
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_attachment_session(
+    state: &Arc<RwLock<Snapshot>>,
+    migration_history: &Arc<RwLock<MigrationHistory>>,
+    observer: &SharedObserverContext,
+    scheduler_config: &Arc<RwLock<SchedulerConfigSnapshot>>,
+    shutdown: &AtomicBool,
+    commands: &Receiver<CollectorCommand>,
+    identity: &SchedulerIdentity,
+    context: &ObserverContext,
+    pending_reset: &mut Option<PendingReset>,
+    backoff: &mut RetryBackoff,
+    config: CollectorConfig,
+) -> Result<SessionExit> {
+    if read_scheduler_identity()?.as_ref() != Some(identity) {
+        return Ok(SessionExit::IdentityChanged);
+    }
+    if let Some(pending) = pending_reset {
+        if pending.identity != *identity {
+            bail!("scheduler changed while resetting");
+        }
+        pending
+            .request
+            .check_deadline(Instant::now())
+            .map_err(anyhow::Error::msg)?;
+    }
+    let targets = find_targets()?;
     let target_program_ids = targets.each_ref().map(|target| target.id);
     let existing_program_ids = ProgInfoIter::default()
         .map(|program| program.id)
@@ -1181,8 +1715,8 @@ pub fn run(
         .open(&mut open_object)
         .context("opening callback collector BPF object")?;
     set_targets(&mut open_skel, &targets).context("setting callback attach targets")?;
-    let block_io_supported = configure_block_io_programs(&mut open_skel, config.enable_block_io);
-    let hardirq_supported = configure_hardirq_programs(&mut open_skel, config.enable_irqs);
+    let (block_io_supported, hardirq_supported) =
+        configure_optional_probes(&mut open_skel, config)?;
     let rodata = open_skel
         .maps
         .rodata_data
@@ -1190,7 +1724,14 @@ pub fn run(
         .context("callback collector rodata is unavailable")?;
     rodata.callback_timing_sample_rate = config.callback_timing_sample_rate;
     rodata.event_timing_sample_rate = config.event_timing_sample_rate;
-    let mut skel = open_skel
+    let map_capacity =
+        migration_map_capacity(libbpf_rs::num_possible_cpus().context("counting possible CPUs")?);
+    open_skel
+        .maps
+        .migration_counts
+        .set_max_entries(map_capacity)
+        .context("sizing migration map")?;
+    let skel = open_skel
         .load()
         .context("loading callback collector BPF object")?;
     let inspector_program_ids = ProgInfoIter::default()
@@ -1201,22 +1742,26 @@ pub fn run(
         attach_programs(&skel, config, block_io_supported, hardirq_supported)
             .context("attaching callback observer programs")?;
 
-    let mut started = Instant::now();
+    if read_scheduler_identity()?.as_ref() != Some(identity) {
+        return Ok(SessionExit::IdentityChanged);
+    }
+    if shutdown.load(Ordering::Relaxed) {
+        return Ok(SessionExit::Shutdown);
+    }
+    let started = Instant::now();
     let mut previous = read_counts(&skel)?;
-    let mut previous_scheduler_events = read_scheduler_events(&skel)?;
-    let mut previous_softirqs = read_softirq_metrics(&skel)?;
+    let mut previous_scheduler_events =
+        read_scheduler_events(&skel, config.enable_scheduler_events)?;
+    let mut previous_softirqs = read_softirq_metrics(&skel, config.enable_irqs)?;
     let mut previous_block_io = read_block_io_metrics(&skel, block_io_available)?;
     let mut previous_hardirqs = read_hardirq_metrics(&skel, hardirq_available)?;
     let irq_names = read_irq_names();
-    let callback_timings = read_callback_timings(&skel)?;
+    let callback_timings = read_callback_timings(&skel, config.callback_timing_sample_rate > 0)?;
     let wakeup_latency = read_wakeup_latency(&skel)?;
     let cpu_slice_duration = read_cpu_slice_duration(&skel)?;
     let blocked_duration = read_blocked_duration(&skel)?;
     let migrations = read_migrations(&skel)?;
-    migration_history
-        .write()
-        .expect("migration history lock poisoned")
-        .ingest(0, &migrations);
+    let migration_failures = read_migration_failures(&skel)?;
     let mut previous_cpu_runtime = read_cpu_runtime(&skel)?;
     let mut previous_cpu_stat = read_per_cpu_stat().unwrap_or_default();
     let bpf_program_stats = query_bpf_program_stats(&target_program_ids);
@@ -1230,112 +1775,172 @@ pub fn run(
         .sum::<u64>();
     let dsq_metrics = read_dsq_metrics(&skel, dsq_available)?;
     let mut previous_at = Instant::now();
-    {
-        let mut snapshot = state.write().expect("snapshot lock poisoned");
-        *snapshot = Snapshot {
-            scheduler: "scx_mitosis",
-            target_program_ids,
-            uptime_seconds: 0,
-            counters: build_counters(previous, previous, Duration::ZERO),
-            callback_timing_sample_rate: config.callback_timing_sample_rate,
-            event_timing_sample_rate: config.event_timing_sample_rate,
-            callback_timings: build_callback_timing_rows(&callback_timings),
-            scheduler_timings: vec![
-                build_timing_metric_row("wakeup_to_running", &wakeup_latency),
-                build_timing_metric_row("on_cpu_slice", &cpu_slice_duration),
-                build_timing_metric_row("blocked_off_cpu", &blocked_duration),
-            ],
-            migrations,
-            cpu_runtime: build_cpu_runtime_rows(
-                &previous_cpu_runtime.busy_ns,
-                &previous_cpu_runtime.busy_ns,
-                Duration::ZERO,
-            ),
-            cpu_capacity_loss: build_cpu_capacity_loss_rows(
-                &previous_cpu_runtime.rt_stop_ns,
-                &previous_cpu_runtime.rt_stop_ns,
-                &previous_cpu_runtime.deadline_ns,
-                &previous_cpu_runtime.deadline_ns,
-                &vec![0.0; previous_cpu_runtime.busy_ns.len()],
-                Duration::ZERO,
-            ),
-            bpf_program_stats,
-            inspector_bpf_program_stats,
-            inspector_bpf_cpu_equivalent_pct: None,
-            inspector_bpf_host_capacity_pct: None,
-            dsq_metrics,
-            scheduler_events: build_scheduler_event_rows(
-                previous_scheduler_events,
-                previous_scheduler_events,
-                Duration::ZERO,
-            ),
-            softirqs: build_softirq_rows(
-                &previous_softirqs.rows,
-                &previous_softirqs.rows,
-                Duration::ZERO,
-            ),
-            block_io: build_block_io_view(
-                &previous_block_io,
-                &previous_block_io,
-                Duration::ZERO,
-                block_io_available,
-            ),
-            interrupt_cpu: build_interrupt_cpu_rows(
-                &previous_softirqs,
-                &previous_softirqs,
-                &previous_hardirqs,
-                &previous_hardirqs,
-                Duration::ZERO,
-            ),
-            hardirqs: build_hardirq_view(
-                &previous_hardirqs,
-                &previous_hardirqs,
-                Duration::ZERO,
-                hardirq_available,
-                &irq_names,
-            ),
-            probe_manifest: probe_manifest(
-                config,
-                dsq_available,
-                block_io_available,
-                hardirq_available,
-                inspector_stats_enabled,
-            ),
-        };
+    let discovered_config = crate::scheduler_config::discover();
+    if read_scheduler_identity()?.as_ref() != Some(identity) {
+        return Ok(SessionExit::IdentityChanged);
     }
-    ready
-        .send(Ok(()))
-        .context("reporting collector readiness")?;
+    if shutdown.load(Ordering::Relaxed) {
+        return Ok(SessionExit::Shutdown);
+    }
+    if let Some(pending) = pending_reset {
+        pending
+            .request
+            .check_deadline(Instant::now())
+            .map_err(anyhow::Error::msg)?;
+    }
+    let mut active_context = context.clone();
+    active_context.status = CollectorStatus::Active;
+    active_context.error = None;
+    let captured_at = unix_ms();
+    let mut sample_meta = SampleMeta {
+        epoch: context.epoch,
+        sample_seq: 1,
+        captured_at_unix_ms: Some(captured_at),
+        last_success_at_unix_ms: Some(captured_at),
+        error: None,
+    };
+    let snapshot = Snapshot {
+        meta: sample_meta.clone(),
+        collector: active_context.clone(),
+        migration_map_capacity: map_capacity,
+        migration_map_failures: migration_failures,
+        migration_quality: if migration_failures > 0 {
+            "incomplete"
+        } else {
+            "complete"
+        },
+        scheduler: "scx_mitosis",
+        target_program_ids,
+        uptime_seconds: 0,
+        counters: build_counters(previous, previous, Duration::ZERO),
+        callback_timing_sample_rate: config.callback_timing_sample_rate,
+        event_timing_sample_rate: config.event_timing_sample_rate,
+        callback_timings: build_callback_timing_rows(&callback_timings),
+        scheduler_timings: vec![
+            build_timing_metric_row("wakeup_to_running", &wakeup_latency),
+            build_timing_metric_row("on_cpu_slice", &cpu_slice_duration),
+            build_timing_metric_row("blocked_off_cpu", &blocked_duration),
+        ],
+        migrations,
+        cpu_runtime: build_cpu_runtime_rows(
+            &previous_cpu_runtime.busy_ns,
+            &previous_cpu_runtime.busy_ns,
+            Duration::ZERO,
+        ),
+        cpu_capacity_loss: build_cpu_capacity_loss_rows(
+            &previous_cpu_runtime.rt_stop_ns,
+            &previous_cpu_runtime.rt_stop_ns,
+            &previous_cpu_runtime.deadline_ns,
+            &previous_cpu_runtime.deadline_ns,
+            &vec![0.0; previous_cpu_runtime.busy_ns.len()],
+            Duration::ZERO,
+        ),
+        bpf_program_stats,
+        inspector_bpf_program_stats,
+        inspector_bpf_cpu_equivalent_pct: None,
+        inspector_bpf_host_capacity_pct: None,
+        dsq_metrics,
+        scheduler_events: if config.enable_scheduler_events {
+            build_scheduler_event_rows(
+                previous_scheduler_events,
+                previous_scheduler_events,
+                Duration::ZERO,
+            )
+        } else {
+            Vec::new()
+        },
+        softirqs: build_softirq_rows(
+            &previous_softirqs.rows,
+            &previous_softirqs.rows,
+            Duration::ZERO,
+        ),
+        block_io: build_block_io_view(
+            &previous_block_io,
+            &previous_block_io,
+            Duration::ZERO,
+            block_io_available,
+        ),
+        interrupt_cpu: build_interrupt_cpu_rows(
+            &previous_softirqs,
+            &previous_softirqs,
+            &previous_hardirqs,
+            &previous_hardirqs,
+            Duration::ZERO,
+        ),
+        hardirqs: build_hardirq_view(
+            &previous_hardirqs,
+            &previous_hardirqs,
+            Duration::ZERO,
+            hardirq_available,
+            &irq_names,
+        ),
+        probe_manifest: probe_manifest(
+            config,
+            dsq_available,
+            block_io_available,
+            hardirq_available,
+            inspector_stats_enabled,
+        ),
+    };
+    *scheduler_config
+        .write()
+        .expect("scheduler config lock poisoned") = discovered_config;
+    if read_scheduler_identity()?.as_ref() != Some(identity) {
+        return Ok(SessionExit::IdentityChanged);
+    }
+    publish_sample_inner(
+        state,
+        migration_history,
+        observer,
+        snapshot,
+        0,
+        Some(pending_reset),
+    )?;
+    backoff.reset();
 
     while !shutdown.load(Ordering::Relaxed) {
-        thread::sleep(Duration::from_secs(1));
-        if reset_requested.swap(false, Ordering::AcqRel) {
-            if let Err(error) = reset_inspector_maps(&mut skel) {
-                eprintln!("Inspector stats reset failed: {error:#}");
-            } else {
-                started = Instant::now();
-                previous_at = started;
-                previous_cpu_stat = read_per_cpu_stat().unwrap_or_default();
+        match commands.recv_timeout(Duration::from_secs(1)) {
+            Ok(CollectorCommand::Shutdown) | Err(RecvTimeoutError::Disconnected) => {
+                return Ok(SessionExit::Shutdown)
             }
+            Ok(CollectorCommand::Reset(request)) => {
+                if let Err(message) = request.validate(&active_context, Instant::now()) {
+                    let _ = request.reply.send(Err(message));
+                    continue;
+                }
+                if read_scheduler_identity()?.as_ref() != Some(identity) {
+                    let _ = request
+                        .reply
+                        .send(Err("scheduler changed before reset".into()));
+                    return Ok(SessionExit::IdentityChanged);
+                }
+                request
+                    .check_deadline(Instant::now())
+                    .map_err(anyhow::Error::msg)?;
+                return Ok(SessionExit::Reset(request));
+            }
+            Err(RecvTimeoutError::Timeout) => {}
+        }
+        if shutdown.load(Ordering::Relaxed) {
+            return Ok(SessionExit::Shutdown);
+        }
+        if read_scheduler_identity()?.as_ref() != Some(identity) {
+            return Ok(SessionExit::IdentityChanged);
         }
         let now = Instant::now();
         let current = read_counts(&skel)?;
-        let current_scheduler_events = read_scheduler_events(&skel)?;
-        let current_softirqs = read_softirq_metrics(&skel)?;
+        let current_scheduler_events =
+            read_scheduler_events(&skel, config.enable_scheduler_events)?;
+        let current_softirqs = read_softirq_metrics(&skel, config.enable_irqs)?;
         let current_block_io = read_block_io_metrics(&skel, block_io_available)?;
         let current_hardirqs = read_hardirq_metrics(&skel, hardirq_available)?;
-        let callback_timings = read_callback_timings(&skel)?;
+        let callback_timings =
+            read_callback_timings(&skel, config.callback_timing_sample_rate > 0)?;
         let wakeup_latency = read_wakeup_latency(&skel)?;
         let cpu_slice_duration = read_cpu_slice_duration(&skel)?;
         let blocked_duration = read_blocked_duration(&skel)?;
         let migrations = read_migrations(&skel)?;
-        migration_history
-            .write()
-            .expect("migration history lock poisoned")
-            .ingest(
-                u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
-                &migrations,
-            );
+        let migration_failures = read_migration_failures(&skel)?;
         let current_cpu_runtime = read_cpu_runtime(&skel)?;
         let current_cpu_stat = read_per_cpu_stat().unwrap_or_else(|_| previous_cpu_stat.clone());
         let bpf_program_stats = query_bpf_program_stats(&target_program_ids);
@@ -1356,7 +1961,7 @@ pub fn run(
         });
         let counters = build_counters(current, previous, elapsed);
         previous = current;
-        let mut snapshot = state.write().expect("snapshot lock poisoned");
+        let mut snapshot = state.read().expect("snapshot lock poisoned").clone();
         snapshot.uptime_seconds = started.elapsed().as_secs();
         snapshot.counters = counters;
         snapshot.callback_timings = build_callback_timing_rows(&callback_timings);
@@ -1393,11 +1998,11 @@ pub fn run(
             .map(|percentage| percentage / previous_cpu_runtime.busy_ns.len().max(1) as f64);
         previous_inspector_runtime_ns = inspector_runtime_ns;
         snapshot.dsq_metrics = dsq_metrics;
-        snapshot.scheduler_events = build_scheduler_event_rows(
-            current_scheduler_events,
-            previous_scheduler_events,
-            elapsed,
-        );
+        snapshot.scheduler_events = if config.enable_scheduler_events {
+            build_scheduler_event_rows(current_scheduler_events, previous_scheduler_events, elapsed)
+        } else {
+            Vec::new()
+        };
         previous_scheduler_events = current_scheduler_events;
         snapshot.softirqs =
             build_softirq_rows(&current_softirqs.rows, &previous_softirqs.rows, elapsed);
@@ -1432,13 +2037,720 @@ pub fn run(
         previous_softirqs = current_softirqs;
         previous_hardirqs = current_hardirqs;
         previous_at = now;
+        if read_scheduler_identity()?.as_ref() != Some(identity) {
+            return Ok(SessionExit::IdentityChanged);
+        }
+        if shutdown.load(Ordering::Relaxed) {
+            return Ok(SessionExit::Shutdown);
+        }
+        let captured_at = unix_ms();
+        sample_meta.sample_seq = sample_meta
+            .sample_seq
+            .checked_add(1)
+            .context("collector sample sequence exhausted")?;
+        sample_meta.captured_at_unix_ms = Some(captured_at);
+        sample_meta.last_success_at_unix_ms = Some(captured_at);
+        snapshot.meta = sample_meta.clone();
+        snapshot.collector = active_context.clone();
+        snapshot.migration_map_failures = migration_failures;
+        snapshot.migration_quality = if migration_failures > 0 {
+            "incomplete"
+        } else {
+            "complete"
+        };
+        publish_sample(
+            state,
+            migration_history,
+            observer,
+            snapshot,
+            u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        )?;
+        backoff.reset();
     }
-    Ok(())
+    Ok(SessionExit::Shutdown)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{build_steal_utilization, parse_irq_names, parse_per_cpu_stat};
+    use super::{
+        build_steal_utilization, migration_map_capacity, parse_irq_names, parse_per_cpu_stat,
+    };
+
+    #[test]
+    fn replay_projection_preserves_all_counter_fields_without_allocating_migrations() {
+        let mut snapshot = super::Snapshot::empty(super::CollectorConfig {
+            callback_timing_sample_rate: 1024,
+            event_timing_sample_rate: 64,
+            enable_dsq: true,
+            enable_scheduler_events: true,
+            enable_irqs: true,
+            enable_block_io: true,
+        });
+        snapshot.migrations.push(crate::MigrationRow {
+            from_cpu: 1,
+            to_cpu: 2,
+            count: 99,
+        });
+        let projected = snapshot.compact_clone_without_migrations();
+        let mut expected = serde_json::to_value(&snapshot).unwrap();
+        expected["migrations"] = serde_json::json!([]);
+        assert_eq!(serde_json::to_value(&projected).unwrap(), expected);
+        assert_eq!(projected.migrations.capacity(), 0);
+        assert_eq!(snapshot.migrations.len(), 1);
+    }
+
+    #[test]
+    fn migration_map_retains_all_possible_pairs_until_the_memory_cap() {
+        assert_eq!(migration_map_capacity(160), 25_600);
+        assert_eq!(migration_map_capacity(1024), 1_048_576);
+        assert_eq!(migration_map_capacity(4096), 1_048_576);
+        assert_eq!(migration_map_capacity(usize::MAX), 1_048_576);
+        assert_eq!(migration_map_capacity(1), 1);
+        assert_eq!(migration_map_capacity(0), 1);
+    }
+
+    #[test]
+    fn native_migration_observer_handles_origin_races_and_map_exhaustion() {
+        let executable =
+            std::env::temp_dir().join(format!("mitosis-migration-test-{}", std::process::id()));
+        let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/migration_observer_test.c");
+        let compilation = std::process::Command::new("cc")
+            .args(["-std=c11", "-Wall", "-Wextra"])
+            .arg(source)
+            .arg("-o")
+            .arg(&executable)
+            .output()
+            .unwrap();
+        assert!(
+            compilation.status.success(),
+            "{}",
+            String::from_utf8_lossy(&compilation.stderr)
+        );
+        let result = std::process::Command::new(&executable).output().unwrap();
+        let _ = std::fs::remove_file(executable);
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+
+    #[test]
+    fn native_task_timing_excludes_idle_running_wakeups_and_preempted_blocking() {
+        let executable =
+            std::env::temp_dir().join(format!("mitosis-task-timing-test-{}", std::process::id()));
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let compilation = std::process::Command::new("cc")
+            .args(["-std=gnu11", "-Wall", "-Wextra", "-Wno-unused-parameter"])
+            .arg("-I")
+            .arg(root.join("tests/native_bpf_stubs"))
+            .arg(root.join("tests/task_timing_observer_test.c"))
+            .arg("-o")
+            .arg(&executable)
+            .output()
+            .unwrap();
+        assert!(
+            compilation.status.success(),
+            "{}",
+            String::from_utf8_lossy(&compilation.stderr)
+        );
+        for case in [
+            "idle",
+            "wakeup",
+            "preempt",
+            "blocked",
+            "switch_bins",
+            "runtime",
+            "buckets",
+        ] {
+            let result = std::process::Command::new(&executable)
+                .arg(case)
+                .output()
+                .unwrap();
+            assert!(
+                result.status.success(),
+                "{case}: {}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+        }
+        let _ = std::fs::remove_file(executable);
+    }
+
+    #[test]
+    #[ignore = "Manual native CoreCollector smoke requires BPF observation privileges and an already-running Mitosis scheduler"]
+    fn native_disabled_optional_groups_collect_initial_and_poll() {
+        use super::*;
+
+        let identity = read_scheduler_identity()
+            .unwrap()
+            .expect("native smoke requires an already-running Mitosis scheduler");
+        let config = CollectorConfig {
+            callback_timing_sample_rate: 0,
+            event_timing_sample_rate: 0,
+            enable_dsq: false,
+            enable_scheduler_events: false,
+            enable_irqs: false,
+            enable_block_io: false,
+        };
+        let context = ObserverContext {
+            epoch: 1,
+            status: CollectorStatus::Attaching,
+            scheduler_enable_seq: Some(identity.enable_seq),
+            scheduler_name: Some(identity.name.clone()),
+            error: None,
+        };
+        let state = Arc::new(RwLock::new(Snapshot::empty(config)));
+        let history = Arc::new(RwLock::new(MigrationHistory::new(10_000)));
+        let observer = Arc::new(RwLock::new(context.clone()));
+        let scheduler_config = Arc::new(RwLock::new(SchedulerConfigSnapshot::default()));
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let (commands, receiver) = std::sync::mpsc::channel();
+        let session_state = state.clone();
+        let session_shutdown = shutdown.clone();
+        let session_identity = identity.clone();
+        let worker = std::thread::spawn(move || {
+            run_attachment_session(
+                &session_state,
+                &history,
+                &observer,
+                &scheduler_config,
+                &session_shutdown,
+                &receiver,
+                &session_identity,
+                &context,
+                &mut None,
+                &mut RetryBackoff::default(),
+                config,
+            )
+        });
+        let deadline = Instant::now() + Duration::from_secs(8);
+        let mut samples = Vec::new();
+        while Instant::now() < deadline && !worker.is_finished() {
+            let sample = state.read().unwrap().clone();
+            if sample.meta.sample_seq
+                > samples
+                    .last()
+                    .map_or(0, |previous: &Snapshot| previous.meta.sample_seq)
+            {
+                println!("native CoreCollector sample_seq={}", sample.meta.sample_seq);
+                samples.push(sample);
+            }
+            if samples
+                .last()
+                .is_some_and(|sample| sample.meta.sample_seq >= 2)
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        // Teardown precedes assertions, including timeout/error assertions.
+        let _ = commands.send(CollectorCommand::Shutdown);
+        shutdown.store(true, Ordering::Relaxed);
+        let result = worker.join().expect("native CoreCollector panicked");
+        assert!(
+            result.is_ok(),
+            "native CoreCollector failed: {:?}",
+            result.err()
+        );
+        assert_eq!(
+            samples.first().map(|sample| sample.meta.sample_seq),
+            Some(1)
+        );
+        assert!(samples
+            .last()
+            .is_some_and(|sample| sample.meta.sample_seq >= 2));
+        assert_eq!(read_scheduler_identity().unwrap(), Some(identity));
+        for sample in samples {
+            assert_eq!(sample.collector.status, CollectorStatus::Active);
+            assert_eq!(sample.counters.len(), 5);
+            assert!(!sample.cpu_runtime.is_empty());
+            assert!(!sample.dsq_metrics.available);
+            assert_eq!(sample.dsq_metrics.insert_count, 0);
+            assert_eq!(sample.dsq_metrics.move_count, 0);
+            assert_eq!(sample.dsq_metrics.residence_samples, 0);
+            assert_eq!(sample.dsq_metrics.residence_buckets, vec![0; 64]);
+            assert!(sample.dsq_metrics.residence_mean_ns.is_none());
+            assert!(sample.dsq_metrics.depth_average.is_none());
+            assert!(sample.scheduler_events.is_empty());
+            assert!(sample.callback_timings.is_empty());
+            assert!(sample.softirqs.is_empty());
+            assert!(sample.hardirqs.rows.is_empty());
+            assert!(!sample.hardirqs.available);
+            assert!(!sample.block_io.available);
+        }
+    }
+
+    #[test]
+    fn enabled_probe_configuration_keeps_the_core_counts_and_runtime_dependencies() {
+        use super::*;
+
+        let mut object = MaybeUninit::<OpenObject>::uninit();
+        let mut skel = BpfSkelBuilder::default().open(&mut object).unwrap();
+        let config = test_config();
+        configure_optional_probes(&mut skel, config).unwrap();
+        for program in skel.open_object().progs().filter(|program| {
+            matches!(
+                program.name().to_str(),
+                Some(
+                    "observe_select_cpu"
+                        | "observe_enqueue"
+                        | "observe_dispatch"
+                        | "observe_running"
+                        | "observe_stopping"
+                        | "on_sched_switch"
+                        | "on_sched_migrate_task"
+                )
+            )
+        }) {
+            assert!(program.autoload(), "{:?}", program.name());
+        }
+        for map in skel.open_object().maps().filter(|map| {
+            matches!(
+                map.name().to_str(),
+                Some(
+                    "callback_counts"
+                        | "callback_timing_starts"
+                        | "cpu_runtime"
+                        | "migration_counts"
+                        | "migration_failures"
+                        | "task_observations"
+                        | "wakeup_latency"
+                        | "cpu_slice_duration"
+                        | "blocked_duration"
+                )
+            )
+        }) {
+            assert!(map.autocreate(), "{:?}", map.name());
+        }
+    }
+
+    fn inspect_probe_configuration(
+        config: super::CollectorConfig,
+        check: impl FnOnce(&crate::bpf_skel::OpenBpfSkel<'_>, bool, bool),
+    ) {
+        use super::*;
+
+        let mut object = MaybeUninit::<OpenObject>::uninit();
+        let mut skel = BpfSkelBuilder::default().open(&mut object).unwrap();
+        let (block_io, hardirq) = configure_optional_probes(&mut skel, config).unwrap();
+        check(&skel, block_io, hardirq);
+    }
+
+    fn assert_probe_group_flags(
+        skel: &crate::bpf_skel::OpenBpfSkel<'_>,
+        program_prefix: &str,
+        map_prefix: &str,
+        enabled: bool,
+    ) {
+        use libbpf_rs::skel::OpenSkel;
+
+        let programs: Vec<_> = skel
+            .open_object()
+            .progs()
+            .filter(|program| program.name().to_string_lossy().starts_with(program_prefix))
+            .collect();
+        assert!(!programs.is_empty(), "missing {program_prefix} programs");
+        for program in programs {
+            assert_eq!(program.autoload(), enabled, "{:?}", program.name());
+        }
+        let maps: Vec<_> = skel
+            .open_object()
+            .maps()
+            .filter(|map| map.name().to_string_lossy().starts_with(map_prefix))
+            .collect();
+        assert!(!maps.is_empty(), "missing {map_prefix} maps");
+        for map in maps {
+            assert_eq!(map.autocreate(), enabled, "{:?}", map.name());
+        }
+    }
+
+    #[test]
+    fn disabled_dsq_probes_skip_program_load_and_map_creation() {
+        let config = super::CollectorConfig {
+            enable_dsq: false,
+            ..test_config()
+        };
+        inspect_probe_configuration(config, |skel, _, _| {
+            assert_probe_group_flags(skel, "dsqo_", "dsq_", false);
+        });
+    }
+
+    #[test]
+    fn disabled_scheduler_activity_skips_program_load_and_map_creation() {
+        let config = super::CollectorConfig {
+            enable_scheduler_events: false,
+            ..test_config()
+        };
+        inspect_probe_configuration(config, |skel, _, _| {
+            assert_probe_group_flags(skel, "scheduler_event_", "scheduler_event_", false);
+        });
+    }
+
+    #[test]
+    fn disabled_softirqs_skip_program_load_and_map_creation() {
+        let config = super::CollectorConfig {
+            enable_irqs: false,
+            ..test_config()
+        };
+        inspect_probe_configuration(config, |skel, _, _| {
+            assert_probe_group_flags(skel, "sirqo_", "softirq_", false);
+        });
+    }
+
+    #[test]
+    fn disabled_hardirqs_omit_the_per_cpu_histogram_maps() {
+        let config = super::CollectorConfig {
+            enable_irqs: false,
+            ..test_config()
+        };
+        inspect_probe_configuration(config, |skel, _, supported| {
+            assert!(!supported);
+            assert_probe_group_flags(skel, "hirqo_", "hardirq_", false);
+        });
+    }
+
+    #[test]
+    fn disabled_block_io_omits_the_request_tracking_and_histogram_maps() {
+        let config = super::CollectorConfig {
+            enable_block_io: false,
+            ..test_config()
+        };
+        inspect_probe_configuration(config, |skel, supported, _| {
+            assert!(!supported);
+            assert_probe_group_flags(skel, "block_io_observer_", "block_io_", false);
+        });
+    }
+
+    #[test]
+    fn disabled_callback_timing_omits_exits_and_keeps_counter_dependencies() {
+        let config = super::CollectorConfig {
+            callback_timing_sample_rate: 0,
+            ..test_config()
+        };
+        inspect_probe_configuration(config, |skel, _, _| {
+            assert!(!skel.progs.observe_select_cpu_exit.autoload());
+            assert!(!skel.progs.observe_enqueue_exit.autoload());
+            assert!(!skel.progs.observe_dispatch_exit.autoload());
+            assert!(!skel.progs.observe_running_exit.autoload());
+            assert!(!skel.progs.observe_stopping_exit.autoload());
+            assert!(!skel.maps.callback_timings.autocreate());
+            assert!(skel.progs.observe_enqueue.autoload());
+            assert!(skel.maps.callback_counts.autocreate());
+            assert!(skel.maps.callback_timing_starts.autocreate());
+        });
+    }
+
+    #[test]
+    fn disabled_event_timing_keeps_runtime_and_omits_wakeup_programs() {
+        let config = super::CollectorConfig {
+            event_timing_sample_rate: 0,
+            ..test_config()
+        };
+        inspect_probe_configuration(config, |skel, _, _| {
+            assert!(!skel.progs.on_sched_wakeup.autoload());
+            assert!(!skel.progs.on_sched_wakeup_new.autoload());
+            assert!(skel.progs.on_sched_switch.autoload());
+            assert!(skel.maps.cpu_runtime.autocreate());
+            assert!(skel.maps.task_observations.autocreate());
+            assert!(skel.maps.cpu_slice_duration.autocreate());
+        });
+    }
+
+    #[test]
+    fn independent_probe_switches_preserve_all_loaded_map_dependencies() {
+        for bits in 0..64 {
+            let config = super::CollectorConfig {
+                enable_dsq: bits & 1 != 0,
+                enable_scheduler_events: bits & 2 != 0,
+                enable_irqs: bits & 4 != 0,
+                enable_block_io: bits & 8 != 0,
+                callback_timing_sample_rate: u32::from(bits & 16 != 0),
+                event_timing_sample_rate: u32::from(bits & 32 != 0),
+            };
+            inspect_probe_configuration(config, |skel, block_io, hardirq| {
+                assert_probe_group_flags(skel, "dsqo_", "dsq_", config.enable_dsq);
+                assert_probe_group_flags(
+                    skel,
+                    "scheduler_event_",
+                    "scheduler_event_",
+                    config.enable_scheduler_events,
+                );
+                assert_probe_group_flags(skel, "sirqo_", "softirq_", config.enable_irqs);
+                assert_probe_group_flags(skel, "hirqo_", "hardirq_", hardirq);
+                assert_probe_group_flags(skel, "block_io_observer_", "block_io_", block_io);
+                assert_eq!(
+                    skel.progs.observe_enqueue_exit.autoload(),
+                    config.callback_timing_sample_rate > 0,
+                );
+                assert_eq!(
+                    skel.maps.callback_timings.autocreate(),
+                    config.callback_timing_sample_rate > 0,
+                );
+                assert_eq!(
+                    skel.progs.on_sched_wakeup.autoload(),
+                    config.event_timing_sample_rate > 0,
+                );
+                assert!(skel.progs.observe_enqueue.autoload());
+                assert!(skel.progs.on_sched_switch.autoload());
+                assert!(skel.maps.callback_counts.autocreate());
+                assert!(skel.maps.callback_timing_starts.autocreate());
+                assert!(skel.maps.cpu_runtime.autocreate());
+                assert!(skel.maps.task_observations.autocreate());
+                assert!(skel.maps.wakeup_latency.autocreate());
+                assert!(skel.maps.cpu_slice_duration.autocreate());
+                assert!(skel.maps.blocked_duration.autocreate());
+            });
+        }
+    }
+
+    fn test_config() -> super::CollectorConfig {
+        super::CollectorConfig {
+            callback_timing_sample_rate: 1,
+            event_timing_sample_rate: 1,
+            enable_dsq: true,
+            enable_scheduler_events: true,
+            enable_irqs: true,
+            enable_block_io: true,
+        }
+    }
+
+    #[test]
+    fn reset_refuses_stale_expired_inactive_and_abandoned_requests() {
+        use super::*;
+        let now = Instant::now();
+        let mut context = ObserverContext {
+            epoch: 7,
+            status: CollectorStatus::Active,
+            ..ObserverContext::default()
+        };
+        let (reply, receiver) = oneshot::channel();
+        let mut request = ResetRequest {
+            expected_epoch: 6,
+            deadline: now + Duration::from_secs(15),
+            reply,
+        };
+        assert!(request
+            .validate(&context, now)
+            .unwrap_err()
+            .contains("epoch"));
+        request.expected_epoch = 7;
+        assert!(request
+            .validate(&context, now + Duration::from_secs(15))
+            .unwrap_err()
+            .contains("expired"));
+        context.status = CollectorStatus::Waiting;
+        assert!(request.validate(&context, now).is_err());
+        context.status = CollectorStatus::Active;
+        assert!(request.validate(&context, now).is_ok());
+        drop(receiver);
+        assert!(request
+            .validate(&context, now)
+            .unwrap_err()
+            .contains("cancel"));
+    }
+
+    #[test]
+    fn invalidation_clears_counters_and_history_together_and_keeps_last_success() {
+        use super::*;
+        use crate::migration_history::MigrationHistory;
+        let config = test_config();
+        let mut snapshot = Snapshot::empty(config);
+        snapshot.meta.epoch = 1;
+        snapshot.meta.sample_seq = 5;
+        snapshot.meta.captured_at_unix_ms = Some(2000);
+        snapshot.meta.last_success_at_unix_ms = Some(2000);
+        snapshot.migrations = vec![MigrationRow {
+            from_cpu: 0,
+            to_cpu: 1,
+            count: 9,
+        }];
+        let state = Arc::new(RwLock::new(snapshot));
+        let history = Arc::new(RwLock::new(MigrationHistory::new(5000)));
+        let observer = Arc::new(RwLock::new(ObserverContext::default()));
+        let context = ObserverContext {
+            epoch: 2,
+            status: CollectorStatus::Error,
+            error: Some("map read failed".into()),
+            ..ObserverContext::default()
+        };
+        publish_context(&state, &history, &observer, context.clone(), config);
+        let snapshot = state.read().unwrap();
+        let view = history.read().unwrap().view(5000).unwrap();
+        assert!(snapshot.migrations.is_empty());
+        assert_eq!(snapshot.meta.epoch, 2);
+        assert_eq!(snapshot.meta.sample_seq, 0);
+        assert_eq!(snapshot.meta.captured_at_unix_ms, None);
+        assert_eq!(snapshot.meta.last_success_at_unix_ms, Some(2000));
+        assert_eq!(snapshot.meta.error.as_deref(), Some("map read failed"));
+        assert_eq!(snapshot.meta, view.meta);
+        assert_eq!(snapshot.collector, context);
+        assert_eq!(*observer.read().unwrap(), context);
+    }
+
+    #[test]
+    fn reset_receipt_requires_fresh_epoch_publication_and_expired_reset_cannot_commit() {
+        use super::*;
+        let config = test_config();
+        let state = Arc::new(RwLock::new(Snapshot::empty(config)));
+        let history = Arc::new(RwLock::new(MigrationHistory::new(5000)));
+        let context = ObserverContext {
+            epoch: 8,
+            status: CollectorStatus::Resetting,
+            scheduler_name: Some("mitosis".into()),
+            scheduler_enable_seq: Some(5),
+            error: None,
+        };
+        let observer = Arc::new(RwLock::new(context.clone()));
+        let identity = SchedulerIdentity {
+            name: "mitosis".into(),
+            enable_seq: 5,
+        };
+        let (reply, mut receipt) = oneshot::channel();
+        let mut pending = Some(PendingReset {
+            identity: identity.clone(),
+            request: ResetRequest {
+                expected_epoch: 7,
+                deadline: Instant::now() + Duration::from_secs(15),
+                reply,
+            },
+        });
+        let mut snapshot = Snapshot::empty(config);
+        snapshot.collector = context;
+        snapshot.collector.status = CollectorStatus::Active;
+        snapshot.meta = SampleMeta {
+            epoch: 8,
+            sample_seq: 1,
+            captured_at_unix_ms: Some(2000),
+            last_success_at_unix_ms: Some(2000),
+            error: None,
+        };
+        assert!(receipt.try_recv().is_err());
+        publish_sample_inner(
+            &state,
+            &history,
+            &observer,
+            snapshot.clone(),
+            0,
+            Some(&mut pending),
+        )
+        .unwrap();
+        let receipt = receipt.try_recv().unwrap().unwrap();
+        assert_eq!(receipt.epoch, 8);
+        assert_eq!(receipt.sample_seq, 1);
+        assert_eq!(receipt.reset_at_unix_ms, 2000);
+        assert_eq!(
+            state.read().unwrap().meta,
+            history.read().unwrap().view(5000).unwrap().meta
+        );
+        assert!(pending.is_none());
+
+        let (reply, _receipt) = oneshot::channel();
+        pending = Some(PendingReset {
+            identity,
+            request: ResetRequest {
+                expected_epoch: 7,
+                deadline: Instant::now(),
+                reply,
+            },
+        });
+        snapshot.meta.sample_seq = 2;
+        assert!(
+            publish_sample_inner(&state, &history, &observer, snapshot, 0, Some(&mut pending))
+                .unwrap_err()
+                .to_string()
+                .contains("expired")
+        );
+        assert_eq!(state.read().unwrap().meta.sample_seq, 1);
+
+        let (reply, _receipt) = oneshot::channel();
+        pending = Some(PendingReset {
+            identity: SchedulerIdentity {
+                name: "mitosis".into(),
+                enable_seq: 5,
+            },
+            request: ResetRequest {
+                expected_epoch: 7,
+                deadline: Instant::now() + Duration::from_secs(15),
+                reply,
+            },
+        });
+        let mut invalid = state.read().unwrap().clone();
+        invalid.meta.sample_seq = 2;
+        invalid.meta.captured_at_unix_ms = None;
+        assert!(
+            publish_sample_inner(&state, &history, &observer, invalid, 0, Some(&mut pending))
+                .is_err()
+        );
+        assert_eq!(
+            state.read().unwrap().meta.sample_seq,
+            1,
+            "invalid baseline must not partially publish"
+        );
+    }
+
+    #[test]
+    fn stale_epoch_sample_cannot_overwrite_new_session_or_history() {
+        use super::*;
+        let config = test_config();
+        let state = Arc::new(RwLock::new(Snapshot::empty(config)));
+        let history = Arc::new(RwLock::new(MigrationHistory::new(5000)));
+        let observer = Arc::new(RwLock::new(ObserverContext {
+            epoch: 2,
+            ..ObserverContext::default()
+        }));
+        let mut stale = Snapshot::empty(config);
+        stale.meta.epoch = 1;
+        assert!(publish_sample(&state, &history, &observer, stale, 0).is_err());
+        assert_eq!(state.read().unwrap().meta.epoch, 0);
+        assert_eq!(history.read().unwrap().view(5000).unwrap().meta.epoch, 0);
+        assert_eq!(observer.read().unwrap().epoch, 2);
+    }
+
+    #[test]
+    fn failure_counters_aggregate_all_possible_cpus_and_validate_values() {
+        let counters = [0_u64, 4, 9, 0, 2].map(|count| count.to_ne_bytes().to_vec());
+        assert_eq!(super::sum_percpu_u64(&counters).unwrap(), 15);
+        assert!(super::sum_percpu_u64(&[vec![0; 7]]).is_err());
+        assert_eq!(
+            super::sum_percpu_u64(&[
+                u64::MAX.to_ne_bytes().to_vec(),
+                1_u64.to_ne_bytes().to_vec()
+            ])
+            .unwrap(),
+            u64::MAX
+        );
+    }
+
+    #[test]
+    fn shutdown_rejects_queued_resets_without_starting_an_attachment() {
+        use super::*;
+        let config = test_config();
+        let (commands, receiver) = std::sync::mpsc::sync_channel(16);
+        let (reply, mut receipt) = oneshot::channel();
+        commands
+            .send(CollectorCommand::Reset(ResetRequest {
+                expected_epoch: 0,
+                deadline: Instant::now() + Duration::from_secs(15),
+                reply,
+            }))
+            .unwrap();
+        run(
+            Arc::new(RwLock::new(Snapshot::empty(config))),
+            Arc::new(RwLock::new(MigrationHistory::new(5000))),
+            Arc::new(RwLock::new(ObserverContext::default())),
+            Arc::new(RwLock::new(SchedulerConfigSnapshot::default())),
+            Arc::new(AtomicBool::new(true)),
+            receiver,
+            config,
+        )
+        .unwrap();
+        assert!(receipt
+            .try_recv()
+            .unwrap()
+            .unwrap_err()
+            .contains("shutting down"));
+    }
 
     #[test]
     fn parses_irq_action_names_after_per_cpu_counts() {

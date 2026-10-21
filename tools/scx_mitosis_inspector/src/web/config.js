@@ -6,6 +6,7 @@ const rows = document.querySelector("#configurationRows");
 const inactiveRows = document.querySelector("#inactiveConfigurationRows");
 const search = document.querySelector("#configurationSearch");
 const number = new Intl.NumberFormat("en-US");
+const timeline = globalThis.MitosisTimeline || null;
 let snapshot = null;
 let stateFilter = "all";
 const statusOrder = { explicit: 0, default: 1, unset: 2, disabled: 3 };
@@ -88,6 +89,7 @@ function render(next) {
 }
 
 async function refresh() {
+  if (timeline) return timeline.refresh();
   try {
     const response = await fetch("/api/config", { cache: "no-store" });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -96,6 +98,23 @@ async function refresh() {
     status.classList.remove("live", "stale");
     statusText.textContent = "Unavailable";
   }
+}
+
+function renderTimeline(state) {
+  const next = state.view?.sources?.config;
+  const sourceError = state.view?.source_errors?.config || next?.error;
+  const error = sourceError || state.error;
+  const available = Boolean(next?.available && !sourceError && Array.isArray(next.options)
+    && Array.isArray(next.command_line));
+  render(available ? next : { available: false, error: error || (state.loading
+    ? "Loading selected configuration" : "No retained configuration"), pid: null,
+    version: null, executable: null, command_line: [], options: [] });
+  status.classList.toggle("live", available && state.mode === "live" && !state.error);
+  status.classList.toggle("stale", !state.loading && (!available || Boolean(state.error)));
+  statusText.textContent = state.loading && !state.view ? "Loading selected time"
+    : state.mode === "history" ? `Historical configuration${available ? "" : " unavailable"}`
+      : available ? state.error ? "Configuration updates unavailable" : "Live configuration"
+        : error || "Unavailable";
 }
 
 search.addEventListener("input", renderRows);
@@ -107,4 +126,5 @@ document.querySelectorAll("[name=configurationState]").forEach((control) => {
   });
 });
 
-refresh();
+if (timeline) timeline.subscribe(renderTimeline);
+else refresh();

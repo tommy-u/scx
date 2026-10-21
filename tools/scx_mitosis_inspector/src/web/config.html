@@ -27,17 +27,32 @@
       </div>
     </header>
 
+    <section class="timeline-bar" id="timelineBar" aria-label="Inspector time">
+      <div class="timeline-transport">
+        <button class="timeline-button timeline-live" id="timelineLive" type="button" aria-pressed="true">Live</button>
+        <button class="timeline-button" id="timelinePrevious" type="button" aria-label="Previous recorded sample" title="Previous recorded sample">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M10 3 5 8l5 5"/></svg>
+        </button>
+        <div class="timeline-track">
+          <label class="timeline-visually-hidden" for="timelineRange">Inspection time</label>
+          <input class="timeline-range" id="timelineRange" type="range" min="0" max="1" step="1" value="0" disabled aria-describedby="timelineKeyboard">
+          <div class="timeline-endpoints"><time id="timelineOldest">Waiting for history</time><time id="timelineLatest">Present</time></div>
+        </div>
+        <button class="timeline-button" id="timelineNext" type="button" aria-label="Next recorded sample" title="Next recorded sample">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m6 3 5 5-5 5"/></svg>
+        </button>
+      </div>
+      <div class="timeline-clocks">
+        <div class="timeline-clock"><span class="timeline-clock-label">Viewing</span><time id="timelineSelected">--</time></div>
+        <div class="timeline-clock"><span class="timeline-clock-label">Now · host time</span><time id="timelineNow">--</time></div>
+      </div>
+      <p class="timeline-status" id="timelineStatus" role="status" aria-live="polite">Loading recorded history</p>
+      <p class="timeline-visually-hidden" id="timelineKeyboard">Left and right arrows move one recorded sample. Home selects the oldest sample. End returns to Live. Page Up and Page Down move thirty seconds.</p>
+    </section>
+
     <div class="workspace-shell">
       <aside class="workspace-sidebar">
-        <nav class="workspace-navigation" aria-label="Inspector workspaces">
-          <span class="navigation-group-label">Observe</span>
-          <a href="/">Callbacks</a>
-          <a href="/system">System</a>
-          <a href="/stats">Scheduler</a>
-          <a class="active" aria-current="page" href="/config">Configuration</a>
-          <span class="navigation-group-label navigation-group-label-secondary">Reference</span>
-          <a href="/appendix">Appendix</a>
-        </nav>
+        <nav class="workspace-navigation" aria-label="Inspector workspaces"><!-- workspace-navigation --></nav>
         <label class="workspace-theme-control">
           <span>Dark mode</span>
           <input type="checkbox" role="switch" data-theme-toggle aria-label="Use dark mode">
@@ -139,6 +154,8 @@
         </section>
       </main>
     </div>
+    <script src="/assets/polling.js" defer></script>
+    <script src="/assets/timeline.js" defer></script>
     <script src="/assets/feedback.js" defer></script>
     <script src="/assets/reset.js" defer></script>
     <script src="/assets/config.js" defer></script>

@@ -9,6 +9,7 @@ struct scheduler_event_metrics {
 	u64 context_switches;
 	u64 preemptions;
 	u64 blocked_switches;
+	/* Legacy name: non-preempted switches with a still-runnable prev task. */
 	u64 voluntary_switches;
 	u64 wakeups;
 	u64 new_task_wakeups;

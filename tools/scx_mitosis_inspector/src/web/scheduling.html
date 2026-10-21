@@ -1,0 +1,296 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Scheduling · Mitosis inspector</title>
+    <script src="/assets/theme.js"></script>
+    <link rel="stylesheet" href="/assets/style.css">
+    <link rel="stylesheet" href="/assets/explore.css">
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="topbar-product">
+        <div class="product-title">
+          <h1>Mitosis inspector</h1>
+          <p>Scheduler activity and runtime statistics</p>
+        </div>
+      </div>
+      <div class="topbar-actions">
+        <div class="reset-stats-control">
+          <button class="reset-all-stats" id="resetAllStats" type="button">Reset all stats</button>
+          <span id="resetStatsStatus" role="status" aria-live="polite"></span>
+        </div>
+        <div class="status" id="status" role="status" aria-live="polite">
+          <span class="status-dot" aria-hidden="true"></span>
+          <span id="statusText">Connecting</span>
+        </div>
+      </div>
+    </header>
+
+    <section class="timeline-bar" id="timelineBar" aria-label="Inspector time">
+      <div class="timeline-transport">
+        <button class="timeline-button timeline-live" id="timelineLive" type="button" aria-pressed="true">Live</button>
+        <button class="timeline-button" id="timelinePrevious" type="button" aria-label="Previous recorded sample" title="Previous recorded sample">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M10 3 5 8l5 5"/></svg>
+        </button>
+        <div class="timeline-track">
+          <label class="timeline-visually-hidden" for="timelineRange">Inspection time</label>
+          <input class="timeline-range" id="timelineRange" type="range" min="0" max="1" step="1" value="0" disabled aria-describedby="timelineKeyboard">
+          <div class="timeline-endpoints"><time id="timelineOldest">Waiting for history</time><time id="timelineLatest">Present</time></div>
+        </div>
+        <button class="timeline-button" id="timelineNext" type="button" aria-label="Next recorded sample" title="Next recorded sample">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m6 3 5 5-5 5"/></svg>
+        </button>
+      </div>
+      <div class="timeline-clocks">
+        <div class="timeline-clock"><span class="timeline-clock-label">Viewing</span><time id="timelineSelected">--</time></div>
+        <div class="timeline-clock"><span class="timeline-clock-label">Now · host time</span><time id="timelineNow">--</time></div>
+      </div>
+      <p class="timeline-status" id="timelineStatus" role="status" aria-live="polite">Loading recorded history</p>
+      <p class="timeline-visually-hidden" id="timelineKeyboard">Left and right arrows move one recorded sample. Home selects the oldest sample. End returns to Live. Page Up and Page Down move thirty seconds.</p>
+    </section>
+
+    <div class="workspace-shell">
+      <aside class="workspace-sidebar">
+        <nav class="workspace-navigation" aria-label="Inspector workspaces"><!-- workspace-navigation --></nav>
+        <nav class="section-navigation" id="sectionNavigation" aria-label="Scheduling page sections">
+          <span class="navigation-group-label">On this page</span>
+          <a href="#overview">Overview</a>
+          <a href="#migration-locality">Migration</a>
+          <a href="#scheduler-latency">Scheduler latency</a>
+          <a href="#exploreTasks">Threads</a>
+          <a href="#exploreWakers">Wakeup handoffs</a>
+          <a href="#dsq-performance">Dispatch queues</a>
+          <a href="#exploreDsqs">Queue detail</a>
+          <a href="#scheduler-activity">Activity</a>
+          <a href="#sched-ext">sched_ext health</a>
+          <a href="#exploreScxEvents">sched_ext fallbacks</a>
+        </nav>
+        <label class="workspace-theme-control">
+          <span>Dark mode</span>
+          <input type="checkbox" role="switch" data-theme-toggle aria-label="Use dark mode">
+          <span class="theme-switch-track" aria-hidden="true"><span></span></span>
+        </label>
+      </aside>
+
+      <main id="app" tabindex="-1" aria-label="Scheduling latency, queues and migration">
+        <header class="view-heading" id="overview">
+          <div>
+            <h2>Scheduling</h2>
+            <p>How long tasks wait, where they queue, and where they move</p>
+          </div>
+        </header>
+
+        <section class="summary" aria-label="Scheduling summary" data-feedback-key="Scheduling:Summary">
+          <dl>
+            <div><dt>Event sampling</dt><dd id="eventTimingSampleRate">--</dd></div>
+            <div><dt>Last refresh</dt><dd id="refreshed">--</dd></div>
+            <div class="source-status"><dt>Sources</dt><dd id="sourceStatus" role="status">Waiting for samples</dd></div>
+          </dl>
+        </section>
+
+        <section class="table-section migration-section" id="migration-locality" aria-labelledby="migrationHeading" data-feedback-key="Scheduling:Migration">
+          <div class="table-section-heading migration-heading">
+            <div>
+              <h2 id="migrationHeading">CPU migration matrix</h2>
+              <p>Source CPU by destination CPU, with IRQ, non-SCX loss, task, whole-core, LLC utilization, and memory bandwidth</p>
+              <p id="migrationQuality" role="status">Unavailable</p>
+            </div>
+            <div class="heatmap-heading-tools">
+              <label class="heatmap-window">
+                <span>Window</span>
+                <select id="migrationWindow" aria-label="Migration rolling time window"></select>
+                <small id="migrationWindowCoverage">Collecting</small>
+              </label>
+              <div class="legend" aria-label="Heat intensity legend">
+                <span id="migrationLegendLow">0</span>
+                <span class="legend-ramp" aria-hidden="true"></span>
+                <span id="migrationLegendHigh">0</span>
+              </div>
+              <fieldset class="segmented" aria-label="CPU order">
+                <label><input type="radio" name="migrationOrder" value="topology" checked><span>Topology</span></label>
+                <label><input type="radio" name="migrationOrder" value="numeric"><span>Numeric</span></label>
+              </fieldset>
+              <fieldset class="segmented" aria-label="Color scale">
+                <label><input type="radio" name="migrationScale" value="log" checked><span>Log</span></label>
+                <label><input type="radio" name="migrationScale" value="linear"><span>Linear</span></label>
+              </fieldset>
+              <label class="heatmap-zoom">
+                <span>Zoom</span>
+                <input id="migrationZoom" type="range" min="0.25" max="3" step="0.25" value="1" aria-label="Heatmap zoom">
+              </label>
+            </div>
+          </div>
+          <canvas class="chart-canvas chart-canvas-wide" id="migrationLocalityChart" width="1100" height="220"></canvas>
+          <section class="migration-pair-inspection" id="migrationPairInspection" aria-live="polite"></section>
+          <div class="heatmap-viewport" id="migrationHeatmapViewport">
+            <canvas id="migrationHeatmapCanvas" width="800" height="800" role="img" aria-label="CPU migration heatmap"></canvas>
+            <div class="heatmap-tooltip hidden" id="migrationHeatmapTooltip" role="tooltip"></div>
+          </div>
+          <h3 class="table-subheading">Busiest pairs</h3>
+          <div class="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">Source CPU</th>
+                  <th scope="col">Destination CPU</th>
+                  <th scope="col">Count</th>
+                </tr>
+              </thead>
+              <tbody id="migrationRows"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="table-section" id="scheduler-latency" aria-labelledby="schedulerTimingHeading" data-feedback-key="Scheduling:Latency">
+          <div class="table-section-heading">
+            <div>
+              <h2 id="schedulerTimingHeading">Scheduler latency</h2>
+              <p>Host-wide wakeup, slice and blocked durations from sampled scheduler tracepoints</p>
+            </div>
+            <div class="chart-heading-controls">
+              <span id="schedulerLatencyMetricLabel">Metrics</span>
+              <details class="metric-picker" id="schedulerLatencyMetric">
+                <summary id="schedulerLatencyMetricSummary" aria-labelledby="schedulerLatencyMetricLabel schedulerLatencyMetricSummary">Choose metrics</summary>
+                <fieldset aria-label="Scheduler latency metrics to compare"></fieldset>
+              </details>
+            </div>
+          </div>
+          <canvas class="chart-canvas chart-canvas-wide" id="schedulerLatencyChart" width="1100" height="260"></canvas>
+          <ul class="histogram-legend" id="schedulerLatencyChartLegend" aria-label="Selected scheduler metrics"></ul>
+          <h3 class="table-subheading" id="latencyHistoryHeading">Wakeup tail latency</h3>
+          <canvas class="chart-canvas chart-canvas-wide" id="latencyHistoryChart" width="1100" height="220" aria-labelledby="latencyHistoryHeading"></canvas>
+          <div class="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">Metric</th>
+                  <th scope="col">Samples</th>
+                  <th scope="col">Mean (ns)</th>
+                  <th scope="col">p50 approx. (ns)</th>
+                  <th scope="col">p95 approx. (ns)</th>
+                  <th scope="col">p99 approx. (ns)</th>
+                </tr>
+              </thead>
+              <tbody id="schedulerTimingRows"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="table-section explore-section" id="exploreTasks" aria-labelledby="exploreTasksHeading" data-feedback-key="Scheduling:Threads">
+          <details id="exploreTasksDetails" open>
+            <summary class="explore-section-heading"><div><h2 id="exploreTasksHeading">Threads</h2><p>Per-thread CPU use and scheduling delay for a bounded cohort</p></div><span class="explore-source-badge" id="exploreTasksStatus">Waiting</span></summary>
+            <div class="explore-section-body">
+              <p class="explore-quality" id="exploreTasksQuality"></p><dl class="explore-facts" id="exploreTasksFacts"></dl>
+              <div class="explore-table-toolbar"><label for="exploreTasksSearch">Find thread</label><input id="exploreTasksSearch" type="search" placeholder="Name, TID, CPU, LLC or NUMA" autocomplete="off"><span>Click a column to sort</span></div>
+              <div class="explore-table-scroll"><table class="explore-table"><thead><tr id="exploreTasksHead"></tr></thead><tbody id="exploreTasksRows"></tbody></table></div>
+              <div class="explore-table-footer"><span id="exploreTasksCount"></span><div><button id="exploreTasksPrevious" type="button" aria-label="Previous thread rows">Previous</button><button id="exploreTasksNext" type="button" aria-label="Next thread rows">Next</button></div></div>
+              <div class="explore-chart-toolbar"><label for="exploreTaskSelect">Distribution for thread</label><select id="exploreTaskSelect"></select><span id="exploreTaskSamples"></span></div>
+              <figure class="explore-distribution" id="exploreTaskDistributionPanel"><figcaption>Wakeup delay and DSQ wait · sampled observations</figcaption><canvas id="exploreTaskDelayChart" class="chart-canvas" role="img" aria-label="Selected thread wakeup and queue delay histogram"></canvas></figure>
+              <div class="explore-chart-pair"><figure class="explore-history" id="exploreTaskHistoryPanel"><figcaption>Interval CPU use <span>CPUs</span></figcaption><canvas id="exploreTaskHistory" class="chart-canvas" role="img" aria-label="Tracked thread CPU equivalents history"></canvas></figure><figure class="explore-history" id="exploreTaskDelayHistoryPanel"><figcaption>Interval mean scheduling delay <span>µs</span></figcaption><canvas id="exploreTaskDelayHistory" class="chart-canvas" role="img" aria-label="Tracked thread scheduling delay history"></canvas></figure></div>
+            </div>
+          </details>
+        </section>
+
+        <section class="table-section explore-section" id="exploreWakers" aria-labelledby="exploreWakersHeading" data-feedback-key="Scheduling:Wakeup-handoffs">
+          <details id="exploreWakersDetails" open>
+            <summary class="explore-section-heading"><div><h2 id="exploreWakersHeading">Wakeup handoffs</h2><p>Follow waker → wakee relationships across CPU boundaries</p></div><span class="explore-source-badge" id="exploreWakersStatus">Waiting</span></summary>
+            <div class="explore-section-body">
+              <p class="explore-quality" id="exploreWakersQuality"></p><dl class="explore-facts" id="exploreWakersFacts"></dl>
+              <div class="explore-table-toolbar"><label for="exploreWakersSearch">Find handoff</label><input id="exploreWakersSearch" type="search" placeholder="Waker, wakee or TID" autocomplete="off"></div>
+              <div class="explore-table-scroll"><table class="explore-table"><thead><tr id="exploreWakersHead"></tr></thead><tbody id="exploreWakersRows"></tbody></table></div>
+              <div class="explore-table-footer"><span id="exploreWakersCount"></span><div><button id="exploreWakersPrevious" type="button" aria-label="Previous wakeup handoff rows">Previous</button><button id="exploreWakersNext" type="button" aria-label="Next wakeup handoff rows">Next</button></div></div>
+              <div class="explore-chart-toolbar"><label for="exploreWakerSelect">Distribution for handoff</label><select id="exploreWakerSelect"></select><span id="exploreWakerSamples"></span></div>
+              <div class="explore-chart-pair"><figure class="explore-distribution" id="exploreWakerDistributionPanel"><figcaption>Wakee scheduling delay · sampled observations</figcaption><canvas id="exploreWakerDelayChart" class="chart-canvas" role="img" aria-label="Selected waker and wakee scheduling delay histogram"></canvas></figure><figure class="explore-history" id="exploreWakerHistoryPanel"><figcaption>Interval handoff rate <span>/s</span></figcaption><canvas id="exploreWakerHistory" class="chart-canvas" role="img" aria-label="Observed wakeup handoff rate history"></canvas></figure></div>
+            </div>
+          </details>
+        </section>
+
+        <section class="table-section" id="dsq-performance" aria-labelledby="dsqHeading" data-feedback-key="Scheduling:Dispatch-queues">
+          <div class="table-section-heading">
+            <div>
+              <h2 id="dsqHeading">Dispatch queues</h2>
+              <p>Exact insert and move totals with residence time across all DSQs</p>
+            </div>
+            <p id="dsqStatus">Checking kernel DSQ probes</p>
+          </div>
+          <canvas class="chart-canvas chart-canvas-wide" id="dsqResidenceChart" width="1100" height="240"></canvas>
+          <h3 class="table-subheading" id="dsqDepthHistoryHeading">Queue depth</h3>
+          <canvas class="chart-canvas chart-canvas-wide" id="dsqDepthHistoryChart" width="1100" height="220" aria-labelledby="dsqDepthHistoryHeading"></canvas>
+          <div class="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">Metric</th>
+                  <th scope="col">Value</th>
+                </tr>
+              </thead>
+              <tbody id="dsqMetricRows"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="table-section explore-section" id="exploreDsqs" aria-labelledby="exploreDsqsHeading" data-feedback-key="Scheduling:Dispatch-queue-detail">
+          <details id="exploreDsqsDetails" open>
+            <summary class="explore-section-heading"><div><h2 id="exploreDsqsHeading">Dispatch queue detail</h2><p>Sampled wait, depth and run distributions for each queue</p></div><span class="explore-source-badge" id="exploreDsqsStatus">Waiting</span></summary>
+            <div class="explore-section-body">
+              <p class="explore-quality" id="exploreDsqsQuality"></p><dl class="explore-facts" id="exploreDsqsFacts"></dl>
+              <div class="explore-table-scroll"><table class="explore-table"><thead><tr id="exploreDsqsHead"></tr></thead><tbody id="exploreDsqsRows"></tbody></table></div>
+              <div class="explore-table-footer"><span id="exploreDsqsCount"></span><div><button id="exploreDsqsPrevious" type="button" aria-label="Previous dispatch queue rows">Previous</button><button id="exploreDsqsNext" type="button" aria-label="Next dispatch queue rows">Next</button></div></div>
+              <div class="explore-chart-toolbar"><label for="exploreDsqSelect">Distribution for DSQ</label><select id="exploreDsqSelect"></select><span id="exploreDsqSamples"></span></div>
+              <div class="explore-chart-pair" id="exploreDsqDistributions"><figure><figcaption>Queue wait · sampled observations</figcaption><canvas id="exploreDsqWaitChart" class="chart-canvas" role="img" aria-label="Selected dispatch queue wait histogram"></canvas></figure><figure><figcaption>Running duration · sampled observations</figcaption><canvas id="exploreDsqRunChart" class="chart-canvas" role="img" aria-label="Selected dispatch queue running duration histogram"></canvas></figure></div>
+              <figure class="explore-history" id="exploreDsqHistoryPanel"><figcaption>Interval queue wait and running duration <span>µs</span></figcaption><canvas id="exploreDsqHistory" class="chart-canvas" role="img" aria-label="Interval queue wait and running duration history"></canvas></figure>
+            </div>
+          </details>
+        </section>
+
+        <section class="table-section" id="scheduler-activity" aria-labelledby="schedulerEventsHeading" data-feedback-key="Scheduling:Activity">
+          <div class="table-section-heading">
+            <h2 id="schedulerEventsHeading">Scheduler activity</h2>
+            <p>Exact tracepoint counters</p>
+          </div>
+          <div class="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">Event</th>
+                  <th scope="col">Total</th>
+                  <th scope="col">Rate / second</th>
+                </tr>
+              </thead>
+              <tbody id="schedulerEventRows"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="table-section" id="sched-ext" aria-labelledby="schedExtHeading" data-feedback-key="Scheduling:sched-ext">
+          <div class="table-section-heading">
+            <h2 id="schedExtHeading">sched_ext health</h2>
+            <p>Kernel scheduler state and enable sequence</p>
+          </div>
+          <div class="table-scroll"><table><tbody id="schedExtRows"></tbody></table></div>
+        </section>
+
+        <section class="table-section explore-section" id="exploreScxEvents" aria-labelledby="exploreScxEventsHeading" data-feedback-key="Scheduling:sched-ext-fallbacks">
+          <details id="exploreScxEventsDetails" open>
+            <summary class="explore-section-heading"><div><h2 id="exploreScxEventsHeading">sched_ext fallbacks</h2><p>Track kernel fallback and exceptional scheduling paths</p></div><span class="explore-source-badge" id="exploreScxEventsStatus">Waiting</span></summary>
+            <div class="explore-section-body">
+              <p class="explore-quality" id="exploreScxEventsQuality"></p><dl class="explore-facts" id="exploreScxEventsFacts"></dl>
+              <div class="explore-diagnostic-split"><div><div class="explore-table-scroll"><table class="explore-table"><thead><tr id="exploreScxEventsHead"></tr></thead><tbody id="exploreScxEventsRows"></tbody></table></div><div class="explore-table-footer"><span id="exploreScxEventsCount"></span><div><button id="exploreScxEventsPrevious" type="button" aria-label="Previous sched_ext counter rows">Previous</button><button id="exploreScxEventsNext" type="button" aria-label="Next sched_ext counter rows">Next</button></div></div></div><figure class="explore-history" id="exploreScxEventsHistoryPanel"><figcaption>Interval kernel event rate <span>/s</span></figcaption><canvas id="exploreScxEventsHistory" class="chart-canvas" role="img" aria-label="Kernel sched_ext fallback event rate history"></canvas></figure></div>
+            </div>
+          </details>
+        </section>
+      </main>
+    </div>
+    <script src="/assets/polling.js" defer></script>
+    <script src="/assets/timeline.js" defer></script>
+    <script src="/assets/charts.js" defer></script>
+    <script src="/assets/sections.js" defer></script>
+    <script src="/assets/feedback.js" defer></script>
+    <script src="/assets/heatmap.js" defer></script>
+    <script src="/assets/reset.js" defer></script>
+    <script src="/assets/scheduling.js" defer></script>
+    <script src="/assets/explore.js" defer></script>
+  </body>
+</html>

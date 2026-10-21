@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use serde::Serialize;
 
+use crate::lifecycle::{ObserverContext, SampleMeta};
 use crate::MigrationRow;
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -25,6 +26,11 @@ struct DeltaBin {
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct MigrationWindowView {
+    pub meta: SampleMeta,
+    pub collector: ObserverContext,
+    pub migration_map_capacity: u32,
+    pub migration_map_failures: u64,
+    pub migration_quality: &'static str,
     pub window_ms: u64,
     pub max_window_ms: u64,
     pub observed_ms: u64,
@@ -54,6 +60,10 @@ impl std::error::Error for WindowError {}
 
 #[derive(Debug)]
 pub struct MigrationHistory {
+    meta: SampleMeta,
+    collector: ObserverContext,
+    migration_map_capacity: u32,
+    migration_map_failures: u64,
     max_window_ms: u64,
     started_at_ms: Option<u64>,
     latest_at_ms: u64,
@@ -65,12 +75,32 @@ impl MigrationHistory {
     pub fn new(max_window_ms: u64) -> Self {
         assert!(max_window_ms > 0, "maximum window must be non-zero");
         Self {
+            meta: SampleMeta::default(),
+            collector: ObserverContext::default(),
+            migration_map_capacity: 0,
+            migration_map_failures: 0,
             max_window_ms,
             started_at_ms: None,
             latest_at_ms: 0,
             last_counts: BTreeMap::new(),
             bins: VecDeque::new(),
         }
+    }
+
+    pub fn set_context(
+        &mut self,
+        meta: SampleMeta,
+        collector: ObserverContext,
+        capacity: u32,
+        failures: u64,
+    ) {
+        if self.meta.epoch != meta.epoch {
+            self.reset();
+        }
+        self.meta = meta;
+        self.collector = collector;
+        self.migration_map_capacity = capacity;
+        self.migration_map_failures = failures;
     }
 
     pub fn ingest(&mut self, at_ms: u64, rows: &[MigrationRow]) {
@@ -153,6 +183,17 @@ impl MigrationHistory {
             .collect();
 
         Ok(MigrationWindowView {
+            meta: self.meta.clone(),
+            collector: self.collector.clone(),
+            migration_map_capacity: self.migration_map_capacity,
+            migration_map_failures: self.migration_map_failures,
+            migration_quality: if self.migration_map_capacity == 0 {
+                "unavailable"
+            } else if self.migration_map_failures > 0 {
+                "incomplete"
+            } else {
+                "complete"
+            },
             window_ms,
             max_window_ms: self.max_window_ms,
             observed_ms,
@@ -170,6 +211,107 @@ impl MigrationHistory {
         while self.bins.front().is_some_and(|bin| bin.at_ms <= cutoff_ms) {
             self.bins.pop_front();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lifecycle::CollectorStatus;
+
+    fn context(epoch: u64, seq: u64) -> (SampleMeta, ObserverContext) {
+        (
+            SampleMeta {
+                epoch,
+                sample_seq: seq,
+                captured_at_unix_ms: Some(1000 + seq),
+                last_success_at_unix_ms: Some(1000 + seq),
+                error: None,
+            },
+            ObserverContext {
+                epoch,
+                status: CollectorStatus::Active,
+                scheduler_enable_seq: Some(epoch),
+                scheduler_name: Some("mitosis".into()),
+                error: None,
+            },
+        )
+    }
+
+    #[test]
+    fn epoch_change_discards_old_bins_and_sets_a_new_baseline() {
+        let mut history = MigrationHistory::new(5000);
+        let (meta, collector) = context(1, 1);
+        history.set_context(meta, collector, 4096, 0);
+        history.ingest(0, &[]);
+        history.ingest(
+            1000,
+            &[MigrationRow {
+                from_cpu: 1,
+                to_cpu: 2,
+                count: 5,
+            }],
+        );
+        assert_eq!(history.view(5000).unwrap().total, 5);
+        let (meta, collector) = context(2, 1);
+        history.set_context(meta.clone(), collector.clone(), 4096, 0);
+        history.ingest(
+            0,
+            &[MigrationRow {
+                from_cpu: 1,
+                to_cpu: 2,
+                count: 3,
+            }],
+        );
+        let view = history.view(5000).unwrap();
+        assert_eq!(view.total, 0);
+        assert_eq!(view.observed_ms, 0);
+        assert_eq!(view.meta, meta);
+        assert_eq!(view.collector, collector);
+    }
+
+    #[test]
+    fn same_epoch_updates_metadata_and_quality_without_erasing_history() {
+        let mut history = MigrationHistory::new(5000);
+        let (meta, collector) = context(1, 1);
+        history.set_context(meta, collector, 25600, 0);
+        history.ingest(0, &[]);
+        history.ingest(
+            1000,
+            &[MigrationRow {
+                from_cpu: 0,
+                to_cpu: 1,
+                count: 9,
+            }],
+        );
+        let (meta, collector) = context(1, 2);
+        history.set_context(meta.clone(), collector, 25600, 4);
+        let view = history.view(5000).unwrap();
+        assert_eq!(view.total, 9);
+        assert_eq!(view.meta, meta);
+        assert_eq!(view.migration_map_capacity, 25600);
+        assert_eq!(view.migration_map_failures, 4);
+        assert_eq!(view.migration_quality, "incomplete");
+    }
+
+    #[test]
+    fn retains_more_than_4096_distinct_pairs_in_a_window() {
+        let mut history = MigrationHistory::new(5000);
+        let (meta, collector) = context(1, 1);
+        history.set_context(meta, collector, 25600, 0);
+        history.ingest(0, &[]);
+        let rows: Vec<_> = (0..5000)
+            .map(|index| MigrationRow {
+                from_cpu: index / 159,
+                to_cpu: (index % 159 + index / 159 + 1) % 160,
+                count: 1,
+            })
+            .collect();
+        history.ingest(1000, &rows);
+        let view = history.view(5000).unwrap();
+        assert_eq!(view.rows.len(), 5000);
+        assert_eq!(view.total, 5000);
+        assert_eq!(view.migration_quality, "complete");
     }
 }
 

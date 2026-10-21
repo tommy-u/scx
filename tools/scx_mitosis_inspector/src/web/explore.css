@@ -1,0 +1,139 @@
+/*
+ * DESIGN PHILOSOPHY: The diagnostic workbench.
+ * Movement: Swiss instrument panels.
+ * Color: Inspector neutrals carry the data; green identifies navigation and
+ *        source health. Existing chart colors distinguish measurements.
+ * Layout: Full-width, collapsible measurements embedded in the Scheduling
+ *         and System pages. Tables and small distributions share the width.
+ * Type: The inspector's local sans stack for reading; local monospace for
+ *       IDs, quantities and comparisons. No external font requests.
+ * Signature: Explicit source scope and short unit labels.
+ * Motion: Quiet control feedback, with no animation on changing data.
+ * Other directions considered: an editorial notebook of large chart panels;
+ * a single terminal-like matrix. This layout fits the existing inspector.
+ */
+
+/* Section rules set display values that would otherwise override [hidden]. */
+.explore-section [hidden] { display: none !important; }
+.explore-table-footer button {
+  min-height: 32px;
+  padding: 6px 10px;
+  border: 1px solid var(--control-border);
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background-color 120ms, border-color 120ms;
+}
+.explore-table-footer button:hover { background: var(--surface-subtle); border-color: var(--text-muted); }
+.explore-table-footer button:disabled { color: var(--text-disabled); cursor: default; border-color: var(--border-soft); }
+.explore-section :is(button, input, select, a, summary):focus-visible { outline: 2px solid var(--accent-text); outline-offset: 3px; }
+
+.explore-section { margin-top: 20px; padding-bottom: 20px; border-bottom: 1px solid var(--border-soft); }
+.explore-section-heading {
+  display: flex; align-items: center; gap: 12px;
+  /* The existing section feedback control floats at the right edge. */
+  min-height: 48px; padding: 4px 40px 4px 0;
+  list-style: none; cursor: pointer;
+}
+.explore-section-heading::-webkit-details-marker { display: none; }
+.explore-section-heading::before {
+  content: ""; width: 6px; height: 6px; flex: 0 0 6px;
+  border: solid var(--text-muted); border-width: 0 1px 1px 0;
+  transform: rotate(-45deg); margin: 0 2px;
+}
+details[open] > .explore-section-heading::before { transform: rotate(45deg); margin-top: -4px; }
+.explore-section-heading > div { flex: 1; min-width: 0; }
+.explore-section-heading h2 { margin: 0; font-size: 15px; font-weight: 500; line-height: 1.4; }
+.explore-section-heading p { margin: 4px 0 0; color: var(--text-subtle); font-size: 11px; line-height: 1.4; }
+.explore-section-heading:hover h2 { color: var(--accent-text); }
+.explore-source-badge {
+  display: inline-flex; align-items: center; flex: 0 0 auto;
+  padding: 3px 6px; border: 1px solid var(--border-soft); border-radius: 3px;
+  color: var(--text-subtle); font-size: 10px; line-height: 1.4;
+}
+.explore-source-badge[data-state="fresh"] { color: var(--accent-text); border-color: var(--accent-soft); background: var(--accent-softer); }
+.explore-source-badge[data-state="partial"] { color: var(--text-secondary); border-style: dashed; }
+.explore-source-badge[data-state="stale"] { color: var(--series-orange); }
+.explore-section-body { padding: 12px 0 0 40px; min-width: 0; }
+.explore-quality { margin: 0 0 12px; color: var(--text-secondary); font-size: 11px; line-height: 1.55; overflow-wrap: anywhere; }
+.explore-facts { display: flex; flex-wrap: wrap; gap: 12px 28px; margin: 0 0 16px; }
+.explore-facts dt { font-size: 10px; font-weight: 400; text-transform: none; letter-spacing: 0; }
+.explore-facts dd { margin-top: 4px; font: 17px ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--text); }
+.explore-facts dd small { font-family: inherit; font-size: 11px; color: var(--text-subtle); margin-left: 4px; }
+.explore-facts:empty { display: none; }
+
+.explore-table-toolbar,
+.explore-chart-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0 0 12px; }
+.explore-table-toolbar label,
+.explore-chart-toolbar label { color: var(--text-secondary); font-size: 11px; }
+.explore-table-toolbar input,
+.explore-chart-toolbar select {
+  box-sizing: border-box; min-height: 32px; max-width: 100%; padding: 6px 8px;
+  border: 1px solid var(--control-border); border-radius: 4px;
+  background: var(--surface); color: var(--text); font: inherit; font-size: 12px;
+}
+.explore-table-toolbar input { width: min(280px, 100%); }
+.explore-chart-toolbar select { min-width: 150px; max-width: 340px; }
+.explore-table-toolbar > span,
+.explore-chart-toolbar > span { color: var(--text-subtle); font-size: 10px; }
+.explore-table-toolbar input::placeholder { color: var(--text-muted); }
+.explore-table-scroll { max-width: 100%; max-height: 304px; overflow: auto; border: 1px solid var(--border); background: var(--surface); }
+.explore-table { width: 100%; border-collapse: collapse; font-size: 11px; font-variant-numeric: tabular-nums; }
+.explore-table :is(th, td) { padding: 8px 10px; vertical-align: middle; }
+.explore-table thead th { position: sticky; top: 0; z-index: 2; padding: 0; background: var(--surface-subtle); }
+.explore-table :is(th, td):first-child { position: sticky; left: 0; z-index: 1; background: var(--surface); }
+.explore-table thead th:first-child { z-index: 3; background: var(--surface-subtle); }
+.explore-table tbody th { font-weight: 400; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.explore-table tbody tr:hover :is(th, td) { background: var(--surface-subtle); }
+.explore-table td.explore-text { text-align: left; max-width: 220px; overflow: hidden; text-overflow: ellipsis; }
+.explore-table .explore-empty { position: static !important; text-align: left; white-space: normal; color: var(--text-secondary); padding: 12px; line-height: 1.5; }
+.explore-sort {
+  display: block; width: 100%; min-height: 40px; padding: 8px 10px; border: 0;
+  text-align: right; background: transparent; color: var(--text-secondary);
+  font: inherit; font-size: 10px; font-weight: 500; white-space: nowrap; cursor: pointer;
+}
+.explore-sort small { display: block; margin-top: 3px; color: var(--text-subtle); font-size: 9px; font-weight: 400; }
+.explore-sort:hover { color: var(--accent-text); background: var(--accent-softer); }
+.explore-table th:first-child .explore-sort,
+.explore-table th.explore-text .explore-sort { text-align: left; }
+.explore-table th[aria-sort="ascending"] .explore-sort::after { content: " ↑"; }
+.explore-table th[aria-sort="descending"] .explore-sort::after { content: " ↓"; }
+.explore-table-footer { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin: 8px 0 16px; min-height: 24px; }
+.explore-table-footer > span { color: var(--text-subtle); font-size: 10px; }
+.explore-table-footer > div { display: flex; gap: 4px; }
+.explore-table-footer button { min-height: 24px; padding: 2px 6px; font-size: 10px; border-color: var(--border-soft); }
+
+.explore-chart-pair { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; }
+.explore-diagnostic-split { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); align-items: start; gap: 20px; }
+.explore-section figure { min-width: 0; margin: 0 0 16px; }
+.explore-section figcaption { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 8px; margin-bottom: 8px; color: var(--text-secondary); font-size: 11px; line-height: 1.4; }
+.explore-section figcaption > span { color: var(--text-subtle); font-size: 10px; }
+.explore-section .chart-canvas { height: 152px; border-color: var(--border-soft); }
+.explore-section .explore-distribution .chart-canvas { height: 164px; }
+.explore-legend { display: flex; flex-wrap: wrap; gap: 4px 16px; margin-top: 8px; font-size: 10px; color: var(--text-secondary); }
+.explore-legend > span { display: inline-flex; align-items: center; gap: 6px; }
+.explore-legend i { display: inline-block; width: 12px; height: 2px; background: var(--legend-color, var(--accent)); }
+.explore-subheading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 8px; }
+.explore-subheading h3 { margin: 0; font-size: 13px; font-weight: 500; }
+.explore-hardware-groups > section + section { margin-top: 16px; padding-top: 20px; border-top: 1px solid var(--border-soft); }
+
+@media (max-width: 1100px) {
+  .explore-section-body { padding-left: 0; }
+  .explore-diagnostic-split { grid-template-columns: minmax(0, 1fr); gap: 0; }
+  .explore-diagnostic-split > figure { max-width: 100%; }
+}
+@media (max-width: 700px) {
+  .explore-section-heading { gap: 8px; }
+  .explore-section-heading h2 { font-size: 14px; }
+  .explore-section-heading p { font-size: 10px; }
+  .explore-source-badge { font-size: 9px; padding: 2px 4px; }
+  .explore-chart-pair { grid-template-columns: minmax(0, 1fr); gap: 0; }
+  .explore-chart-toolbar select { flex: 1; min-width: 120px; max-width: 100%; }
+  .explore-facts { gap: 12px 20px; }
+  .explore-facts dd { font-size: 15px; }
+  .explore-table :is(th, td) { padding: 8px; }
+}
+@media (prefers-reduced-motion: reduce) { .explore-section * { transition: none !important; } }

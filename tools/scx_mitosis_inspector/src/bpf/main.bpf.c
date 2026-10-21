@@ -83,11 +83,21 @@ struct {
 } blocked_duration SEC(".maps");
 
 struct {
-	__uint(type, BPF_MAP_TYPE_LRU_HASH);
-	__uint(max_entries, 4096);
+	__uint(type, BPF_MAP_TYPE_HASH);
+	/* Userspace sizes this to possible CPU pairs, with a fixed memory cap. */
+	__uint(max_entries, 1);
 	__type(key, struct mitosis_cpu_pair);
 	__type(value, u64);
 } migration_counts SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, u32);
+	__type(value, u64);
+} migration_failures SEC(".maps");
+
+#include "migration_observer.bpf.h"
 
 struct {
 	__uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
@@ -241,13 +251,14 @@ int BPF_PROG(observe_stopping_exit, struct task_struct *p, bool runnable)
 static __always_inline int record_wakeup(struct task_struct *p)
 {
 	struct mitosis_callback_timing *timing;
-	struct task_observation *observation;
-	u32 key = 0;
-	u64 now;
+	struct task_observation	       *observation;
+	u32				key = 0;
+	u64				now;
 
-	if (!p)
+	/* Already-running wakeups do not begin an off-CPU wait. */
+	if (!p || !BPF_CORE_READ(p, pid) || BPF_CORE_READ(p, on_cpu))
 		return 0;
-	now = bpf_ktime_get_ns();
+	now	    = bpf_ktime_get_ns();
 	observation = bpf_task_storage_get(&task_observations, p, 0, 0);
 	if (observation && observation->blocked_at) {
 		timing = bpf_map_lookup_elem(&blocked_duration, &key);
@@ -309,14 +320,17 @@ int BPF_PROG(on_sched_switch, bool preempt, struct task_struct *prev,
 		else
 			runtime->current_class = 0;
 	}
-	if (prev) {
-		observation = bpf_task_storage_get(&task_observations, prev, 0, 0);
+	if (!READ_ONCE(event_timing_sample_rate))
+		return 0;
+	if (prev && BPF_CORE_READ(prev, pid)) {
+		observation =
+			bpf_task_storage_get(&task_observations, prev, 0, 0);
 		if (observation && observation->running_at) {
 			timing = bpf_map_lookup_elem(&cpu_slice_duration, &key);
 			record_elapsed(timing, now - observation->running_at);
 			observation->running_at = 0;
 		}
-		if (prev_state != 0 &&
+		if (!preempt && prev_state != 0 &&
 		    should_sample(READ_ONCE(event_timing_sample_rate))) {
 			if (!observation)
 				observation = bpf_task_storage_get(
@@ -326,6 +340,8 @@ int BPF_PROG(on_sched_switch, bool preempt, struct task_struct *prev,
 				observation->blocked_at = now;
 		}
 	}
+	if (!BPF_CORE_READ(next, pid))
+		return 0;
 	observation = bpf_task_storage_get(&task_observations, next, 0, 0);
 	if (observation && observation->wakeup_at) {
 		timing = bpf_map_lookup_elem(&wakeup_latency, &key);
@@ -343,22 +359,10 @@ int BPF_PROG(on_sched_switch, bool preempt, struct task_struct *prev,
 	return 0;
 }
 
-SEC("tp_btf/sched_migrate_task")
-int BPF_PROG(on_sched_migrate_task, struct task_struct *p, int dest_cpu)
+SEC("tracepoint/sched/sched_migrate_task")
+int on_sched_migrate_task(struct trace_event_raw_sched_migrate_task *ctx)
 {
-	struct mitosis_cpu_pair pair = {
-		.from_cpu = bpf_get_smp_processor_id(),
-		.to_cpu = dest_cpu,
-	};
-	u64 initial = 1, *count;
-
-	if (pair.from_cpu == pair.to_cpu)
-		return 0;
-	count = bpf_map_lookup_elem(&migration_counts, &pair);
-	if (count) {
-		__sync_fetch_and_add(count, 1);
-		return 0;
-	}
-	bpf_map_update_elem(&migration_counts, &pair, &initial, BPF_NOEXIST);
+	observe_migration(BPF_CORE_READ(ctx, orig_cpu),
+			  BPF_CORE_READ(ctx, dest_cpu));
 	return 0;
 }

@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Scheduler stats</title>
+    <title>Cells · Mitosis inspector</title>
     <script src="/assets/theme.js"></script>
     <link rel="stylesheet" href="/assets/style.css">
   </head>
@@ -27,17 +27,32 @@
       </div>
     </header>
 
+    <section class="timeline-bar" id="timelineBar" aria-label="Inspector time">
+      <div class="timeline-transport">
+        <button class="timeline-button timeline-live" id="timelineLive" type="button" aria-pressed="true">Live</button>
+        <button class="timeline-button" id="timelinePrevious" type="button" aria-label="Previous recorded sample" title="Previous recorded sample">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M10 3 5 8l5 5"/></svg>
+        </button>
+        <div class="timeline-track">
+          <label class="timeline-visually-hidden" for="timelineRange">Inspection time</label>
+          <input class="timeline-range" id="timelineRange" type="range" min="0" max="1" step="1" value="0" disabled aria-describedby="timelineKeyboard">
+          <div class="timeline-endpoints"><time id="timelineOldest">Waiting for history</time><time id="timelineLatest">Present</time></div>
+        </div>
+        <button class="timeline-button" id="timelineNext" type="button" aria-label="Next recorded sample" title="Next recorded sample">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m6 3 5 5-5 5"/></svg>
+        </button>
+      </div>
+      <div class="timeline-clocks">
+        <div class="timeline-clock"><span class="timeline-clock-label">Viewing</span><time id="timelineSelected">--</time></div>
+        <div class="timeline-clock"><span class="timeline-clock-label">Now · host time</span><time id="timelineNow">--</time></div>
+      </div>
+      <p class="timeline-status" id="timelineStatus" role="status" aria-live="polite">Loading recorded history</p>
+      <p class="timeline-visually-hidden" id="timelineKeyboard">Left and right arrows move one recorded sample. Home selects the oldest sample. End returns to Live. Page Up and Page Down move thirty seconds.</p>
+    </section>
+
     <div class="workspace-shell">
       <aside class="workspace-sidebar">
-        <nav class="workspace-navigation" aria-label="Inspector workspaces">
-          <span class="navigation-group-label">Observe</span>
-          <a href="/">Callbacks</a>
-          <a href="/system">System</a>
-          <a class="active" aria-current="page" href="/stats">Scheduler</a>
-          <a href="/config">Configuration</a>
-          <span class="navigation-group-label navigation-group-label-secondary">Reference</span>
-          <a href="/appendix">Appendix</a>
-        </nav>
+        <nav class="workspace-navigation" aria-label="Inspector workspaces"><!-- workspace-navigation --></nav>
         <label class="workspace-theme-control">
           <span>Dark mode</span>
           <input type="checkbox" role="switch" data-theme-toggle aria-label="Use dark mode">
@@ -45,27 +60,58 @@
         </label>
       </aside>
 
-      <main class="stats-main" id="app" tabindex="-1" aria-label="Mitosis scheduler stats">
+      <main class="stats-main" id="app" tabindex="-1" aria-label="Mitosis cells">
         <header class="view-heading">
           <div>
-            <h2>Scheduler stats</h2>
-            <p>Scheduler-provided metrics</p>
+            <h2>Cells</h2>
+            <p>How mitosis partitions CPUs into cells, from the scheduler's own stats</p>
           </div>
         </header>
 
-        <section class="summary" aria-label="Stats summary" data-feedback-key="Scheduler:Summary">
+        <section class="summary" aria-label="Stats summary" data-feedback-key="Cells:Summary">
           <dl>
             <div><dt>Source</dt><dd>Mitosis stats server</dd></div>
             <div><dt>Cells</dt><dd id="cellCount">--</dd></div>
             <div><dt>Last refresh</dt><dd id="refreshed">--</dd></div>
+            <div class="source-status"><dt>Source</dt><dd id="sourceStatus" role="status">Waiting for samples</dd></div>
           </dl>
         </section>
 
-        <section class="table-section" aria-labelledby="borrowingHeading" data-feedback-key="Scheduler:Borrowing-flows">
+        <section class="table-section" id="cpuTopology" aria-labelledby="cpuTopologyHeading" data-feedback-key="Cells:CPU-topology">
           <div class="section-heading">
             <div>
-              <h2 id="borrowingHeading">Cell borrowing flows</h2>
-              <p>Rows borrow from lending columns · latest scheduler interval</p>
+              <h2 id="cpuTopologyHeading">CPU placement by cell</h2>
+              <p id="cpuTopologyStatus">Waiting for CPU topology</p>
+              <p>Rebalances: <span id="reconfigurationCount">--</span> · since scheduler start</p>
+            </div>
+          </div>
+          <p class="table-summary">Rows are cells; columns are LLCs. Values show assigned logical CPUs, and bars show each cell's share of the LLC. Hover for CPU lists.</p>
+          <div class="table-scroll cell-placement-scroll" tabindex="0" aria-label="Scroll cell CPU placement matrix">
+            <table class="cell-placement-table" id="cellPlacementMatrix" aria-label="Assigned CPU counts by cell and LLC">
+              <thead id="cellPlacementMatrixHead"></thead>
+              <tbody id="cellPlacementMatrixBody"></tbody>
+            </table>
+          </div>
+          <div class="cpuset-charts" aria-label="Assigned CPU sets by cell">
+            <div class="cpuset-chart" aria-labelledby="cellCpusetNumericHeading">
+              <h3 id="cellCpusetNumericHeading">Numeric CPU order</h3>
+              <div id="cellCpusetNumeric"></div>
+            </div>
+            <div class="cpuset-chart" aria-labelledby="cellCpusetLlcHeading">
+              <h3 id="cellCpusetLlcHeading">LLC cores by cell</h3>
+              <div class="cpuset-grid-scroll" tabindex="0" aria-label="Scroll CPU membership grids by LLC">
+                <div id="cellCpusetLlc" class="cpuset-grid"></div>
+              </div>
+            </div>
+          </div>
+          <p class="table-summary cell-placement-note">Each outline groups a physical core's observed threads. Solid marks belong to this row; colored hatching shows a sibling in another cell. Gray hatching means ownership is unavailable; dashed outlines mean core topology is unavailable. Hover for CPU IDs and sibling owners; click a cell to highlight. Assignment does not measure execution or utilization.</p>
+        </section>
+
+        <section class="table-section" aria-labelledby="borrowingHeading" data-feedback-key="Cells:Borrowing-flows">
+          <div class="section-heading">
+            <div>
+              <h2 id="borrowingHeading">Cell borrowing</h2>
+              <p id="borrowingStatus">Waiting for scheduler borrowing metrics</p>
             </div>
           </div>
           <div class="borrowing-layout">
@@ -96,36 +142,40 @@
           </div>
         </section>
 
-        <section class="table-section" aria-labelledby="cellHistoryHeading" data-feedback-key="Scheduler:Cell-history">
+        <section class="table-section" aria-labelledby="cellHistoryHeading" data-feedback-key="Cells:Cell-history">
           <div class="section-heading">
             <div>
               <h2 id="cellHistoryHeading">Cell history</h2>
-              <p>Last 10 minutes in this browser</p>
+              <p id="cellHistoryStatus" role="status">Last 30 minutes · Waiting for retained samples</p>
             </div>
           </div>
-          <div class="chart-grid">
+          <div class="chart-grid cell-history-charts">
             <div class="chart-panel">
               <h3>Utilization by cell</h3>
+              <p class="table-summary">100 × cell task runtime since the last collection (including borrowed CPUs) ÷ (currently assigned logical CPUs × configured monitor interval).</p>
               <canvas
                 id="cellUtilizationChart"
                 class="chart-canvas"
                 role="img"
-                aria-label="Cell utilization over the last 10 minutes"
+                aria-label="Cell utilization over the last 30 minutes"
               ></canvas>
+              <ul class="histogram-legend" id="cellUtilizationLegend" aria-label="Cell utilization series"></ul>
             </div>
             <div class="chart-panel">
-              <h3>Demand and capacity movement</h3>
+              <h3>CPU use and assigned capacity</h3>
+              <p class="table-summary">CPU equivalents by cell · dashed lines show assigned capacity</p>
               <canvas
                 id="cellBalanceChart"
                 class="chart-canvas"
                 role="img"
-                aria-label="Cell demand, borrowed capacity, and lent capacity over the last 10 minutes"
+                aria-label="CPU use and assigned CPU capacity by cell over the last 30 minutes"
               ></canvas>
+              <ul class="histogram-legend" id="cellBalanceLegend" aria-label="CPU use and capacity series"></ul>
             </div>
           </div>
         </section>
 
-        <section class="table-section" aria-labelledby="globalStatsHeading" data-feedback-key="Scheduler:Global-metrics">
+        <section class="table-section" aria-labelledby="globalStatsHeading" data-feedback-key="Cells:Global-metrics">
           <h2 id="globalStatsHeading">Global metrics</h2>
           <div class="table-scroll">
             <table>
@@ -135,7 +185,7 @@
           </div>
         </section>
 
-        <section class="table-section" aria-labelledby="cellStatsHeading" data-feedback-key="Scheduler:Cell-metrics">
+        <section class="table-section" aria-labelledby="cellStatsHeading" data-feedback-key="Cells:Cell-metrics">
           <h2 id="cellStatsHeading">Cell metrics</h2>
           <div class="table-scroll">
             <table id="cellStatsTable">
@@ -146,7 +196,10 @@
         </section>
       </main>
     </div>
+    <script src="/assets/polling.js" defer></script>
+    <script src="/assets/timeline.js" defer></script>
     <script src="/assets/charts.js" defer></script>
+    <script src="/assets/topology_strip.js" defer></script>
     <script src="/assets/feedback.js" defer></script>
     <script src="/assets/reset.js" defer></script>
     <script src="/assets/stats.js" defer></script>

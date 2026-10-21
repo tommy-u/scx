@@ -11,7 +11,10 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, RwLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
+
+use crate::lifecycle::{ObserverContext, SampleMeta, SharedObserverContext};
 
 use serde::Serialize;
 
@@ -48,6 +51,8 @@ impl<T> MetricSource<T> {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct SystemStatsSnapshot {
+    pub meta: SampleMeta,
+    pub collector: ObserverContext,
     pub captured_at_unix_ms: u64,
     pub interval_ms: Option<u64>,
     pub cpu: MetricSource<CpuStats>,
@@ -56,6 +61,29 @@ pub struct SystemStatsSnapshot {
     pub network: MetricSource<NetworkStats>,
     pub frequencies: MetricSource<FrequencyStats>,
     pub sched_ext: MetricSource<SchedExtStats>,
+}
+
+/// Discard host reads that straddle an observer epoch transition.
+pub fn publish_sample(
+    state: &Arc<RwLock<SystemStatsSnapshot>>,
+    observer: &SharedObserverContext,
+    expected: &ObserverContext,
+    mut sample: SystemStatsSnapshot,
+) -> bool {
+    let mut previous = state.write().expect("system snapshot lock poisoned");
+    let current = observer.read().expect("observer context lock poisoned");
+    if *current != *expected {
+        return false;
+    }
+    sample.meta.sample_seq = if previous.meta.epoch == expected.epoch {
+        previous.meta.sample_seq + 1
+    } else {
+        1
+    };
+    sample.meta.epoch = expected.epoch;
+    sample.collector = expected.clone();
+    *previous = sample;
+    true
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -156,6 +184,7 @@ pub struct SchedExtStats {
 
 #[derive(Debug, Default)]
 pub struct SystemStatsCollector {
+    sample_seq: u64,
     previous_collection: Option<Instant>,
     previous_cpu: Option<(Instant, RawProcStat)>,
     previous_network: Option<(Instant, BTreeMap<String, RawNetworkInterface>)>,
@@ -176,11 +205,20 @@ impl SystemStatsCollector {
         let cpu = self.collect_cpu(now);
         let network = self.collect_network(now);
 
+        self.sample_seq += 1;
+        let at_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(duration_ms)
+            .unwrap_or(0);
         SystemStatsSnapshot {
-            captured_at_unix_ms: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(duration_ms)
-                .unwrap_or(0),
+            meta: SampleMeta {
+                sample_seq: self.sample_seq,
+                captured_at_unix_ms: Some(at_ms),
+                last_success_at_unix_ms: Some(at_ms),
+                ..Default::default()
+            },
+            collector: ObserverContext::default(),
+            captured_at_unix_ms: at_ms,
             interval_ms,
             cpu,
             memory: MetricSource::from_result(read_and_parse(PROC_MEMINFO, parse_meminfo)),
@@ -331,17 +369,36 @@ fn cpu_view(
     previous: Option<&RawProcStat>,
     elapsed_seconds: Option<f64>,
 ) -> CpuStats {
-    let total_delta = previous.map(|previous| counter_delta(current.total(), previous.total()));
-    let percentage = |current_value: u64, previous_value: u64| {
-        total_delta.and_then(|total| {
-            (total > 0)
-                .then(|| 100.0 * counter_delta(current_value, previous_value) as f64 / total as f64)
+    // Every CPU component shares the denominator. A decrease in any component
+    // (including the kernel's non-monotonic iowait counter) invalidates it.
+    let total_delta = previous.and_then(|previous| {
+        [
+            (current.user, previous.user),
+            (current.nice, previous.nice),
+            (current.system, previous.system),
+            (current.idle, previous.idle),
+            (current.iowait, previous.iowait),
+            (current.irq, previous.irq),
+            (current.softirq, previous.softirq),
+            (current.steal, previous.steal),
+        ]
+        .into_iter()
+        .try_fold(0_u64, |total, (current, previous)| {
+            total.checked_add(counter_delta(current, previous)?)
         })
+    });
+    let percentage = |current_value: u64, previous_value: u64| {
+        total_delta
+            .filter(|total| *total > 0)
+            .zip(counter_delta(current_value, previous_value))
+            .filter(|(total, delta)| delta <= total)
+            .map(|(total, delta)| 100.0 * delta as f64 / total as f64)
     };
     let rate = |current_value: u64, previous_value: u64| {
-        elapsed_seconds.and_then(|seconds| {
-            (seconds > 0.0).then(|| counter_delta(current_value, previous_value) as f64 / seconds)
-        })
+        elapsed_seconds
+            .filter(|seconds| seconds.is_finite() && *seconds > 0.0)
+            .zip(counter_delta(current_value, previous_value))
+            .map(|(seconds, delta)| delta as f64 / seconds)
     };
 
     CpuStats {
@@ -508,7 +565,9 @@ fn network_view(
         previous
             .zip(elapsed_seconds)
             .and_then(|(previous, seconds)| {
-                (seconds > 0.0).then(|| counter_delta(current, previous) as f64 / seconds)
+                counter_delta(current, previous)
+                    .filter(|_| seconds.is_finite() && seconds > 0.0)
+                    .map(|delta| delta as f64 / seconds)
             })
     };
     NetworkStats {
@@ -652,12 +711,8 @@ fn collect_sched_ext(root: &Path) -> Result<SchedExtStats, String> {
     })
 }
 
-fn counter_delta(current: u64, previous: u64) -> u64 {
-    if current >= previous {
-        current - previous
-    } else {
-        current
-    }
+fn counter_delta(current: u64, previous: u64) -> Option<u64> {
+    current.checked_sub(previous)
 }
 
 fn duration_ms(duration: std::time::Duration) -> u64 {
@@ -684,6 +739,97 @@ mod tests {
         assert_eq!(view.context_switches_per_second, Some(60.0));
         assert_eq!(view.processes_created_per_second, Some(3.0));
         assert_eq!(view.procs_running, 3);
+    }
+
+    #[test]
+    fn decreasing_iowait_invalidates_cpu_percentages_without_hiding_totals() {
+        let previous = parse_proc_stat(
+            "cpu 100 0 20 80 1000 0 0 0\nctxt 1000\nprocesses 50\nprocs_running 2\nprocs_blocked 1\n",
+        )
+        .unwrap();
+        let current = parse_proc_stat(
+            "cpu 101 0 20 82 999 0 0 0\nctxt 1010\nprocesses 51\nprocs_running 3\nprocs_blocked 0\n",
+        )
+        .unwrap();
+        let view = cpu_view(&current, Some(&previous), Some(2.0));
+
+        // A one-tick iowait decrease makes the old ratio 999 / 2 = 49,950%.
+        assert_eq!(view.iowait_pct, None);
+        assert_eq!(view.busy_pct, None);
+        assert_eq!(view.user_pct, None);
+        assert_eq!(view.system_pct, None);
+        assert_eq!(view.steal_pct, None);
+        assert_eq!(view.context_switches_total, 1010);
+        assert_eq!(view.context_switches_per_second, Some(5.0));
+        assert_eq!(view.processes_created_per_second, Some(0.5));
+    }
+
+    #[test]
+    fn reset_cpu_counters_start_an_unknown_interval_and_recover_next_sample() {
+        let previous = parse_proc_stat(
+            "cpu 100 10 20 80 30 2 3 1\nctxt 1000\nprocesses 50\nprocs_running 2\nprocs_blocked 1\n",
+        )
+        .unwrap();
+        let reset = parse_proc_stat(
+            "cpu 10 0 2 8 0 0 0 0\nctxt 10\nprocesses 2\nprocs_running 1\nprocs_blocked 0\n",
+        )
+        .unwrap();
+        let reset_view = cpu_view(&reset, Some(&previous), Some(2.0));
+        assert_eq!(reset_view.busy_pct, None);
+        assert_eq!(reset_view.context_switches_per_second, None);
+        assert_eq!(reset_view.processes_created_per_second, None);
+        assert_eq!(reset_view.context_switches_total, 10);
+        assert_eq!(reset_view.processes_created_total, 2);
+
+        let next = parse_proc_stat(
+            "cpu 14 0 3 13 0 0 0 0\nctxt 20\nprocesses 3\nprocs_running 1\nprocs_blocked 0\n",
+        )
+        .unwrap();
+        let recovered = cpu_view(&next, Some(&reset), Some(2.0));
+        assert_eq!(recovered.busy_pct, Some(50.0));
+        assert_eq!(recovered.user_pct, Some(40.0));
+        assert_eq!(recovered.system_pct, Some(10.0));
+        assert_eq!(recovered.context_switches_per_second, Some(5.0));
+        assert_eq!(recovered.processes_created_per_second, Some(0.5));
+    }
+
+    #[test]
+    fn reset_network_counter_has_unknown_rate_and_keeps_other_direction_valid() {
+        let previous =
+            parse_net_dev("eth0: 10000 100 0 0 0 0 0 0 20000 200 0 0 0 0 0 0\n").unwrap();
+        let reset = parse_net_dev("eth0: 500 5 0 0 0 0 0 0 22000 220 0 0 0 0 0 0\n").unwrap();
+        let view = network_view(&reset, Some(&previous), Some(2.0));
+        let row = &view.interfaces[0];
+        assert_eq!(row.rx_bytes_total, 500);
+        assert_eq!(row.rx_bytes_per_second, None);
+        assert_eq!(row.tx_bytes_per_second, Some(1000.0));
+
+        let next = parse_net_dev("eth0: 1500 15 0 0 0 0 0 0 24000 240 0 0 0 0 0 0\n").unwrap();
+        let next_view = network_view(&next, Some(&reset), Some(2.0));
+        assert_eq!(next_view.interfaces[0].rx_bytes_per_second, Some(500.0));
+        assert_eq!(next_view.interfaces[0].tx_bytes_per_second, Some(1000.0));
+    }
+
+    #[test]
+    fn first_host_sample_establishes_baselines_and_keeps_cumulative_totals() {
+        let cpu = parse_proc_stat(
+            "cpu 100 0 20 80 1000 0 0 0\nctxt 1000\nprocesses 50\nprocs_running 2\nprocs_blocked 1\n",
+        )
+        .unwrap();
+        let cpu = cpu_view(&cpu, None, None);
+        assert_eq!(cpu.busy_pct, None);
+        assert_eq!(cpu.iowait_pct, None);
+        assert_eq!(cpu.context_switches_per_second, None);
+        assert_eq!(cpu.processes_created_per_second, None);
+        assert_eq!(cpu.context_switches_total, 1000);
+        assert_eq!(cpu.processes_created_total, 50);
+
+        let network = parse_net_dev("eth0: 10000 100 0 0 0 0 0 0 20000 200 0 0 0 0 0 0\n").unwrap();
+        let network = network_view(&network, None, None);
+        assert_eq!(network.interfaces[0].rx_bytes_per_second, None);
+        assert_eq!(network.interfaces[0].tx_bytes_per_second, None);
+        assert_eq!(network.interfaces[0].rx_bytes_total, 10000);
+        assert_eq!(network.interfaces[0].tx_bytes_total, 20000);
     }
 
     #[test]

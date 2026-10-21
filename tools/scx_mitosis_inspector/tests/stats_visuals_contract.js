@@ -4,6 +4,8 @@ const assert = require("assert");
 const fs = require("fs");
 const path = require("path");
 const vm = require("vm");
+const { meta, collector, historySnapshot } = require("./page_test_support");
+const charts = require("../src/web/charts");
 
 const webRoot = path.join(__dirname, "..", "src", "web");
 
@@ -22,8 +24,16 @@ class FakeElement {
     this.children.push(...children);
   }
 
+  setAttribute(name, value) { this[name] = value; }
+
   replaceChildren(...children) {
     this.children = children;
+  }
+
+  querySelector(selector) {
+    this.parts ??= new Map();
+    if (!this.parts.has(selector)) this.parts.set(selector, new FakeElement());
+    return this.parts.get(selector);
   }
 }
 
@@ -52,28 +62,11 @@ async function testStatsVisuals() {
     if (!elements.has(selector)) elements.set(selector, new FakeElement());
     return elements.get(selector);
   };
-  const histories = [];
   const lineCharts = [];
 
-  class FakeHistory {
-    constructor(maxPoints) {
-      this.maxPoints = maxPoints;
-      this.samples = [];
-      histories.push(this);
-    }
-
-    push(timestamp, values) {
-      this.samples.push({ timestamp, values });
-    }
-
-    points(key) {
-      return this.samples
-        .filter((sample) => Number.isFinite(sample.values[key]))
-        .map((sample) => ({ x: sample.timestamp, y: sample.values[key] }));
-    }
-  }
-
   const snapshot = {
+    meta: { ...meta(), captured_at_unix_ms: Date.now(), last_success_at_unix_ms: Date.now() },
+    collector: collector(),
     metrics: {
       borrow_flows: {
         "1_from_0": {
@@ -86,14 +79,16 @@ async function testStatsVisuals() {
       },
       cells: {
         0: {
-          smoothed_util_pct: 61,
+          smoothed_util_pct: 0,
           util_pct: 63.5,
+          num_cpus: 4,
           demand_borrow_pct: 4.5,
           borrowed_pct: 8,
           lent_pct: 1.5,
         },
         1: {
           util_pct: 47,
+          num_cpus: 6,
           borrowed_pct: null,
         },
       },
@@ -106,7 +101,7 @@ async function testStatsVisuals() {
     Date,
     Intl,
     MitosisCharts: {
-      History: FakeHistory,
+      History: charts.History,
       drawLineChart(canvas, series, options) {
         lineCharts.push({ canvas, series, options });
       },
@@ -115,13 +110,21 @@ async function testStatsVisuals() {
       querySelector: element,
       createElement: () => new FakeElement(),
     },
-    fetch: async () => ({
+    fetch: async (url) => ({
       ok: true,
-      json: async () => snapshot,
+      json: async () => url === "/api/host-context" ? { topology: { cpus: [] } }
+        : url.startsWith("/api/stats/history") ? historySnapshot([snapshot]) : snapshot,
     }),
     setInterval() {},
+    setTimeout,
+    clearTimeout,
+    AbortController,
   };
 
+  vm.runInNewContext(fs.readFileSync(path.join(webRoot, "polling.js"), "utf8"), context,
+    { filename: "polling.js" });
+  vm.runInNewContext(fs.readFileSync(path.join(webRoot, "topology_strip.js"), "utf8"), context,
+    { filename: "topology_strip.js" });
   vm.runInNewContext(
     fs.readFileSync(path.join(webRoot, "stats.js"), "utf8"),
     context,
@@ -129,17 +132,18 @@ async function testStatsVisuals() {
   );
   await new Promise((resolve) => setImmediate(resolve));
 
-  assert.strictEqual(histories.length, 1);
-  assert.strictEqual(histories[0].maxPoints, 300);
-  assert.strictEqual(histories[0].samples.length, 1);
+  const history = vm.runInNewContext("statsHistory", context);
+  assert.strictEqual(history.maxPoints, 1801);
+  assert.strictEqual(history.samples.length, 1);
 
-  const values = histories[0].samples[0].values;
-  assert.strictEqual(values["cell.0.util"], 61, "smoothed utilization wins");
-  assert.strictEqual(values["cell.1.util"], 47, "raw utilization is the fallback");
-  assert.strictEqual(values["cell.0.demand"], 4.5);
-  assert.strictEqual(values["cell.0.borrowed"], 8);
-  assert.strictEqual(values["cell.0.lent"], 1.5);
-  assert(!Object.hasOwn(values, "cell.1.borrowed"), "missing values stay absent");
+  const values = history.samples[0].values;
+  assert.strictEqual(values["cell.0.util"], 63.5,
+    "current utilization must not be masked by an uninitialized smoothed value");
+  assert.strictEqual(values["cell.1.util"], 47, "current utilization is plotted directly");
+  assert.strictEqual(values["cell.0.used_cpus"], 2.54);
+  assert.strictEqual(values["cell.0.assigned_cpus"], 4);
+  assert.strictEqual(values["cell.1.used_cpus"], 2.82);
+  assert.strictEqual(values["cell.1.assigned_cpus"], 6);
 
   assert.strictEqual(lineCharts.length, 2);
   assert.deepStrictEqual(
@@ -148,10 +152,16 @@ async function testStatsVisuals() {
   );
   assert.deepStrictEqual(
     Array.from(lineCharts[1].series, (series) => series.label),
-    ["Cell 0 demand", "Cell 0 borrowed", "Cell 0 lent"],
+    ["Cell 0 use", "Cell 0 capacity", "Cell 1 use", "Cell 1 capacity"],
   );
   assert.strictEqual(lineCharts[0].options.unit, "%");
-  assert.strictEqual(lineCharts[1].options.unit, "%");
+  assert.strictEqual(lineCharts[1].options.unit, " CPUs");
+  assert.strictEqual(lineCharts[1].options.showLegend, false);
+  assert(!Object.hasOwn(lineCharts[1].options, "maxY"), "CPU quantities must not be clipped to 100");
+  assert.strictEqual(lineCharts[1].series[0].color, lineCharts[1].series[1].color);
+  assert.strictEqual(lineCharts[1].series[1].dash.length, 2);
+  assert.strictEqual(element("#cellBalanceLegend").children.length, 4,
+    "every use and capacity series has a visible legend entry");
 
   const matrixHead = element("#borrowMatrixHead");
   const matrixBody = element("#borrowMatrixBody");

@@ -1,0 +1,1 @@
+/* Native tests call the real probe bodies with ordinary C arguments. */
