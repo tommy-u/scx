@@ -12,12 +12,14 @@
 //! for per-cgroup per-phase stats, and the `claim!`/`Verdict` assertion DSL.
 
 use ktstr::prelude::*;
+use std::time::{Duration, Instant};
 
-#[path = "../src/bpf_intf.rs"]
-mod bpf_intf;
+#[path = "common/mitosis_bpf.rs"]
+mod mitosis_bpf;
+use mitosis_bpf::{assert_cpu_llcs, bpf_intf, cpu_contexts};
 
 /// scx_mitosis in cell-manager mode: each child of `--cell-parent-cgroup` is a cell.
-const MITOSIS: Scheduler = Scheduler::named("mitosis")
+const MITOSIS_COMPATIBILITY: Scheduler = Scheduler::named("mitosis")
     .binary_discover("scx_mitosis")
     .sched_args(&[
         "--cell-parent-cgroup",
@@ -32,7 +34,7 @@ const MITOSIS: Scheduler = Scheduler::named("mitosis")
         "1048576",
     ]);
 
-const MITOSIS_DEFAULT: Scheduler = Scheduler::named("mitosis")
+const MITOSIS: Scheduler = Scheduler::named("mitosis")
     .binary_discover("scx_mitosis")
     .sched_args(&[
         "--cell-parent-cgroup",
@@ -45,6 +47,43 @@ const MITOSIS_DEFAULT: Scheduler = Scheduler::named("mitosis")
         "--exit-dump-len",
         "1048576",
     ]);
+
+const MITOSIS_VIRTUAL: Scheduler = Scheduler::named("mitosis")
+    .binary_discover("scx_mitosis")
+    .sched_args(&[
+        "--cell-parent-cgroup",
+        "/test.slice",
+        "--cpu-controller-disabled",
+        "--dynamic-affinity-cpu-selection",
+        "--enable-borrowing",
+        "--enable-rebalancing",
+        "--enable-slice-shrinking",
+        "--virt-llc=2-2",
+        "--exit-dump-len",
+        "1048576",
+    ]);
+
+const MITOSIS_CHURN: Scheduler = Scheduler::named("mitosis")
+    .binary_discover("scx_mitosis")
+    .config_file_def("--cell-config {file}", "/include-files/mitosis-churn.json")
+    .sched_args(&["--reconfiguration-interval-s", "1"]);
+
+const CHURN_CONFIG: &str = r#"
+[
+  {
+    "name": "pressure",
+    "matches": {"CgroupRegex": "/test[.]slice/pressure$"}
+  },
+  {
+    "name": "rest",
+    "matches": {},
+    "subcells": [
+      {"name": "victim", "matches": [[{"CommPrefix": "llc_churn"}]]},
+      {"name": "rest", "matches": [[]]}
+    ]
+  }
+]
+"#;
 
 const SENSITIVE_WORKERS: usize = 2;
 const HOG_WORKERS: usize = 30;
@@ -156,35 +195,29 @@ fn assert_mitosis_progress(result: &VmResult) -> Result<()> {
 }
 
 fn run_progress_workload(ctx: &Ctx) -> Result<AssertResult> {
-    execute_steps(ctx, vec![interference_workload(), interference_workload()])
-}
-
-fn assert_cpu_llcs(expected: &[u32]) -> Result<()> {
-    use libbpf_rs::{MapCore as _, MapFlags, MapHandle, query::MapInfoIter};
-
-    let info = MapInfoIter::default()
-        .find(|info| info.name.to_str() == Some("cpu_ctxs"))
-        .ok_or_else(|| anyhow::anyhow!("Mitosis CPU context map is missing"))?;
-    let map = MapHandle::from_map_id(info.id)?;
-    let values = map
-        .lookup_percpu(&0u32.to_ne_bytes(), MapFlags::ANY)?
-        .ok_or_else(|| anyhow::anyhow!("Mitosis CPU contexts are missing"))?;
-    let offset = std::mem::offset_of!(bpf_intf::cpu_ctx, llc);
-    for (cpu, &llc) in expected.iter().enumerate() {
-        let value = values
-            .get(cpu)
-            .and_then(|value| value.get(offset..offset + 4))
-            .ok_or_else(|| anyhow::anyhow!("CPU {cpu} context is missing"))?;
-        let actual = u32::from_ne_bytes(value.try_into()?);
-        if actual != llc {
-            anyhow::bail!("CPU {cpu} uses LLC {actual}, expected {llc}");
-        }
+    let checks = ctx.assert.min_iteration_rate(1.0).check_isolation();
+    let result = execute_steps_with(
+        ctx,
+        vec![interference_workload(), interference_workload()],
+        Some(&checks),
+    )
+    .inspect_err(|error| eprintln!("guest progress failed: {error:#}"))?;
+    eprintln!(
+        "guest progress: total_workers={} total_iterations={}",
+        result.stats.total_workers, result.stats.total_iterations,
+    );
+    for detail in result.failure_details() {
+        eprintln!("guest progress assertion failed: {}", detail.message);
     }
-    Ok(())
+    if result.stats.total_workers == 0 || result.stats.total_iterations == 0 {
+        eprintln!("guest progress reported no active workers");
+        anyhow::bail!("guest progress reported no active workers");
+    }
+    Ok(result)
 }
 
 #[ktstr_test(
-    scheduler = MITOSIS_DEFAULT,
+    scheduler = MITOSIS,
     workload_root_cgroup = "/test.slice",
     llcs = 1,
     cores = 16,
@@ -202,7 +235,7 @@ fn mitosis_single_llc_default_progress(ctx: &Ctx) -> Result<AssertResult> {
 }
 
 #[ktstr_test(
-    scheduler = MITOSIS,
+    scheduler = MITOSIS_COMPATIBILITY,
     workload_root_cgroup = "/test.slice",
     llcs = 1,
     cores = 16,
@@ -220,7 +253,7 @@ fn mitosis_single_llc_compatibility_progress(ctx: &Ctx) -> Result<AssertResult> 
 }
 
 #[ktstr_test(
-    scheduler = MITOSIS_DEFAULT,
+    scheduler = MITOSIS,
     workload_root_cgroup = "/test.slice",
     llcs = 4,
     cores = 4,
@@ -238,10 +271,10 @@ fn mitosis_multi_llc_default_progress(ctx: &Ctx) -> Result<AssertResult> {
 }
 
 #[ktstr_test(
-    scheduler = MITOSIS,
+    scheduler = MITOSIS_VIRTUAL,
     workload_root_cgroup = "/test.slice",
-    llcs = 4,
-    cores = 4,
+    llcs = 1,
+    cores = 16,
     threads = 1,
     memory_mib = 512,
     duration_s = 8,
@@ -250,7 +283,198 @@ fn mitosis_multi_llc_default_progress(ctx: &Ctx) -> Result<AssertResult> {
     auto_repro = false,
     post_vm = assert_mitosis_progress,
 )]
-fn mitosis_multi_llc_compatibility_progress(ctx: &Ctx) -> Result<AssertResult> {
-    assert_cpu_llcs(&[0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3])?;
+fn mitosis_virtual_llc_default_progress(ctx: &Ctx) -> Result<AssertResult> {
+    assert_cpu_llcs(&[0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7])?;
     run_progress_workload(ctx)
+}
+
+#[derive(Debug)]
+struct ChurnState {
+    tags: Vec<(u32, u32)>,
+    in_use: bool,
+    llcs_with_cpus: u64,
+    llcs_to_drain: u64,
+    queued: [u32; 2],
+    // Successful drains, affinity rescues, and affinity violations in cell 0.
+    counters: [u64; 3],
+}
+
+fn churn_state() -> Result<ChurnState> {
+    use libbpf_rs::{MapCore as _, MapFlags, MapHandle, query::MapInfoIter};
+
+    let contexts = cpu_contexts()?;
+    let info = MapInfoIter::default()
+        .find(|info| info.name.to_str() == Some("cells"))
+        .ok_or_else(|| anyhow::anyhow!("Mitosis cell map is missing"))?;
+    let map = MapHandle::from_map_id(info.id)?;
+    let value = map
+        .lookup(&0u32.to_ne_bytes(), MapFlags::ANY)?
+        .ok_or_else(|| anyhow::anyhow!("Mitosis root cell is missing"))?;
+    if value.len() < std::mem::size_of::<bpf_intf::cell>() {
+        anyhow::bail!("Mitosis root cell value is too small");
+    }
+    // Read the generated C layout; the map buffer is not necessarily aligned.
+    let cell = unsafe { std::ptr::read_unaligned(value.as_ptr().cast::<bpf_intf::cell>()) };
+    let subcell = &cell.subcells[1];
+    let indices = [
+        bpf_intf::cell_stat_idx_CSTAT_DRAIN_CNT,
+        bpf_intf::cell_stat_idx_CSTAT_DRAIN_AFFN_CNT,
+        bpf_intf::cell_stat_idx_CSTAT_AFFN_VIOL,
+    ];
+    Ok(ChurnState {
+        tags: contexts
+            .iter()
+            .take(4)
+            .map(|ctx| (ctx.cell, ctx.subcell))
+            .collect(),
+        in_use: cell.in_use != 0 && subcell.in_use != 0,
+        llcs_with_cpus: subcell.llcs_with_cpus,
+        llcs_to_drain: subcell.llcs_to_drain,
+        queued: [subcell.llcs[0].nr_queued, subcell.llcs[1].nr_queued],
+        counters: indices.map(|idx| contexts.iter().map(|ctx| ctx.cstats[0][idx as usize]).sum()),
+    })
+}
+
+fn wait_for_churn<T: std::fmt::Debug>(
+    description: &str,
+    mut probe: impl FnMut() -> Result<(bool, T)>,
+) -> Result<T> {
+    let deadline = Instant::now() + Duration::from_secs(8);
+    loop {
+        let (ready, state) = probe()?;
+        if ready {
+            return Ok(state);
+        }
+        if Instant::now() >= deadline {
+            eprintln!("{description} timed out: {state:?}");
+            anyhow::bail!("{description} timed out: {state:?}");
+        }
+        // Configuration and worker progress have no guest-side wait primitive.
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn wait_for_churn_assignment(
+    description: &str,
+    tags: &[(u32, u32)],
+    llcs_with_cpus: u64,
+    require_queued: bool,
+) -> Result<ChurnState> {
+    wait_for_churn(description, || {
+        let state = churn_state()?;
+        let ready = state.in_use
+            && state.tags == tags
+            && state.llcs_with_cpus == llcs_with_cpus
+            && (!require_queued || state.queued[1] > 0);
+        Ok((ready, state))
+    })
+}
+
+fn wait_for_churn_progress(description: &str, handle: &WorkloadHandle) -> Result<()> {
+    let before = handle.snapshot_iterations();
+    let (after, state) = wait_for_churn(description, || {
+        let now = handle.snapshot_iterations();
+        let ready = now.len() == 16 && now.iter().zip(&before).all(|(now, before)| now > before);
+        Ok((ready, (now, churn_state()?)))
+    })?;
+    let delta: Vec<u64> = after.iter().zip(before).map(|(a, b)| a - b).collect();
+    eprintln!("{description}: worker_iterations={delta:?} state={state:?}");
+    Ok(())
+}
+
+/// Moving an empty pressure cell's cpuset changes cell 0's partition from
+/// [subcell 0: CPUs 0,1; subcell 1: CPU 2] to [0: CPU 0; 1: CPU 1] and back.
+/// Victim workers retain their affinity and never see an empty subcell.
+#[ktstr_test(
+    scheduler = MITOSIS_CHURN,
+    config = CHURN_CONFIG,
+    workload_root_cgroup = "/test.slice",
+    llcs = 2,
+    cores = 2,
+    threads = 1,
+    memory_mib = 512,
+    duration_s = 40,
+    watchdog_timeout_s = 10,
+    num_snapshots = 8,
+    auto_repro = false,
+)]
+fn mitosis_nonzero_subcell_last_cpu_leaves_llc_and_returns(ctx: &Ctx) -> Result<AssertResult> {
+    let result: Result<AssertResult> = (|| {
+        assert_cpu_llcs(&[0, 0, 1, 1])?;
+        let initial = [(0, 0), (0, 0), (0, 1), (1, 0)];
+        let off_llc = [(0, 0), (0, 1), (1, 0), (1, 0)];
+        let allowed: std::collections::BTreeSet<usize> = [0, 1, 2].into_iter().collect();
+        let mut group = CgroupGroup::new(ctx.cgroups);
+        group.add_cgroup("pressure", &[3].into_iter().collect())?;
+        group.add_cgroup_no_cpuset("victim")?;
+        wait_for_churn_assignment("initial subcell assignment", &initial, 2, false)?;
+
+        let config = WorkloadConfig::default()
+            .workers(16)
+            .comm("llc_churn")
+            .work_type(WorkType::SpinWait)
+            .affinity(AffinityIntent::exact([0, 1, 2]));
+        let mut handle = WorkloadHandle::spawn(&config)?;
+        ctx.cgroups
+            .move_tasks("victim", &handle.worker_pids_for_cgroup_procs()?)?;
+        handle.start();
+        wait_for_churn_progress("initial worker progress", &handle)?;
+        let before = wait_for_churn_assignment("queued work before removal", &initial, 2, true)?;
+        eprintln!("before removal: {before:?}");
+
+        for (description, cpus, tags, llcs) in [
+            ("last CPU left LLC 1", vec![2, 3], off_llc, 1),
+            ("last CPU returned to LLC 1", vec![3], initial, 2),
+        ] {
+            ctx.cgroups
+                .set_cpuset("pressure", &cpus.into_iter().collect())?;
+            wait_for_churn_assignment(description, &tags, llcs, false)?;
+            wait_for_churn_progress(description, &handle)?;
+        }
+
+        let after = churn_state()?;
+        let counters =
+            std::array::from_fn::<_, 3, _>(|idx| after.counters[idx] - before.counters[idx]);
+        eprintln!(
+            "churn counters: drains={} affinity_rescues={} affinity_violations={} drain_mask={}",
+            counters[0], counters[1], counters[2], after.llcs_to_drain,
+        );
+        let reports = handle.stop_and_collect();
+        for report in &reports {
+            eprintln!(
+                "churn worker tid={} iterations={} cpus={:?} max_gap_ms={} affinity_error={:?}",
+                report.tid,
+                report.iterations,
+                report.cpus_used,
+                report.max_gap_ms,
+                report.affinity_error,
+            );
+        }
+        let mut verdict = AssertResult::pass();
+        for report in &reports {
+            if report.affinity_error.is_some() || !report.cpus_used.is_subset(&allowed) {
+                verdict.merge(AssertResult::fail_msg(format!(
+                    "worker {} violated its affinity: CPUs {:?}, error {:?}",
+                    report.tid, report.cpus_used, report.affinity_error,
+                )));
+            }
+        }
+        verdict.note_value("queued_before_removal", before.queued[1] as u64);
+        verdict.note_value("successful_drains", counters[0]);
+        verdict.note_value("affinity_rescues", counters[1]);
+        verdict.note_value("affinity_violations", counters[2]);
+        if counters[0] == 0 || counters[2] != 0 {
+            verdict.merge(AssertResult::fail_msg(format!(
+                "expected successful draining without affinity violations: {counters:?}"
+            )));
+        }
+        for detail in verdict.failure_details() {
+            eprintln!("nonzero subcell churn assertion failed: {}", detail.message);
+        }
+        Ok(verdict)
+    })();
+    if let Err(error) = &result {
+        eprintln!("nonzero subcell churn failed: {error:#}");
+    }
+    result
 }

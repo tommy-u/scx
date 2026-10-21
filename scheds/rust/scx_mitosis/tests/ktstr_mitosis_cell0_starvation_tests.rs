@@ -1,6 +1,10 @@
 #![cfg(feature = "ktstr-tests")]
+//! Cell-0 CPU holdout under mandatory LLC scheduling on two LLCs.
 
 use ktstr::prelude::*;
+
+#[path = "common/mitosis_bpf.rs"]
+mod mitosis_bpf;
 
 declare_scheduler!(MITOSIS, {
     name = "mitosis",
@@ -15,34 +19,21 @@ declare_scheduler!(MITOSIS, {
     ],
 });
 
-/// Reproduces the mitosis "Cell 0 has no CPUs assigned" bail.
+/// Keep cell 0 running when child cpusets cover both LLCs.
 ///
-/// In --cell-parent-cgroup mode, cell 0 is the catch-all that
-/// receives any CPUs not explicitly claimed by a child cgroup's
-/// cpuset. compute_cpu_assignments (cell_manager.rs Phase 5)
-/// bails when any cell — including cell 0 — would end up with
-/// zero CPUs.
-///
-/// When child cgroups' cpusets collectively cover every CPU on
-/// the host, cell 0 gets nothing and the scheduler tears down
-/// mid-recompute:
-///
-///   running scheduler main loop
-///   Caused by:
-///     0: checking cpuset changes
-///     1: recomputing cell configuration after cpuset change
-///     2: computing demand-weighted CPU assignments
-///     3: Cell 0 has no CPUs assigned (nr_cpus=N, num_cells=M)
-///
-/// alpha + beta with disjoint cpusets covering all 16 topology
-/// CPUs reproduces the bail.
+/// Alpha and beta claim disjoint cpusets covering all 16 CPUs. The
+/// --cell0-min-cpus reservation keeps one CPU for the catch-all cell.
 #[ktstr_test(
     scheduler = MITOSIS,
     workload_root_cgroup = "/ktstr",
+    llcs = 2,
+    cores = 4,
+    threads = 2,
     duration_s = 30,
     memory_mib = 256,
 )]
-fn mitosis_cell0_starved_by_full_coverage_cpusets(ctx: &Ctx) -> Result<AssertResult> {
+fn mitosis_two_llc_cell0_holdout_with_full_coverage_cpusets(ctx: &Ctx) -> Result<AssertResult> {
+    mitosis_bpf::assert_cpu_llcs(&[0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1])?;
     let steps = vec![Step::with_defs(
         vec![
             CgroupDef::named("alpha")
@@ -56,5 +47,19 @@ fn mitosis_cell0_starved_by_full_coverage_cpusets(ctx: &Ctx) -> Result<AssertRes
         ],
         HoldSpec::FULL,
     )];
-    execute_steps(ctx, steps)
+    let checks = ctx.assert.min_iteration_rate(1.0).check_isolation();
+    let result = execute_steps_with(ctx, steps, Some(&checks))
+        .inspect_err(|error| eprintln!("guest cell0 progress failed: {error:#}"))?;
+    eprintln!(
+        "guest cell0 progress: total_workers={} total_iterations={}",
+        result.stats.total_workers, result.stats.total_iterations,
+    );
+    for detail in result.failure_details() {
+        eprintln!("guest cell0 progress assertion failed: {}", detail.message);
+    }
+    if result.stats.total_workers == 0 || result.stats.total_iterations == 0 {
+        eprintln!("guest cell0 progress reported no active workers");
+        anyhow::bail!("guest cell0 progress reported no active workers");
+    }
+    Ok(result)
 }
