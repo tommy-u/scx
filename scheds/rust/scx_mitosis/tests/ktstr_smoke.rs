@@ -13,6 +13,9 @@
 
 use ktstr::prelude::*;
 
+#[path = "../src/bpf_intf.rs"]
+mod bpf_intf;
+
 /// scx_mitosis in cell-manager mode: each child of `--cell-parent-cgroup` is a cell.
 const MITOSIS: Scheduler = Scheduler::named("mitosis")
     .binary_discover("scx_mitosis")
@@ -25,6 +28,20 @@ const MITOSIS: Scheduler = Scheduler::named("mitosis")
         "--enable-rebalancing",
         "--enable-slice-shrinking",
         "--enable-llc-awareness",
+        "--exit-dump-len",
+        "1048576",
+    ]);
+
+const MITOSIS_DEFAULT: Scheduler = Scheduler::named("mitosis")
+    .binary_discover("scx_mitosis")
+    .sched_args(&[
+        "--cell-parent-cgroup",
+        "/test.slice",
+        "--cpu-controller-disabled",
+        "--dynamic-affinity-cpu-selection",
+        "--enable-borrowing",
+        "--enable-rebalancing",
+        "--enable-slice-shrinking",
         "--exit-dump-len",
         "1048576",
     ]);
@@ -117,4 +134,123 @@ fn mitosis_isolates_sensitive_tenant(ctx: &Ctx) -> Result<AssertResult> {
         interference_workload().set_ops(vec![Op::detach_scheduler()]),
     ];
     execute_steps(ctx, steps)
+}
+
+fn assert_mitosis_progress(result: &VmResult) -> Result<()> {
+    for step in 0..2 {
+        for name in ["sensitive", "hog"] {
+            let Some(stats) = result.phase_cgroup(Phase::step(step), name) else {
+                anyhow::bail!("no per-phase stats for {name} in step {step}");
+            };
+            if stats.total_iterations == 0 {
+                anyhow::bail!("{name} made no progress in step {step}");
+            }
+            eprintln!(
+                "step={step} cgroup={name} iterations={} run_delay_us={:?}",
+                stats.total_iterations,
+                stats.run_delay_summary(),
+            );
+        }
+    }
+    Ok(())
+}
+
+fn run_progress_workload(ctx: &Ctx) -> Result<AssertResult> {
+    execute_steps(ctx, vec![interference_workload(), interference_workload()])
+}
+
+fn assert_cpu_llcs(expected: &[u32]) -> Result<()> {
+    use libbpf_rs::{MapCore as _, MapFlags, MapHandle, query::MapInfoIter};
+
+    let info = MapInfoIter::default()
+        .find(|info| info.name.to_str() == Some("cpu_ctxs"))
+        .ok_or_else(|| anyhow::anyhow!("Mitosis CPU context map is missing"))?;
+    let map = MapHandle::from_map_id(info.id)?;
+    let values = map
+        .lookup_percpu(&0u32.to_ne_bytes(), MapFlags::ANY)?
+        .ok_or_else(|| anyhow::anyhow!("Mitosis CPU contexts are missing"))?;
+    let offset = std::mem::offset_of!(bpf_intf::cpu_ctx, llc);
+    for (cpu, &llc) in expected.iter().enumerate() {
+        let value = values
+            .get(cpu)
+            .and_then(|value| value.get(offset..offset + 4))
+            .ok_or_else(|| anyhow::anyhow!("CPU {cpu} context is missing"))?;
+        let actual = u32::from_ne_bytes(value.try_into()?);
+        if actual != llc {
+            anyhow::bail!("CPU {cpu} uses LLC {actual}, expected {llc}");
+        }
+    }
+    Ok(())
+}
+
+#[ktstr_test(
+    scheduler = MITOSIS_DEFAULT,
+    workload_root_cgroup = "/test.slice",
+    llcs = 1,
+    cores = 16,
+    threads = 1,
+    memory_mib = 512,
+    duration_s = 8,
+    watchdog_timeout_s = 10,
+    num_snapshots = 8,
+    auto_repro = false,
+    post_vm = assert_mitosis_progress,
+)]
+fn mitosis_single_llc_default_progress(ctx: &Ctx) -> Result<AssertResult> {
+    assert_cpu_llcs(&[0; 16])?;
+    run_progress_workload(ctx)
+}
+
+#[ktstr_test(
+    scheduler = MITOSIS,
+    workload_root_cgroup = "/test.slice",
+    llcs = 1,
+    cores = 16,
+    threads = 1,
+    memory_mib = 512,
+    duration_s = 8,
+    watchdog_timeout_s = 10,
+    num_snapshots = 8,
+    auto_repro = false,
+    post_vm = assert_mitosis_progress,
+)]
+fn mitosis_single_llc_compatibility_progress(ctx: &Ctx) -> Result<AssertResult> {
+    assert_cpu_llcs(&[0; 16])?;
+    run_progress_workload(ctx)
+}
+
+#[ktstr_test(
+    scheduler = MITOSIS_DEFAULT,
+    workload_root_cgroup = "/test.slice",
+    llcs = 4,
+    cores = 4,
+    threads = 1,
+    memory_mib = 512,
+    duration_s = 8,
+    watchdog_timeout_s = 10,
+    num_snapshots = 8,
+    auto_repro = false,
+    post_vm = assert_mitosis_progress,
+)]
+fn mitosis_multi_llc_default_progress(ctx: &Ctx) -> Result<AssertResult> {
+    assert_cpu_llcs(&[0; 16])?;
+    run_progress_workload(ctx)
+}
+
+#[ktstr_test(
+    scheduler = MITOSIS,
+    workload_root_cgroup = "/test.slice",
+    llcs = 4,
+    cores = 4,
+    threads = 1,
+    memory_mib = 512,
+    duration_s = 8,
+    watchdog_timeout_s = 10,
+    num_snapshots = 8,
+    auto_repro = false,
+    post_vm = assert_mitosis_progress,
+)]
+fn mitosis_multi_llc_compatibility_progress(ctx: &Ctx) -> Result<AssertResult> {
+    assert_cpu_llcs(&[0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3])?;
+    run_progress_workload(ctx)
 }

@@ -36,7 +36,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "parkin
 # Test-only scheduler harness, pulled in only by the `ktstr-tests` feature for
 # the gated smoke test under tests/. Not built for normal scheduler builds.
 # Optional (not a dev-dependency) so the feature can gate it.
-ktstr = { version = "=0.18.0", optional = true }
+ktstr = { version = "=0.18.0", optional = true, default-features = false, features = ["export"] }
 
 [build-dependencies]
 scx_cargo = { path = "../../../rust/scx_cargo", version = "1.1.4" }
