@@ -91,14 +91,14 @@ fn parse_ewma_factor(s: &str) -> Result<f64, String> {
 /// split and which CPUs they should be assigned to.
 #[derive(Debug, Parser)]
 #[command(after_long_help = r#"VIRTUAL LLC CONFIGURATION:
-    --virt-llc requires --enable-llc-awareness to affect DSQ creation.
+    --virt-llc partitions physical LLCs for scheduling and DSQ creation.
     MIN-MAX specifies the target range of physical cores per virtual LLC.
     For each physical LLC and core type, the smallest exact divisor in the
     range is preferred; otherwise, the size with the smallest remainder is
     used, favoring smaller sizes. Remaining cores join the last partition.
 
     Example: On a 32-core physical LLC, --virt-llc=8-8 creates four virtual
-    LLCs, and therefore four LLC DSQs per cell."#)]
+    LLCs, and therefore four LLC DSQs per subcell."#)]
 struct Opts {
     /// Deprecated, noop, use RUST_LOG or --log-level instead.
     #[clap(short = 'v', long, action = clap::ArgAction::Count)]
@@ -157,12 +157,11 @@ struct Opts {
     #[clap(long, action = clap::ArgAction::SetTrue)]
     reject_multicpu_pinning: bool,
 
-    /// Enable LLC-awareness. This will populate the scheduler's LLC maps and cause it
-    /// to use LLC-aware scheduling. Required for --virt-llc to affect DSQ creation.
+    /// Deprecated, noop. Mitosis always uses LLC-aware scheduling.
     #[clap(long, action = clap::ArgAction::SetTrue)]
     enable_llc_awareness: bool,
 
-    /// Deprecated, noop. LLC-aware mode always scans sibling LLC DSQs.
+    /// Deprecated, noop. Mitosis always scans sibling LLC DSQs.
     #[clap(long, action = clap::ArgAction::SetTrue)]
     enable_work_stealing: bool,
 
@@ -493,7 +492,6 @@ impl<'a> Scheduler<'a> {
 
         // Set nr_llc in rodata
         rodata.nr_llc = nr_llc as u32;
-        rodata.enable_llc_awareness = opts.enable_llc_awareness;
 
         rodata.enable_borrowing = opts.enable_borrowing;
         rodata.use_lockless_peek = opts.use_lockless_peek;
@@ -2573,6 +2571,32 @@ mod tests {
     #[test]
     fn allows_monitor_without_cell_parent_cgroup() {
         assert!(Opts::try_parse_from(["scx_mitosis", "--monitor", "1"]).is_ok());
+    }
+
+    #[test]
+    fn accepts_llc_compatibility_flag() {
+        assert!(
+            Opts::try_parse_from([
+                "scx_mitosis",
+                "--cell-parent-cgroup",
+                "/workloads",
+                "--enable-llc-awareness"
+            ])
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn accepts_virtual_llcs_without_compatibility_flag() {
+        assert!(
+            Opts::try_parse_from([
+                "scx_mitosis",
+                "--cell-parent-cgroup",
+                "/workloads",
+                "--virt-llc=2-2"
+            ])
+            .is_ok()
+        );
     }
 
     #[test]

@@ -233,7 +233,7 @@ fn mitosis_single_llc_compatibility_progress(ctx: &Ctx) -> Result<AssertResult> 
     post_vm = assert_mitosis_progress,
 )]
 fn mitosis_multi_llc_default_progress(ctx: &Ctx) -> Result<AssertResult> {
-    assert_cpu_llcs(&[0; 16])?;
+    assert_cpu_llcs(&[0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3])?;
     run_progress_workload(ctx)
 }
 

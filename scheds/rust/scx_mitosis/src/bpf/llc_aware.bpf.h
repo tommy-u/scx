@@ -228,9 +228,6 @@ static inline int refresh_subcell_llc_draining(u32 cell_id, u32 subcell_id)
 	u64 llcs_with_cpus = 0;
 	u32 llc;
 
-	if (!enable_llc_awareness)
-		return 0;
-
 	subcell = lookup_subcell(cell_id, subcell_id);
 	if (!subcell)
 		return -EINVAL;
@@ -287,9 +284,6 @@ static inline int refresh_subcell_llc_draining(u32 cell_id, u32 subcell_id)
 static inline int account_subcell_llc_enqueue(u32 cell_id, u32 subcell_id, u32 llc)
 {
 	struct subcell *subcell;
-
-	if (!enable_llc_awareness)
-		return 0;
 
 	if (!llc_is_valid(llc) || llc >= nr_llc) {
 		scx_bpf_error("account_subcell_llc_enqueue: invalid LLC %u", llc);

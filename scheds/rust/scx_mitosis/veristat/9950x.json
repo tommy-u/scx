@@ -1,8 +1,6 @@
 [{
         "value": {
             ".rodata": [{
-                    "enable_llc_awareness": false
-                },{
                     "enable_work_stealing": false
                 },{
                     "nr_llc": 2
