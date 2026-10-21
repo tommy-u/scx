@@ -439,8 +439,10 @@ impl<'a> Scheduler<'a> {
         Self::validate_args(opts).context("validating scheduler options")?;
 
         let topology = Topology::with_args(&opts.topology).context("detecting system topology")?;
+        let mitosis_topology =
+            MitosisTopology::new(&topology).context("validating LLC topology")?;
 
-        let nr_llc = topology.all_llcs.len().max(1);
+        let nr_llc = mitosis_topology.llc_to_cpus.len();
 
         let mut skel_builder = BpfSkelBuilder::default();
         skel_builder
@@ -501,7 +503,6 @@ impl<'a> Scheduler<'a> {
             v => skel.struct_ops.mitosis_mut().flags |= v,
         }
 
-        let mitosis_topology = MitosisTopology::new(&topology);
         mitosis_topology
             .apply(&mut skel)
             .context("mitosis_topology.apply")?;

@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use scx_utils::{Cpumask, Topology};
 
 use crate::bpf_intf;
@@ -13,6 +13,7 @@ use crate::bpf_skel::OpenBpfSkel;
 use crate::bpf_skel::types::llc_cpumask;
 
 const MAX_LLCS: usize = bpf_intf::consts_MAX_LLCS as usize;
+const MAX_CPUS: usize = bpf_intf::consts_MAX_CPUS as usize;
 const CPUMASK_LONG_ENTRIES: usize = bpf_intf::consts_CPUMASK_LONG_ENTRIES as usize;
 
 pub struct MitosisTopology {
@@ -21,17 +22,49 @@ pub struct MitosisTopology {
 }
 
 impl MitosisTopology {
-    pub fn new(topology: &Topology) -> Self {
-        let mut cpu_to_llc = BTreeMap::new();
-        for cpu in 0..*scx_utils::NR_CPUS_POSSIBLE {
-            cpu_to_llc.insert(
-                cpu,
-                topology
-                    .all_cpus
-                    .get(&cpu)
-                    .map(|cpu| cpu.llc_id)
-                    .unwrap_or(0),
-            );
+    pub fn new(topology: &Topology) -> Result<Self> {
+        let nr_llc = topology.all_llcs.len();
+        if !(1..=MAX_LLCS).contains(&nr_llc) {
+            bail!("LLC topology must contain between 1 and {MAX_LLCS} domains, got {nr_llc}");
+        }
+        for (expected, (&id, llc)) in topology.all_llcs.iter().enumerate() {
+            if id != expected || llc.id != id {
+                bail!(
+                    "LLC IDs must be dense: expected {expected}, got {id} (domain {})",
+                    llc.id
+                );
+            }
+            if llc.kernel_id == usize::MAX {
+                bail!("LLC information is unavailable for domain {id}");
+            }
+        }
+
+        if topology.all_cpus.len() != topology.span.weight() {
+            bail!("online CPU topology does not match its CPU mask");
+        }
+
+        // Possible CPUs absent from the online topology retain inactive slots.
+        let mut cpu_to_llc: BTreeMap<usize, usize> = (0..*scx_utils::NR_CPUS_POSSIBLE)
+            .map(|cpu| (cpu, 0))
+            .collect();
+        for cpu in topology.span.iter() {
+            if cpu >= MAX_CPUS {
+                bail!("CPU {cpu} exceeds the supported CPU range 0..{MAX_CPUS}");
+            }
+            let cpu_topology = topology
+                .all_cpus
+                .get(&cpu)
+                .with_context(|| format!("online CPU {cpu} is missing from topology"))?;
+            let llc = topology
+                .all_llcs
+                .get(&cpu_topology.llc_id)
+                .with_context(|| {
+                    format!("CPU {cpu} maps to missing LLC {}", cpu_topology.llc_id)
+                })?;
+            if !llc.span.test_cpu(cpu) {
+                bail!("CPU {cpu} is outside its assigned LLC {} mask", llc.id);
+            }
+            cpu_to_llc.insert(cpu, llc.id);
         }
 
         let mut llc_to_cpus = BTreeMap::new();
@@ -39,10 +72,10 @@ impl MitosisTopology {
             llc_to_cpus.insert(llc.id, llc.span.clone());
         }
 
-        MitosisTopology {
+        Ok(MitosisTopology {
             cpu_to_llc,
             llc_to_cpus,
-        }
+        })
     }
 
     pub fn apply(&self, skel: &mut OpenBpfSkel) -> Result<()> {
@@ -92,6 +125,68 @@ impl MitosisTopology {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
+    #[test]
+    fn accepts_single_llc_zero() {
+        let (topology, _) = scx_utils::testutils::make_test_topo(1, 1, 2, 1);
+        let mapped = MitosisTopology::new(&topology).unwrap();
+        assert_eq!(mapped.cpu_to_llc[&0], 0);
+        assert_eq!(mapped.cpu_to_llc[&1], 0);
+        assert!(mapped.llc_to_cpus[&0].test_cpu(0));
+        assert!(mapped.llc_to_cpus[&0].test_cpu(1));
+    }
+
+    #[test]
+    fn rejects_unavailable_llc_identity_with_populated_mappings() {
+        let (mut topology, _) = scx_utils::testutils::make_test_topo(1, 4, 1, 1);
+        for llc in topology.all_llcs.values_mut() {
+            Arc::make_mut(llc).kernel_id = usize::MAX;
+        }
+        assert!(MitosisTopology::new(&topology).is_err());
+    }
+
+    #[test]
+    fn rejects_unsupported_llc_count() {
+        for count in [0, 17] {
+            let (topology, _) = scx_utils::testutils::make_test_topo(1, count, 1, 1);
+            assert!(MitosisTopology::new(&topology).is_err());
+        }
+    }
+
+    #[test]
+    fn rejects_nondense_llc_id() {
+        let (mut topology, _) = scx_utils::testutils::make_test_topo(1, 1, 1, 1);
+        let mut llc = topology.all_llcs.remove(&0).unwrap();
+        Arc::make_mut(&mut llc).id = 16;
+        topology.all_llcs.insert(16, llc);
+        assert!(MitosisTopology::new(&topology).is_err());
+    }
+
+    #[test]
+    fn rejects_cpu_outside_its_llc_mask() {
+        let (mut topology, _) = scx_utils::testutils::make_test_topo(1, 1, 2, 1);
+        Arc::make_mut(topology.all_llcs.get_mut(&0).unwrap())
+            .span
+            .clear_cpu(1)
+            .unwrap();
+        assert!(MitosisTopology::new(&topology).is_err());
+    }
+
+    #[test]
+    fn accepts_offline_cpu_holes() {
+        let (mut topology, _) = scx_utils::testutils::make_test_topo(1, 1, 2, 1);
+        topology.span.clear_cpu(1).unwrap();
+        topology.all_cpus.remove(&1);
+        Arc::make_mut(topology.all_llcs.get_mut(&0).unwrap())
+            .span
+            .clear_cpu(1)
+            .unwrap();
+        let mapped = MitosisTopology::new(&topology).unwrap();
+        assert_eq!(mapped.cpu_to_llc[&0], 0);
+        assert_eq!(mapped.cpu_to_llc[&1], 0);
+        assert!(!mapped.llc_to_cpus[&0].test_cpu(1));
+    }
 
     fn check_llc_cpu(llc_to_cpus: &[llc_cpumask; MAX_LLCS], llc: usize, cpu: usize) -> bool {
         let long_idx = cpu / 64;
@@ -107,19 +202,7 @@ mod tests {
             8,  // cores
             2,  // cpus
         );
-        let mut cpu_to_llc_map = BTreeMap::new();
-        for cpu in 0..256 {
-            cpu_to_llc_map.insert(cpu, cpu / 16);
-        }
-        let llc_to_cpus_map = topology
-            .all_llcs
-            .values()
-            .map(|llc| (llc.id, llc.span.clone()))
-            .collect();
-        let mitosis_topology = MitosisTopology {
-            cpu_to_llc: cpu_to_llc_map,
-            llc_to_cpus: llc_to_cpus_map,
-        };
+        let mitosis_topology = MitosisTopology::new(&topology).unwrap();
 
         let mut cpu_to_llc = [0u32; bpf_intf::consts_MAX_CPUS as usize];
         let mut llc_to_cpus = [llc_cpumask {
