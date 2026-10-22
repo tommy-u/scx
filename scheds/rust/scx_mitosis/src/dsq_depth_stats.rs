@@ -33,7 +33,8 @@ pub fn summarize_delta(previous: &Snapshot, current: &Snapshot) -> u64 {
         cumulative += count;
         if cumulative >= rank {
             return if bucket == BUCKETS - 1 {
-                16384
+                // The open-ended bucket reports its lower edge.
+                1u64 << (bucket - 1)
             } else {
                 (1u64 << bucket) - 1
             };
@@ -162,7 +163,18 @@ mod tests {
 
     #[test]
     fn reports_bucket_upper_edges_and_terminal_cap() {
-        for (bucket, expected) in [(0, 0), (1, 1), (2, 3), (3, 7), (14, 16383), (15, 16384)] {
+        for (bucket, expected) in [
+            (0, 0),
+            (1, 1),
+            (2, 3),
+            (3, 7),
+            (4, 15),
+            (5, 31),
+            (6, 63),
+            (7, 127),
+            (8, 255),
+            (9, 256),
+        ] {
             assert_eq!(summarize_delta(&EMPTY, &observations(bucket, 1)), expected);
         }
     }

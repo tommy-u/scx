@@ -46,9 +46,9 @@ The executing CPU's physical LLC selects the writer shard. `--virt-llc`
 selects virtual LLC domains instead, including in flat mode. Writer domains
 are independent of the shared DSQ layout and `--enable-llc-awareness`.
 CPUs in the same domain share atomic cumulative counters. All 16 supported
-domains have reserved shards for every cell: 512 KiB of raw counters across
-256 cells, also the x86 map value storage. Cacheline padding can increase
-map value storage on other architectures. The ARRAY map uses
+domains have reserved shards for every cell: 320 KiB of raw counters across
+256 cells. Cacheline padding brings x86 map value storage to 512 KiB and
+can increase it further on other architectures. The ARRAY map uses
 `BPF_F_MMAPABLE` to page-align its values and preserve shard alignment.
 
 Userspace publishes the nearest-rank P99 from each completed, approximately
@@ -58,7 +58,9 @@ the window for the same workload; a new owner of a reused cell ID starts a
 new window. The first window and completed windows without observations
 report zero.
 
-The histogram approximates depth using bucket upper edges of
-0, 1, 3, 7, ..., 16383. Depths of 16384 and above are reported as 16384.
+The ten histogram buckets cover depths 0, 1, 2-3, 4-7, 8-15, 16-31,
+32-63, 64-127, 128-255, and 256 or more. The percentile reports the selected
+bucket's upper edge, except the last bucket, which reports 256 to mean
+at least 256.
 Snapshots of the live counters are approximate because enqueues continue
 while they are read. Counters are cumulative and never cleared by readers.

@@ -18,7 +18,8 @@ enum consts {
 	MAX_CPUS = 1 << MAX_CPUS_SHIFT,
 	MAX_CPUS_U8 = MAX_CPUS / 8,
 	MAX_CELLS = 256,
-	DSQ_DEPTH_BUCKETS = 16,
+	/* Depths 0, 1, 2-3, ..., 128-255, and 256 or more. */
+	DSQ_DEPTH_BUCKETS = 10,
 	MAX_SUBCELLS_PER_CELL = 8,
 	MAX_COMM = 16,
 	MAX_SUBCELL_MATCH_ORS = 4,
@@ -135,8 +136,8 @@ struct cell_dsq_depth_hist {
 
 /* Shard alignment may add architecture-specific padding to map values. */
 _Static_assert(sizeof(((struct dsq_depth_shard *)0)->buckets) * DSQ_DEPTH_SHARDS * MAX_CELLS ==
-		       512 * 1024,
-	       "shared DSQ depth counters must stay bounded at 512 KiB");
+		       320 * 1024,
+	       "shared DSQ depth counters must stay bounded at 320 KiB");
 
 /* Serialized subcell config shared between userspace and BPF. */
 struct subcell_config {

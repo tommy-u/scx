@@ -99,7 +99,7 @@ pub struct CellMetrics {
     #[stat(desc = "Cell queue %")]
     pub cell_q_pct: f64,
     #[stat(
-        desc = "Shared DSQ enqueue depth P99 in the last completed 60-second window (bucket upper edge, capped at 16384)"
+        desc = "Shared DSQ enqueue depth P99 in the last completed 60-second window (bucket upper edge, capped at 256; 256 means at least 256)"
     )]
     pub shared_dsq_enqueue_depth_p99: u64,
     #[stat(desc = "Borrowed CPU %")]

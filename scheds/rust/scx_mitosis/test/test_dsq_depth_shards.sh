@@ -117,8 +117,8 @@ assert flags & (1 << 10), f"Histogram ARRAY must have BPF_F_MMAPABLE: {metadata}
 value_size = metadata["bytes_value"]
 assert value_size % 16 == 0, f"Value must contain 16 equal shards: {metadata}"
 stride = value_size // 16
-# Each shard contains 16 u64 counters, followed by any cacheline padding.
-assert stride >= 16 * 8 and stride % 8 == 0, f"Invalid 16-shard layout: {metadata}"
+# Each shard contains 10 u64 counters, followed by any cacheline padding.
+assert stride >= 10 * 8 and stride % 8 == 0, f"Invalid 16-shard layout: {metadata}"
 if os.uname().machine == "x86_64":
     assert value_size == 2048, f"x86 values must reserve exactly 16 shards: {metadata}"
 
@@ -134,14 +134,16 @@ while time.monotonic() < deadline:
     formatted = result.get("formatted", {}).get("value", {})
     if isinstance(formatted, dict) and "shards" in formatted:
         assert len(formatted["shards"]) == 16, "BTF value must contain 16 shards"
+        assert all(len(shard["buckets"]) == 10 for shard in formatted["shards"]), \
+            "BTF shards must contain 10 depth buckets"
     totals = [sum(int.from_bytes(raw[shard * stride + bucket * 8:
                                      shard * stride + (bucket + 1) * 8], sys.byteorder)
-                  for bucket in range(16)) for shard in range(16)]
+                  for bucket in range(10)) for shard in range(16)]
     active = [shard for shard, total in enumerate(totals) if total]
     (artifacts / "shard.totals.json").write_text(json.dumps(totals))
     assert set(active) <= set(expected), f"Unexpected writer shards: {active}; expected {expected}"
     if active == expected:
-        print(f"PASS: ARRAY flags={flags:#x}, entries=256, shards=16, "
+        print(f"PASS: ARRAY flags={flags:#x}, entries=256, shards=16, buckets=10, "
               f"value_size={value_size}, stride={stride}, active={active}, totals={totals}")
         break
     time.sleep(min(0.5, max(0, deadline - time.monotonic())))
